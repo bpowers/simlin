@@ -668,6 +668,10 @@ impl Expr2 {
                         result
                     }
                     Pi => Pi,
+                    Quantum(e1, e2) => Quantum(
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                    ),
                     Pulse(e1, e2, e3) => Pulse(
                         Box::new(Expr2::from(*e1, ctx)?),
                         Box::new(Expr2::from(*e2, ctx)?),
@@ -684,6 +688,11 @@ impl Expr2 {
                         e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     Sign(e) => Sign(Box::new(Expr2::from(*e, ctx)?)),
+                    Sshape(e1, e2, e3) => Sshape(
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                        Box::new(Expr2::from(*e3, ctx)?),
+                    ),
                     Sin(e) => Sin(Box::new(Expr2::from(*e, ctx)?)),
                     Sqrt(e) => Sqrt(Box::new(Expr2::from(*e, ctx)?)),
                     Step(e1, e2) => Step(
@@ -750,6 +759,46 @@ impl Expr2 {
                         // have different dimensions, producing a cross-product sum.
                         let prev = ctx.set_allow_dimension_union(true);
                         let result = Sum(Box::new(Expr2::from(*e, ctx)?));
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    VectorSelect(sel, expr, max_val, action, err) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = VectorSelect(
+                            Box::new(Expr2::from(*sel, ctx)?),
+                            Box::new(Expr2::from(*expr, ctx)?),
+                            Box::new(Expr2::from(*max_val, ctx)?),
+                            Box::new(Expr2::from(*action, ctx)?),
+                            Box::new(Expr2::from(*err, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    VectorElmMap(src, offs) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = VectorElmMap(
+                            Box::new(Expr2::from(*src, ctx)?),
+                            Box::new(Expr2::from(*offs, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    VectorSortOrder(arr, dir) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = VectorSortOrder(
+                            Box::new(Expr2::from(*arr, ctx)?),
+                            Box::new(Expr2::from(*dir, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    AllocateAvailable(req, pp, avail) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = AllocateAvailable(
+                            Box::new(Expr2::from(*req, ctx)?),
+                            Box::new(Expr2::from(*pp, ctx)?),
+                            Box::new(Expr2::from(*avail, ctx)?),
+                        );
                         ctx.set_allow_dimension_union(prev);
                         result
                     }
@@ -860,13 +909,19 @@ impl Expr2 {
                 let t_expr = Expr2::from(*t, ctx)?;
                 let f_expr = Expr2::from(*f, ctx)?;
 
-                // Compute array bounds for if expressions
-                let array_bounds = Self::unify_array_bounds(
+                // Compute array bounds for if expressions.
+                // First try to unify the then/else branch bounds.
+                let branch_bounds = Self::unify_array_bounds(
                     ctx,
                     t_expr.get_array_bounds(),
                     f_expr.get_array_bounds(),
                     loc,
                 )?;
+
+                // If the branches are both scalar but the condition is
+                // array-valued, the IF expression should inherit the
+                // condition's dimensions (broadcasting scalar branches).
+                let array_bounds = branch_bounds.or_else(|| cond_expr.get_array_bounds().cloned());
 
                 Expr2::If(
                     Box::new(cond_expr),

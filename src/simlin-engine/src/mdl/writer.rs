@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+use super::builtins::to_lower_space;
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
 use crate::common::Result;
@@ -102,7 +103,7 @@ fn mdl_bare_keyword(xmile_name: &str) -> Option<&'static str> {
         "time" => Some("Time"),
         "dt" | "time_step" => Some("TIME STEP"),
         "starttime" | "initial_time" => Some("INITIAL TIME"),
-        "endtime" | "final_time" => Some("FINAL TIME"),
+        "endtime" | "stoptime" | "final_time" => Some("FINAL TIME"),
         _ => None,
     }
 }
@@ -553,7 +554,12 @@ impl Visitor<String> for MdlPrintVisitor {
                 {
                     return kw.to_owned();
                 }
-                let mdl_name = xmile_to_mdl_function_name(func);
+                // safediv with 3+ args is XIDZ (3-arg form), not ZIDZ (2-arg)
+                let mdl_name = if func == "safediv" && args.len() >= 3 {
+                    "XIDZ".to_owned()
+                } else {
+                    xmile_to_mdl_function_name(func)
+                };
                 let converted: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 let reordered = reorder_args(&mdl_name, converted);
                 format!("{}({})", mdl_name, reordered.join(", "))
@@ -579,6 +585,15 @@ impl Visitor<String> for MdlPrintVisitor {
                 }
             },
             Expr0::Op2(op, l, r, _) => {
+                // Vensim uses MODULO(a, b) function form rather than the
+                // binary MOD operator that the XMILE equation parser
+                // produces.  Emit the function call so the MDL roundtrip
+                // re-parses correctly.
+                if *op == BinaryOp::Mod {
+                    let l = self.walk(l);
+                    let r = self.walk(r);
+                    return format!("MODULO({l}, {r})");
+                }
                 let l = mdl_paren_if_necessary(expr, l, false, self.walk(l));
                 let r = mdl_paren_if_necessary(expr, r, true, self.walk(r));
                 let op_str = match op {
@@ -587,7 +602,7 @@ impl Visitor<String> for MdlPrintVisitor {
                     BinaryOp::Exp => "^",
                     BinaryOp::Mul => "*",
                     BinaryOp::Div => "/",
-                    BinaryOp::Mod => "MOD",
+                    BinaryOp::Mod => unreachable!(),
                     BinaryOp::Gt => ">",
                     BinaryOp::Lt => "<",
                     BinaryOp::Gte => ">=",
@@ -742,20 +757,85 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
         _ => unreachable!(),
     };
 
+    let data_source_eqn = compat_get_direct_equation(compat);
+    let effective_gf = if data_source_eqn.is_some() { None } else { gf };
+
     match equation {
         Equation::Scalar(eqn) => {
-            let effective_eqn = wrap_active_initial(eqn, compat);
-            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, gf);
+            let effective_eqn = data_source_eqn
+                .clone()
+                .unwrap_or_else(|| wrap_active_initial(eqn, compat));
+            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, effective_gf);
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
-            let effective_eqn = wrap_active_initial(eqn, compat);
-            write_single_entry(buf, ident, &effective_eqn, &dim_names, units, doc, gf);
+            let effective_eqn = data_source_eqn
+                .clone()
+                .unwrap_or_else(|| wrap_active_initial(eqn, compat));
+            write_single_entry(
+                buf,
+                ident,
+                &effective_eqn,
+                &dim_names,
+                units,
+                doc,
+                effective_gf,
+            );
         }
-        Equation::Arrayed(dims, elements) => {
-            write_arrayed_entries(buf, ident, dims, elements, units, doc);
+        Equation::Arrayed(dims, elements, default_eq) => {
+            write_arrayed_entries(buf, ident, dims, elements, default_eq, units, doc);
         }
     }
+}
+
+fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
+    let ds = compat.data_source.as_ref()?;
+    // Vensim's GET DIRECT argument parser uses single quotes as toggle
+    // delimiters with no escape mechanism, so we pass arguments through
+    // unmodified rather than producing `\'` which would be unparsable.
+    let quote = |s: &str| s.to_string();
+    let eq = match ds.kind {
+        datamodel::DataSourceKind::Data => format!(
+            "{{GET DIRECT DATA('{}', '{}', '{}', '{}')}}",
+            quote(&ds.file),
+            quote(&ds.tab_or_delimiter),
+            quote(&ds.row_or_col),
+            quote(&ds.cell)
+        ),
+        datamodel::DataSourceKind::Constants => {
+            if ds.cell.is_empty() {
+                format!(
+                    "{{GET DIRECT CONSTANTS('{}', '{}', '{}')}}",
+                    quote(&ds.file),
+                    quote(&ds.tab_or_delimiter),
+                    quote(&ds.row_or_col)
+                )
+            } else {
+                format!(
+                    "{{GET DIRECT CONSTANTS('{}', '{}', '{}', '{}')}}",
+                    quote(&ds.file),
+                    quote(&ds.tab_or_delimiter),
+                    quote(&ds.row_or_col),
+                    quote(&ds.cell)
+                )
+            }
+        }
+        datamodel::DataSourceKind::Lookups => format!(
+            "{{GET DIRECT LOOKUPS('{}', '{}', '{}', '{}')}}",
+            quote(&ds.file),
+            quote(&ds.tab_or_delimiter),
+            quote(&ds.row_or_col),
+            quote(&ds.cell)
+        ),
+        datamodel::DataSourceKind::Subscript => format!(
+            "{{GET DIRECT SUBSCRIPT('{}', '{}', '{}', '{}', '')}}",
+            quote(&ds.file),
+            quote(&ds.tab_or_delimiter),
+            quote(&ds.row_or_col),
+            quote(&ds.cell)
+        ),
+    };
+    Some(eq)
 }
 
 /// Reconstruct a stock's INTEG equation from its decomposed fields.
@@ -801,12 +881,14 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
                 &stock.documentation,
             );
         }
-        Equation::Arrayed(_dims, elements) => {
+        Equation::Arrayed(dims, elements, default_eq) => {
             write_arrayed_stock_entries(
                 buf,
                 &stock.ident,
                 &net_flow,
+                dims,
                 elements,
+                default_eq,
                 &stock.units,
                 &stock.documentation,
             );
@@ -846,11 +928,14 @@ fn write_stock_entry(
     write_units_and_comment(buf, units, doc);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_arrayed_stock_entries(
     buf: &mut String,
     ident: &str,
     net_flow: &str,
+    _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
@@ -923,17 +1008,33 @@ fn write_single_entry(
 }
 
 /// Write arrayed (per-element) entries.
+///
+/// `default_equation` records EXCEPT metadata, but the datamodel may omit
+/// excepted elements entirely. Without full dimension membership information at
+/// this callsite, emitting `name[Dim...]=default` can incorrectly apply the
+/// default to omitted EXCEPT members. To preserve behavior, always emit explicit
+/// element entries and leave omitted elements implicit.
 fn write_arrayed_entries(
     buf: &mut String,
     ident: &str,
     _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
     let name = format_mdl_ident(ident);
-    let last_idx = elements.len().saturating_sub(1);
+    write_arrayed_element_entries(buf, &name, elements, units, doc);
+}
 
+fn write_arrayed_element_entries(
+    buf: &mut String,
+    name: &str,
+    elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    units: &Option<String>,
+    doc: &str,
+) {
+    let last_idx = elements.len().saturating_sub(1);
     for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
         let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
@@ -950,10 +1051,8 @@ fn write_arrayed_entries(
         }
 
         if i < last_idx {
-            // Intermediate arrayed entries use the terse `~~|` separator
             buf.push_str("\n\t~~|\n");
         } else {
-            // Last element gets the full units/comment block
             write_units_and_comment(buf, units, doc);
         }
     }
@@ -975,6 +1074,7 @@ fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) 
 /// Named:   `DimName: Elem1, Elem2, Elem3 ~~|`
 /// Indexed: `DimName: (1-N) ~~|`
 /// Mapped:  `DimName: Elem1, Elem2 -> MappedDim ~~|`
+/// Element-mapped: `DimName: A1, A2 -> MappedDim: B2, B1 ~~|`
 pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
     let name = format_mdl_ident(&dim.name);
     write!(buf, "{name}:").unwrap();
@@ -990,8 +1090,61 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
         }
     }
 
-    if let Some(maps_to) = &dim.maps_to {
+    if let Some(maps_to) = dim.maps_to() {
         write!(buf, " -> {}", format_mdl_ident(maps_to)).unwrap();
+    } else if !dim.mappings.is_empty() {
+        // Build a source-position index so element-level mappings emit
+        // targets in the same order as the source dimension's elements.
+        let source_positions: HashMap<String, usize> = match &dim.elements {
+            DimensionElements::Named(elems) => elems
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (to_lower_space(e), i))
+                .collect(),
+            DimensionElements::Indexed(_) => HashMap::new(),
+        };
+        let parts: Vec<String> = dim
+            .mappings
+            .iter()
+            .map(|mapping| {
+                if mapping.element_map.is_empty() {
+                    format_mdl_ident(&mapping.target)
+                } else {
+                    // Detect one-to-many mappings (from subdimension
+                    // expansion) by checking for duplicate source keys.
+                    // MDL positional notation can't represent these, so
+                    // fall back to a plain dimension-name mapping. This
+                    // loses element-level mapping detail on re-import;
+                    // use protobuf serialization for lossless roundtrips.
+                    let mut seen_sources = std::collections::HashSet::new();
+                    let has_one_to_many = mapping
+                        .element_map
+                        .iter()
+                        .any(|(src, _)| !seen_sources.insert(src.as_str()));
+                    if has_one_to_many {
+                        format_mdl_ident(&mapping.target)
+                    } else {
+                        let mut sorted_map = mapping.element_map.clone();
+                        sorted_map.sort_by_key(|(src, _)| {
+                            source_positions
+                                .get(src.as_str())
+                                .copied()
+                                .unwrap_or(usize::MAX)
+                        });
+                        let target_elems: Vec<String> = sorted_map
+                            .iter()
+                            .map(|(_, tgt)| format_mdl_ident(tgt))
+                            .collect();
+                        format!(
+                            "({}: {})",
+                            format_mdl_ident(&mapping.target),
+                            target_elems.join(", ")
+                        )
+                    }
+                }
+            })
+            .collect();
+        write!(buf, " -> {}", parts.join(", ")).unwrap();
     }
 
     buf.push_str("\n\t~~|\n");
@@ -1696,7 +1849,7 @@ mod tests {
     use crate::ast::{Expr0, Loc};
     use crate::common::RawIdent;
     use crate::datamodel::{
-        Aux, Compat, DimensionElements, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
+        Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
         GraphicalFunctionScale, SimMethod, Stock, Unit, Variable,
     };
     use crate::lexer::LexerType;
@@ -1852,6 +2005,11 @@ mod tests {
     }
 
     #[test]
+    fn function_rename_safediv_three_args_emits_xidz() {
+        assert_mdl("safediv(a, b, x)", "XIDZ(a, b, x)");
+    }
+
+    #[test]
     fn function_rename_init() {
         assert_mdl("init(x, 10)", "ACTIVE INITIAL(x, 10)");
     }
@@ -2002,6 +2160,12 @@ mod tests {
             "if time >= start and time <= end_val and (time - start) mod interval < width then 1 else 0",
             "PULSE TRAIN(start, width, interval, end val)",
         );
+    }
+
+    #[test]
+    fn mod_emits_modulo() {
+        assert_mdl("a mod b", "MODULO(a, b)");
+        assert_mdl("(time) mod (5)", "MODULO(Time, 5)");
     }
 
     #[test]
@@ -2203,6 +2367,7 @@ mod tests {
                     ("north".to_owned(), "100".to_owned(), None, None),
                     ("south".to_owned(), "200".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: "Stock by region".to_owned(),
             units: Some("widgets".to_owned()),
@@ -2247,6 +2412,44 @@ mod tests {
             buf.contains("ACTIVE INITIAL(y * 2, 100)"),
             "Expected ACTIVE INITIAL wrapper: {}",
             buf
+        );
+    }
+
+    #[test]
+    fn compat_data_source_reconstructs_get_direct_constants() {
+        let var = Variable::Aux(Aux {
+            ident: "imported_constants".to_owned(),
+            equation: Equation::Scalar("0".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(make_gf()),
+            ai_state: None,
+            uid: None,
+            compat: Compat {
+                data_source: Some(crate::datamodel::DataSource {
+                    kind: crate::datamodel::DataSourceKind::Constants,
+                    file: "workbook.xlsx".to_owned(),
+                    tab_or_delimiter: "Sheet1".to_owned(),
+                    row_or_col: "A".to_owned(),
+                    cell: String::new(),
+                }),
+                ..Compat::default()
+            },
+        });
+
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+        assert!(
+            buf.contains("imported constants:="),
+            "GET DIRECT reconstruction should use := for data equations: {buf}"
+        );
+        assert!(
+            buf.contains("GET DIRECT CONSTANTS('workbook.xlsx', 'Sheet1', 'A')"),
+            "writer should reconstruct GET DIRECT CONSTANTS from compat metadata: {buf}"
+        );
+        assert!(
+            !buf.contains("([(0,0)-(2,1)]"),
+            "lookup table output must be suppressed when data_source metadata is present: {buf}"
         );
     }
 
@@ -2358,6 +2561,7 @@ mod tests {
                     ("entry_2".to_owned(), "0.2".to_owned(), None, None),
                     ("entry_3".to_owned(), "0.3".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2384,6 +2588,7 @@ mod tests {
                     ("north_america".to_owned(), "100".to_owned(), None, None),
                     ("south_america".to_owned(), "200".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2419,6 +2624,7 @@ mod tests {
                         None,
                     ),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2455,6 +2661,7 @@ mod tests {
                     ("a".to_owned(), String::new(), None, Some(gf.clone())),
                     ("b".to_owned(), "5".to_owned(), None, None),
                 ],
+                None,
             ),
             documentation: String::new(),
             units: None,
@@ -2492,15 +2699,11 @@ mod tests {
 
     #[test]
     fn dimension_def_with_mapping() {
-        let dim = datamodel::Dimension {
-            name: "dim_c".to_owned(),
-            elements: DimensionElements::Named(vec![
-                "dc1".to_owned(),
-                "dc2".to_owned(),
-                "dc3".to_owned(),
-            ]),
-            maps_to: Some("dim_b".to_owned()),
-        };
+        let mut dim = datamodel::Dimension::named(
+            "dim_c".to_owned(),
+            vec!["dc1".to_owned(), "dc2".to_owned(), "dc3".to_owned()],
+        );
+        dim.set_maps_to("dim_b".to_owned());
         let mut buf = String::new();
         write_dimension_def(&mut buf, &dim);
         assert_eq!(buf, "dim c:\n\tdc1, dc2, dc3 -> dim b\n\t~~|\n");
@@ -3901,6 +4104,345 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert_eq!(
             direct, compat,
             "compat::to_mdl should produce same result as mdl::project_to_mdl"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_with_default_equation_omits_dimension_level_default() {
+        // When default_equation is set (from EXCEPT syntax), the writer must
+        // NOT emit name[Dim...]=default because that would apply the default
+        // equation to excepted elements that should default to 0.
+        let var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: "cost".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["region".to_string()],
+                vec![
+                    ("north".to_string(), "base+1".to_string(), None, None),
+                    ("south".to_string(), "base+2".to_string(), None, None),
+                ],
+                Some("base".to_string()),
+            ),
+            documentation: String::new(),
+            units: Some("dollars".to_string()),
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        });
+
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var);
+
+        // Must NOT contain dimension-level default (would apply to excepted elements)
+        assert!(
+            !buf.contains("cost[region]="),
+            "should NOT contain dimension-level default equation, got: {buf}"
+        );
+        // Individual element equations should be present
+        assert!(
+            buf.contains("cost[north]="),
+            "should contain north element equation, got: {buf}"
+        );
+        assert!(
+            buf.contains("cost[south]="),
+            "should contain south element equation, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_with_element_level_mapping() {
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a1".to_string(), "b2".to_string()),
+                    ("a2".to_string(), "b1".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (dim b: b2, b1)"),
+            "element-level mapping must use parenthesized syntax, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_with_multi_target_positional_mapping() {
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("dim b") && buf.contains("dim c"),
+            "both positional mapping targets should be emitted, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_element_mapping_sorted_by_source_position() {
+        // element_map entries out of source order should still emit
+        // targets in the dimension's element order for correct positional
+        // correspondence on re-import.
+        let dim = datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: datamodel::DimensionElements::Named(vec![
+                "a1".to_string(),
+                "a2".to_string(),
+                "a3".to_string(),
+            ]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a3".to_string(), "b3".to_string()),
+                    ("a1".to_string(), "b1".to_string()),
+                    ("a2".to_string(), "b2".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (dim b: b1, b2, b3)"),
+            "targets should be in source element order (a1->b1, a2->b2, a3->b3), got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_element_mapping_case_insensitive_lookup() {
+        // element_map uses canonical (lowercase) keys, but dim.elements
+        // may preserve original casing -- the sort must still work.
+        let dim = datamodel::Dimension {
+            name: "Region".to_string(),
+            elements: datamodel::DimensionElements::Named(vec![
+                "North".to_string(),
+                "South".to_string(),
+                "East".to_string(),
+            ]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "zone".to_string(),
+                element_map: vec![
+                    ("east".to_string(), "z3".to_string()),
+                    ("north".to_string(), "z1".to_string()),
+                    ("south".to_string(), "z2".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (zone: z1, z2, z3)"),
+            "targets should be sorted by source element order despite case mismatch, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_element_mapping_underscored_names() {
+        // Element names with underscores must be normalized via to_lower_space()
+        // to match the canonical form used in element_map keys.
+        let dim = datamodel::Dimension {
+            name: "Continent".to_string(),
+            elements: datamodel::DimensionElements::Named(vec![
+                "North_America".to_string(),
+                "South_America".to_string(),
+                "Europe".to_string(),
+            ]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "zone".to_string(),
+                element_map: vec![
+                    ("europe".to_string(), "z3".to_string()),
+                    ("north america".to_string(), "z1".to_string()),
+                    ("south america".to_string(), "z2".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (zone: z1, z2, z3)"),
+            "underscore element names should match canonical element_map keys, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_one_to_many_falls_back_to_positional() {
+        // When a source element maps to multiple targets (from subdimension
+        // expansion), the element-level notation can't round-trip correctly.
+        // The writer should fall back to a positional dimension-name mapping.
+        let dim = datamodel::Dimension {
+            name: "dim_b".to_string(),
+            elements: datamodel::DimensionElements::Named(vec!["b1".to_string(), "b2".to_string()]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "dim_a".to_string(),
+                element_map: vec![
+                    ("b1".to_string(), "a1".to_string()),
+                    ("b1".to_string(), "a2".to_string()),
+                    ("b2".to_string(), "a3".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> dim a") && !buf.contains("(dim a:"),
+            "one-to-many mapping should fall back to positional notation, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_with_default_equation_writes_explicit_elements() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "g",
+            &["DimA".to_string()],
+            &[
+                ("A1".to_string(), "10".to_string(), None, None),
+                ("A2".to_string(), "7".to_string(), None, None),
+                ("A3".to_string(), "7".to_string(), None, None),
+            ],
+            &Some("7".to_string()),
+            &None,
+            "",
+        );
+        assert!(
+            !buf.contains("g[DimA]"),
+            "dimension-level default must not be emitted, got: {buf}"
+        );
+        assert!(
+            !buf.contains(":EXCEPT:"),
+            "EXCEPT syntax should not be emitted"
+        );
+        assert!(
+            buf.contains("g[A1]"),
+            "A1 entry should be written explicitly, got: {buf}"
+        );
+        assert!(
+            buf.contains("g[A2]") && buf.contains("g[A3]"),
+            "all explicit array elements should be written, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_no_default_writes_all_elements() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "h",
+            &["DimA".to_string()],
+            &[
+                ("A1".to_string(), "8".to_string(), None, None),
+                ("A2".to_string(), "0".to_string(), None, None),
+            ],
+            &None,
+            &None,
+            "",
+        );
+        assert!(
+            !buf.contains(":EXCEPT:"),
+            "should not emit EXCEPT when no default_equation, got: {buf}"
+        );
+        assert!(buf.contains("h[A1]"), "should write A1 element, got: {buf}");
+        assert!(buf.contains("h[A2]"), "should write A2 element, got: {buf}");
+    }
+
+    #[test]
+    fn write_arrayed_except_no_exceptions_all_default() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "k",
+            &["DimA".to_string()],
+            &[
+                ("A1".to_string(), "5".to_string(), None, None),
+                ("A2".to_string(), "5".to_string(), None, None),
+            ],
+            &Some("5".to_string()),
+            &None,
+            "",
+        );
+        assert!(
+            !buf.contains("k[DimA]"),
+            "dimension-level default must not be emitted, got: {buf}"
+        );
+        assert!(buf.contains("k[A1]"), "should write A1 element, got: {buf}");
+        assert!(buf.contains("k[A2]"), "should write A2 element, got: {buf}");
+        assert!(
+            !buf.contains(":EXCEPT:"),
+            "EXCEPT syntax should not be emitted, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_arrayed_except_with_omitted_elements_avoids_dimension_default() {
+        let mut buf = String::new();
+        write_arrayed_entries(
+            &mut buf,
+            "h",
+            &["DimA".to_string()],
+            &[("A1".to_string(), "8".to_string(), None, None)],
+            &Some("8".to_string()),
+            &None,
+            "",
+        );
+
+        assert!(
+            !buf.contains("h[DimA]"),
+            "dimension-level default would apply to omitted EXCEPT elements, got: {buf}"
+        );
+        assert!(
+            buf.contains("h[A1]"),
+            "explicitly present elements must still be emitted, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn compat_get_direct_equation_does_not_produce_backslash_escapes() {
+        let compat = Compat {
+            data_source: Some(crate::datamodel::DataSource {
+                kind: crate::datamodel::DataSourceKind::Constants,
+                file: "data/a.csv".to_string(),
+                tab_or_delimiter: ",".to_string(),
+                row_or_col: "B2".to_string(),
+                cell: String::new(),
+            }),
+            ..Compat::default()
+        };
+        let eq = compat_get_direct_equation(&compat).expect("should produce equation");
+        assert!(
+            !eq.contains("\\'"),
+            "writer must not emit backslash-escaped quotes (parser treats ' as toggle): {eq}"
+        );
+        assert!(
+            eq.contains("GET DIRECT CONSTANTS"),
+            "should produce GET DIRECT CONSTANTS: {eq}"
         );
     }
 }

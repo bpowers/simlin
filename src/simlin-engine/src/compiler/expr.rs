@@ -174,6 +174,9 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         c.map(|expr| Box::new(expr.strip_loc())),
                     ),
+                    BuiltinFn::Quantum(a, b) => {
+                        BuiltinFn::Quantum(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
                     BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
                         Box::new(a.strip_loc()),
                         Box::new(b.strip_loc()),
@@ -184,6 +187,11 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         c.map(|expr| Box::new(expr.strip_loc())),
                     ),
+                    BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
+                    ),
                     BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
                         Box::new(a.strip_loc()),
                         rest.map(|(b, c)| {
@@ -193,6 +201,24 @@ impl Expr {
                     BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.strip_loc())),
                     BuiltinFn::Stddev(a) => BuiltinFn::Stddev(Box::new(a.strip_loc())),
                     BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.strip_loc())),
+                    BuiltinFn::VectorSelect(a, b, c, d, e) => BuiltinFn::VectorSelect(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
+                        Box::new(d.strip_loc()),
+                        Box::new(e.strip_loc()),
+                    ),
+                    BuiltinFn::VectorElmMap(a, b) => {
+                        BuiltinFn::VectorElmMap(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
+                    BuiltinFn::VectorSortOrder(a, b) => {
+                        BuiltinFn::VectorSortOrder(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
+                    BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
+                    ),
                 };
                 Expr::App(builtin, loc)
             }

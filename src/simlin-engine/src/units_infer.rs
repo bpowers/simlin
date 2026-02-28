@@ -465,6 +465,12 @@ impl UnitInferer<'_> {
                     }
                     Ok(a_units)
                 }
+                BuiltinFn::Quantum(a, _) => {
+                    self.gen_constraints(a, prefix, current_var, constraints)
+                }
+                BuiltinFn::Sshape(_, bottom, _) => {
+                    self.gen_constraints(bottom, prefix, current_var, constraints)
+                }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
                 }
@@ -501,6 +507,16 @@ impl UnitInferer<'_> {
                     // RANK(A, 3, B) gives index of third smallest value in array A, breaking any ties between same-valued elements in A by comparing the corresponding elements in array B
 
                     Ok(a_units)
+                }
+                BuiltinFn::VectorSelect(_, expr_array, _, _, _) => {
+                    self.gen_constraints(expr_array, prefix, current_var, constraints)
+                }
+                BuiltinFn::VectorElmMap(source, _) => {
+                    self.gen_constraints(source, prefix, current_var, constraints)
+                }
+                BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
+                BuiltinFn::AllocateAvailable(req, _, _) => {
+                    self.gen_constraints(req, prefix, current_var, constraints)
                 }
             },
             Expr2::Subscript(base_name, _, _, _) => {
@@ -665,7 +681,7 @@ impl UnitInferer<'_> {
                     Some(Ast::ApplyToAll(_, ast)) => {
                         self.gen_constraints(ast, prefix, &current_var, constraints)
                     }
-                    Some(Ast::Arrayed(_, asts)) => {
+                    Some(Ast::Arrayed(_, asts, default_expr, _)) => {
                         // For arrayed variables, each element may have a different expression,
                         // but all elements must have the same units. Process each expression
                         // and add a constraint tying each element's units to the array variable.
@@ -694,6 +710,25 @@ impl UnitInferer<'_> {
                                 }
                             }
                         }
+                        if let Some(default_expr) = default_expr {
+                            match self.gen_constraints(
+                                default_expr,
+                                prefix,
+                                &current_var,
+                                constraints,
+                            ) {
+                                Ok(expr_units) => {
+                                    if let Units::Explicit(units) = expr_units {
+                                        constraints.push(LocatedConstraint::new(
+                                            combine(UnitOp::Div, array_var.clone(), units),
+                                            &format!("{current_var}[default]"),
+                                            Some(default_expr.get_loc()),
+                                        ));
+                                    }
+                                }
+                                Err(e) => result = Err(e),
+                            }
+                        }
                         // Return Constant since we've added constraints directly above
                         // (the constraint from var_units below would be redundant)
                         result
@@ -712,9 +747,16 @@ impl UnitInferer<'_> {
                     let loc = var.ast().map(|ast| match ast {
                         Ast::Scalar(expr) => expr.get_loc(),
                         Ast::ApplyToAll(_, expr) => expr.get_loc(),
-                        Ast::Arrayed(_, asts) => {
+                        Ast::Arrayed(_, asts, default_expr, _) => {
                             // Use the first element's location if available
-                            asts.values().next().map_or(Loc::default(), |e| e.get_loc())
+                            asts.values().next().map_or_else(
+                                || {
+                                    default_expr
+                                        .as_ref()
+                                        .map_or(Loc::default(), |e| e.get_loc())
+                                },
+                                |e| e.get_loc(),
+                            )
                         }
                     });
                     constraints.push(LocatedConstraint::new(

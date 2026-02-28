@@ -1,0 +1,59 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+DimB: B1, B2 ~~|
+
+ASCENDING==1 ~~|
+DESCENDING==0 ~~|
+VSSUM==0 ~~|
+VSMAX==3 ~~|
+VSERRNONE==0 ~~|
+
+a[DimA] = 0, 1, 1 ~~|
+b[DimB] = 1, 2 ~~|
+c[DimA] = 10 + VECTOR ELM MAP(b[B1], a[DimA]) ~~|
+d[A1,B1] = 1 ~~|
+d[A2,B1] = 2 ~~|
+d[A3,B1] = 3 ~~|
+d[A1,B2] = 4 ~~|
+d[A2,B2] = 5 ~~|
+d[A3,B2] = 6 ~~|
+e[A1,B1] = 0 ~~|
+e[A2,B1] = 1 ~~|
+e[A3,B1] = 0 ~~|
+e[A1,B2] = 1 ~~|
+e[A2,B2] = 0 ~~|
+e[A3,B2] = 1 ~~|
+f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA]) ~~|
+g[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], e[DimA,DimB]) ~~|
+h[DimA] = 2100, 2010, 2020 ~~|
+l[DimA] = VECTOR SORT ORDER(h[DimA], ASCENDING) ~~|
+m[DimA] = VECTOR SORT ORDER(h[DimA], 0) ~~|
+
+INITIAL TIME  = 0 ~~|
+FINAL TIME  = 1 ~~|
+TIME STEP  = 1 ~~|
+SAVEPER  = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:vector_simple
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

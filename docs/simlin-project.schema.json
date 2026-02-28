@@ -263,8 +263,45 @@
         },
         "isPublic": {
           "type": "boolean"
+        },
+        "dataSource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonDataSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
+    },
+    "JsonDataSource": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "tabOrDelimiter": {
+          "type": "string"
+        },
+        "rowOrCol": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "file",
+        "tabOrDelimiter",
+        "rowOrCol",
+        "cell"
+      ]
     },
     "ElementEquation": {
       "type": "object",
@@ -1103,15 +1140,54 @@
           "format": "int32"
         },
         "mapsTo": {
-          "description": "Optional dimension mapping target (e.g., DimA: A1, A2, A3 -> DimB).\nThis establishes a positional correspondence between this dimension's\nelements and the target dimension's elements.",
+          "description": "Simple positional mapping target for backward compatibility.\nUsed when a dimension has a single positional mapping with no element-level entries.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "mappings": {
+          "description": "Element-level dimension mappings with explicit source->target correspondence.\nTakes precedence over maps_to during deserialization.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonDimensionMapping"
+          }
         }
       },
       "required": [
         "name"
+      ]
+    },
+    "JsonDimensionMapping": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "elementMap": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonElementMapEntry"
+          }
+        }
+      },
+      "required": [
+        "target"
+      ]
+    },
+    "JsonElementMapEntry": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target"
       ]
     },
     "Unit": {

@@ -4,12 +4,13 @@
 
 //! Dimension building methods for MDL to datamodel conversion.
 
-use crate::datamodel::{Dimension, DimensionElements};
+use crate::datamodel::{self, Dimension, DimensionElements};
 
 use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
 use crate::mdl::xmile_compat::space_to_underbar;
 
 use super::ConversionContext;
+use super::external_data;
 use super::helpers::{canonical_name, expand_range};
 use super::types::ConvertError;
 use crate::mdl::builtins::eq_lower_space;
@@ -35,6 +36,8 @@ impl<'input> ConversionContext<'input> {
             {
                 let src_canonical = canonical_name(src);
                 let dst_canonical = canonical_name(dst);
+                self.equivalence_original_names
+                    .insert(src_canonical.clone(), src.to_string());
                 self.equivalences.insert(src_canonical, dst_canonical);
             }
         }
@@ -94,11 +97,17 @@ impl<'input> ConversionContext<'input> {
                 .iter()
                 .find(|d| eq_lower_space(&d.name, dst))
             {
-                let alias = Dimension {
-                    name: space_to_underbar(src),
+                let original_name = self
+                    .equivalence_original_names
+                    .get(src)
+                    .map(|s| s.as_str())
+                    .unwrap_or(src);
+                let mut alias = Dimension {
+                    name: space_to_underbar(original_name),
                     elements: target_dim.elements.clone(),
-                    maps_to: Some(dst.clone()),
+                    mappings: vec![],
                 };
+                alias.set_maps_to(dst.clone());
                 // Add alias to dimension_elements so expand_subscript can find it
                 if let DimensionElements::Named(elements) = &alias.elements {
                     self.dimension_elements
@@ -121,39 +130,113 @@ impl<'input> ConversionContext<'input> {
         let mut visited = std::collections::HashSet::new();
         let elements = self.expand_subscript_elements(canonical, &mut visited)?;
 
-        // Get mapping info from raw subscript def
-        let maps_to = self.get_dimension_mapping(original_name);
+        let mappings = self.get_dimension_mappings(original_name, &elements);
 
         Ok(Dimension {
             name: space_to_underbar(original_name),
             elements: DimensionElements::Named(elements),
-            maps_to,
+            mappings,
         })
     }
 
-    /// Get the maps_to target for a dimension from its SubscriptDef.
-    fn get_dimension_mapping(&self, name: &str) -> Option<String> {
+    /// Build dimension mappings from the SubscriptDef mapping clause.
+    ///
+    /// Handles:
+    /// - Simple positional: `DimA -> DimB` (empty element_map)
+    /// - Multiple targets: `DimA -> DimB, DimC` (one mapping per target)
+    /// - Element reordering: `DimA -> (DimB: B3, B2, B1)` (element_map with pairs)
+    /// - Subdimension mapping: `DimB -> (DimA: SubA, A3)` (expands subdimension to elements)
+    fn get_dimension_mappings(
+        &self,
+        name: &str,
+        source_elements: &[String],
+    ) -> Vec<datamodel::DimensionMapping> {
         let name_canonical = canonical_name(name);
         for item in &self.items {
             if let MdlItem::Equation(eq) = item
                 && let MdlEquation::SubscriptDef(def_name, def) = &eq.equation
                 && eq_lower_space(def_name, &name_canonical)
+                && let Some(m) = &def.mapping
             {
-                return def.mapping.as_ref().and_then(|m| {
-                    if m.entries.len() != 1 {
-                        return None;
-                    }
-                    match &m.entries[0] {
-                        crate::mdl::ast::MappingEntry::Name(n, _) => Some(canonical_name(n)),
-                        crate::mdl::ast::MappingEntry::DimensionMapping { dimension, .. } => {
-                            Some(canonical_name(dimension))
-                        }
-                        _ => None,
-                    }
-                });
+                return self.convert_mapping_entries(source_elements, &m.entries);
             }
         }
-        None
+        vec![]
+    }
+
+    /// Convert MDL mapping entries to datamodel DimensionMappings.
+    fn convert_mapping_entries(
+        &self,
+        source_elements: &[String],
+        entries: &[crate::mdl::ast::MappingEntry<'_>],
+    ) -> Vec<datamodel::DimensionMapping> {
+        let mut result = Vec::new();
+        for entry in entries {
+            match entry {
+                crate::mdl::ast::MappingEntry::Name(n, _) => {
+                    // Simple positional mapping: `-> DimB`
+                    result.push(datamodel::DimensionMapping {
+                        target: canonical_name(n),
+                        element_map: vec![],
+                    });
+                }
+                crate::mdl::ast::MappingEntry::DimensionMapping {
+                    dimension,
+                    elements,
+                    ..
+                } => {
+                    let target_name = canonical_name(dimension);
+                    let element_map =
+                        self.build_element_map(source_elements, elements, &target_name);
+                    result.push(datamodel::DimensionMapping {
+                        target: target_name,
+                        element_map,
+                    });
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    /// Build element-level mapping from source elements to target dimension elements.
+    ///
+    /// Each entry in `target_elements` can be either a specific element name or
+    /// a subdimension name (which expands to multiple elements). The source
+    /// elements are matched positionally: the first source element maps to the
+    /// first target entry, and so on. When a target entry is a subdimension,
+    /// one source element maps to all elements in that subdimension.
+    fn build_element_map(
+        &self,
+        source_elements: &[String],
+        target_elements: &[crate::mdl::ast::Subscript<'_>],
+        _target_dim_name: &str,
+    ) -> Vec<(String, String)> {
+        let mut element_map = Vec::new();
+        for (source_idx, target_sub) in target_elements.iter().enumerate() {
+            if source_idx >= source_elements.len() {
+                break;
+            }
+            let source_canonical = canonical_name(&source_elements[source_idx]);
+            if let crate::mdl::ast::Subscript::Element(target_name, _) = target_sub {
+                let target_canonical = canonical_name(target_name);
+                // Check if target_name is a subdimension by looking in raw_subscript_defs
+                // (dimension_elements is not populated yet during build_dimension_recursive)
+                if self.raw_subscript_defs.contains_key(&target_canonical) {
+                    let mut visited = std::collections::HashSet::new();
+                    if let Ok(sub_elements) =
+                        self.expand_subscript_elements(&target_canonical, &mut visited)
+                    {
+                        for sub_elem in &sub_elements {
+                            element_map.push((source_canonical.clone(), canonical_name(sub_elem)));
+                        }
+                    }
+                } else {
+                    element_map.push((source_canonical.clone(), target_canonical));
+                }
+            }
+        }
+        element_map
     }
 
     /// Recursively expand subscript elements.
@@ -181,6 +264,13 @@ impl<'input> ConversionContext<'input> {
         for elem in &elements {
             match elem {
                 SubscriptElement::Element(e, _) => {
+                    // Check if this element is a GET DIRECT SUBSCRIPT reference
+                    if external_data::is_get_direct_ref(e) {
+                        let resolved = self.resolve_subscript_from_data(e)?;
+                        result.extend(resolved);
+                        continue;
+                    }
+
                     let elem_canonical = canonical_name(e);
                     // Check if this element is actually a dimension reference
                     if self.raw_subscript_defs.contains_key(&elem_canonical) {
@@ -201,6 +291,36 @@ impl<'input> ConversionContext<'input> {
 
         visited.remove(dim_canonical);
         Ok(result)
+    }
+
+    /// Resolve a GET DIRECT SUBSCRIPT reference to a list of element names.
+    fn resolve_subscript_from_data(&self, opaque_str: &str) -> Result<Vec<String>, ConvertError> {
+        let call = external_data::parse_get_direct(opaque_str).ok_or_else(|| {
+            ConvertError::Other(format!(
+                "failed to parse GET DIRECT SUBSCRIPT reference: {}",
+                opaque_str
+            ))
+        })?;
+
+        let provider = self.data_provider.ok_or_else(|| {
+            ConvertError::Other(
+                "GET DIRECT SUBSCRIPT referenced but no DataProvider configured".to_string(),
+            )
+        })?;
+
+        match external_data::resolve_get_direct(&call, provider, &self.file_aliases) {
+            Ok(external_data::ResolvedData::Subscript(elements)) => Ok(elements
+                .into_iter()
+                .map(|e| space_to_underbar(&e))
+                .collect()),
+            Ok(_) => Err(ConvertError::Other(
+                "expected GET DIRECT SUBSCRIPT but got a different GET DIRECT type".to_string(),
+            )),
+            Err(e) => Err(ConvertError::Other(format!(
+                "failed to resolve GET DIRECT SUBSCRIPT: {}",
+                e.details.unwrap_or_default()
+            ))),
+        }
     }
 
     /// Resolve an element subscript to its owning dimension.
@@ -352,24 +472,21 @@ y = 1
             "Should have DimB dimension"
         );
         assert!(
-            project.dimensions.iter().any(|d| d.name == "dima"),
-            "Should have DimA dimension (alias)"
+            project.dimensions.iter().any(|d| d.name == "DimA"),
+            "Should have DimA dimension (alias) with preserved casing"
         );
 
         // DimA should map to DimB
-        let dim_a = project.dimensions.iter().find(|d| d.name == "dima");
+        let dim_a = project.dimensions.iter().find(|d| d.name == "DimA");
         if let Some(dim) = dim_a {
-            assert_eq!(
-                dim.maps_to,
-                Some("dimb".to_string()),
-                "DimA should map to dimb"
-            );
+            assert_eq!(dim.maps_to(), Some("dimb"), "DimA should map to dimb");
         }
     }
 
     #[test]
     fn test_explicit_dimension_mapping() {
-        // Explicit mapping `DimA: a1, a2, a3 -> (DimB: b1, b2, b3)` should extract DimB as maps_to
+        // Explicit mapping `DimA: a1, a2, a3 -> (DimB: b1, b2, b3)` should create
+        // a mapping to DimB with element-level correspondence.
         let mdl = "DimB: b1, b2, b3
 ~ ~|
 DimA: a1, a2, a3 -> (DimB: b1, b2, b3)
@@ -382,16 +499,21 @@ x = 1
         assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
         let project = result.unwrap();
 
-        // DimA should exist with maps_to = dimb
-        let dim_a = project.dimensions.iter().find(|d| d.name == "DimA");
-        assert!(dim_a.is_some(), "Should have DimA dimension");
-        if let Some(dim) = dim_a {
-            assert_eq!(
-                dim.maps_to,
-                Some("dimb".to_string()),
-                "DimA should map to dimb via explicit mapping"
-            );
-        }
+        let dim_a = project
+            .dimensions
+            .iter()
+            .find(|d| d.name == "DimA")
+            .expect("Should have DimA dimension");
+        assert_eq!(dim_a.mappings.len(), 1, "Should have one mapping");
+        assert_eq!(dim_a.mappings[0].target, "dimb");
+        assert_eq!(
+            dim_a.mappings[0].element_map,
+            vec![
+                ("a1".to_string(), "b1".to_string()),
+                ("a2".to_string(), "b2".to_string()),
+                ("a3".to_string(), "b3".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -531,8 +653,8 @@ x[DimA] = 1
         // Should be recognized and processed correctly
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements) => {
-                    assert_eq!(dims, &["dima"]);
+                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
+                    assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                 }
                 other => panic!("Expected Arrayed (dimension expansion), got {:?}", other),
@@ -566,9 +688,8 @@ x[b1] = 2
 
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements) => {
-                    // Dimension should be dima (from the first equation)
-                    assert_eq!(dims, &["dima"]);
+                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
+                    assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
 
                     let b1_eq = elements.iter().find(|(k, _, _, _)| k == "b1");
@@ -635,6 +756,108 @@ x = 1
             ctx.normalize_dimension("scenario"),
             "scenario",
             "Top-level dimension should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_equivalence_preserves_original_casing() {
+        // Equivalence `CamelCase <-> other` should produce a dimension named
+        // "CamelCase", not "camelcase".
+        let mdl = "TargetDim: x1, x2
+~ ~|
+MyCamelCase <-> TargetDim
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let alias = project
+            .dimensions
+            .iter()
+            .find(|d| d.maps_to() == Some("targetdim"));
+        assert!(alias.is_some(), "Should have alias dimension");
+        assert_eq!(
+            alias.unwrap().name,
+            "MyCamelCase",
+            "Alias dimension should preserve original casing"
+        );
+    }
+
+    #[test]
+    fn test_subdimension_mapping() {
+        // DimB: B1, B2 -> (DimA: SubA, A3) where SubA: A1, A2
+        // Should produce element_map: (b1, a1), (b1, a2), (b2, a3)
+        let mdl = "{UTF-8}
+DimA: A1, A2, A3 ~~|
+DimB: B1, B2 -> (DimA: SubA, A3) ~~|
+SubA: A1, A2 ~~|
+b[DimB] = 1, 2 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+        let project = crate::compat::open_vensim(mdl).unwrap();
+        let dim_b = project
+            .dimensions
+            .iter()
+            .find(|d| d.name == "DimB")
+            .expect("DimB should exist");
+
+        assert_eq!(dim_b.mappings.len(), 1, "DimB should have 1 mapping");
+        assert_eq!(dim_b.mappings[0].target, "dima");
+        assert_eq!(
+            dim_b.mappings[0].element_map,
+            vec![
+                ("b1".to_string(), "a1".to_string()),
+                ("b1".to_string(), "a2".to_string()),
+                ("b2".to_string(), "a3".to_string()),
+            ],
+            "B1 should map to SubA elements (A1, A2), B2 should map to A3"
+        );
+    }
+
+    #[test]
+    fn test_multimap_dimension_mappings() {
+        let mdl = "{UTF-8}
+DimA: A1, A2, A3 -> (DimB: B3, B2, B1), DimC ~~|
+DimB: B1, B2, B3 ~~|
+DimC: C1, C2, C3 ~~|
+a[DimA] = 1, 2, 3 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+        let project = crate::compat::open_vensim(mdl).unwrap();
+        let dim_a = project
+            .dimensions
+            .iter()
+            .find(|d| d.name == "DimA")
+            .expect("DimA should exist");
+
+        assert_eq!(
+            dim_a.mappings.len(),
+            2,
+            "DimA should have 2 mappings (DimB and DimC)"
+        );
+
+        // First mapping: DimA -> (DimB: B3, B2, B1) with element reordering
+        assert_eq!(dim_a.mappings[0].target, "dimb");
+        assert_eq!(
+            dim_a.mappings[0].element_map,
+            vec![
+                ("a1".to_string(), "b3".to_string()),
+                ("a2".to_string(), "b2".to_string()),
+                ("a3".to_string(), "b1".to_string()),
+            ]
+        );
+
+        // Second mapping: DimA -> DimC (positional)
+        assert_eq!(dim_a.mappings[1].target, "dimc");
+        assert!(
+            dim_a.mappings[1].element_map.is_empty(),
+            "Positional mapping should have empty element_map"
         );
     }
 }

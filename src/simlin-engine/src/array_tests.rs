@@ -3291,6 +3291,64 @@ mod cross_dimension_reduction_tests {
 }
 
 #[cfg(test)]
+mod sum_of_conditional_tests {
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn sum_if_interpreter() {
+        // SUM(IF a[*] > 2 THEN a[*] ELSE 0) should sum only elements > 2
+        // a = [1, 3, 5], so only 3 and 5 pass => sum = 8
+        let project = TestProject::new("sum_if")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[8.0, 8.0]);
+    }
+
+    #[test]
+    fn sum_if_vm() {
+        // Same test but for the VM path
+        let project = TestProject::new("sum_if_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_vm_result("result", &[8.0, 8.0]);
+    }
+
+    #[test]
+    fn sum_if_count_interpreter() {
+        // SUM(IF a[*] > 2 THEN 1 ELSE 0) counts elements > 2
+        // a = [1, 3, 5], so 2 elements pass => sum = 2
+        let project = TestProject::new("sum_if_count")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 2.0]);
+    }
+
+    #[test]
+    fn sum_if_count_vm() {
+        let project = TestProject::new("sum_if_count_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
+            .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_vm_result("result", &[2.0, 2.0]);
+    }
+}
+
+#[cfg(test)]
 mod compiler_limit_tests {
     use crate::test_common::TestProject;
 
@@ -3328,5 +3386,70 @@ mod compiler_limit_tests {
         project.assert_sim_builds();
         // SUM((1+2+3+4+5) * 3 elements) = SUM(15,15,15) = 45
         project.assert_vm_result("result", &[45.0, 45.0]);
+    }
+}
+
+#[cfg(test)]
+mod vector_select_action_tests {
+    use crate::test_common::TestProject;
+
+    // Helper: build a project with selection array [1,0,1] and expression array [2,4,6].
+    // Selected elements (where selection != 0) are 2 and 6.
+    // action 0 = VSSUM: 2+6 = 8
+    // action 1 = VSMIN: min(2,6) = 2
+    // action 2 = VSMEAN: (2+6)/2 = 4
+    // action 3 = VSMAX: max(2,6) = 6
+    // action 4 = VSPROD: 2*6 = 12
+    fn make_project(name: &str, action: u32) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("sel[D]", vec![("1", "1"), ("2", "0"), ("3", "1")])
+            .array_with_ranges("expr[D]", vec![("1", "2"), ("2", "4"), ("3", "6")])
+            .scalar_aux(
+                "result",
+                &format!("vector_select(sel[*], expr[*], 0, {action}, 0)"),
+            )
+    }
+
+    #[test]
+    fn vssum_interpreter() {
+        let project = make_project("vssum", 0);
+        project.assert_interpreter_result("result", &[8.0, 8.0]);
+    }
+
+    #[test]
+    fn vsmin_interpreter() {
+        let project = make_project("vsmin", 1);
+        project.assert_interpreter_result("result", &[2.0, 2.0]);
+    }
+
+    #[test]
+    fn vsmean_interpreter() {
+        let project = make_project("vsmean", 2);
+        project.assert_interpreter_result("result", &[4.0, 4.0]);
+    }
+
+    #[test]
+    fn vsmax_interpreter() {
+        let project = make_project("vsmax", 3);
+        project.assert_interpreter_result("result", &[6.0, 6.0]);
+    }
+
+    #[test]
+    fn vsprod_interpreter() {
+        let project = make_project("vsprod", 4);
+        project.assert_interpreter_result("result", &[12.0, 12.0]);
+    }
+
+    #[test]
+    fn empty_selection_returns_max_value() {
+        // When no elements are selected, the missing_value (max_value param) is returned.
+        // All selection values are 0 => no elements pass => returns max_val = 99.
+        let project = TestProject::new("vsempty")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("sel[D]", vec![("1", "0"), ("2", "0"), ("3", "0")])
+            .array_with_ranges("expr[D]", vec![("1", "2"), ("2", "4"), ("3", "6")])
+            .scalar_aux("result", "vector_select(sel[*], expr[*], 99, 0, 0)");
+        project.assert_interpreter_result("result", &[99.0, 99.0]);
     }
 }

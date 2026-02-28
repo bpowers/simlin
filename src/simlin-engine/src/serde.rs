@@ -4,6 +4,7 @@
 
 use float_cmp::approx_eq;
 
+use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{
     Aux, Compat, Dimension, DimensionElements, Dt, Equation, Extension, Flow, GraphicalFunction,
     GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, Model, ModelGroup, Module,
@@ -291,7 +292,7 @@ impl From<Equation> for project_io::variable::Equation {
                         },
                     )
                 }
-                Equation::Arrayed(dimension_names, elements) => {
+                Equation::Arrayed(dimension_names, elements, _default_eq) => {
                     project_io::variable::equation::Equation::Arrayed(
                         project_io::variable::ArrayedEquation {
                             dimension_names,
@@ -347,6 +348,7 @@ impl From<project_io::variable::Equation> for Equation {
                         )
                     })
                     .collect(),
+                None,
             ),
         }
     }
@@ -368,6 +370,7 @@ fn test_equation_roundtrip() {
                     None,
                 ),
             ],
+            None,
         ),
     ];
     for expected in cases {
@@ -506,6 +509,7 @@ impl From<project_io::variable::Stock> for Stock {
                 non_negative: compat_nn,
                 can_be_module_input: compat_cbmi,
                 visibility: compat_vis,
+                ..Default::default()
             },
             ai_state: None,
             uid: if stock.uid == 0 {
@@ -683,6 +687,7 @@ impl From<project_io::variable::Flow> for Flow {
                 non_negative: compat_nn,
                 can_be_module_input: compat_cbmi,
                 visibility: compat_vis,
+                ..Default::default()
             },
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
@@ -808,9 +813,9 @@ impl From<project_io::variable::Aux> for Aux {
             gf: aux.gf.map(GraphicalFunction::from),
             compat: Compat {
                 active_initial: compat_ai,
-                non_negative: false,
                 can_be_module_input: compat_cbmi,
                 visibility: compat_vis,
+                ..Default::default()
             },
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
@@ -977,10 +982,9 @@ impl From<project_io::variable::Module> for Module {
                 Some(module.uid)
             },
             compat: Compat {
-                active_initial: None,
-                non_negative: false,
                 can_be_module_input: cbmi,
                 visibility: vis,
+                ..Default::default()
             },
         }
     }
@@ -2067,6 +2071,7 @@ fn test_model_with_groups_roundtrip() {
 
 impl From<Dimension> for project_io::Dimension {
     fn from(dimension: Dimension) -> Self {
+        let maps_to = dimension.maps_to().map(|s| s.to_owned());
         let dim = match dimension.elements {
             DimensionElements::Indexed(size) => {
                 project_io::dimension::Dimension::Size(project_io::dimension::DimensionSize {
@@ -2081,7 +2086,7 @@ impl From<Dimension> for project_io::Dimension {
             name: dimension.name,
             obsolete_elements: vec![],
             dimension: Some(dim),
-            maps_to: dimension.maps_to,
+            maps_to,
         }
     }
 }
@@ -2101,11 +2106,15 @@ impl From<project_io::Dimension> for Dimension {
             // originally we ignored dimensions with only indexes -- treat that as a fallback
             DimensionElements::Named(dimension.obsolete_elements)
         };
-        Dimension {
+        let mut result = Dimension {
             name: dimension.name,
             elements,
-            maps_to: dimension.maps_to,
+            mappings: vec![],
+        };
+        if let Some(target) = dimension.maps_to {
+            result.set_maps_to(target);
         }
+        result
     }
 }
 
@@ -2218,8 +2227,87 @@ impl From<project_io::Project> for Project {
     }
 }
 
-pub fn serialize(project: &Project) -> project_io::Project {
-    project_io::Project::from(project.clone())
+fn unsupported_err(detail: &str) -> Error {
+    Error::new(
+        ErrorKind::Model,
+        ErrorCode::UnsupportedForSerialization,
+        Some(detail.to_owned()),
+    )
+}
+
+fn validate_equation_for_protobuf(var_ident: &str, eqn: &Equation) -> Result<()> {
+    if let Equation::Arrayed(_, _, Some(_)) = eqn {
+        return Err(unsupported_err(&format!(
+            "variable '{}': protobuf serialization does not support EXCEPT \
+             (default_equation) in Equation::Arrayed -- use sd.json for full fidelity",
+            var_ident
+        )));
+    }
+    Ok(())
+}
+
+fn validate_compat_for_protobuf(var_ident: &str, compat: &Compat) -> Result<()> {
+    if compat.data_source.is_some() {
+        return Err(unsupported_err(&format!(
+            "variable '{}': protobuf serialization does not support DataSource \
+             metadata -- use sd.json for full fidelity",
+            var_ident
+        )));
+    }
+    Ok(())
+}
+
+fn validate_dimension_for_protobuf(dim: &Dimension) -> Result<()> {
+    if dim.mappings.len() > 1 {
+        return Err(unsupported_err(&format!(
+            "dimension '{}': protobuf serialization does not support \
+             multiple dimension mappings -- use sd.json for full fidelity",
+            dim.name
+        )));
+    }
+    for mapping in &dim.mappings {
+        if !mapping.element_map.is_empty() {
+            return Err(unsupported_err(&format!(
+                "dimension '{}': protobuf serialization does not support \
+                 element-level dimension mappings -- use sd.json for full fidelity",
+                dim.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_for_protobuf(project: &Project) -> Result<()> {
+    for dim in &project.dimensions {
+        validate_dimension_for_protobuf(dim)?;
+    }
+    for model in &project.models {
+        for var in &model.variables {
+            match var {
+                Variable::Stock(s) => {
+                    validate_equation_for_protobuf(&s.ident, &s.equation)?;
+                    validate_compat_for_protobuf(&s.ident, &s.compat)?;
+                }
+                Variable::Flow(f) => {
+                    validate_equation_for_protobuf(&f.ident, &f.equation)?;
+                    validate_compat_for_protobuf(&f.ident, &f.compat)?;
+                }
+                Variable::Aux(a) => {
+                    validate_equation_for_protobuf(&a.ident, &a.equation)?;
+                    validate_compat_for_protobuf(&a.ident, &a.compat)?;
+                }
+                Variable::Module(m) => {
+                    validate_compat_for_protobuf(&m.ident, &m.compat)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn serialize(project: &Project) -> Result<project_io::Project> {
+    validate_for_protobuf(project)?;
+    Ok(project_io::Project::from(project.clone()))
 }
 
 pub fn deserialize(project: project_io::Project) -> Project {
@@ -2232,4 +2320,189 @@ pub fn deserialize_view(view: project_io::View) -> View {
 
 pub fn deserialize_graphical_function(gf: project_io::GraphicalFunction) -> GraphicalFunction {
     gf.into()
+}
+
+#[cfg(test)]
+fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Project {
+    use crate::datamodel::{self, SimMethod};
+    Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions,
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    }
+}
+
+#[test]
+fn test_protobuf_rejects_except_equation() {
+    let project = make_test_project(
+        vec![Variable::Aux(Aux {
+            ident: "test_var".to_string(),
+            equation: Equation::Arrayed(
+                vec!["dim_a".to_string()],
+                vec![("a1".to_string(), "10".to_string(), None, None)],
+                Some("default_eq".to_string()),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Compat::default(),
+            ai_state: None,
+            uid: None,
+        })],
+        vec![],
+    );
+    let result = serialize(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+    assert!(err.details.unwrap().contains("EXCEPT"));
+}
+
+#[test]
+fn test_protobuf_rejects_element_level_dimension_mapping() {
+    let project = make_test_project(
+        vec![],
+        vec![Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![crate::datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a1".to_string(), "b2".to_string()),
+                    ("a2".to_string(), "b1".to_string()),
+                ],
+            }],
+        }],
+    );
+    let result = serialize(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+    assert!(err.details.unwrap().contains("element-level"));
+}
+
+#[test]
+fn test_protobuf_rejects_data_source() {
+    let project = make_test_project(
+        vec![Variable::Aux(Aux {
+            ident: "data_var".to_string(),
+            equation: Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Compat {
+                data_source: Some(crate::datamodel::DataSource {
+                    kind: crate::datamodel::DataSourceKind::Data,
+                    file: "test.xlsx".to_string(),
+                    tab_or_delimiter: "Sheet1".to_string(),
+                    row_or_col: "A".to_string(),
+                    cell: "B2".to_string(),
+                }),
+                ..Compat::default()
+            },
+            ai_state: None,
+            uid: None,
+        })],
+        vec![],
+    );
+    let result = serialize(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+    assert!(err.details.unwrap().contains("DataSource"));
+}
+
+#[test]
+fn test_protobuf_accepts_simple_dimension_mapping() {
+    let project = make_test_project(
+        vec![],
+        vec![Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![crate::datamodel::DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![],
+            }],
+        }],
+    );
+    let result = serialize(&project);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_protobuf_rejects_multi_target_positional_mappings() {
+    let project = make_test_project(
+        vec![],
+        vec![Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                crate::datamodel::DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                crate::datamodel::DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        }],
+    );
+    let result = serialize(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+}
+
+#[test]
+fn test_protobuf_accepts_arrayed_without_default() {
+    let project = make_test_project(
+        vec![Variable::Aux(Aux {
+            ident: "arr_var".to_string(),
+            equation: Equation::Arrayed(
+                vec!["dim_a".to_string()],
+                vec![("a1".to_string(), "10".to_string(), None, None)],
+                None,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Compat::default(),
+            ai_state: None,
+            uid: None,
+        })],
+        vec![],
+    );
+    let result = serialize(&project);
+    assert!(result.is_ok());
 }

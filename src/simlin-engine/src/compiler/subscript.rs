@@ -52,6 +52,10 @@ pub(crate) struct ViewBuildConfig<'a> {
     pub(crate) active_subscript: Option<&'a [CanonicalElementName]>,
     /// Dimensions of the variable being subscripted (for element name -> offset lookups)
     pub(crate) dims: &'a [Dimension],
+    /// Active A2A dimensions (for dimension mapping resolution)
+    pub(crate) active_dimension: Option<&'a [Dimension]>,
+    /// For dimension mapping lookups
+    pub(crate) dimensions_ctx: Option<&'a DimensionsContext>,
 }
 
 /// Configuration for subscript normalization from Expr3.
@@ -259,11 +263,29 @@ pub(crate) fn normalize_subscripts3(
                     continue;
                 }
 
-                // A2A dimension reference - need to find matching active dimension
+                // A2A dimension reference - need to find matching active dimension.
+                // Check by name first, then by dimension mapping.
                 let active_dims = config.active_dimension?;
                 let active_idx = active_dims
                     .iter()
-                    .position(|ad| &*canonicalize(ad.name()) == name.as_str())?;
+                    .position(|ad| &*canonicalize(ad.name()) == name.as_str())
+                    .or_else(|| {
+                        // Try dimension mapping in both directions (handles
+                        // multi-target dimensions correctly).
+                        let dim_name =
+                            crate::common::CanonicalDimensionName::from_raw(name.as_str());
+                        active_dims.iter().position(|ad| {
+                            let active_canonical = crate::common::CanonicalDimensionName::from_raw(
+                                &canonicalize(ad.name()),
+                            );
+                            config
+                                .dimensions_ctx
+                                .has_mapping_to(&dim_name, &active_canonical)
+                                || config
+                                    .dimensions_ctx
+                                    .has_mapping_to(&active_canonical, &dim_name)
+                        })
+                    })?;
                 IndexOp::ActiveDimRef(active_idx)
             }
         };
@@ -347,7 +369,21 @@ pub(crate) fn build_view_from_ops(
                 let subscript = &active_subscripts[*active_idx];
                 let dim = &config.dims[i];
 
-                if let Some(offset) = dim.get_offset(subscript) {
+                let offset = dim.get_offset(subscript).or_else(|| {
+                    // The subscript from the active dimension doesn't exist in this
+                    // variable's dimension. Try dimension mapping translation.
+                    let dims_ctx = config.dimensions_ctx?;
+                    let active_dims = config.active_dimension?;
+                    let active_dim = &active_dims[*active_idx];
+                    let translated = dims_ctx.translate_via_mapping(
+                        dim.canonical_name(),
+                        active_dim.canonical_name(),
+                        subscript,
+                    )?;
+                    dim.get_offset(&translated)
+                });
+
+                if let Some(offset) = offset {
                     single_indices.push(offset);
                     offset_adjustment += offset * orig_strides[i] as usize;
                 } else {

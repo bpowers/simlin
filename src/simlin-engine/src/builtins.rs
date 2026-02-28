@@ -76,9 +76,11 @@ pub enum BuiltinFn<Expr> {
     Min(Box<Expr>, Option<Box<Expr>>),
     Pi,
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    Quantum(Box<Expr>, Box<Expr>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sign(Box<Expr>),
+    Sshape(Box<Expr>, Box<Expr>, Box<Expr>),
     Sin(Box<Expr>),
     Sqrt(Box<Expr>),
     Step(Box<Expr>, Box<Expr>),
@@ -92,6 +94,14 @@ pub enum BuiltinFn<Expr> {
     Size(Box<Expr>),
     Stddev(Box<Expr>),
     Sum(Box<Expr>),
+    // VECTOR SELECT(selection_array, expression_array, max_value, action, error_handling)
+    VectorSelect(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
+    // VECTOR ELM MAP(source_array, offset_array)
+    VectorElmMap(Box<Expr>, Box<Expr>),
+    // VECTOR SORT ORDER(array, direction)
+    VectorSortOrder(Box<Expr>, Box<Expr>),
+    // ALLOCATE AVAILABLE(request, priority_profile, avail)
+    AllocateAvailable(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 impl<Expr> BuiltinFn<Expr> {
@@ -117,9 +127,11 @@ impl<Expr> BuiltinFn<Expr> {
             Min(_, _) => "min",
             Pi => "pi",
             Pulse(_, _, _) => "pulse",
+            Quantum(_, _) => "quantum",
             Ramp(_, _, _) => "ramp",
             SafeDiv(_, _, _) => "safediv",
             Sign(_) => "sign",
+            Sshape(_, _, _) => "sshape",
             Sin(_) => "sin",
             Sqrt(_) => "sqrt",
             Step(_, _) => "step",
@@ -133,6 +145,10 @@ impl<Expr> BuiltinFn<Expr> {
             Size(_) => "size",
             Stddev(_) => "stddev",
             Sum(_) => "sum",
+            VectorSelect(_, _, _, _, _) => "vector_select",
+            VectorElmMap(_, _) => "vector_elm_map",
+            VectorSortOrder(_, _) => "vector_sort_order",
+            AllocateAvailable(_, _, _) => "allocate_available",
         }
     }
 
@@ -183,6 +199,7 @@ impl<Expr> BuiltinFn<Expr> {
                 Box::new(f(*b)?),
                 c.map(|c| f(*c)).transpose()?.map(Box::new),
             ),
+            Quantum(a, b) => Quantum(Box::new(f(*a)?), Box::new(f(*b)?)),
             Ramp(a, b, c) => Ramp(
                 Box::new(f(*a)?),
                 Box::new(f(*b)?),
@@ -194,6 +211,7 @@ impl<Expr> BuiltinFn<Expr> {
                 c.map(|c| f(*c)).transpose()?.map(Box::new),
             ),
             Sign(a) => Sign(Box::new(f(*a)?)),
+            Sshape(a, b, c) => Sshape(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?)),
             Sin(a) => Sin(Box::new(f(*a)?)),
             Sqrt(a) => Sqrt(Box::new(f(*a)?)),
             Step(a, b) => Step(Box::new(f(*a)?), Box::new(f(*b)?)),
@@ -215,6 +233,18 @@ impl<Expr> BuiltinFn<Expr> {
             Size(a) => Size(Box::new(f(*a)?)),
             Stddev(a) => Stddev(Box::new(f(*a)?)),
             Sum(a) => Sum(Box::new(f(*a)?)),
+            VectorSelect(a, b, c, d, e) => VectorSelect(
+                Box::new(f(*a)?),
+                Box::new(f(*b)?),
+                Box::new(f(*c)?),
+                Box::new(f(*d)?),
+                Box::new(f(*e)?),
+            ),
+            VectorElmMap(a, b) => VectorElmMap(Box::new(f(*a)?), Box::new(f(*b)?)),
+            VectorSortOrder(a, b) => VectorSortOrder(Box::new(f(*a)?), Box::new(f(*b)?)),
+            AllocateAvailable(a, b, c) => {
+                AllocateAvailable(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?))
+            }
         })
     }
 
@@ -254,12 +284,21 @@ impl<Expr> BuiltinFn<Expr> {
                     f(a);
                 }
             }
+            Quantum(a, b) => {
+                f(a);
+                f(b);
+            }
             Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
                 f(a);
                 f(b);
                 if let Some(c) = c {
                     f(c);
                 }
+            }
+            Sshape(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
             }
             Step(a, b) => {
                 f(a);
@@ -274,6 +313,22 @@ impl<Expr> BuiltinFn<Expr> {
                     }
                 }
             }
+            VectorSelect(a, b, c, d, e) => {
+                f(a);
+                f(b);
+                f(c);
+                f(d);
+                f(e);
+            }
+            VectorElmMap(a, b) | VectorSortOrder(a, b) => {
+                f(a);
+                f(b);
+            }
+            AllocateAvailable(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
+            }
         }
     }
 }
@@ -281,7 +336,15 @@ impl<Expr> BuiltinFn<Expr> {
 pub fn is_0_arity_builtin_fn(name: &str) -> bool {
     matches!(
         name,
-        "inf" | "pi" | "time" | "time_step" | "dt" | "initial_time" | "final_time"
+        "inf"
+            | "pi"
+            | "time"
+            | "time_step"
+            | "dt"
+            | "initial_time"
+            | "starttime"
+            | "final_time"
+            | "stoptime"
     )
 }
 
@@ -307,10 +370,12 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "mean"
         | "min"
         | "pulse"
+        | "quantum"
         | "ramp"
         | "safediv"
         | "sign"
         | "sin"
+        | "sshape"
         | "sqrt"
         | "step"
         | "tan"
@@ -319,6 +384,10 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "size"
         | "stddev"
         | "sum"
+        | "vector_select"
+        | "vector_elm_map"
+        | "vector_sort_order"
+        | "allocate_available"
         )
 }
 
@@ -374,12 +443,21 @@ where
                 cb(BuiltinContents::Expr(b));
             }
         }
+        BuiltinFn::Quantum(a, b) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+        }
         BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
             if let Some(c) = c {
                 cb(BuiltinContents::Expr(c))
             }
+        }
+        BuiltinFn::Sshape(a, b, c) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
         }
         BuiltinFn::Rank(a, rest) => {
             cb(BuiltinContents::Expr(a));
@@ -389,6 +467,22 @@ where
                     cb(BuiltinContents::Expr(c));
                 }
             }
+        }
+        BuiltinFn::VectorSelect(a, b, c, d, e) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
+            cb(BuiltinContents::Expr(d));
+            cb(BuiltinContents::Expr(e));
+        }
+        BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+        }
+        BuiltinFn::AllocateAvailable(a, b, c) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
         }
     }
 }

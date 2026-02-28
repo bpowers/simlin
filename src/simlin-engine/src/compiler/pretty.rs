@@ -149,6 +149,9 @@ pub fn pretty(expr: &Expr) -> String {
                 }
             }
             BuiltinFn::Pi => "\u{1D70B}".to_string(),
+            BuiltinFn::Quantum(a, b) => {
+                format!("quantum({}, {})", pretty(a), pretty(b))
+            }
             BuiltinFn::Pulse(a, b, c) => {
                 let c = match c.as_ref() {
                     Some(c) => pretty(c),
@@ -173,6 +176,9 @@ pub fn pretty(expr: &Expr) -> String {
             ),
             BuiltinFn::Sign(l) => format!("sign({})", pretty(l)),
             BuiltinFn::Sin(l) => format!("sin({})", pretty(l)),
+            BuiltinFn::Sshape(a, b, c) => {
+                format!("sshape({}, {}, {})", pretty(a), pretty(b), pretty(c))
+            }
             BuiltinFn::Sqrt(l) => format!("sqrt({})", pretty(l)),
             BuiltinFn::Step(a, b) => {
                 format!("step({}, {})", pretty(a), pretty(b))
@@ -192,6 +198,30 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Size(a) => format!("size({})", pretty(a)),
             BuiltinFn::Stddev(a) => format!("stddev({})", pretty(a)),
             BuiltinFn::Sum(a) => format!("sum({})", pretty(a)),
+            BuiltinFn::VectorSelect(a, b, c, d, e) => {
+                format!(
+                    "vector_select({}, {}, {}, {}, {})",
+                    pretty(a),
+                    pretty(b),
+                    pretty(c),
+                    pretty(d),
+                    pretty(e)
+                )
+            }
+            BuiltinFn::VectorElmMap(a, b) => {
+                format!("vector_elm_map({}, {})", pretty(a), pretty(b))
+            }
+            BuiltinFn::VectorSortOrder(a, b) => {
+                format!("vector_sort_order({}, {})", pretty(a), pretty(b))
+            }
+            BuiltinFn::AllocateAvailable(a, b, c) => {
+                format!(
+                    "allocate_available({}, {}, {})",
+                    pretty(a),
+                    pretty(b),
+                    pretty(c)
+                )
+            }
         },
         Expr::EvalModule(module, model_name, _input_set, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();

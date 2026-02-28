@@ -215,21 +215,43 @@ impl Expr1 {
                     "min" => check_arity!(Min, 1, 2),
                     "pi" => check_arity!(Pi, 0),
                     "pulse" => check_arity!(Pulse, 2, 3),
+                    "quantum" => check_arity!(Quantum, 2),
                     "ramp" => check_arity!(Ramp, 2, 3),
                     "safediv" => check_arity!(SafeDiv, 2, 3),
                     "sign" => check_arity!(Sign, 1),
                     "sin" => check_arity!(Sin, 1),
+                    "sshape" => check_arity!(Sshape, 3),
                     "sqrt" => check_arity!(Sqrt, 1),
                     "step" => check_arity!(Step, 2),
                     "tan" => check_arity!(Tan, 1),
                     "time" => check_arity!(Time, 0),
                     "time_step" | "dt" => check_arity!(TimeStep, 0),
-                    "initial_time" => check_arity!(StartTime, 0),
-                    "final_time" => check_arity!(FinalTime, 0),
+                    "initial_time" | "starttime" => check_arity!(StartTime, 0),
+                    "final_time" | "stoptime" => check_arity!(FinalTime, 0),
                     "rank" => check_arity!(Rank, 1, 3),
                     "size" => check_arity!(Size, 1),
                     "stddev" => check_arity!(Stddev, 1),
                     "sum" => check_arity!(Sum, 1),
+                    "vector_select" => {
+                        if args.len() != 5 {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                        let e = args.remove(4);
+                        let d = args.remove(3);
+                        let c = args.remove(2);
+                        let b = args.remove(1);
+                        let a = args.remove(0);
+                        BuiltinFn::VectorSelect(
+                            Box::new(a),
+                            Box::new(b),
+                            Box::new(c),
+                            Box::new(d),
+                            Box::new(e),
+                        )
+                    }
+                    "vector_elm_map" => check_arity!(VectorElmMap, 2),
+                    "vector_sort_order" => check_arity!(VectorSortOrder, 2),
+                    "allocate_available" => check_arity!(AllocateAvailable, 3),
                     _ => {
                         // TODO: this could be a table reference, array reference,
                         //       or module instantiation according to 3.3.2 of the spec
@@ -337,6 +359,10 @@ impl Expr1 {
                             loc,
                         )
                     }
+                    BuiltinFn::Quantum(a, b) => BuiltinFn::Quantum(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
                     BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),
@@ -352,6 +378,11 @@ impl Expr1 {
                         Box::new(b.constify_dimensions(scope)),
                         c.map(|arg| Box::new(arg.constify_dimensions(scope))),
                     ),
+                    BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        Box::new(c.constify_dimensions(scope)),
+                    ),
                     BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
                         Box::new(a.constify_dimensions(scope)),
                         rest.map(|(b, c)| {
@@ -366,6 +397,26 @@ impl Expr1 {
                         BuiltinFn::Stddev(Box::new(a.constify_dimensions(scope)))
                     }
                     BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::VectorSelect(a, b, c, d, e) => BuiltinFn::VectorSelect(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        Box::new(c.constify_dimensions(scope)),
+                        Box::new(d.constify_dimensions(scope)),
+                        Box::new(e.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::VectorElmMap(a, b) => BuiltinFn::VectorElmMap(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::VectorSortOrder(a, b) => BuiltinFn::VectorSortOrder(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        Box::new(c.constify_dimensions(scope)),
+                    ),
                 };
                 Expr1::App(func, loc)
             }

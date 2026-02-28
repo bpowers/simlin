@@ -21,6 +21,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 
 - **`src/project.rs`** - Load, reference-count, and query projects:
   - `simlin_project_open_{protobuf,json,xmile,vensim}()` - Load from various formats
+  - `simlin_project_open_vensim_with_data()` - Load MDL with a `FilesystemDataProvider` for resolving GET DIRECT external data references (CSV/Excel). Accepts a `data_dir` path; feature-gated on `file_io`
   - `simlin_project_{ref,unref}()` - Reference counting
   - `simlin_project_get_model()` - Get model handle by name (or default)
   - `simlin_project_enable_ltm()` - Enable loop analysis

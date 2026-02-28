@@ -166,11 +166,11 @@ impl<MI, E> Variable<MI, E> {
     pub fn get_dimensions(&self) -> Option<&[Dimension]> {
         match self {
             Variable::Stock {
-                init_ast: Some(Ast::Arrayed(dims, _)),
+                init_ast: Some(Ast::Arrayed(dims, _, _, _)),
                 ..
             }
             | Variable::Var {
-                ast: Some(Ast::Arrayed(dims, _)),
+                ast: Some(Ast::Arrayed(dims, _, _, _)),
                 ..
             } => Some(dims),
             Variable::Stock {
@@ -302,7 +302,7 @@ fn build_tables(
     let mut errors = Vec::new();
 
     // Check for per-element gfs in arrayed equation
-    if let datamodel::Equation::Arrayed(_, elements) = equation {
+    if let datamodel::Equation::Arrayed(_, elements, _) = equation {
         let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
         if has_element_gfs {
             for (_, _, _, elem_gf) in elements {
@@ -354,6 +354,37 @@ fn parse_equation(
     is_initial: bool,
     active_initial: Option<&str>,
 ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
+    fn should_apply_default_to_missing(
+        dimension_names: &[DimensionName],
+        dimensions: &[datamodel::Dimension],
+        elements: &[(
+            String,
+            String,
+            Option<String>,
+            Option<datamodel::GraphicalFunction>,
+        )],
+        default_eq: &Option<String>,
+    ) -> bool {
+        let Some(default_eq) = default_eq else {
+            return false;
+        };
+
+        let Ok(dims) = get_dimensions(dimensions, dimension_names) else {
+            return false;
+        };
+        let total_slots: usize = dims.iter().map(|d| d.len()).product();
+        if total_slots <= elements.len() {
+            return false;
+        }
+
+        // EXCEPT conversion produces sparse arrays where ALL explicit elements
+        // have the same equation as the default (the base equation).  Override-
+        // style sparse arrays have at least one element that differs.
+        !elements
+            .iter()
+            .all(|(_, eqn, _, _)| eqn.trim() == default_eq.trim())
+    }
+
     fn parse_inner(eqn: &str) -> (Option<Expr0>, Vec<EquationError>) {
         match Expr0::new(eqn, LexerType::Equation) {
             Ok(expr) => (expr, vec![]),
@@ -388,8 +419,12 @@ fn parse_equation(
                 }
             }
         }
-        datamodel::Equation::Arrayed(dimension_names, elements) => {
+        // Preserve the default equation (EXCEPT semantics) so sparse array
+        // definitions can apply it to omitted elements during lowering.
+        datamodel::Equation::Arrayed(dimension_names, elements, default_eq) => {
             let mut errors: Vec<EquationError> = vec![];
+            let apply_default_to_missing =
+                should_apply_default_to_missing(dimension_names, dimensions, elements, default_eq);
             let elements: HashMap<_, _> = elements
                 .iter()
                 .map(|(subscript, eqn, init_eqn, _gf)| {
@@ -404,9 +439,22 @@ fn parse_equation(
                 .filter(|(_, ast)| ast.is_some())
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))
                 .collect();
+            let default_expr = default_eq.as_ref().and_then(|eqn| {
+                let (ast, default_errors) = parse_inner(eqn);
+                errors.extend(default_errors);
+                ast
+            });
 
             match get_dimensions(dimensions, dimension_names) {
-                Ok(dims) => (Some(Ast::Arrayed(dims, elements)), errors),
+                Ok(dims) => (
+                    Some(Ast::Arrayed(
+                        dims,
+                        elements,
+                        default_expr,
+                        apply_default_to_missing,
+                    )),
+                    errors,
+                ),
                 Err(err) => {
                     errors.push(err);
                     (None, errors)
@@ -714,9 +762,12 @@ pub fn identifier_set(
     match ast {
         Ast::Scalar(ast) => id_visitor.walk(ast),
         Ast::ApplyToAll(_, ast) => id_visitor.walk(ast),
-        Ast::Arrayed(_, elements) => {
+        Ast::Arrayed(_, elements, default_expr, _) => {
             for ast in elements.values() {
                 id_visitor.walk(ast);
+            }
+            if let Some(default_expr) = default_expr {
+                id_visitor.walk(default_expr);
             }
         }
     };
@@ -786,6 +837,61 @@ fn test_identifier_sets() {
         }
         assert_eq!(id_set_expected, id_set_test);
     }
+}
+
+#[test]
+fn test_parse_equation_arrayed_preserves_default_expression() {
+    let dimensions = vec![datamodel::Dimension::named(
+        "dim".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+    )];
+    let equation = datamodel::Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![("a".to_string(), "1".to_string(), None, None)],
+        Some("2 + 3".to_string()),
+    );
+
+    let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
+    assert!(errors.is_empty(), "arrayed parse should not emit errors");
+
+    let Some(Ast::Arrayed(_, _, default_expr, apply_default_to_missing)) = ast else {
+        panic!("expected arrayed AST");
+    };
+    assert!(
+        default_expr.is_some(),
+        "arrayed default equation should be preserved in AST lowering"
+    );
+    assert!(apply_default_to_missing);
+}
+
+#[test]
+fn test_parse_equation_arrayed_applies_default_when_element_matches_default() {
+    // Sparse array like {a=7, b=10, default=7}: element "a" matches the default,
+    // but missing element "c" should still get the default 7, not 0.
+    let dimensions = vec![datamodel::Dimension::named(
+        "dim".to_string(),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+    )];
+    let equation = datamodel::Equation::Arrayed(
+        vec!["dim".to_string()],
+        vec![
+            ("a".to_string(), "7".to_string(), None, None),
+            ("b".to_string(), "10".to_string(), None, None),
+        ],
+        Some("7".to_string()),
+    );
+
+    let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
+    assert!(errors.is_empty(), "arrayed parse should not emit errors");
+
+    let Some(Ast::Arrayed(_, _, default_expr, apply_default_to_missing)) = ast else {
+        panic!("expected arrayed AST");
+    };
+    assert!(default_expr.is_some());
+    assert!(
+        apply_default_to_missing,
+        "defaults must apply to missing elements even when an explicit element matches the default"
+    );
 }
 
 #[test]

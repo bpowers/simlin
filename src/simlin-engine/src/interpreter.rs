@@ -64,6 +64,191 @@ pub fn transpose_flat_index(transposed_flat_idx: usize, transposed_dims: &[usize
     orig_idx
 }
 
+/// Complementary error function approximation using Abramowitz & Stegun 26.2.17.
+/// For z >= 0, erfc(z) ~ P(t) * exp(-z^2) where t = 1/(1 + p*z).
+/// Maximum error |epsilon(z)| <= 1.5e-7.
+fn erfc_approx(z: f64) -> f64 {
+    if z < 0.0 {
+        return 2.0 - erfc_approx(-z);
+    }
+    let a1: f64 = 0.254829592;
+    let a2: f64 = -0.284496736;
+    let a3: f64 = 1.421413741;
+    let a4: f64 = -1.453152027;
+    let a5: f64 = 1.061405429;
+    let p: f64 = 0.3275911;
+
+    let t = 1.0 / (1.0 + p * z);
+    (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp()
+}
+
+/// Standard normal CDF: Phi(x) = P(X <= x) for X ~ N(0,1).
+/// Computed as 0.5 * erfc(-x / sqrt(2)).
+fn normal_cdf(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    0.5 * erfc_approx(-x / std::f64::consts::SQRT_2)
+}
+
+/// Compute the allocation curve value q_i(p) for a single requester.
+///
+/// Given a "market price" p and a priority profile (ptype, ppriority, pwidth, pextra),
+/// returns the fraction of the request that should be allocated, scaled by request amount.
+///
+/// The price p decreases as supply tightens. Higher ppriority means higher priority,
+/// so requesters with higher ppriority maintain their allocation at lower prices.
+/// The survival function (1 - CDF) is used: fraction = P(priority >= p).
+fn alloc_curve(p: f64, request: f64, ptype: i32, ppriority: f64, pwidth: f64, pextra: f64) -> f64 {
+    if request <= 0.0 {
+        return 0.0;
+    }
+    let fraction = match ptype % 10 {
+        0 => {
+            // Fixed quantity: allocated when price is at or below priority
+            if p <= ppriority { 1.0 } else { 0.0 }
+        }
+        1 => {
+            // Rectangular: survival function of uniform distribution
+            let half_width = pwidth;
+            let lo = ppriority - half_width;
+            let hi = ppriority + half_width;
+            if p <= lo {
+                1.0
+            } else if p >= hi {
+                0.0
+            } else {
+                (hi - p) / (hi - lo)
+            }
+        }
+        2 => {
+            // Triangular: survival function of triangular distribution
+            let half_width = pwidth;
+            let lo = ppriority - half_width;
+            let hi = ppriority + half_width;
+            if p <= lo {
+                1.0
+            } else if p >= hi {
+                0.0
+            } else if p <= ppriority {
+                let t = (hi - p) / (hi - lo);
+                1.0 - 2.0 * (1.0 - t) * (1.0 - t)
+            } else {
+                let t = (hi - p) / (hi - lo);
+                2.0 * t * t
+            }
+        }
+        3 => {
+            // Normal: survival function P(X >= p) where X ~ N(ppriority, pwidth^2)
+            if pwidth <= 0.0 {
+                if p <= ppriority { 1.0 } else { 0.0 }
+            } else {
+                normal_cdf((ppriority - p) / pwidth)
+            }
+        }
+        4 => {
+            // Exponential: survival function of symmetric exponential
+            if pwidth <= 0.0 {
+                if p <= ppriority { 1.0 } else { 0.0 }
+            } else {
+                let z = (p - ppriority) / pwidth;
+                if z > 0.0 {
+                    0.5 * (-z).exp()
+                } else {
+                    1.0 - 0.5 * z.exp()
+                }
+            }
+        }
+        5 => {
+            // Constant Elasticity of Substitution (CES)
+            if p <= 0.0 {
+                1.0
+            } else if ppriority <= 0.0 {
+                0.0
+            } else {
+                let ratio = ppriority / p;
+                let q = ratio.powf(pextra);
+                if q.is_infinite() { 1.0 } else { q / (1.0 + q) }
+            }
+        }
+        _ => {
+            if p <= ppriority {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    };
+    let alloc = request * fraction;
+    if ptype >= 10 { alloc.floor() } else { alloc }
+}
+
+/// Perform the ALLOCATE AVAILABLE computation across all requesters.
+///
+/// Uses bisection search to find the market-clearing "price" p such that
+/// the sum of all allocations equals the available supply (or total demand
+/// if supply exceeds it).
+fn allocate_available(requests: &[f64], profiles: &[(f64, f64, f64, f64)], avail: f64) -> Vec<f64> {
+    let n = requests.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    let total_demand: f64 = requests.iter().filter(|r| **r > 0.0).sum();
+    if avail >= total_demand {
+        return requests.iter().map(|&r| r.max(0.0)).collect();
+    }
+    if avail <= 0.0 {
+        return vec![0.0; n];
+    }
+
+    // Find the search range from priority values
+    let mut p_min = f64::INFINITY;
+    let mut p_max = f64::NEG_INFINITY;
+    for (ptype, ppriority, pwidth, _pextra) in profiles.iter() {
+        let pt = (*ptype as i32) % 10;
+        let spread = match pt {
+            0 => 1.0,
+            1 | 2 => *pwidth,
+            3 => pwidth * 6.0,
+            4 => pwidth * 10.0,
+            5 => ppriority * 10.0,
+            _ => 1.0,
+        };
+        p_min = p_min.min(ppriority - spread);
+        p_max = p_max.max(ppriority + spread);
+    }
+
+    // Bisection search for the market-clearing price
+    let mut lo = p_min;
+    let mut hi = p_max;
+    for _ in 0..100 {
+        let mid = (lo + hi) / 2.0;
+        let total: f64 = (0..n)
+            .map(|i| {
+                let (pt, pp, pw, pe) = profiles[i];
+                alloc_curve(mid, requests[i], pt as i32, pp, pw, pe)
+            })
+            .sum();
+        if total < avail {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        if (hi - lo).abs() < 1e-14 * (1.0 + hi.abs()) {
+            break;
+        }
+    }
+
+    let p_star = (lo + hi) / 2.0;
+    (0..n)
+        .map(|i| {
+            let (pt, pp, pw, pe) = profiles[i];
+            alloc_curve(p_star, requests[i], pt as i32, pp, pw, pe)
+        })
+        .collect()
+}
+
 pub struct ModuleEvaluator<'a> {
     step_part: StepPart,
     off: usize,
@@ -132,6 +317,12 @@ impl ModuleEvaluator<'_> {
                 BuiltinFn::SafeDiv(a, b, _) => {
                     Self::find_array_dims(a).or_else(|| Self::find_array_dims(b))
                 }
+                // Array-producing: output has same dims as offset_array
+                BuiltinFn::VectorElmMap(_, offset) => Self::find_array_dims(offset),
+                // Array-producing: output has same dims as input array
+                BuiltinFn::VectorSortOrder(arr, _) => Self::find_array_dims(arr),
+                // Array-producing: output has same dims as request
+                BuiltinFn::AllocateAvailable(req, _, _) => Self::find_array_dims(req),
                 _ => None,
             },
             _ => None,
@@ -227,7 +418,7 @@ impl ModuleEvaluator<'_> {
                     BinaryOp::Sub => lval - rval,
                     BinaryOp::Mul => lval * rval,
                     BinaryOp::Div => lval / rval,
-                    BinaryOp::Mod => lval % rval,
+                    BinaryOp::Mod => lval.rem_euclid(rval),
                     BinaryOp::Exp => lval.powf(rval),
                     BinaryOp::Lt => {
                         if lval < rval {
@@ -316,10 +507,64 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Ln(e) => self.eval_at_index(e, index).ln(),
                     BuiltinFn::Log10(e) => self.eval_at_index(e, index).log10(),
                     BuiltinFn::Sqrt(e) => self.eval_at_index(e, index).sqrt(),
-                    BuiltinFn::Int(e) => self.eval_at_index(e, index).trunc(),
+                    BuiltinFn::Int(e) => self.eval_at_index(e, index).floor(),
                     BuiltinFn::Arccos(e) => self.eval_at_index(e, index).acos(),
                     BuiltinFn::Arcsin(e) => self.eval_at_index(e, index).asin(),
                     BuiltinFn::Arctan(e) => self.eval_at_index(e, index).atan(),
+                    BuiltinFn::VectorElmMap(source_array, offset_array) => {
+                        let mut source_values = Vec::new();
+                        self.iter_array_elements(source_array, |val| {
+                            source_values.push(val);
+                        });
+                        let raw = self.eval_at_index(offset_array, index).round();
+                        if raw.is_nan() || raw < 0.0 || raw >= source_values.len() as f64 {
+                            f64::NAN
+                        } else {
+                            source_values[raw as usize]
+                        }
+                    }
+                    BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
+                        let direction = self.eval(direction_expr).round() as i32;
+                        let mut values = Vec::new();
+                        self.iter_array_elements(array_expr, |val| {
+                            values.push(val);
+                        });
+                        let mut indexed: Vec<(usize, f64)> = values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i + 1, v))
+                            .collect();
+                        if direction == 1 {
+                            indexed.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+                        if index < indexed.len() {
+                            indexed[index].0 as f64
+                        } else {
+                            f64::NAN
+                        }
+                    }
+                    BuiltinFn::AllocateAvailable(req_expr, pp_expr, avail_expr) => {
+                        let allocations =
+                            self.compute_allocate_available(req_expr, pp_expr, avail_expr);
+                        let elem_idx = match &**req_expr {
+                            Expr::Var(off, _) => self
+                                .find_var_range(*off)
+                                .map(|(base, _)| off - base + index)
+                                .unwrap_or(index),
+                            _ => index,
+                        };
+                        if elem_idx < allocations.len() {
+                            allocations[elem_idx]
+                        } else {
+                            f64::NAN
+                        }
+                    }
                     _ => self.eval(expr), // Fall back to scalar eval for other builtins
                 }
             }
@@ -545,6 +790,148 @@ impl ModuleEvaluator<'_> {
 
         // Sample standard deviation (n-1 divisor)
         (variance / (size - 1) as f64).sqrt()
+    }
+
+    /// Compute the ALLOCATE AVAILABLE result for all requesters.
+    ///
+    /// The priority profile pp is a 2D array [n_requesters x 4] where each row
+    /// contains (ptype, ppriority, pwidth, pextra). The function collects all
+    /// request values, extracts the priority profile columns, and calls the
+    /// allocation algorithm.
+    /// Find the variable that contains the given offset, returning the
+    /// base offset and total size of that variable's storage.
+    fn find_var_range(&self, offset: usize) -> Option<(usize, usize)> {
+        let module_offsets = &self.module.offsets[&self.module.ident];
+        module_offsets
+            .values()
+            .find(|(base, size)| offset >= *base && offset < *base + *size)
+            .copied()
+    }
+
+    // NOTE: This function is called once per array element during evaluation (O(N^2) total)
+    // because the interpreter evaluates each element independently. The bisection algorithm
+    // inside build_profiles_and_allocate runs in O(N log N) per call, giving O(N^2 log N)
+    // overall. This is acceptable since the interpreter is a reference implementation, not
+    // the performance-critical path (the VM handles production simulation).
+    fn compute_allocate_available(
+        &mut self,
+        req_expr: &Expr,
+        pp_expr: &Expr,
+        avail_expr: &Expr,
+    ) -> Vec<f64> {
+        let avail = self.eval(avail_expr);
+
+        // ALLOCATE AVAILABLE is a cross-element function: even though the compiler
+        // expands per-element and hands us scalar Var references, we need to read
+        // the full underlying arrays. Extract the variable offset from the
+        // expression and look up the complete array range in the module's offset map.
+        let (req_base, req_size) = match req_expr {
+            Expr::Var(off, _) => self.find_var_range(*off).unwrap_or((*off, 1)),
+            Expr::StaticSubscript(off, view, _) => {
+                let total = view.dims.iter().product::<usize>().max(1);
+                (*off, total)
+            }
+            _ => {
+                let mut requests = Vec::new();
+                self.iter_array_elements(req_expr, |val| requests.push(val));
+                let n = requests.len();
+                if n == 0 {
+                    return vec![];
+                }
+                return self.compute_allocate_available_from_values(&requests, pp_expr, avail);
+            }
+        };
+
+        let requests: Vec<f64> = (0..req_size)
+            .map(|i| self.curr[self.off + req_base + i])
+            .collect();
+        let n = requests.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        // For the priority profile, we need the full 2D array.
+        // The pp argument in Vensim is pp[requester_dim, ptype] where ptype is just
+        // the name of the first element of the XPriority dimension. The actual array
+        // has all 4 columns (ptype, ppriority, pwidth, pextra) for each requester.
+        let pp_values: Vec<f64> = match pp_expr {
+            Expr::Var(off, _) => {
+                let (pp_base, pp_size) = self.find_var_range(*off).unwrap_or((*off, 1));
+                (0..pp_size)
+                    .map(|i| self.curr[self.off + pp_base + i])
+                    .collect()
+            }
+            Expr::StaticSubscript(off, view, _) => {
+                let total = view.dims.iter().product::<usize>().max(1);
+                (0..total).map(|i| self.curr[self.off + *off + i]).collect()
+            }
+            _ => {
+                let mut vals = Vec::new();
+                self.iter_array_elements(pp_expr, |val| vals.push(val));
+                vals
+            }
+        };
+
+        self.build_profiles_and_allocate(&requests, &pp_values, avail)
+    }
+
+    fn compute_allocate_available_from_values(
+        &mut self,
+        requests: &[f64],
+        pp_expr: &Expr,
+        avail: f64,
+    ) -> Vec<f64> {
+        let mut pp_values = Vec::new();
+        self.iter_array_elements(pp_expr, |val| pp_values.push(val));
+        self.build_profiles_and_allocate(requests, &pp_values, avail)
+    }
+
+    fn build_profiles_and_allocate(
+        &self,
+        requests: &[f64],
+        pp_values: &[f64],
+        avail: f64,
+    ) -> Vec<f64> {
+        let n = requests.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        // The pp array should have n*4 elements (n requesters x 4 profile params).
+        // Layout is row-major: [r0_ptype, r0_ppriority, r0_pwidth, r0_pextra, r1_ptype, ...]
+        let pp_cols = if !pp_values.is_empty() && pp_values.len().is_multiple_of(n) {
+            pp_values.len() / n
+        } else {
+            4
+        };
+
+        let mut profiles = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = i * pp_cols;
+            let ptype = if base < pp_values.len() {
+                pp_values[base]
+            } else {
+                0.0
+            };
+            let ppriority = if base + 1 < pp_values.len() {
+                pp_values[base + 1]
+            } else {
+                0.0
+            };
+            let pwidth = if base + 2 < pp_values.len() {
+                pp_values[base + 2]
+            } else {
+                1.0
+            };
+            let pextra = if base + 3 < pp_values.len() {
+                pp_values[base + 3]
+            } else {
+                0.0
+            };
+            profiles.push((ptype, ppriority, pwidth, pextra));
+        }
+
+        allocate_available(requests, &profiles, avail)
     }
 
     /// Extract the table identifier and element offset from a lookup table expression.
@@ -786,6 +1173,17 @@ impl ModuleEvaluator<'_> {
                         } else {
                             0.0
                         }
+                    }
+                    BuiltinFn::Quantum(x, q) => {
+                        let x = self.eval(x);
+                        let q = self.eval(q);
+                        if q == 0.0 { x } else { (x / q).trunc() * q }
+                    }
+                    BuiltinFn::Sshape(x, bottom, top) => {
+                        let x = self.eval(x);
+                        let bottom = self.eval(bottom);
+                        let top = self.eval(top);
+                        bottom + (top - bottom) / (1.0 + (-4.0 * (2.0 * x - 1.0)).exp())
                     }
                     BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
                     BuiltinFn::Min(a, b) => {
@@ -1029,6 +1427,119 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Rank(_, _) => {
                         unreachable!();
                     }
+                    BuiltinFn::VectorSelect(
+                        selection_array,
+                        expression_array,
+                        max_value,
+                        action_expr,
+                        _error_handling,
+                    ) => {
+                        let action = self.eval(action_expr).round() as i32;
+                        let max_val = self.eval(max_value);
+
+                        let mut selection_values = Vec::new();
+                        self.iter_array_elements(selection_array, |val| {
+                            selection_values.push(val);
+                        });
+
+                        let mut expression_values = Vec::new();
+                        self.iter_array_elements(expression_array, |val| {
+                            expression_values.push(val);
+                        });
+
+                        let selected: Vec<f64> = selection_values
+                            .iter()
+                            .zip(expression_values.iter())
+                            .filter(|(sel, _)| is_truthy(**sel))
+                            .map(|(_, expr)| *expr)
+                            .collect();
+
+                        if selected.is_empty() {
+                            max_val
+                        } else {
+                            match action {
+                                1 => selected.iter().cloned().fold(f64::INFINITY, f64::min), // VSMIN
+                                2 => selected.iter().sum::<f64>() / selected.len() as f64, // VSMEAN
+                                3 => selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max), // VSMAX
+                                4 => selected.iter().product(), // VSPROD
+                                _ => selected.iter().sum(),     // VSSUM (action == 0)
+                            }
+                        }
+                    }
+                    BuiltinFn::VectorElmMap(source_array, offset_array) => {
+                        let mut source_values = Vec::new();
+                        self.iter_array_elements(source_array, |val| {
+                            source_values.push(val);
+                        });
+
+                        let mut offset_values = Vec::new();
+                        self.iter_array_elements(offset_array, |val| {
+                            offset_values.push(val);
+                        });
+
+                        // Evaluated per-element: offset is 0-based into source.
+                        // For scalar eval, use the first offset.
+                        if offset_values.is_empty() {
+                            return f64::NAN;
+                        }
+
+                        let raw = offset_values[0].round();
+                        if raw.is_nan() || raw < 0.0 || raw >= source_values.len() as f64 {
+                            f64::NAN
+                        } else {
+                            source_values[raw as usize]
+                        }
+                    }
+                    BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
+                        let direction = self.eval(direction_expr).round() as i32;
+
+                        let mut values = Vec::new();
+                        self.iter_array_elements(array_expr, |val| {
+                            values.push(val);
+                        });
+
+                        // Create 1-based index-value pairs
+                        let mut indexed: Vec<(usize, f64)> = values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i + 1, v))
+                            .collect();
+
+                        if direction == 1 {
+                            indexed.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+
+                        if indexed.is_empty() {
+                            return f64::NAN;
+                        }
+
+                        // Return the first sorted index for scalar eval
+                        indexed[0].0 as f64
+                    }
+                    BuiltinFn::AllocateAvailable(req_expr, pp_expr, avail_expr) => {
+                        let allocations =
+                            self.compute_allocate_available(req_expr, pp_expr, avail_expr);
+                        let elem_idx = match &**req_expr {
+                            Expr::Var(off, _) => self
+                                .find_var_range(*off)
+                                .map(|(base, _)| off - base)
+                                .unwrap_or(0),
+                            _ => 0,
+                        };
+                        if elem_idx < allocations.len() {
+                            allocations[elem_idx]
+                        } else if !allocations.is_empty() {
+                            allocations[0]
+                        } else {
+                            f64::NAN
+                        }
+                    }
                 }
             }
             Expr::TempArray(id, view, _) => {
@@ -1223,7 +1734,7 @@ impl ModuleEvaluator<'_> {
                                 BinaryOp::Mul => l_val * r_val,
                                 BinaryOp::Div => l_val / r_val,
                                 BinaryOp::Exp => l_val.powf(r_val),
-                                BinaryOp::Mod => l_val % r_val,
+                                BinaryOp::Mod => l_val.rem_euclid(r_val),
                                 BinaryOp::Lt => (l_val < r_val) as i8 as f64,
                                 BinaryOp::Lte => (l_val <= r_val) as i8 as f64,
                                 BinaryOp::Gt => (l_val > r_val) as i8 as f64,
@@ -1585,8 +2096,8 @@ impl Simulation {
                 self.calc(StepPart::Stocks, module, 0, module_inputs, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 next[DT_OFF] = dt;
-                curr[INITIAL_TIME_OFF] = self.specs.start;
-                curr[FINAL_TIME_OFF] = self.specs.stop;
+                next[INITIAL_TIME_OFF] = self.specs.start;
+                next[FINAL_TIME_OFF] = self.specs.stop;
                 step += 1;
                 if step != save_every && !is_initial_timestep {
                     let curr = curr.borrow_mut();
@@ -1754,7 +2265,9 @@ pub fn calc_flattened_offsets(
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[&*canonicalize(ident)].ast() {
+        } else if let Some(Ast::Arrayed(dims, _, _, _)) =
+            &model.variables[&*canonicalize(ident)].ast()
+        {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let ident_canonical = Ident::new(ident);
@@ -1778,6 +2291,87 @@ pub fn calc_flattened_offsets(
     }
 
     offsets
+}
+
+#[cfg(test)]
+mod alloc_curve_tests {
+    use super::alloc_curve;
+
+    #[test]
+    fn triangular_survival_continuous_at_mode() {
+        let ppriority = 10.0;
+        let pwidth = 5.0;
+        // At p = ppriority (the mode), both branches should yield 0.5
+        let left = alloc_curve(ppriority, 1.0, 2, ppriority, pwidth, 0.0);
+        let right = alloc_curve(ppriority + f64::EPSILON, 1.0, 2, ppriority, pwidth, 0.0);
+        assert!(
+            (left - 0.5).abs() < 1e-10,
+            "left branch at mode should be 0.5, got {left}"
+        );
+        assert!(
+            (right - 0.5).abs() < 1e-6,
+            "right branch near mode should be ~0.5, got {right}"
+        );
+    }
+
+    #[test]
+    fn triangular_survival_endpoints() {
+        let ppriority = 10.0;
+        let pwidth = 5.0;
+        let lo = ppriority - pwidth;
+        let hi = ppriority + pwidth;
+        assert_eq!(alloc_curve(lo, 1.0, 2, ppriority, pwidth, 0.0), 1.0);
+        assert_eq!(alloc_curve(hi, 1.0, 2, ppriority, pwidth, 0.0), 0.0);
+    }
+
+    #[test]
+    fn ces_survives_large_exponent() {
+        // Large pextra with ratio > 1 should produce 1.0, not NaN
+        let result = alloc_curve(1.0, 1.0, 5, 10.0, 0.0, 1000.0);
+        assert!(
+            result.is_finite(),
+            "CES with large exponent produced {result}"
+        );
+        assert!((result - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ces_survives_large_exponent_both_sides() {
+        // ratio < 1 with large exponent: q -> 0, fraction -> 0
+        let result = alloc_curve(10.0, 1.0, 5, 1.0, 0.0, 1000.0);
+        assert!(
+            result.is_finite(),
+            "CES with large exponent produced {result}"
+        );
+        assert!(result.abs() < 1e-10);
+    }
+
+    #[test]
+    fn ces_zero_priority_returns_zero() {
+        // When ppriority <= 0 but p > 0, the item has no priority and
+        // should receive zero allocation share.
+        let result = alloc_curve(5.0, 1.0, 5, 0.0, 0.0, 2.0);
+        assert_eq!(
+            result, 0.0,
+            "zero priority with positive price should yield 0"
+        );
+
+        let result_neg = alloc_curve(5.0, 1.0, 5, -1.0, 0.0, 2.0);
+        assert_eq!(
+            result_neg, 0.0,
+            "negative priority with positive price should yield 0"
+        );
+    }
+
+    #[test]
+    fn ces_zero_price_returns_one() {
+        // When p <= 0, price is zero/negative and everyone gets full allocation.
+        let result = alloc_curve(0.0, 1.0, 5, 10.0, 0.0, 2.0);
+        assert_eq!(result, 1.0, "zero price should yield 1");
+
+        let result_neg = alloc_curve(-1.0, 1.0, 5, 10.0, 0.0, 2.0);
+        assert_eq!(result_neg, 1.0, "negative price should yield 1");
+    }
 }
 
 #[cfg(test)]
@@ -1915,6 +2509,7 @@ fn test_arrays() {
                                 ("b".to_owned(), "7".to_owned(), None, None),
                                 ("c".to_owned(), "5".to_owned(), None, None),
                             ],
+                            None,
                         ),
                         documentation: "".to_owned(),
                         units: None,
@@ -2354,5 +2949,117 @@ mod compile_project_tests {
         assert_eq!(x.len(), 6); // steps 0,1,2,3,4,5
         assert!((x[0] - 0.0).abs() < 1e-10);
         assert!((x[5] - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sparse_arrayed_equation_defaults_missing_elements_to_zero() {
+        // EXCEPT-style sparse arrays where all explicit elements have the same
+        // equation as the default: omitted elements were intentionally excluded
+        // and should be 0.
+        let tp = TestProject::new("sparse_arrayed")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("DimA", &["A1", "A2", "A3"]);
+
+        let mut datamodel = tp.build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "h".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec!["DimA".to_string()],
+                    vec![("A1".to_string(), "8".to_string(), None, None)],
+                    Some("8".to_string()),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let sim = super::Simulation::new(&project, "main").expect("sparse arrayed should compile");
+        let results = sim.run_to_end().expect("should simulate");
+
+        let step0 = results.iter().next().unwrap();
+        assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sparse_arrayed_equation_applies_default_for_override_only_arrays() {
+        // Sparse arrays with explicit overrides and a default equation should
+        // apply that default to unspecified elements.
+        let tp = TestProject::new("sparse_arrayed_default")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("DimA", &["A1", "A2", "A3"]);
+
+        let mut datamodel = tp.build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "h".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec!["DimA".to_string()],
+                    vec![("A1".to_string(), "10".to_string(), None, None)],
+                    Some("7".to_string()),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let sim = super::Simulation::new(&project, "main").expect("sparse arrayed should compile");
+        let results = sim.run_to_end().expect("should simulate");
+
+        let step0 = results.iter().next().unwrap();
+        assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 10.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 7.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dense_arrayed_equation_compiles_and_simulates() {
+        // Dense arrayed equations (all elements present) should work.
+        let tp = TestProject::new("dense_arrayed")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("DimA", &["A1", "A2", "A3"]);
+
+        let mut datamodel = tp.build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "h".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec!["DimA".to_string()],
+                    vec![
+                        ("A1".to_string(), "8".to_string(), None, None),
+                        ("A2".to_string(), "0".to_string(), None, None),
+                        ("A3".to_string(), "0".to_string(), None, None),
+                    ],
+                    None,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let project = Arc::new(crate::project::Project::from(datamodel));
+        let sim = super::Simulation::new(&project, "main").expect("dense arrayed should compile");
+        let results = sim.run_to_end().expect("should simulate");
+
+        let step0 = results.iter().next().unwrap();
+        assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
+        assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
     }
 }

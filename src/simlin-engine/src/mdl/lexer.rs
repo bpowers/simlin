@@ -724,8 +724,8 @@ impl<'input> RawLexer<'input> {
                                 }
                             }
                         }
-                        // Strip trailing spaces
-                        while name.ends_with(' ') {
+                        // Strip trailing spaces and tabs
+                        while name.ends_with(' ') || name.ends_with('\t') {
                             name.pop();
                         }
                         // Skip to closing }
@@ -1513,6 +1513,24 @@ mod tests {
         test(
             "***\nMy.Group.Name\n***|",
             vec![("~~~~~~~~~~~~~~~~~~~~~~", group_owned("My-Group-Name"))],
+        );
+    }
+
+    #[test]
+    fn group_star_strips_trailing_tabs() {
+        // {** form: trailing tabs on group name should be stripped
+        test(
+            "{**GroupName\t**}",
+            vec![("~~~~~~~~~~~~~~~~", group_owned("GroupName"))],
+        );
+    }
+
+    #[test]
+    fn group_star_strips_mixed_trailing_whitespace() {
+        // {** form: mixed trailing spaces and tabs should all be stripped
+        test(
+            "{**GroupName \t **}",
+            vec![("~~~~~~~~~~~~~~~~~~", group_owned("GroupName"))],
         );
     }
 

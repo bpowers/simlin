@@ -798,7 +798,75 @@ fn test_sim_specs_parsing() {
     assert_eq!(roundtripped, actual);
 }
 
+fn validate_for_xmile(project: &datamodel::Project) -> Result<()> {
+    use crate::common::{Error, ErrorCode, ErrorKind};
+    use datamodel::{Equation, Variable};
+
+    let unsupported = |detail: &str| -> Error {
+        Error::new(
+            ErrorKind::Model,
+            ErrorCode::UnsupportedForSerialization,
+            Some(detail.to_owned()),
+        )
+    };
+
+    for dim in &project.dimensions {
+        if dim.mappings.len() > 1 {
+            return Err(unsupported(&format!(
+                "dimension '{}': XMILE serialization does not support \
+                 multiple dimension mappings -- use sd.json for full fidelity",
+                dim.name
+            )));
+        }
+        for mapping in &dim.mappings {
+            if !mapping.element_map.is_empty() {
+                return Err(unsupported(&format!(
+                    "dimension '{}': XMILE serialization does not support \
+                     element-level dimension mappings -- use sd.json for full fidelity",
+                    dim.name
+                )));
+            }
+        }
+    }
+
+    for model in &project.models {
+        for var in &model.variables {
+            let (ident, eqn, compat) = match var {
+                Variable::Stock(s) => (&s.ident, &s.equation, &s.compat),
+                Variable::Flow(f) => (&f.ident, &f.equation, &f.compat),
+                Variable::Aux(a) => (&a.ident, &a.equation, &a.compat),
+                Variable::Module(m) => {
+                    if m.compat.data_source.is_some() {
+                        return Err(unsupported(&format!(
+                            "variable '{}': XMILE serialization does not support \
+                             DataSource metadata -- use sd.json for full fidelity",
+                            m.ident
+                        )));
+                    }
+                    continue;
+                }
+            };
+            if let Equation::Arrayed(_, _, Some(_)) = eqn {
+                return Err(unsupported(&format!(
+                    "variable '{}': XMILE serialization does not support EXCEPT \
+                     (default_equation) in Equation::Arrayed -- use sd.json for full fidelity",
+                    ident
+                )));
+            }
+            if compat.data_source.is_some() {
+                return Err(unsupported(&format!(
+                    "variable '{}': XMILE serialization does not support \
+                     DataSource metadata -- use sd.json for full fidelity",
+                    ident
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
+    validate_for_xmile(project)?;
     let file: File = project.clone().into();
 
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
@@ -834,4 +902,207 @@ pub fn project_from_reader(reader: &mut dyn BufRead) -> Result<datamodel::Projec
 
 pub fn convert_file_to_project(file: File) -> datamodel::Project {
     datamodel::Project::from(file)
+}
+
+#[test]
+fn test_xmile_rejects_except_equation() {
+    use crate::datamodel::{Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![Variable::Aux(Aux {
+                ident: "test_var".to_string(),
+                equation: Equation::Arrayed(
+                    vec!["dim_a".to_string()],
+                    vec![("a1".to_string(), "10".to_string(), None, None)],
+                    Some("default_eq".to_string()),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Compat::default(),
+                ai_state: None,
+                uid: None,
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let result = project_to_xmile(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+    assert!(err.details.unwrap().contains("EXCEPT"));
+}
+
+#[test]
+fn test_xmile_rejects_element_level_dimension_mapping() {
+    use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![DimensionMapping {
+                target: "dim_b".to_string(),
+                element_map: vec![
+                    ("a1".to_string(), "b2".to_string()),
+                    ("a2".to_string(), "b1".to_string()),
+                ],
+            }],
+        }],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let result = project_to_xmile(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+    assert!(err.details.unwrap().contains("element-level"));
+}
+
+#[test]
+fn test_xmile_rejects_multi_target_positional_mapping() {
+    use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension {
+            name: "dim_a".to_string(),
+            elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
+            mappings: vec![
+                DimensionMapping {
+                    target: "dim_b".to_string(),
+                    element_map: vec![],
+                },
+                DimensionMapping {
+                    target: "dim_c".to_string(),
+                    element_map: vec![],
+                },
+            ],
+        }],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let result = project_to_xmile(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+}
+
+#[test]
+fn test_xmile_rejects_data_source() {
+    use crate::datamodel::{
+        Aux, Compat, DataSource, DataSourceKind, Dt, Equation, SimMethod, SimSpecs, Variable,
+    };
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![Variable::Aux(Aux {
+                ident: "data_var".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Compat {
+                    data_source: Some(DataSource {
+                        kind: DataSourceKind::Data,
+                        file: "test.xlsx".to_string(),
+                        tab_or_delimiter: "Sheet1".to_string(),
+                        row_or_col: "A".to_string(),
+                        cell: "B2".to_string(),
+                    }),
+                    ..Compat::default()
+                },
+                ai_state: None,
+                uid: None,
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let result = project_to_xmile(&project);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::common::ErrorCode::UnsupportedForSerialization
+    );
+    assert!(err.details.unwrap().contains("DataSource"));
 }

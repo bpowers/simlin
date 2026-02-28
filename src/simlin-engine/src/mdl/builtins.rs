@@ -306,6 +306,7 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "lookup backward",
         "tabxl",
         "get data at time",
+        "get data between times",
         "get data last time",
         // Array functions
         "sum",
@@ -327,6 +328,9 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "game",
         "time base",
         "npv",
+        "sshape",
+        "ramp from to",
+        "allocate available",
         "allocate by priority",
         "get direct data",
         "get data mean",
@@ -373,6 +377,21 @@ pub fn classify_symbol(name: &str) -> SymbolClass {
         }
         if rest.starts_with("data") {
             return SymbolClass::GetXls("{GET DATA");
+        }
+        if let Some(direct_rest) = rest.strip_prefix("direct ") {
+            if direct_rest.starts_with("data") {
+                return SymbolClass::GetXls("{GET DIRECT DATA");
+            }
+            if direct_rest.starts_with("constants") {
+                return SymbolClass::GetXls("{GET DIRECT CONSTANTS");
+            }
+            if direct_rest.starts_with("lookups") {
+                return SymbolClass::GetXls("{GET DIRECT LOOKUPS");
+            }
+            if direct_rest.starts_with("subscript") {
+                return SymbolClass::GetXls("{GET DIRECT SUBSCRIPT");
+            }
+            return SymbolClass::GetXls("{GET DIRECT");
         }
         if rest.starts_with("direct") {
             return SymbolClass::GetXls("{GET DIRECT");

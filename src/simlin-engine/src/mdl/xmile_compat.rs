@@ -104,7 +104,7 @@ impl XmileFormatter {
                 // But xmutil strips quotes from literals in expression output
                 lit.to_string()
             }
-            Expr::Na(_) => ":NA:".to_string(),
+            Expr::Na(_) => "NAN".to_string(),
         }
     }
 
@@ -181,6 +181,12 @@ impl XmileFormatter {
     }
 
     fn format_name(&self, name: &str) -> String {
+        // Pass through opaque GET DIRECT/GET XLS references from the normalizer.
+        // These are resolved during data conversion, not formatted as variable names.
+        if name.starts_with('{') {
+            return name.to_string();
+        }
+
         // Handle special TIME-related names without allocating
         if self.use_xmile_time_names {
             if eq_lower_space(name, "time") {
@@ -285,11 +291,13 @@ impl XmileFormatter {
                 }
             }
             "quantum" => {
-                // QUANTUM(x, q) -> (q)*INT((x)/(q))
+                // QUANTUM(x, q) passes through as a VM builtin
                 if args.len() >= 2 {
-                    let x = self.format_expr_ctx(&args[0], ctx);
-                    let q = self.format_expr_ctx(&args[1], ctx);
-                    return format!("({})*INT(({})/({}))", q, x, q);
+                    return format!(
+                        "QUANTUM({}, {})",
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
+                    );
                 }
             }
             "pulse" => {
@@ -360,6 +368,72 @@ impl XmileFormatter {
                     let t = self.format_expr_ctx(&args[0], ctx);
                     let dt = self.format_expr_ctx(&args[1], ctx);
                     return format!("{} + ({}) * TIME", t, dt);
+                }
+            }
+            "npv" => {
+                // NPV(stream, discount_rate, init_val, factor) passes through as stdlib call
+                if args.len() >= 4 {
+                    return format!(
+                        "NPV({}, {}, {}, {})",
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx),
+                        self.format_expr_ctx(&args[2], ctx),
+                        self.format_expr_ctx(&args[3], ctx)
+                    );
+                }
+            }
+            "ramp from to" => {
+                // RAMP FROM TO(y_start, y_end, t_start, t_end) ->
+                // y_start + RAMP((y_end - y_start) / (t_end - t_start), t_start, t_end)
+                if args.len() >= 4 {
+                    let y_start = self.format_expr_ctx(&args[0], ctx);
+                    let y_end = self.format_expr_ctx(&args[1], ctx);
+                    let t_start = self.format_expr_ctx(&args[2], ctx);
+                    let t_end = self.format_expr_ctx(&args[3], ctx);
+                    return format!(
+                        "({y_start}) + RAMP((({y_end}) - ({y_start})) / (({t_end}) - ({t_start})), {t_start}, {t_end})"
+                    );
+                }
+            }
+            "modulo" => {
+                // MODULO(x, y) -> (x) MOD (y)
+                if args.len() >= 2 {
+                    return format!(
+                        "({}) MOD ({})",
+                        self.format_expr_ctx(&args[0], ctx),
+                        self.format_expr_ctx(&args[1], ctx)
+                    );
+                }
+            }
+            "get data between times" => {
+                // GET DATA BETWEEN TIMES(var, time, mode) -> lookup variant based on mode
+                // mode: 0=interpolate (LOOKUP), -1=backward (LOOKUP_BACKWARD), 1=forward (LOOKUP_FORWARD)
+                if args.len() >= 3 {
+                    let var_expr = self.format_expr_ctx(&args[0], ctx);
+                    let time_expr = self.format_expr_ctx(&args[1], ctx);
+                    let mode_expr = self.format_expr_ctx(&args[2], ctx);
+                    let mode_trimmed = mode_expr.trim();
+                    let lookup_fn = if mode_trimmed == "-1"
+                        || mode_trimmed.eq_ignore_ascii_case("backward")
+                    {
+                        "LOOKUP_BACKWARD"
+                    } else if mode_trimmed == "1" || mode_trimmed.eq_ignore_ascii_case("forward") {
+                        "LOOKUP_FORWARD"
+                    } else if mode_trimmed == "0"
+                        || mode_trimmed.eq_ignore_ascii_case("interpolate")
+                    {
+                        "LOOKUP"
+                    } else {
+                        // Non-constant or unrecognized mode expression; LOOKUP
+                        // (interpolation) is the safest static approximation since
+                        // we can't resolve runtime values during conversion.
+                        eprintln!(
+                            "warning: GET DATA BETWEEN TIMES mode '{}' is not a recognized constant; defaulting to LOOKUP (interpolation)",
+                            mode_trimmed
+                        );
+                        "LOOKUP"
+                    };
+                    return format!("{}({}, {})", lookup_fn, var_expr, time_expr);
                 }
             }
             "zidz" => {
@@ -440,6 +514,10 @@ impl XmileFormatter {
             "zidz" => "SAFEDIV".to_string(),
             "xidz" => "SAFEDIV".to_string(),
             "lookup extrapolate" => "LOOKUP".to_string(),
+            "quantum" => "QUANTUM".to_string(),
+            "ramp from to" => "RAMP_FROM_TO".to_string(),
+            "sshape" => "SSHAPE".to_string(),
+            "npv" => "NPV".to_string(),
             "vmax" => "MAX".to_string(),
             "vmin" => "MIN".to_string(),
             "forecast" => "FORCST".to_string(),
@@ -447,6 +525,7 @@ impl XmileFormatter {
             "vector select" => "VECTOR SELECT".to_string(),
             "vector elm map" => "VECTOR ELM MAP".to_string(),
             "vector sort order" => "VECTOR SORT ORDER".to_string(),
+            "allocate available" => "ALLOCATE AVAILABLE".to_string(),
             "vector reorder" => "VECTOR_REORDER".to_string(),
             "vector lookup" => "VECTOR LOOKUP".to_string(),
             _ => canonical.to_uppercase().replace(' ', "_"),
@@ -998,7 +1077,7 @@ mod tests {
             CallKind::Builtin,
             loc(),
         );
-        assert_eq!(formatter.format_expr(&expr), "(0.5)*INT((x)/(0.5))");
+        assert_eq!(formatter.format_expr(&expr), "QUANTUM(x, 0.5)");
     }
 
     #[test]
@@ -1917,6 +1996,125 @@ mod tests {
         assert_eq!(
             formatter.format_expr_with_context(&expr, &ctx),
             "Layer_Depth[layer2]"
+        );
+    }
+
+    #[test]
+    fn test_format_na_emits_nan() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::Na(loc());
+        assert_eq!(formatter.format_expr(&expr), "NAN");
+    }
+
+    #[test]
+    fn test_ramp_from_to_transforms_args() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("ramp from to"),
+            vec![],
+            vec![
+                Expr::Const(0.0, loc()),
+                Expr::Const(100.0, loc()),
+                Expr::Const(5.0, loc()),
+                Expr::Const(15.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        let result = formatter.format_expr(&expr);
+        assert!(result.contains("RAMP"), "should contain RAMP: {result}");
+        assert!(
+            !result.starts_with("RAMP_FROM_TO"),
+            "should not be bare RAMP_FROM_TO: {result}"
+        );
+        assert!(result.contains("100") && result.contains("0"), "{result}");
+    }
+
+    #[test]
+    fn test_get_data_between_times_mode_zero() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Const(0.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "LOOKUP(data_var, TIME)",
+            "mode 0 should map to LOOKUP"
+        );
+    }
+
+    #[test]
+    fn test_get_data_between_times_mode_backward() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Const(-1.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "LOOKUP_BACKWARD(data_var, TIME)",
+            "mode -1 should map to LOOKUP_BACKWARD"
+        );
+    }
+
+    #[test]
+    fn test_get_data_between_times_mode_forward() {
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Const(1.0, loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        assert_eq!(
+            formatter.format_expr(&expr),
+            "LOOKUP_FORWARD(data_var, TIME)",
+            "mode 1 should map to LOOKUP_FORWARD"
+        );
+    }
+
+    #[test]
+    fn test_get_data_between_times_non_constant_mode() {
+        // When mode is a non-constant expression, we can't resolve at conversion
+        // time. The output should still be valid XMILE (defaulting to LOOKUP)
+        // but must not silently drop the mode information without any indication.
+        let formatter = XmileFormatter::new();
+        let expr = Expr::App(
+            Cow::Borrowed("GET DATA BETWEEN TIMES"),
+            vec![],
+            vec![
+                Expr::Var(Cow::Borrowed("data var"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("Time"), vec![], loc()),
+                Expr::Var(Cow::Borrowed("mode var"), vec![], loc()),
+            ],
+            CallKind::Builtin,
+            loc(),
+        );
+        let result = formatter.format_expr(&expr);
+        // Must produce valid XMILE with LOOKUP as fallback
+        assert!(
+            result.starts_with("LOOKUP("),
+            "non-constant mode should default to LOOKUP: {result}"
         );
     }
 }

@@ -31,7 +31,7 @@ pub use writer::expr0_to_mdl;
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{Project, Variable};
 
-use convert::convert_mdl;
+use convert::convert_mdl_with_data;
 use writer::MdlWriter;
 
 /// Convert a Project to Vensim MDL text.
@@ -64,7 +64,16 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 /// This is the main entry point for MDL parsing. It takes the MDL source as a
 /// string and converts it to the internal datamodel representation.
 pub fn parse_mdl(source: &str) -> Result<Project> {
-    convert_mdl(source).map_err(|e| {
+    parse_mdl_with_data(source, None)
+}
+
+/// Parse a Vensim MDL file into a Project with an optional DataProvider
+/// for resolving GET DIRECT external data references.
+pub fn parse_mdl_with_data(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<Project> {
+    convert_mdl_with_data(source, data_provider).map_err(|e| {
         Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,

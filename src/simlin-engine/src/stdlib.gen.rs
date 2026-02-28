@@ -1,6 +1,10 @@
 // @generated from stdlib/*.stmx
 // DO NOT EDIT - regenerate with: pnpm rebuild-stdlib
 //
+// Some models (marked @hand-maintained below) cannot be expressed as .stmx files
+// because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME).
+// Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs.
+//
 // Stdlib SHA256: 7fb58d5c90732144633cb1210aa061b00667f84e6cf762eb0a4d3557fbaecf0c
 
 #![allow(
@@ -17,8 +21,8 @@ use crate::datamodel::{
     SimMethod, SimSpecs, Stock, StockFlow, Variable, View, ViewElement, Visibility, view_element,
 };
 
-pub const MODEL_NAMES: [&str; 7] = [
-    "delay1", "delay3", "init", "previous", "smth1", "smth3", "trend",
+pub const MODEL_NAMES: [&str; 8] = [
+    "delay1", "delay3", "init", "npv", "previous", "smth1", "smth3", "trend",
 ];
 
 pub fn get(name: &str) -> Option<Model> {
@@ -26,6 +30,7 @@ pub fn get(name: &str) -> Option<Model> {
         "delay1" => Some(delay1()),
         "delay3" => Some(delay3()),
         "init" => Some(init()),
+        "npv" => Some(npv()),
         "previous" => Some(previous()),
         "smth1" => Some(smth1()),
         "smth3" => Some(smth3()),
@@ -479,6 +484,102 @@ fn init() -> Model {
                 width: 0_f64,
                 height: 0_f64,
             },
+            zoom: 1_f64,
+            use_lettered_polarity: false,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    }
+}
+
+// @hand-maintained: npv cannot be expressed as an .stmx file because its flow equation
+// references `time`, `initial_time`, and `time_step` -- simulation system variables that
+// the engine injects at runtime and that are not representable as named variables in a
+// self-contained XMILE stdlib model.
+fn npv() -> Model {
+    Model {
+        name: "stdlib⁚npv".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Aux(Aux {
+                ident: "stream".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "discount_rate".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "initial_value".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "factor".to_string(),
+                equation: Equation::Scalar("1".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Flow(Flow {
+                ident: "inflow".to_string(),
+                equation: Equation::Scalar(
+                    "stream * factor * (1 + discount_rate * time_step) ^ ((initial_time - time) / time_step)"
+                        .to_string(),
+                ),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "output".to_string(),
+                equation: Equation::Scalar("stock + inflow * time_step".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Stock(Stock {
+                ident: "stock".to_string(),
+                equation: Equation::Scalar("initial_value".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                inflows: vec!["inflow".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+        ],
+        views: vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![],
+            view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
         })],

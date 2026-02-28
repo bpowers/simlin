@@ -104,8 +104,8 @@ fn test_sync_simple_project() {
             .model_names(&db)
             .contains(&"main".to_string())
     );
-    // 1 user model + 7 stdlib models
-    assert_eq!(result.project.model_names(&db).len(), 8);
+    // 1 user model + 8 stdlib models
+    assert_eq!(result.project.model_names(&db).len(), 9);
 
     let sim_specs = result.project.sim_specs(&db);
     assert_eq!(sim_specs.start, 0.0);
@@ -4423,6 +4423,7 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
                             }),
                         ),
                     ],
+                    None,
                 ),
                 documentation: String::new(),
                 units: None,

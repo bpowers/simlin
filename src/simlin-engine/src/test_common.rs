@@ -115,7 +115,7 @@ impl TestProject {
             name.to_string(),
             elements.iter().map(|s| s.to_string()).collect(),
         );
-        dim.maps_to = Some(maps_to.to_string());
+        dim.set_maps_to(maps_to.to_string());
         self.dimensions.push(dim);
         self
     }
@@ -307,7 +307,7 @@ impl TestProject {
 
         self.variables.push(Variable::Aux(datamodel::Aux {
             ident: name.to_string(),
-            equation: Equation::Arrayed(dims, arrayed_equations),
+            equation: Equation::Arrayed(dims, arrayed_equations, None),
             documentation: String::new(),
             units: units.map(|s| s.to_string()),
             gf: None,

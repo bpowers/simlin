@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Ast, Expr0, IndexExpr0, print_eqn};
+use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
@@ -14,9 +14,10 @@ use crate::{datamodel, eqn_err};
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     let args: &'static [&'static str] = match name {
-        "smth1" | "smth3" | "delay1" | "delay3" | "trend" => {
+        "smth1" | "smth3" | "delay" | "delay1" | "delay3" | "trend" => {
             &["input", "delay_time", "initial_value"]
         }
+        "npv" => &["stream", "discount_rate", "initial_value", "factor"],
         "previous" => &["input", "initial_value"],
         "init" => &["input"],
         _ => {
@@ -34,7 +35,7 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
             if crate::stdlib::MODEL_NAMES.contains(&func.as_str())
-                || matches!(func.as_str(), "delayn" | "smthn")
+                || matches!(func.as_str(), "delay" | "delayn" | "smthn")
             {
                 return true;
             }
@@ -67,6 +68,15 @@ fn rewrite_alias_module_call(
     args: Vec<Expr0>,
     loc: crate::builtins::Loc,
 ) -> Result<(String, Vec<Expr0>), EquationError> {
+    // xmutil maps DELAY FIXED to DELAY(...); semantically this is a
+    // pipeline delay, not an exponential smooth like delay1.  The stdlib
+    // framework cannot represent the ring-buffer state needed for a true
+    // pipeline delay, so for now we map it to delay1 as a rough
+    // approximation.  This is known-incorrect for models where the exact
+    // delay matters (e.g. delay_time >> DT).
+    if func == "delay" {
+        return Ok(("delay1".to_string(), args));
+    }
     if !matches!(func.as_str(), "delayn" | "smthn") {
         return Ok((func, args));
     }
@@ -203,24 +213,30 @@ impl<'a> BuiltinVisitor<'a> {
                 // translate the reference to DimA to its equivalent element "a1".
                 if let Some(ctx) = self.dimensions_ctx {
                     for (i, dim_name) in self.dimension_names.iter().enumerate() {
-                        // Check if canonical_name maps to dim_name
-                        if ctx.get_maps_to(&canonical_name) == Some(dim_name) {
-                            // Translate: find the element in canonical_name that corresponds to
-                            // subscript[i] in dim_name
-                            let target_element = CanonicalElementName::from_raw(&subscript[i]);
-                            if let Some(source_element) = ctx.translate_to_source_via_mapping(
+                        let target_element = CanonicalElementName::from_raw(&subscript[i]);
+
+                        // Try direct/reverse mapping first, including secondary targets.
+                        if let Some(source_element) =
+                            ctx.translate_via_mapping(&canonical_name, dim_name, &target_element)
+                        {
+                            let qualified_name =
+                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
+                            return Var(RawIdent::new_from_str(&qualified_name), loc);
+                        }
+
+                        // If the active dimension is a subdimension of a mapped target,
+                        // resolve through that mapped parent.
+                        if let Some(parent_dim) =
+                            ctx.find_mapping_parent_of(&canonical_name, dim_name)
+                            && let Some(source_element) = ctx.translate_to_source_via_mapping(
                                 &canonical_name,
-                                dim_name,
+                                parent_dim,
                                 &target_element,
-                            ) {
-                                // Return qualified element from the source dimension
-                                let qualified_name = format!(
-                                    "{}·{}",
-                                    canonical_name.as_str(),
-                                    source_element.as_str()
-                                );
-                                return Var(RawIdent::new_from_str(&qualified_name), loc);
-                            }
+                            )
+                        {
+                            let qualified_name =
+                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
+                            return Var(RawIdent::new_from_str(&qualified_name), loc);
                         }
                     }
                 }
@@ -302,6 +318,13 @@ impl<'a> BuiltinVisitor<'a> {
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
                 let (func, args) = rewrite_alias_module_call(func, args, loc)?;
+                // MODULO(x, y) is the function-call form of the MOD binary operator
+                if func == "modulo" && args.len() == 2 {
+                    let mut it = args.into_iter();
+                    let lhs = it.next().unwrap();
+                    let rhs = it.next().unwrap();
+                    return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
+                }
                 if is_builtin_fn(&func) {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
@@ -452,7 +475,7 @@ pub fn instantiate_implicit_modules(
                     all_vars.extend(visitor.vars.values().cloned());
                 }
 
-                Ok((Ast::Arrayed(dimensions, elements), all_vars))
+                Ok((Ast::Arrayed(dimensions, elements, None, false), all_vars))
             } else {
                 // No stdlib calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name);
@@ -461,23 +484,123 @@ pub fn instantiate_implicit_modules(
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
             }
         }
-        Ast::Arrayed(dimensions, elements) => {
-            let mut builtin_visitor = BuiltinVisitor::new(variable_name);
-            let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
-                .into_iter()
-                .map(|(subscript, equation)| {
-                    builtin_visitor.walk(equation).map(|ast| (subscript, ast))
-                })
-                .collect();
-            let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
-            Ok((Ast::Arrayed(dimensions, elements?), vars))
+        Ast::Arrayed(dimensions, elements, default_expr, apply_default_to_missing) => {
+            let any_stdlib = elements.values().any(contains_stdlib_call)
+                || default_expr.as_ref().is_some_and(contains_stdlib_call);
+            if any_stdlib && !dimensions.is_empty() {
+                let mut all_vars = Vec::new();
+                let mut new_elements = HashMap::new();
+                for (subscript_key, equation) in elements {
+                    let subscript_parts: Vec<String> = subscript_key
+                        .as_str()
+                        .split(',')
+                        .map(|s| s.to_string())
+                        .collect();
+                    let mut visitor = BuiltinVisitor::new_with_subscript_context(
+                        variable_name,
+                        &dimensions,
+                        &subscript_parts,
+                        dimensions_ctx,
+                    );
+                    let transformed = visitor.walk(equation)?;
+                    new_elements.insert(subscript_key, transformed);
+                    all_vars.extend(visitor.vars.values().cloned());
+                }
+                let transformed_default = if let Some(default_expr) = default_expr {
+                    let mut default_visitor = BuiltinVisitor::new(variable_name);
+                    let transformed = default_visitor.walk(default_expr)?;
+                    all_vars.extend(default_visitor.vars.values().cloned());
+                    Some(transformed)
+                } else {
+                    None
+                };
+                Ok((
+                    Ast::Arrayed(
+                        dimensions,
+                        new_elements,
+                        transformed_default,
+                        apply_default_to_missing,
+                    ),
+                    all_vars,
+                ))
+            } else {
+                let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+                let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
+                    .into_iter()
+                    .map(|(subscript, equation)| {
+                        builtin_visitor.walk(equation).map(|ast| (subscript, ast))
+                    })
+                    .collect();
+                let transformed_default = if let Some(default_expr) = default_expr {
+                    Some(builtin_visitor.walk(default_expr)?)
+                } else {
+                    None
+                };
+                let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
+                Ok((
+                    Ast::Arrayed(
+                        dimensions,
+                        elements?,
+                        transformed_default,
+                        apply_default_to_missing,
+                    ),
+                    vars,
+                ))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::builtins::Loc;
     use crate::test_common::TestProject;
+
+    #[test]
+    fn test_substitute_dimension_refs_uses_secondary_mapping_target() {
+        let dim_a = datamodel::Dimension::named(
+            "dima".to_string(),
+            vec!["a1".to_string(), "a2".to_string()],
+        );
+        let dim_x = datamodel::Dimension::named(
+            "dimx".to_string(),
+            vec!["x1".to_string(), "x2".to_string()],
+        );
+        let mut dim_b = datamodel::Dimension::named(
+            "dimb".to_string(),
+            vec!["b1".to_string(), "b2".to_string()],
+        );
+        dim_b.mappings = vec![
+            datamodel::DimensionMapping {
+                target: "dimx".to_string(),
+                element_map: vec![],
+            },
+            datamodel::DimensionMapping {
+                target: "dima".to_string(),
+                element_map: vec![],
+            },
+        ];
+
+        let dims_ctx = DimensionsContext::from(&[dim_a.clone(), dim_x, dim_b.clone()]);
+        let active_dims = vec![Dimension::from(&dim_a)];
+        let active_subscript = vec!["a1".to_string()];
+        let visitor = BuiltinVisitor::new_with_subscript_context(
+            "test_var",
+            &active_dims,
+            &active_subscript,
+            Some(&dims_ctx),
+        );
+
+        let expr = Expr0::Var(RawIdent::new_from_str("dimb"), Loc::default());
+        let rewritten = visitor.substitute_dimension_refs(expr);
+        match rewritten {
+            Expr0::Var(id, _) => {
+                assert_eq!(id.as_str(), "dimb·b1");
+            }
+            other => panic!("expected Var, got {other:?}"),
+        }
+    }
 
     /// Test that arrayed DELAY1 compiles and simulates
     /// d[SubA] = DELAY1(input[SubA], delay_time, init)
@@ -691,6 +814,152 @@ mod tests {
             .aux("input", "10", None)
             .array_const("delay_a[DimA]", 1.0)
             .array_aux("d[DimA]", "k * DELAY3(input, delay_a[DimA])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that per-element (Arrayed) equations with stdlib calls get unique module names.
+    /// When each element has its own equation containing DELAY1, each element
+    /// must produce a uniquely-named module to avoid collisions.
+    #[test]
+    fn test_arrayed_per_element_delay1() {
+        let project = TestProject::new("arrayed_per_element_delay")
+            .named_dimension("DimA", &["A1", "A2"])
+            .aux("input1", "10", None)
+            .aux("input2", "20", None)
+            .aux("delay_time", "5", None)
+            .aux("init", "0", None)
+            .array_with_ranges(
+                "d[DimA]",
+                vec![
+                    ("A1", "DELAY1(input1, delay_time, init)"),
+                    ("A2", "DELAY1(input2, delay_time, init)"),
+                ],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test per-element Arrayed equations mixing stdlib and non-stdlib expressions
+    #[test]
+    fn test_arrayed_per_element_mixed_stdlib() {
+        let project = TestProject::new("arrayed_per_element_mixed")
+            .named_dimension("DimA", &["A1", "A2"])
+            .aux("input1", "10", None)
+            .aux("delay_time", "5", None)
+            .aux("init", "0", None)
+            .array_with_ranges(
+                "d[DimA]",
+                vec![("A1", "DELAY1(input1, delay_time, init)"), ("A2", "42")],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that per-element (Arrayed) equations with stdlib calls using
+    /// subscripted inputs produce correctly-suffixed module names.
+    /// This verifies dimension reference substitution works in the Arrayed path.
+    #[test]
+    fn test_arrayed_per_element_delay1_with_subscripted_inputs() {
+        let project = TestProject::new("arrayed_per_element_subscripted")
+            .named_dimension("DimA", &["A1", "A2"])
+            .array_with_ranges("input_a[DimA]", vec![("A1", "10"), ("A2", "20")])
+            .aux("delay_time", "5", None)
+            .aux("init", "0", None)
+            .array_with_ranges(
+                "d[DimA]",
+                vec![
+                    ("A1", "DELAY1(input_a[A1], delay_time, init)"),
+                    ("A2", "DELAY1(input_a[A2], delay_time, init)"),
+                ],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+    }
+
+    /// Test that NPV stdlib model compiles and produces accumulation.
+    /// NPV output at time t includes the current step's discounted stream
+    /// (unlike a normal stock which reflects the state before the current step).
+    #[test]
+    fn test_npv_basic() {
+        // NPV with constant stream=10, discount_rate=0, init=0, factor=1
+        // With zero discount rate, NPV just accumulates stream*factor each step
+        let project = TestProject::new("npv_test")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("stream", "10", None)
+            .aux("discount_rate", "0", None)
+            .aux("init_val", "0", None)
+            .aux("factor", "1", None)
+            .aux(
+                "result",
+                "NPV(stream, discount_rate, init_val, factor)",
+                None,
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // output = stock + inflow * DT
+        // t=0: stock=0, inflow=10*1*(1+0)^0=10, output = 0 + 10*1 = 10
+        // t=1: stock=10, inflow=10, output = 10 + 10 = 20
+        // t=2: stock=20, inflow=10, output = 20 + 10 = 30
+        project.assert_interpreter_result("result", &[10.0, 20.0, 30.0]);
+    }
+
+    /// Test NPV with non-zero discount rate
+    #[test]
+    fn test_npv_with_discount() {
+        // NPV with stream=100, discount_rate=0.1, init=0, factor=1
+        // discount_factor(t) = (1 + 0.1 * 1)^(-t/1) = 1.1^(-t)
+        let project = TestProject::new("npv_discount_test")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("stream", "100", None)
+            .aux("discount_rate", "0.1", None)
+            .aux("init_val", "0", None)
+            .aux("factor", "1", None)
+            .aux(
+                "result",
+                "NPV(stream, discount_rate, init_val, factor)",
+                None,
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let results = project.run_interpreter().unwrap();
+        let vals = results.get("result").unwrap();
+        // output = stock + inflow * DT
+        // t=0: stock=0, inflow=100*1.1^0=100, output = 0 + 100 = 100
+        // t=1: stock=100, inflow=100*1.1^(-1)=90.909, output = 100 + 90.909 = 190.909
+        // t=2: stock=190.909, inflow=100*1.1^(-2)=82.645, output = 190.909 + 82.645 = 273.554
+        assert!((vals[0] - 100.0).abs() < 1e-6);
+        assert!((vals[1] - 190.909).abs() < 0.01);
+        assert!((vals[2] - 273.554).abs() < 0.01);
+    }
+
+    /// Test that MODULO function call is converted to MOD binary op
+    #[test]
+    fn test_modulo_function() {
+        let project = TestProject::new("modulo_test")
+            .aux("a", "7", None)
+            .aux("b", "3", None)
+            .aux("result", "MODULO(a, b)", None);
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 1.0]);
+    }
+
+    /// Test that DELAY (from DELAY FIXED mapping) works as delay1
+    #[test]
+    fn test_delay_alias() {
+        let project = TestProject::new("delay_alias_test")
+            .aux("input", "10", None)
+            .aux("delay_time", "1", None)
+            .aux("init", "0", None)
+            .aux("result", "DELAY(input, delay_time, init)", None);
 
         project.assert_compiles();
         project.assert_sim_builds();

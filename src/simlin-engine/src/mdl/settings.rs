@@ -10,6 +10,9 @@
 //! Settings are stored as numbered type codes with colon-delimited values:
 //! - Type 15: Integration type (comma-separated values, 4th is method code)
 //! - Type 22: Unit equivalence strings
+//! - Type 30: File aliases (e.g. `?data=data.xlsx`)
+
+use std::collections::HashMap;
 
 use crate::datamodel::{SimMethod, Unit};
 
@@ -21,6 +24,8 @@ pub struct MdlSettings {
     pub integration_method: SimMethod,
     /// Unit equivalences extracted from type 22 lines
     pub unit_equivs: Vec<Unit>,
+    /// File aliases extracted from type 30 lines (e.g. "?data" -> "data.xlsx")
+    pub file_aliases: HashMap<String, String>,
 }
 
 /// Parser for the post-equation section of MDL files (views and settings).
@@ -64,6 +69,7 @@ impl<'input> PostEquationParser<'input> {
             match type_code {
                 15 => Self::parse_integration_type(rest, &mut settings),
                 22 => Self::parse_unit_equivalence(rest, &mut settings),
+                30 => Self::parse_file_alias(rest, &mut settings),
                 _ => {}
             }
         }
@@ -126,6 +132,22 @@ impl<'input> PostEquationParser<'input> {
                 3 | 4 => SimMethod::RungeKutta2,
                 _ => SimMethod::Euler,
             };
+        }
+    }
+
+    /// Parse type 30: file alias.
+    ///
+    /// Format: `30:?data=data.xlsx`
+    /// Maps the alias (e.g. `?data`) to the actual filename (e.g. `data.xlsx`).
+    fn parse_file_alias(rest: &str, settings: &mut MdlSettings) {
+        if let Some((alias, filename)) = rest.split_once('=') {
+            let alias = alias.trim();
+            let filename = filename.trim();
+            if !alias.is_empty() && !filename.is_empty() {
+                settings
+                    .file_aliases
+                    .insert(alias.to_string(), filename.to_string());
+            }
         }
     }
 
@@ -536,5 +558,45 @@ mod tests {
         let parser = PostEquationParser::new(source);
         let settings = parser.parse_settings();
         assert_eq!(settings.integration_method, SimMethod::RungeKutta4);
+    }
+
+    #[test]
+    fn test_file_alias_type_30() {
+        let source = "\n:L<%^E!@\n30:?data=data.xlsx\n";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.file_aliases.len(), 1);
+        assert_eq!(
+            settings.file_aliases.get("?data"),
+            Some(&"data.xlsx".to_string())
+        );
+    }
+
+    #[test]
+    fn test_file_alias_multiple() {
+        let source = "\n:L<%^E!@\n30:?data=data.xlsx\n30:?input=input.csv\n";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(settings.file_aliases.len(), 2);
+        assert_eq!(
+            settings.file_aliases.get("?data"),
+            Some(&"data.xlsx".to_string())
+        );
+        assert_eq!(
+            settings.file_aliases.get("?input"),
+            Some(&"input.csv".to_string())
+        );
+    }
+
+    #[test]
+    fn test_file_alias_from_directdata_model() {
+        // Real settings from directdata.mdl
+        let source = "\n:L<%^E!@\n1:directdata.vdfx\n30:?data=data.xlsx\n15:0,0,0,0,0,0\n";
+        let parser = PostEquationParser::new(source);
+        let settings = parser.parse_settings();
+        assert_eq!(
+            settings.file_aliases.get("?data"),
+            Some(&"data.xlsx".to_string())
+        );
     }
 }

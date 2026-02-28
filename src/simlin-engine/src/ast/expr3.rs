@@ -199,13 +199,35 @@ impl Expr3 {
                             || b.references_a2a_dimension()
                             || c.as_ref().is_some_and(|e| e.references_a2a_dimension())
                     }
-                    Step(a, b) => a.references_a2a_dimension() || b.references_a2a_dimension(),
+                    Sshape(a, b, c) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
+                    }
+                    Quantum(a, b) | Step(a, b) => {
+                        a.references_a2a_dimension() || b.references_a2a_dimension()
+                    }
                     Rank(e, opt) => {
                         e.references_a2a_dimension()
                             || opt.as_ref().is_some_and(|(a, b)| {
                                 a.references_a2a_dimension()
                                     || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
                             })
+                    }
+                    VectorSelect(a, b, c, d, e) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
+                            || d.references_a2a_dimension()
+                            || e.references_a2a_dimension()
+                    }
+                    VectorElmMap(a, b) | VectorSortOrder(a, b) => {
+                        a.references_a2a_dimension() || b.references_a2a_dimension()
+                    }
+                    AllocateAvailable(a, b, c) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
                     }
                     Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
                         false
@@ -818,6 +840,14 @@ impl<'a> Pass1Context<'a> {
                     a_has_a2a || b_has_a2a,
                 )
             }
+            Quantum(a, b) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                (
+                    Quantum(Box::new(new_a), Box::new(new_b)),
+                    a_has_a2a || b_has_a2a,
+                )
+            }
             Pulse(a, b, c) => {
                 let (new_a, a_has_a2a) = self.transform_inner(*a);
                 let (new_b, b_has_a2a) = self.transform_inner(*b);
@@ -863,6 +893,15 @@ impl<'a> Pass1Context<'a> {
                     a_has_a2a || b_has_a2a || c_has_a2a,
                 )
             }
+            Sshape(a, b, c) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                let (new_c, c_has_a2a) = self.transform_inner(*c);
+                (
+                    Sshape(Box::new(new_a), Box::new(new_b), Box::new(new_c)),
+                    a_has_a2a || b_has_a2a || c_has_a2a,
+                )
+            }
             Rank(e, opt) => {
                 let (new_e, e_has_a2a) = self.transform_inner(*e);
                 let (new_opt, opt_has_a2a) = match opt {
@@ -880,6 +919,49 @@ impl<'a> Pass1Context<'a> {
                     None => (None, false),
                 };
                 (Rank(Box::new(new_e), new_opt), e_has_a2a || opt_has_a2a)
+            }
+
+            VectorSelect(sel, expr, max_val, action, err) => {
+                let (new_sel, sel_a2a) = self.maybe_decompose_array_arg_inner(*sel);
+                let (new_expr, expr_a2a) = self.maybe_decompose_array_arg_inner(*expr);
+                let (new_max, max_a2a) = self.transform_inner(*max_val);
+                let (new_act, act_a2a) = self.transform_inner(*action);
+                let (new_err, err_a2a) = self.transform_inner(*err);
+                (
+                    VectorSelect(
+                        Box::new(new_sel),
+                        Box::new(new_expr),
+                        Box::new(new_max),
+                        Box::new(new_act),
+                        Box::new(new_err),
+                    ),
+                    sel_a2a || expr_a2a || max_a2a || act_a2a || err_a2a,
+                )
+            }
+            VectorElmMap(src, offs) => {
+                let (new_src, src_a2a) = self.maybe_decompose_array_arg_inner(*src);
+                let (new_offs, offs_a2a) = self.maybe_decompose_array_arg_inner(*offs);
+                (
+                    VectorElmMap(Box::new(new_src), Box::new(new_offs)),
+                    src_a2a || offs_a2a,
+                )
+            }
+            VectorSortOrder(arr, dir) => {
+                let (new_arr, arr_a2a) = self.maybe_decompose_array_arg_inner(*arr);
+                let (new_dir, dir_a2a) = self.transform_inner(*dir);
+                (
+                    VectorSortOrder(Box::new(new_arr), Box::new(new_dir)),
+                    arr_a2a || dir_a2a,
+                )
+            }
+            AllocateAvailable(req, pp, avail) => {
+                let (new_req, req_a2a) = self.maybe_decompose_array_arg_inner(*req);
+                let (new_pp, pp_a2a) = self.maybe_decompose_array_arg_inner(*pp);
+                let (new_avail, avail_a2a) = self.transform_inner(*avail);
+                (
+                    AllocateAvailable(Box::new(new_req), Box::new(new_pp), Box::new(new_avail)),
+                    req_a2a || pp_a2a || avail_a2a,
+                )
             }
 
             // 0-arity builtins - no A2A refs
@@ -1187,6 +1269,7 @@ mod tests {
                 elements: canonical_elements,
                 indexed_elements,
                 maps_to: None,
+                mappings: vec![],
             },
         )
     }

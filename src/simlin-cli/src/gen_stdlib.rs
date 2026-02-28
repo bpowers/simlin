@@ -135,7 +135,7 @@ fn gen_equation(eq: &Equation) -> String {
                 escape_string(s),
             )
         }
-        Equation::Arrayed(dims, elements) => {
+        Equation::Arrayed(dims, elements, _default_eq) => {
             let elems: Vec<String> = elements
                 .iter()
                 .map(|(name, eqn, units, gf)| {
@@ -149,7 +149,7 @@ fn gen_equation(eq: &Equation) -> String {
                 })
                 .collect();
             format!(
-                "Equation::Arrayed({}, vec![{}])",
+                "Equation::Arrayed({}, vec![{}], None)",
                 gen_vec_string(dims),
                 elems.join(", ")
             )
@@ -566,6 +566,122 @@ fn model_name_to_fn_name(name: &str) -> String {
     name.replace(['-', ' '], "_")
 }
 
+// Hand-maintained stdlib models that cannot be represented as .stmx files because they
+// reference simulation system variables (TIME, TIME STEP, INITIAL TIME) that are not
+// available as named variables within a standalone XMILE model.
+//
+// When adding a new hand-maintained model:
+//   1. Add its name to HAND_MAINTAINED_NAMES (in sorted order relative to .stmx-based names)
+//   2. Write the model function body in HAND_MAINTAINED_CODE
+//   3. Ensure the function name matches model_name_to_fn_name(model_name)
+const HAND_MAINTAINED_NAMES: &[&str] = &[
+    // NPV uses `time`, `initial_time`, and `time_step` in its flow equation. These are
+    // simulation system variables injected by the engine at runtime and cannot appear as
+    // variables in a self-contained XMILE model file.
+    "npv",
+];
+
+// Literal Rust source appended verbatim after the @generated section.  Each function here
+// must correspond to an entry in HAND_MAINTAINED_NAMES.  The @hand-maintained marker lets
+// grep distinguish these blocks from the surrounding generated code.
+const HAND_MAINTAINED_CODE: &str = r#"
+// @hand-maintained: npv cannot be expressed as an .stmx file because its flow equation
+// references `time`, `initial_time`, and `time_step` -- simulation system variables that
+// the engine injects at runtime and that are not representable as named variables in a
+// self-contained XMILE stdlib model.
+fn npv() -> Model {
+    Model {
+        name: "stdlib⁚npv".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Aux(Aux {
+                ident: "stream".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "discount_rate".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "initial_value".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "factor".to_string(),
+                equation: Equation::Scalar("1".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Flow(Flow {
+                ident: "inflow".to_string(),
+                equation: Equation::Scalar(
+                    "stream * factor * (1 + discount_rate * time_step) ^ ((initial_time - time) / time_step)"
+                        .to_string(),
+                ),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "output".to_string(),
+                equation: Equation::Scalar("stock + inflow * time_step".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Stock(Stock {
+                ident: "stock".to_string(),
+                equation: Equation::Scalar("initial_value".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                inflows: vec!["inflow".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+        ],
+        views: vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![],
+            view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
+            zoom: 1_f64,
+            use_lettered_polarity: false,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    }
+}
+"#;
+
 pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let stdlib_path = Path::new(stdlib_dir);
 
@@ -623,6 +739,14 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
         ));
     }
 
+    // Merge hand-maintained model names into the full list in sorted order.
+    // These models cannot be represented as .stmx files (see HAND_MAINTAINED_NAMES).
+    let mut all_names: Vec<&str> = models.iter().map(|(n, _)| n.as_str()).collect();
+    for &name in HAND_MAINTAINED_NAMES {
+        all_names.push(name);
+    }
+    all_names.sort_unstable();
+
     // Generate Rust code
     let mut output = File::create(output_path)?;
 
@@ -630,6 +754,19 @@ pub fn generate(stdlib_dir: &str, output_path: &str) -> Result<(), Box<dyn std::
     writeln!(
         output,
         "// DO NOT EDIT - regenerate with: pnpm rebuild-stdlib"
+    )?;
+    writeln!(output, "//")?;
+    writeln!(
+        output,
+        "// Some models (marked @hand-maintained below) cannot be expressed as .stmx files"
+    )?;
+    writeln!(
+        output,
+        "// because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME)."
+    )?;
+    writeln!(
+        output,
+        "// Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs."
     )?;
     writeln!(output, "//")?;
     writeln!(output, "// Stdlib SHA256: {}", hash)?;
@@ -651,13 +788,13 @@ use crate::datamodel::view_element::{{FlowPoint, LabelSide, LinkPolarity, LinkSh
     )?;
     writeln!(output)?;
 
-    // Generate MODEL_NAMES constant
+    // Generate MODEL_NAMES constant (generated + hand-maintained, sorted)
     writeln!(
         output,
         "pub const MODEL_NAMES: [&str; {}] = [",
-        models.len()
+        all_names.len()
     )?;
-    for (name, _) in &models {
+    for name in &all_names {
         writeln!(output, "    \"{}\",", name)?;
     }
     writeln!(output, "];")?;
@@ -666,7 +803,7 @@ use crate::datamodel::view_element::{{FlowPoint, LabelSide, LinkPolarity, LinkSh
     // Generate get function
     writeln!(output, "pub fn get(name: &str) -> Option<Model> {{")?;
     writeln!(output, "    match name {{")?;
-    for (name, _) in &models {
+    for name in &all_names {
         writeln!(
             output,
             "        \"{}\" => Some({}()),",
@@ -679,7 +816,7 @@ use crate::datamodel::view_element::{{FlowPoint, LabelSide, LinkPolarity, LinkSh
     writeln!(output, "}}")?;
     writeln!(output)?;
 
-    // Generate individual model functions
+    // Generate individual model functions from .stmx files
     for (name, model) in &models {
         writeln!(output, "fn {}() -> Model {{", model_name_to_fn_name(name))?;
         writeln!(output, "    {}", gen_model(model))?;
@@ -687,10 +824,15 @@ use crate::datamodel::view_element::{{FlowPoint, LabelSide, LinkPolarity, LinkSh
         writeln!(output)?;
     }
 
+    // Append hand-maintained model functions verbatim
+    write!(output, "{}", HAND_MAINTAINED_CODE)?;
+
     eprintln!(
-        "Generated {} with {} models (hash: {})",
+        "Generated {} with {} models ({} from .stmx, {} hand-maintained; hash: {})",
         output_path,
+        all_names.len(),
         models.len(),
+        HAND_MAINTAINED_NAMES.len(),
         &hash[..12]
     );
 

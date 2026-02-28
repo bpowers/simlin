@@ -1000,7 +1000,7 @@ fn analyze_link_polarity(
             LinkPolarity::Positive,
             Some(variables),
         ),
-        Ast::Arrayed(_, elements) => {
+        Ast::Arrayed(_, elements, default_expr, _) => {
             // For arrayed equations, check all elements
             let mut polarity = LinkPolarity::Unknown;
             for expr in elements.values() {
@@ -1014,6 +1014,20 @@ fn analyze_link_polarity(
                     polarity = elem_polarity;
                 } else if polarity != elem_polarity && elem_polarity != LinkPolarity::Unknown {
                     // Mixed polarities
+                    return LinkPolarity::Unknown;
+                }
+            }
+            if let Some(default_expr) = default_expr {
+                let default_polarity = analyze_expr_polarity_with_context(
+                    default_expr,
+                    from_var,
+                    LinkPolarity::Positive,
+                    Some(variables),
+                );
+                if polarity == LinkPolarity::Unknown {
+                    polarity = default_polarity;
+                } else if polarity != default_polarity && default_polarity != LinkPolarity::Unknown
+                {
                     return LinkPolarity::Unknown;
                 }
             }
@@ -1893,7 +1907,7 @@ mod tests {
             ),
         );
 
-        let ast = Ast::Arrayed(vec![], elements);
+        let ast = Ast::Arrayed(vec![], elements, None, false);
         let empty_vars = HashMap::new();
         let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
         assert_eq!(
@@ -1918,7 +1932,7 @@ mod tests {
             ),
         );
 
-        let mixed_ast = Ast::Arrayed(vec![], mixed_elements);
+        let mixed_ast = Ast::Arrayed(vec![], mixed_elements, None, false);
         let mixed_polarity = analyze_link_polarity(&mixed_ast, &x_var, &empty_vars);
         assert_eq!(
             mixed_polarity,

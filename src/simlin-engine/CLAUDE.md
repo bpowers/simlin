@@ -11,7 +11,7 @@ Equation text flows through these stages in order:
 1. **`src/lexer/`** - Tokenizer for equation syntax
 2. **`src/parser/`** - Recursive descent parser producing `Expr0` AST
 3. **`src/ast/`** - AST type system with progressive lowering: `Expr0` (parsed) -> `Expr1` (modules expanded) -> `Expr2` (dimensions resolved) -> `Expr3` (subscripts expanded). `array_view.rs` tracks array dimensions and sparsity.
-4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`). `builtins_visitor.rs` handles implicit module instantiation from `MODULE()` calls.
+4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`). `builtins_visitor.rs` handles implicit module instantiation from `MODULE()` calls.
 5. **`src/compiler/`** - Multi-pass compilation to bytecode:
    - `mod.rs` - Orchestration
    - `context.rs` - Symbol tables and variable metadata
@@ -27,7 +27,7 @@ Equation text flows through these stages in order:
 ## Data model and project structure
 
 - **`src/common.rs`** - Error types (`ErrorCode` with 100+ variants), `Result`, identifier types (`RawIdent`, `Ident<Canonical>`, dimension/element name types), canonicalization
-- **`src/datamodel.rs`** - Core structures: `Project`, `Model`, `Variable`, `Equation`, `Dimension`, `UnitMap`
+- **`src/datamodel.rs`** - Core structures: `Project`, `Model`, `Variable`, `Equation` (including `Arrayed` variant with `default_equation` for EXCEPT semantics), `Dimension` (with `mappings: Vec<DimensionMapping>` replacing the old `maps_to` field), `DimensionMapping`, `DataSource`/`DataSourceKind`, `UnitMap`
 - **`src/variable.rs`** - Variable variants (`Stock`, `Flow`, `Aux`, `Module`), `ModuleInput`, `Table` (graphical functions)
 - **`src/dimensions.rs`** - Dimension context and dimension matching for arrays
 - **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort
@@ -37,12 +37,13 @@ Equation text flows through these stages in order:
 
 ## Format import/export
 
-- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_xmile()`, `to_xmile()`, `.dat`/CSV loading
+- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_vensim_with_data()`, `open_xmile()`, `to_xmile()`, `.dat`/CSV loading
+- **`src/data_provider/`** - `DataProvider` trait for resolving external data references (GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT). `NullDataProvider` (default), `FilesystemDataProvider` (CSV/Excel via calamine; feature-gated on `file_io`)
 - **`src/xmile/`** - XMILE (XML interchange format) parsing and generation. Submodules: `model.rs`, `variables.rs`, `dimensions.rs`, `views.rs`
 - **`src/mdl/`** - Native Rust Vensim MDL parser (replaces C++ xmutil):
   - `lexer.rs` -> `normalizer.rs` -> `parser.rs` -> `reader.rs` (pipeline)
   - `ast.rs`, `builtins.rs` (Vensim function recognition)
-  - convert/ subdir - Multi-pass AST to datamodel conversion
+  - convert/ subdir - Multi-pass AST to datamodel conversion (includes `external_data.rs` for GET DIRECT resolution via `DataProvider`)
   - view/ subdir - Sketch/diagram parsing
   - `xmile_compat.rs` - Expression formatting for XMILE output
   - `settings.rs` - Integration settings parser

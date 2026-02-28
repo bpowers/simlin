@@ -401,7 +401,10 @@ fn main() {
                 .unwrap();
         }
     } else if args.is_convert {
-        let pb_project = serde::serialize(&project);
+        let pb_project = match serde::serialize(&project) {
+            Ok(pb) => pb,
+            Err(err) => die!("protobuf serialization failed: {}", err),
+        };
 
         let mut buf: Vec<u8> = if args.is_model_only {
             if pb_project.models.len() != 1 {

@@ -200,7 +200,38 @@ pub enum Equation {
             Option<String>,
             Option<GraphicalFunction>,
         )>,
+        // Default equation for elements not explicitly listed (EXCEPT semantics).
+        // When Some, this equation applies to all elements not in the Vec above.
+        Option<String>,
     ),
+}
+
+/// The kind of external data function from Vensim's GET DIRECT family.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub enum DataSourceKind {
+    Data,
+    Constants,
+    Lookups,
+    Subscript,
+}
+
+/// Metadata for variables backed by external data files.
+/// Stores the parsed arguments from GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT
+/// so the MDL writer can reconstruct the original function call.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct DataSource {
+    /// The kind of data function (Data, Constants, Lookups, Subscript)
+    pub kind: DataSourceKind,
+    /// Path to the external data file
+    pub file: String,
+    /// Tab/sheet name (for Excel) or delimiter (for CSV)
+    pub tab_or_delimiter: String,
+    /// Row or column label for data lookup
+    pub row_or_col: String,
+    /// Cell label for data lookup
+    pub cell: String,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -210,6 +241,7 @@ pub struct Compat {
     pub non_negative: bool,
     pub can_be_module_input: bool,
     pub visibility: Visibility,
+    pub data_source: Option<DataSource>,
 }
 
 impl Compat {
@@ -218,6 +250,7 @@ impl Compat {
             && !self.non_negative
             && !self.can_be_module_input
             && self.visibility == Visibility::Private
+            && self.data_source.is_none()
     }
 }
 
@@ -727,6 +760,23 @@ pub enum DimensionElements {
     Named(Vec<String>),
 }
 
+/// Element-level correspondence between two subscript families.
+///
+/// A positional mapping (empty `element_map`) means elements correspond by index:
+/// source[0] <-> target[0], source[1] <-> target[1], etc.
+///
+/// An element-level mapping (non-empty `element_map`) provides explicit
+/// source -> target element name pairs for arbitrary correspondence.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+pub struct DimensionMapping {
+    /// Target dimension name
+    pub target: String,
+    /// Element-level correspondence. When empty, positional mapping is assumed.
+    /// When present, maps source elements to target elements by name.
+    pub element_map: Vec<(String, String)>,
+}
+
 /// A dimension definition, optionally mapping to another dimension.
 ///
 /// Vensim allows specifying dimension mappings like `DimA: A1, A2, A3 -> DimB`
@@ -737,15 +787,15 @@ pub enum DimensionElements {
 pub struct Dimension {
     pub name: String,
     pub elements: DimensionElements,
-    /// Name of the dimension this dimension maps to (if any).
-    /// When set, elements correspond positionally: A1<->B1, A2<->B2, etc.
+    /// Dimension mappings. Supports both simple positional mappings (single target,
+    /// empty element_map) and element-level correspondence mappings.
     ///
     /// **Important**: Dimension mappings are only supported for named dimensions
     /// (those with explicit element names). Indexed dimensions (numeric subscripts)
     /// cannot have mappings - the engine will return None from `get_maps_to` for
     /// indexed dimensions. Additionally, both dimensions in a mapping must have
     /// the same number of elements for valid positional correspondence.
-    pub maps_to: Option<String>,
+    pub mappings: Vec<DimensionMapping>,
 }
 
 impl Dimension {
@@ -754,7 +804,7 @@ impl Dimension {
         Dimension {
             name,
             elements: DimensionElements::Indexed(size),
-            maps_to: None,
+            mappings: vec![],
         }
     }
 
@@ -763,8 +813,27 @@ impl Dimension {
         Dimension {
             name,
             elements: DimensionElements::Named(elements),
-            maps_to: None,
+            mappings: vec![],
         }
+    }
+
+    /// Convenience accessor for the simple single-target positional mapping case.
+    /// Returns the target dimension name if exactly one positional mapping exists
+    /// (i.e., one mapping with an empty element_map).
+    pub fn maps_to(&self) -> Option<&str> {
+        if self.mappings.len() == 1 && self.mappings[0].element_map.is_empty() {
+            Some(&self.mappings[0].target)
+        } else {
+            None
+        }
+    }
+
+    /// Set a simple positional mapping to a target dimension.
+    pub fn set_maps_to(&mut self, target: String) {
+        self.mappings = vec![DimensionMapping {
+            target,
+            element_map: vec![],
+        }];
     }
 
     pub fn get_offset(&self, subscript: &str) -> Option<usize> {

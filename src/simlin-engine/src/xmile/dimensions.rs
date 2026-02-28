@@ -71,28 +71,33 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::DimensionElements::Indexed(dimension.size.unwrap_or_default())
         };
-        datamodel::Dimension {
+        let mut result = datamodel::Dimension {
             name,
             elements,
-            maps_to,
+            mappings: vec![],
+        };
+        if let Some(target) = maps_to {
+            result.set_maps_to(target);
         }
+        result
     }
 }
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dimension: datamodel::Dimension) -> Self {
+        let maps_to = dimension.maps_to().map(|s| s.to_owned());
         match dimension.elements {
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dimension.name,
                 size: Some(size),
                 elements: None,
-                maps_to: dimension.maps_to,
+                maps_to,
             },
             datamodel::DimensionElements::Named(elements) => Dimension {
                 name: dimension.name,
                 size: None,
                 elements: Some(elements.into_iter().map(|i| Index { name: i }).collect()),
-                maps_to: dimension.maps_to,
+                maps_to,
             },
         }
     }

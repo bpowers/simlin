@@ -228,6 +228,7 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::CantSubscriptScalar => SimlinErrorCode::Generic,
             engine::ErrorCode::DimensionInScalarContext => SimlinErrorCode::Generic,
             engine::ErrorCode::BadOverride => SimlinErrorCode::BadOverride,
+            engine::ErrorCode::UnsupportedForSerialization => SimlinErrorCode::Generic,
         }
     }
 }
@@ -584,7 +585,7 @@ mod tests {
     }
 
     fn open_project_from_datamodel(project: &engine::datamodel::Project) -> *mut SimlinProject {
-        let pb = engine_serde::serialize(project);
+        let pb = engine_serde::serialize(project).unwrap();
         let mut buf = Vec::new();
         pb.encode(&mut buf).unwrap();
         unsafe {
@@ -691,7 +692,7 @@ mod tests {
 
         // Build the datamodel and serialize to protobuf
         let datamodel_project = test_project.build_datamodel();
-        let project = engine_serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -1704,7 +1705,7 @@ mod tests {
 
         // Build the datamodel and serialize to protobuf
         let datamodel_project = test_project.build_datamodel();
-        let project = engine_serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -1874,7 +1875,7 @@ mod tests {
 
         // Build the datamodel and serialize to protobuf
         let datamodel_project = test_project.build_datamodel();
-        let project = engine_serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -1952,7 +1953,7 @@ mod tests {
             .flow("births", "population * 0.02", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let project = engine_serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -2052,7 +2053,7 @@ mod tests {
             .aux("death_rate", "0.01", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let original_pb = engine_serde::serialize(&datamodel_project);
+        let original_pb = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         original_pb.encode(&mut buf).unwrap();
@@ -2190,7 +2191,7 @@ mod tests {
             .flow("inflow", "stock * 0.1", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let original_pb = engine_serde::serialize(&datamodel_project);
+        let original_pb = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         original_pb.encode(&mut buf).unwrap();
@@ -2806,7 +2807,7 @@ mod tests {
             .flow("births", "population * 0.02", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let project = engine_serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();

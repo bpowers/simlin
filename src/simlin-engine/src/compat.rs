@@ -56,7 +56,16 @@ pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
 
 /// Parse a Vensim MDL file using the native Rust parser.
 pub fn open_vensim(contents: &str) -> Result<Project> {
-    mdl::parse_mdl(contents)
+    open_vensim_with_data(contents, None)
+}
+
+/// Parse a Vensim MDL file with an optional DataProvider for resolving
+/// GET DIRECT external data references (CSV, Excel).
+pub fn open_vensim_with_data(
+    contents: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<Project> {
+    mdl::parse_mdl_with_data(contents, data_provider)
 }
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
@@ -103,9 +112,36 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         .map(|(i, r)| (Ident::<Canonical>::from_str_unchecked(r.as_str()), i))
         .collect();
 
-    let initial_time = unprocessed["initial_time"][0].1;
-    let final_time = unprocessed["final_time"][0].1;
-    let saveper = unprocessed["saveper"][0].1;
+    // Infer simulation parameters from data when not explicitly present
+    let (initial_time, final_time, saveper) =
+        if unprocessed.contains_key("initial_time") && unprocessed.contains_key("final_time") {
+            let it = unprocessed["initial_time"][0].1;
+            let ft = unprocessed["final_time"][0].1;
+            let sp = if unprocessed.contains_key("saveper") {
+                unprocessed["saveper"][0].1
+            } else {
+                1.0
+            };
+            (it, ft, sp)
+        } else {
+            // Find the variable with the most data points to infer time range
+            let longest = unprocessed
+                .values()
+                .max_by_key(|v| v.len())
+                .ok_or("dat file has no data")?;
+            let it = longest.first().map(|p| p.0).unwrap_or(0.0);
+            let ft = longest.last().map(|p| p.0).unwrap_or(1.0);
+            let sp = if longest.len() >= 2 {
+                longest[1].0 - longest[0].0
+            } else {
+                1.0
+            };
+            (it, ft, sp)
+        };
+
+    if saveper <= 0.0 {
+        return Err("inferred saveper is <= 0 (duplicate or unsorted timestamps)".into());
+    }
 
     let step_size = unprocessed.len();
     let step_count = ((final_time - initial_time) / saveper).ceil() as usize + 1;
@@ -114,41 +150,20 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
 
     for (ident, var_off) in offsets.iter() {
         let data = &unprocessed[ident.as_str()];
-        let mut data_iter = data.iter().cloned();
-        let mut curr: Option<(f64, f64)> = data_iter.next();
-        let mut next: Option<(f64, f64)> = data_iter.next();
+        let mut data_iter = data.iter().cloned().peekable();
+        let mut last_value: f64 = f64::NAN;
         for step in 0..step_count {
             let t: f64 = initial_time + saveper * (step as f64);
-            let datapoint: f64 = if let Some((data_time, value)) = curr {
-                if approx_eq!(f64, data_time, t) {
-                    if next.is_some() {
-                        curr = next;
-                        next = data_iter.next();
-                    }
-                    value
-                } else {
-                    assert!(data_time < t);
-                    // curr is in the past
-                    if let Some((next_time, next_value)) = next {
-                        if approx_eq!(f64, next_time, t) {
-                            // next is now now
-                            curr = next;
-                            next = data_iter.next();
-                            next_value
-                        } else {
-                            // next is still in the future
-                            assert!(next_time > t);
-                            value
-                        }
-                    } else {
-                        // at the end of the iter, so just use curr
-                        value
-                    }
+            // Advance past data points at or before the current time,
+            // keeping the most recent value (sample-and-hold).
+            while let Some(&(data_time, value)) = data_iter.peek() {
+                if data_time > t && !approx_eq!(f64, data_time, t) {
+                    break;
                 }
-            } else {
-                unreachable!("curr is None");
-            };
-            step_data[step * step_size + var_off] = datapoint;
+                last_value = value;
+                data_iter.next();
+            }
+            step_data[step * step_size + var_off] = last_value;
         }
     }
 
@@ -158,10 +173,10 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         step_size,
         step_count,
         specs: Specs {
-            start: 0.0,
-            stop: 0.0,
-            dt: 0.0,
-            save_step: 0.0,
+            start: initial_time,
+            stop: final_time,
+            dt: saveper,
+            save_step: saveper,
             method: Method::Euler,
             n_chunks: step_count,
         },
@@ -229,4 +244,55 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         },
         is_vensim: false,
     })
+}
+
+#[cfg(all(test, feature = "file_io"))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn load_dat_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.dat");
+        std::fs::File::create(&path).unwrap();
+
+        let result = load_dat(path.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "empty .dat file should return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn load_dat_duplicate_timestamps_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.dat");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "some_var").unwrap();
+        writeln!(f, "0\t1.0").unwrap();
+        writeln!(f, "0\t2.0").unwrap();
+        writeln!(f, "0\t3.0").unwrap();
+
+        let result = load_dat(path.to_str().unwrap());
+        assert!(result.is_err(), "duplicate timestamps should return Err");
+    }
+
+    #[test]
+    fn load_dat_valid_file_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid.dat");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "test_var").unwrap();
+        writeln!(f, "0\t10.0").unwrap();
+        writeln!(f, "1\t20.0").unwrap();
+        writeln!(f, "2\t30.0").unwrap();
+
+        let result = load_dat(path.to_str().unwrap());
+        assert!(
+            result.is_ok(),
+            "valid .dat file should succeed: {:?}",
+            result.err()
+        );
+    }
 }

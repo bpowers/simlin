@@ -8,6 +8,7 @@
 //! bypassing the XMILE intermediate format.
 
 mod dimensions;
+mod external_data;
 mod helpers;
 mod stocks;
 mod types;
@@ -48,8 +49,10 @@ pub struct ConversionContext<'input> {
     symbols: HashMap<String, SymbolInfo<'input>>,
     /// Collected dimensions
     dimensions: Vec<Dimension>,
-    /// Dimension equivalences: source -> target
+    /// Dimension equivalences: source canonical -> target canonical
     equivalences: HashMap<String, String>,
+    /// Original (pre-canonicalization) names for equivalence sources
+    equivalence_original_names: HashMap<String, String>,
     /// SimSpecs builder
     sim_specs: SimSpecsBuilder,
     /// Integration method (to be used in Phase 10 for settings parsing)
@@ -78,11 +81,24 @@ pub struct ConversionContext<'input> {
     current_group_index: Option<usize>,
     /// Parsed views from the sketch section
     views: Vec<VensimView>,
+    /// Optional data provider for resolving GET DIRECT references
+    data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+    /// File aliases from type 30 settings (e.g. "?data" -> "data.xlsx")
+    file_aliases: HashMap<String, String>,
 }
 
 impl<'input> ConversionContext<'input> {
-    /// Create a new conversion context from MDL source.
+    /// Create a new conversion context from MDL source (convenience wrapper for tests).
+    #[cfg(test)]
     pub fn new(source: &'input str) -> Result<Self, ConvertError> {
+        Self::new_with_data(source, None)
+    }
+
+    /// Create a new conversion context from MDL source with an optional DataProvider.
+    pub fn new_with_data(
+        source: &'input str,
+        data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+    ) -> Result<Self, ConvertError> {
         let mut reader = EquationReader::new(source);
         let items: Result<Vec<MdlItem<'input>>, _> = reader.by_ref().collect();
         let items = items?;
@@ -103,6 +119,7 @@ impl<'input> ConversionContext<'input> {
             symbols: HashMap::with_capacity(n_items),
             dimensions: Vec::new(),
             equivalences: HashMap::new(),
+            equivalence_original_names: HashMap::new(),
             sim_specs: SimSpecsBuilder {
                 sim_method: Some(settings.integration_method),
                 ..SimSpecsBuilder::default()
@@ -118,6 +135,8 @@ impl<'input> ConversionContext<'input> {
             groups: Vec::new(),
             current_group_index: None,
             views,
+            data_provider,
+            file_aliases: settings.file_aliases,
         })
     }
 
@@ -130,13 +149,13 @@ impl<'input> ConversionContext<'input> {
         self.build_dimensions()?;
 
         // Pass 2.5: Set subrange dimensions on formatter for bang-subscript formatting
-        // Subranges are dimensions with maps_to set (they map to a parent dimension).
+        // Subranges are dimensions with a mapping set (they map to a parent dimension).
         // Use canonical form (to_lower_space) since the formatter lookup also uses
         // to_lower_space for consistency.
         let mut subrange_dims: HashSet<String> = self
             .dimensions
             .iter()
-            .filter(|d| d.maps_to.is_some())
+            .filter(|d| d.maps_to().is_some())
             .map(|d| canonical_name(&d.name))
             .collect();
 
@@ -292,9 +311,19 @@ impl<'input> ConversionContext<'input> {
 
 // build_project and other variable building methods are in variables.rs
 
-/// Convert MDL source to a Project.
+/// Convert MDL source to a Project (convenience wrapper for tests).
+#[cfg(test)]
 pub fn convert_mdl(source: &str) -> Result<Project, ConvertError> {
-    let ctx = ConversionContext::new(source)?;
+    convert_mdl_with_data(source, None)
+}
+
+/// Convert MDL source to a Project with an optional DataProvider
+/// for resolving GET DIRECT external data references.
+pub fn convert_mdl_with_data(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<Project, ConvertError> {
+    let ctx = ConversionContext::new_with_data(source, data_provider)?;
     ctx.convert()
 }
 
@@ -877,5 +906,25 @@ $font
 
         // But the model should still have variables
         assert!(!model.variables.is_empty());
+    }
+
+    #[test]
+    fn test_get_direct_error_propagates() {
+        // When a DataProvider is configured but returns an error (e.g. missing file),
+        // the conversion should fail rather than silently keeping the raw expression.
+        use crate::data_provider::NullDataProvider;
+
+        let mdl = "x := GET DIRECT DATA('nonexistent.csv', ',', 'A', 'B2')
+~ Units
+~ Data variable |
+\\\\\\---///
+";
+        let provider = NullDataProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(
+            result.is_err(),
+            "GET DIRECT resolution failure should propagate as a conversion error, \
+             not silently keep the raw expression"
+        );
     }
 }

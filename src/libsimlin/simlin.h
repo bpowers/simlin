@@ -595,6 +595,27 @@ SimlinProject *simlin_project_open_vensim(const uint8_t *data,
                                           uintptr_t len,
                                           SimlinError **out_error);
 
+// Open a Vensim MDL model with external data file support.
+//
+// When `data_dir` is non-null and the `file_io` feature is enabled, a
+// `FilesystemDataProvider` is created using that directory as the base path
+// for resolving relative data file references. When `data_dir` is null,
+// a `NullDataProvider` is used (any GET DIRECT DATA references will error).
+//
+// Returns NULL and populates `out_error` on failure.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes of UTF-8 MDL text
+// - `data_dir` may be null; when non-null it must point to `data_dir_len` bytes
+//   of valid UTF-8 representing a directory path
+// - `out_error` may be null
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_vensim_with_data(const uint8_t *data,
+                                                    uintptr_t len,
+                                                    const uint8_t *data_dir,
+                                                    uintptr_t data_dir_len,
+                                                    SimlinError **out_error);
+
 // Check if a project's model can be simulated
 //
 // Returns true if the model can be simulated (i.e., can be compiled to a VM

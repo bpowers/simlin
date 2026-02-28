@@ -481,6 +481,122 @@ fn test_build_stock_update_expr_multiple_flows() {
     }
 }
 
+#[test]
+fn test_sparse_array_element_returns_error_not_panic() {
+    use crate::test_common::TestProject;
+
+    // Build a project with a 3-element dimension but only 2 of the 3
+    // element keys provided. The compiler must not panic on the missing
+    // element key -- whether it reports an error or silently succeeds
+    // depends on the pipeline stage, but no panic is the guarantee.
+    let _result = TestProject::new("sparse_test")
+        .named_dimension("dim", &["a", "b", "c"])
+        .array_with_ranges(
+            "x[dim]",
+            vec![("a", "1"), ("b", "2")], // 'c' intentionally missing
+        )
+        .aux("y", "1", None)
+        .compile();
+    // Reaching this point without panicking is the success criterion.
+    // Before the fix, elements[&canonical_key] would panic for the
+    // missing "c" key.
+}
+
+#[test]
+fn test_arrayed_default_equation_applies_to_missing_elements() {
+    let datamodel_dim = crate::datamodel::Dimension::named(
+        "dim".to_string(),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+    );
+    let dim = Dimension::from(&datamodel_dim);
+    let dims = vec![dim.clone()];
+
+    let mut elements = HashMap::new();
+    elements.insert(
+        CanonicalElementName::from_raw("a"),
+        crate::ast::Expr2::Const("1".to_string(), 1.0, Loc::default()),
+    );
+    elements.insert(
+        CanonicalElementName::from_raw("b"),
+        crate::ast::Expr2::Const("2".to_string(), 2.0, Loc::default()),
+    );
+
+    let var = Variable::Var {
+        ident: Ident::new("x"),
+        ast: Some(Ast::Arrayed(
+            dims.clone(),
+            elements,
+            Some(crate::ast::Expr2::Const(
+                "7".to_string(),
+                7.0,
+                Loc::default(),
+            )),
+            true,
+        )),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables: vec![],
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    };
+
+    let mut model_metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    model_metadata.insert(
+        Ident::new("x"),
+        VariableMetadata {
+            offset: 0,
+            size: 3,
+            var: &var,
+        },
+    );
+    let mut metadata = HashMap::new();
+    let model_name = Ident::new("main");
+    metadata.insert(model_name.clone(), model_metadata);
+
+    let inputs = BTreeSet::new();
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));
+    let ident = Ident::new("test");
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &dims,
+            dimensions_ctx: &dims_ctx,
+            model_name: &model_name,
+            metadata: &metadata,
+            module_models: &module_models,
+            inputs: &inputs,
+        },
+        &ident,
+        false,
+    );
+
+    let lowered = Var::new(&ctx, &var).expect("arrayed lowering should succeed");
+
+    let mut assigned: HashMap<usize, f64> = HashMap::new();
+    for expr in lowered.ast {
+        if let Expr::AssignCurr(off, rhs) = expr {
+            if let Expr::Const(value, _) = *rhs {
+                assigned.insert(off, value);
+            } else {
+                panic!("expected AssignCurr to use scalar constants in this test");
+            }
+        }
+    }
+
+    assert_eq!(assigned.get(&0), Some(&1.0));
+    assert_eq!(assigned.get(&1), Some(&2.0));
+    assert_eq!(
+        assigned.get(&2),
+        Some(&7.0),
+        "missing element should use array default equation, not 0"
+    );
+}
+
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
@@ -552,7 +668,12 @@ impl Var {
                                     .collect();
                                 exprs?.into_iter().flatten().collect()
                             }
-                            Ast::Arrayed(dims, elements) => {
+                            Ast::Arrayed(
+                                dims,
+                                elements,
+                                default_ast,
+                                apply_default_for_missing,
+                            ) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                     .enumerate()
@@ -560,7 +681,35 @@ impl Var {
                                         let subscript_str = subscripts.join(",");
                                         let canonical_key =
                                             CanonicalElementName::from_raw(&subscript_str);
-                                        let ast = &elements[&canonical_key];
+                                        let ast = match elements.get(&canonical_key) {
+                                            Some(ast) => ast,
+                                            None => {
+                                                if *apply_default_for_missing
+                                                    && let Some(default_ast) = default_ast
+                                                {
+                                                    let ctx = ctx.with_active_subscripts(
+                                                        active_dims.clone(),
+                                                        &subscripts,
+                                                    );
+                                                    return ctx.lower(default_ast).map(
+                                                        |mut exprs| {
+                                                            let main_expr = exprs.pop().unwrap();
+                                                            exprs.push(Expr::AssignCurr(
+                                                                off + i,
+                                                                Box::new(main_expr),
+                                                            ));
+                                                            exprs
+                                                        },
+                                                    );
+                                                }
+                                                // Vensim defaults undefined subscript
+                                                // elements to 0 when no array default is present.
+                                                return Ok(vec![Expr::AssignCurr(
+                                                    off + i,
+                                                    Box::new(Expr::Const(0.0, Loc::default())),
+                                                )]);
+                                            }
+                                        };
                                         let ctx = ctx.with_active_subscripts(
                                             active_dims.clone(),
                                             &subscripts,
@@ -587,7 +736,7 @@ impl Var {
                                 off,
                                 Box::new(ctx.build_stock_update_expr(off, var)?),
                             )],
-                            Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _) => {
+                            Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
@@ -654,7 +803,7 @@ impl Var {
                                 .collect();
                             exprs?.into_iter().flatten().collect()
                         }
-                        Ast::Arrayed(dims, elements) => {
+                        Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
                             let active_dims = Arc::<[Dimension]>::from(dims.clone());
                             let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                 .enumerate()
@@ -662,7 +811,33 @@ impl Var {
                                     let subscript_str = subscripts.join(",");
                                     let canonical_key =
                                         CanonicalElementName::from_raw(&subscript_str);
-                                    let ast = &elements[&canonical_key];
+                                    let ast = match elements.get(&canonical_key) {
+                                        Some(ast) => ast,
+                                        None => {
+                                            if *apply_default_for_missing
+                                                && let Some(default_ast) = default_ast
+                                            {
+                                                let ctx = ctx.with_active_subscripts(
+                                                    active_dims.clone(),
+                                                    &subscripts,
+                                                );
+                                                return ctx.lower(default_ast).map(|mut exprs| {
+                                                    let main_expr = exprs.pop().unwrap();
+                                                    exprs.push(Expr::AssignCurr(
+                                                        off + i,
+                                                        Box::new(main_expr),
+                                                    ));
+                                                    exprs
+                                                });
+                                            }
+                                            // Vensim defaults undefined subscript
+                                            // elements to 0 when no array default is present.
+                                            return Ok(vec![Expr::AssignCurr(
+                                                off + i,
+                                                Box::new(Expr::Const(0.0, Loc::default())),
+                                            )]);
+                                        }
+                                    };
                                     let ctx = ctx
                                         .with_active_subscripts(active_dims.clone(), &subscripts);
                                     ctx.lower(ast).map(|mut exprs| {
@@ -784,12 +959,21 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
                 extract_temp_sizes(arg, temp_sizes_map);
             }
         }
+        BuiltinFn::Quantum(a, b) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+        }
         BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
             extract_temp_sizes(a, temp_sizes_map);
             extract_temp_sizes(b, temp_sizes_map);
             if let Some(c) = c {
                 extract_temp_sizes(c, temp_sizes_map);
             }
+        }
+        BuiltinFn::Sshape(a, b, c) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
         }
         BuiltinFn::Rank(a, opt) => {
             extract_temp_sizes(a, temp_sizes_map);
@@ -803,6 +987,22 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
         BuiltinFn::Step(a, b) => {
             extract_temp_sizes(a, temp_sizes_map);
             extract_temp_sizes(b, temp_sizes_map);
+        }
+        BuiltinFn::VectorSelect(a, b, c, d, e) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
+            extract_temp_sizes(d, temp_sizes_map);
+            extract_temp_sizes(e, temp_sizes_map);
+        }
+        BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+        }
+        BuiltinFn::AllocateAvailable(a, b, c) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
         }
         BuiltinFn::Inf
         | BuiltinFn::Pi
@@ -1000,7 +1200,7 @@ pub(crate) fn build_metadata<'p>(
             sub_offsets.values().map(|metadata| metadata.size).sum()
         } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) = model.variables[canonical_ident].ast() {
+        } else if let Some(Ast::Arrayed(dims, _, _, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
         } else {
             1

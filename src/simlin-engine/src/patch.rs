@@ -444,13 +444,17 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
         (datamodel::Equation::ApplyToAll(_, main), Ast::ApplyToAll(_, expr)) => {
             *main = expr2_to_string(expr);
         }
-        (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
+        (
+            datamodel::Equation::Arrayed(_, elements, default_eq),
+            Ast::Arrayed(_, exprs, default_expr, _),
+        ) => {
             for (element_name, equation, _, _) in elements.iter_mut() {
                 let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
                 if let Some(expr) = exprs.get(&canonical_element) {
                     *equation = expr2_to_string(expr);
                 }
             }
+            *default_eq = default_expr.as_ref().map(expr2_to_string);
         }
         _ => {}
     }
@@ -464,7 +468,7 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
         (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
             // active_initial now lives in Compat, not in Equation
         }
-        (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
+        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs, _, _)) => {
             for (element_name, _, initial, _) in elements.iter_mut() {
                 if let Some(initial_value) = initial.as_mut() {
                     let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
@@ -492,7 +496,7 @@ fn rewrite_compat_active_initial(
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
                 compat.active_initial = Some(expr2_to_string(expr));
             }
-            Ast::Arrayed(_, _) => {}
+            Ast::Arrayed(_, _, _, _) => {}
         }
     }
 }
@@ -507,12 +511,20 @@ fn rename_ast(
         Ast::ApplyToAll(dims, expr) => {
             Ast::ApplyToAll(dims.clone(), rename_expr(expr, old_ident, new_ident))
         }
-        Ast::Arrayed(dims, elements) => {
+        Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let rewritten = elements
                 .iter()
                 .map(|(name, expr)| (name.clone(), rename_expr(expr, old_ident, new_ident)))
                 .collect();
-            Ast::Arrayed(dims.clone(), rewritten)
+            let rewritten_default = default_expr
+                .as_ref()
+                .map(|expr| rename_expr(expr, old_ident, new_ident));
+            Ast::Arrayed(
+                dims.clone(),
+                rewritten,
+                rewritten_default,
+                *apply_default_to_missing,
+            )
         }
     }
 }
@@ -626,6 +638,10 @@ fn rename_builtin(
             c.as_ref()
                 .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
         ),
+        BuiltinFn::Quantum(a, b) => BuiltinFn::Quantum(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
         BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
             Box::new(rename_expr(a, old_ident, new_ident)),
             Box::new(rename_expr(b, old_ident, new_ident)),
@@ -639,6 +655,11 @@ fn rename_builtin(
                 .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
         ),
         BuiltinFn::Sign(expr) => BuiltinFn::Sign(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            Box::new(rename_expr(c, old_ident, new_ident)),
+        ),
         BuiltinFn::Sin(expr) => BuiltinFn::Sin(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Sqrt(expr) => BuiltinFn::Sqrt(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Step(a, b) => BuiltinFn::Step(
@@ -665,6 +686,26 @@ fn rename_builtin(
             BuiltinFn::Stddev(Box::new(rename_expr(expr, old_ident, new_ident)))
         }
         BuiltinFn::Sum(expr) => BuiltinFn::Sum(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::VectorSelect(a, b, c, d, e) => BuiltinFn::VectorSelect(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            Box::new(rename_expr(c, old_ident, new_ident)),
+            Box::new(rename_expr(d, old_ident, new_ident)),
+            Box::new(rename_expr(e, old_ident, new_ident)),
+        ),
+        BuiltinFn::VectorElmMap(a, b) => BuiltinFn::VectorElmMap(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
+        BuiltinFn::VectorSortOrder(a, b) => BuiltinFn::VectorSortOrder(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
+        BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            Box::new(rename_expr(c, old_ident, new_ident)),
+        ),
     }
 }
 
@@ -796,6 +837,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
             }
             UntypedBuiltinFn("pulse".to_string(), args)
         }
+        BuiltinFn::Quantum(a, b) => UntypedBuiltinFn(
+            "quantum".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
         BuiltinFn::Ramp(a, b, c) => {
             let mut args = vec![expr2_to_expr0(a), expr2_to_expr0(b)];
             if let Some(c) = c {
@@ -812,6 +857,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
         }
         BuiltinFn::Sign(expr) => UntypedBuiltinFn("sign".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Sin(expr) => UntypedBuiltinFn("sin".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Sshape(a, b, c) => UntypedBuiltinFn(
+            "sshape".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b), expr2_to_expr0(c)],
+        ),
         BuiltinFn::Sqrt(expr) => UntypedBuiltinFn("sqrt".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Step(a, b) => UntypedBuiltinFn(
             "step".to_string(),
@@ -837,6 +886,28 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
             UntypedBuiltinFn("stddev".to_string(), vec![expr2_to_expr0(expr)])
         }
         BuiltinFn::Sum(expr) => UntypedBuiltinFn("sum".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::VectorSelect(a, b, c, d, e) => UntypedBuiltinFn(
+            "vector_select".to_string(),
+            vec![
+                expr2_to_expr0(a),
+                expr2_to_expr0(b),
+                expr2_to_expr0(c),
+                expr2_to_expr0(d),
+                expr2_to_expr0(e),
+            ],
+        ),
+        BuiltinFn::VectorElmMap(a, b) => UntypedBuiltinFn(
+            "vector_elm_map".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
+        BuiltinFn::VectorSortOrder(a, b) => UntypedBuiltinFn(
+            "vector_sort_order".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
+        BuiltinFn::AllocateAvailable(a, b, c) => UntypedBuiltinFn(
+            "allocate_available".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b), expr2_to_expr0(c)],
+        ),
     }
 }
 
@@ -1498,6 +1569,7 @@ mod tests {
                                     None,
                                 ),
                             ],
+                            None,
                         ),
                         documentation: String::new(),
                         units: None,
@@ -1531,7 +1603,7 @@ mod tests {
 
         match model.get_variable("regional_growth").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Arrayed(dims, elements) => {
+                datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
                     assert_eq!(dims, &vec!["Region".to_string()]);
                     assert_eq!(elements[0].0, "North");
                     assert_eq!(elements[0].1, "initial_value * 1.5");
@@ -1541,6 +1613,31 @@ mod tests {
                 _ => panic!("expected arrayed equation"),
             },
             _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn apply_ast_to_arrayed_equation_clears_default_when_missing() {
+        let mut equation = datamodel::Equation::Arrayed(
+            vec!["region".to_string()],
+            vec![("north".to_string(), "old".to_string(), None, None)],
+            Some("legacy_default".to_string()),
+        );
+        let mut exprs = std::collections::HashMap::new();
+        exprs.insert(
+            CanonicalElementName::from_raw("north"),
+            Expr2::Const("2".to_string(), 2.0, crate::ast::Loc::default()),
+        );
+        let ast = Ast::Arrayed(vec![], exprs, None, false);
+
+        apply_ast_to_equation_main(&mut equation, &ast);
+
+        match equation {
+            datamodel::Equation::Arrayed(_, elements, default_eq) => {
+                assert_eq!(elements[0].1, "2");
+                assert_eq!(default_eq, None);
+            }
+            _ => panic!("expected arrayed equation"),
         }
     }
 
