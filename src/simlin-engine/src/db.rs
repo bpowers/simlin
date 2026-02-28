@@ -1129,6 +1129,8 @@ fn model_dependency_graph_impl(
         deps.iter().map(|d| normalize_dep(d)).collect()
     };
 
+    let project_models = project.models(db);
+
     for (name, source_var) in source_vars.iter() {
         let deps = if module_input_names.is_empty() {
             variable_direct_dependencies(db, *source_var, project)
@@ -1145,12 +1147,45 @@ fn model_dependency_graph_impl(
         // changes when equation text changes even if deps don't).
         let kind = source_var.kind(db);
 
+        // For module variables, the dt_deps may contain composite
+        // references like "submodel\u{00B7}stock_var". In the dt phase, stocks
+        // break the dependency chain (they use their value from the
+        // previous timestep). The monolithic path's module_deps filters
+        // out inputs that reference stocks; we must do the same here to
+        // avoid spurious dependency cycles that produce incorrect
+        // topological orderings.
+        let dt_deps = if kind == SourceVariableKind::Module {
+            deps.dt_deps
+                .iter()
+                .filter(|dep| {
+                    let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+                    if let Some(dot_pos) = effective.find('\u{00B7}') {
+                        let module_name = &effective[..dot_pos];
+                        let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
+                        let sub_canonical = canonicalize(module_name);
+                        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                            let sub_vars = sub_model.variables(db);
+                            if let Some(sub_var) = sub_vars.get(var_name) {
+                                return sub_var.kind(db) != SourceVariableKind::Stock;
+                            }
+                        }
+                        true
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect()
+        } else {
+            deps.dt_deps.clone()
+        };
+
         var_info.insert(
             name.clone(),
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
-                dt_deps: normalize_deps(&deps.dt_deps),
+                dt_deps: normalize_deps(&dt_deps),
                 initial_deps: normalize_deps(&deps.initial_deps),
             },
         );
@@ -1310,11 +1345,16 @@ fn model_dependency_graph_impl(
     let topo_sort_str =
         |names: Vec<&String>, deps: &HashMap<String, BTreeSet<String>>| -> Vec<String> {
             use std::collections::HashSet;
+            // Build the allowed set: only variables in the filtered input list
+            // should appear in the output. Dependencies are used solely for
+            // ordering, not for expanding the set.
+            let allowed: HashSet<&str> = names.iter().map(|n| n.as_str()).collect();
             let mut result: Vec<String> = Vec::new();
             let mut used: HashSet<String> = HashSet::new();
 
             fn add(
                 deps: &HashMap<String, BTreeSet<String>>,
+                allowed: &HashSet<&str>,
                 result: &mut Vec<String>,
                 used: &mut HashSet<String>,
                 name: &str,
@@ -1325,14 +1365,17 @@ fn model_dependency_graph_impl(
                 used.insert(name.to_string());
                 if let Some(d) = deps.get(name) {
                     for dep in d.iter() {
-                        add(deps, result, used, dep);
+                        add(deps, allowed, result, used, dep);
                     }
                 }
-                result.push(name.to_string());
+                // Only include variables that were in the original filtered list
+                if allowed.contains(name) {
+                    result.push(name.to_string());
+                }
             }
 
             for name in names {
-                add(deps, &mut result, &mut used, name);
+                add(deps, &allowed, &mut result, &mut used, name);
             }
             result
         };
@@ -1363,15 +1406,23 @@ fn model_dependency_graph_impl(
         topo_sort_str(init_list, &initial_dependencies)
     };
 
-    // Flows runlist: non-stock, non-module variables (modules are evaluated
-    // in the stocks phase, matching the monolithic compiler behavior)
+    // Flows runlist: non-stock variables, modules, AND stock-typed module inputs.
+    // The monolithic path uses `instantiation.contains(id) || !var.is_stock()`
+    // which includes stock-typed module inputs (e.g., a stock declared with
+    // access="input" in XMILE). These need LoadModuleInput -> AssignCurr in
+    // the flows phase to propagate the parent-provided value each timestep.
+    let module_input_set: BTreeSet<String> = module_input_names
+        .iter()
+        .map(|s| canonicalize(s).into_owned())
+        .collect();
     let runlist_flows = {
         let flow_names: Vec<&String> = var_names
             .iter()
             .filter(|n| {
+                let is_input = module_input_set.contains(canonicalize(n).as_ref());
                 var_info
                     .get(n.as_str())
-                    .map(|i| !i.is_stock && !i.is_module)
+                    .map(|i| is_input || !i.is_stock)
                     .unwrap_or(false)
             })
             .collect();
@@ -3794,6 +3845,7 @@ pub fn compile_var_fragment(
     };
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
+    let is_module_input = inputs.contains(&var_ident_canonical);
 
     // We need module_refs for module variables (explicit or implicit)
     let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
@@ -3979,18 +4031,23 @@ pub fn compile_var_fragment(
         None
     };
 
-    // Flow phase: non-stock vars get compiled with is_initial=false
-    let flow_bytecodes = if !is_stock && dep_graph.runlist_flows.contains(&var_ident_str) {
-        match build_var(false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(ref err) => {
-                accumulate_var_compile_error(err);
-                None
+    // Flow phase: non-stock vars AND stock-typed module inputs get compiled
+    // with is_initial=false. Stock-typed module inputs need LoadModuleInput ->
+    // AssignCurr in the flows phase to propagate the parent-provided value
+    // each timestep (matching the monolithic path's `instantiation.contains(id)
+    // || !var.is_stock()` filter).
+    let flow_bytecodes =
+        if (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str) {
+            match build_var(false) {
+                Ok(var_result) => compile_phase(&var_result.ast),
+                Err(ref err) => {
+                    accumulate_var_compile_error(err);
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Stock phase: stocks and modules get compiled with is_initial=false
     let stock_bytecodes =
@@ -4870,9 +4927,13 @@ pub fn assemble_module(
         }
     }
 
-    // Module input variables are provided by the parent model, so they
-    // must be excluded from runlists (matching the monolithic path which
-    // filters with `!instantiation.contains(id)`).
+    // Module input variables have their values provided by the parent
+    // model via EvalModule/LoadModuleInput. Their compiled bytecodes
+    // consist of LoadModuleInput -> AssignCurr, which copies the
+    // parent-provided value into the sub-model's local slot. This must
+    // happen during initials and flows phases. Only the stocks phase
+    // excludes module inputs (matching the monolithic path which uses
+    // `!instantiation.contains(id) && (is_stock || is_module)` for stocks).
     let is_module_input =
         |var_name: &str| -> bool { module_inputs.contains(&*canonicalize(var_name)) };
 
@@ -4883,27 +4944,21 @@ pub fn assemble_module(
     let mut missing_vars: Vec<String> = Vec::new();
 
     for var_name in &dep_graph.runlist_initials {
-        if is_module_input(var_name) {
-            continue;
-        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.initial_bytecodes
         {
             initial_frags.push((var_name.clone(), bc));
-        } else {
+        } else if !is_module_input(var_name) {
             missing_vars.push(var_name.clone());
         }
     }
 
     for var_name in &dep_graph.runlist_flows {
-        if is_module_input(var_name) {
-            continue;
-        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
             flow_frags.push(bc);
-        } else {
+        } else if !is_module_input(var_name) {
             missing_vars.push(var_name.clone());
         }
     }
