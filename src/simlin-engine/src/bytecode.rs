@@ -977,11 +977,12 @@ impl Opcode {
 
             // VectorSelect pops 2 scalars (max_value, action), pushes 1 result
             Opcode::VectorSelect {} => (2, 1),
-            // Array-producing vector ops don't touch the arithmetic stack
-            // (they write to temp_storage and read views + scalars)
+            // VectorElmMap writes to temp_storage without touching the arithmetic stack.
+            // VectorSortOrder/AllocateAvailable pop 1 scalar each (direction and avail
+            // respectively) and write their result arrays to temp_storage.
             Opcode::VectorElmMap { .. } => (0, 0),
-            Opcode::VectorSortOrder { .. } => (0, 0),
-            Opcode::AllocateAvailable { .. } => (0, 0),
+            Opcode::VectorSortOrder { .. } => (1, 0),
+            Opcode::AllocateAvailable { .. } => (1, 0),
 
             // Broadcasting
             Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),
@@ -1548,6 +1549,27 @@ mod tests {
         assert_eq!((Opcode::ArrayMean {}).stack_effect(), (0, 1));
         assert_eq!((Opcode::ArrayStddev {}).stack_effect(), (0, 1));
         assert_eq!((Opcode::ArraySize {}).stack_effect(), (0, 1));
+    }
+
+    #[test]
+    fn test_stack_effect_vector_ops() {
+        // VectorSelect: pops max_value + action scalars, pushes 1 result
+        assert_eq!((Opcode::VectorSelect {}).stack_effect(), (2, 1));
+        // VectorElmMap: reads views, writes to temp_storage, no arithmetic stack effect
+        assert_eq!(
+            (Opcode::VectorElmMap { write_temp_id: 0 }).stack_effect(),
+            (0, 0)
+        );
+        // VectorSortOrder: pops 1 scalar (direction), writes to temp_storage
+        assert_eq!(
+            (Opcode::VectorSortOrder { write_temp_id: 0 }).stack_effect(),
+            (1, 0)
+        );
+        // AllocateAvailable: pops 1 scalar (avail), writes to temp_storage
+        assert_eq!(
+            (Opcode::AllocateAvailable { write_temp_id: 0 }).stack_effect(),
+            (1, 0)
+        );
     }
 
     // =========================================================================
