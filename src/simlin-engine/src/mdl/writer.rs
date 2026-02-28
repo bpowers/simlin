@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+use super::builtins::to_lower_space;
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
 use crate::common::Result;
@@ -553,7 +554,12 @@ impl Visitor<String> for MdlPrintVisitor {
                 {
                     return kw.to_owned();
                 }
-                let mdl_name = xmile_to_mdl_function_name(func);
+                // safediv with 3+ args is XIDZ (3-arg form), not ZIDZ (2-arg)
+                let mdl_name = if func == "safediv" && args.len() >= 3 {
+                    "XIDZ".to_owned()
+                } else {
+                    xmile_to_mdl_function_name(func)
+                };
                 let converted: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 let reordered = reorder_args(&mdl_name, converted);
                 format!("{}({})", mdl_name, reordered.join(", "))
@@ -1090,7 +1096,7 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
             DimensionElements::Named(elems) => elems
                 .iter()
                 .enumerate()
-                .map(|(i, e)| (e.to_lowercase(), i))
+                .map(|(i, e)| (to_lower_space(e), i))
                 .collect(),
             DimensionElements::Indexed(_) => HashMap::new(),
         };
@@ -1993,6 +1999,11 @@ mod tests {
     #[test]
     fn function_rename_safediv() {
         assert_mdl("safediv(a, b)", "ZIDZ(a, b)");
+    }
+
+    #[test]
+    fn function_rename_safediv_three_args_emits_xidz() {
+        assert_mdl("safediv(a, b, x)", "XIDZ(a, b, x)");
     }
 
     #[test]
@@ -4242,6 +4253,36 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains("-> (zone: z1, z2, z3)"),
             "targets should be sorted by source element order despite case mismatch, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn write_dimension_element_mapping_underscored_names() {
+        // Element names with underscores must be normalized via to_lower_space()
+        // to match the canonical form used in element_map keys.
+        let dim = datamodel::Dimension {
+            name: "Continent".to_string(),
+            elements: datamodel::DimensionElements::Named(vec![
+                "North_America".to_string(),
+                "South_America".to_string(),
+                "Europe".to_string(),
+            ]),
+            mappings: vec![datamodel::DimensionMapping {
+                target: "zone".to_string(),
+                element_map: vec![
+                    ("europe".to_string(), "z3".to_string()),
+                    ("north america".to_string(), "z1".to_string()),
+                    ("south america".to_string(), "z2".to_string()),
+                ],
+            }],
+        };
+
+        let mut buf = String::new();
+        write_dimension_def(&mut buf, &dim);
+
+        assert!(
+            buf.contains("-> (zone: z1, z2, z3)"),
+            "underscore element names should match canonical element_map keys, got: {buf}"
         );
     }
 

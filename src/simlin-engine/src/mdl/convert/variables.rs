@@ -331,7 +331,7 @@ impl<'input> ConversionContext<'input> {
                     if *existing_dims != dims {
                         *existing_dims = existing_dims
                             .iter()
-                            .map(|d| self.resolve_subrange_to_parent(d))
+                            .map(|d| self.resolve_subrange_to_parent(&canonical_name(d)))
                             .collect();
                     }
                 } else {

@@ -1207,18 +1207,6 @@ impl From<Dimension> for datamodel::Dimension {
                         .collect(),
                 });
             }
-            // If maps_to refers to a target not already in mappings, include it.
-            if let Some(target) = dim.maps_to
-                && !result.mappings.iter().any(|m| m.target == target)
-            {
-                result.mappings.insert(
-                    0,
-                    datamodel::DimensionMapping {
-                        target,
-                        element_map: vec![],
-                    },
-                );
-            }
         } else if let Some(target) = dim.maps_to {
             result.set_maps_to(target);
         }
@@ -3755,5 +3743,37 @@ mod tests {
         );
         assert_eq!(roundtripped.mappings[0].target, "dim_b");
         assert_eq!(roundtripped.mappings[1].target, "dim_c");
+    }
+
+    #[test]
+    fn mappings_takes_precedence_over_maps_to() {
+        // When both maps_to and mappings are present in JSON, mappings is
+        // authoritative and maps_to should be ignored.
+        let json_str = r#"{
+            "name": "dim_a",
+            "elements": ["a1", "a2"],
+            "maps_to": "stale_target",
+            "mappings": [{
+                "target": "dim_b",
+                "element_map": [
+                    {"source": "a1", "target": "b1"},
+                    {"source": "a2", "target": "b2"}
+                ]
+            }]
+        }"#;
+
+        let json_dim: Dimension = serde_json::from_str(json_str).unwrap();
+        let dm_dim: datamodel::Dimension = json_dim.into();
+
+        assert_eq!(
+            dm_dim.mappings.len(),
+            1,
+            "only the explicit mapping should be present"
+        );
+        assert_eq!(dm_dim.mappings[0].target, "dim_b");
+        assert!(
+            !dm_dim.mappings.iter().any(|m| m.target == "stale_target"),
+            "stale maps_to target should not be injected into mappings"
+        );
     }
 }

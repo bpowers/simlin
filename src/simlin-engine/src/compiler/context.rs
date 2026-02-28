@@ -1029,8 +1029,14 @@ impl Context<'_> {
                                         let index = Self::subscript_to_index(id_dim, &translated);
                                         return Ok(Expr::Const(index, *loc));
                                     }
-                                    let index = Self::subscript_to_index(dim, subscript);
-                                    return Ok(Expr::Const(index, *loc));
+                                    return Err(Error::new(
+                                        ErrorKind::Model,
+                                        ErrorCode::Generic,
+                                        Some(format!(
+                                            "dimension mapping between '{}' and '{}' exists but could not translate subscript '{}'",
+                                            id_dim_name, active_name, subscript
+                                        )),
+                                    ));
                                 }
                             }
                         }

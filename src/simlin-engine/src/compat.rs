@@ -128,7 +128,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             let longest = unprocessed
                 .values()
                 .max_by_key(|v| v.len())
-                .expect("dat file has no data");
+                .ok_or("dat file has no data")?;
             let it = longest.first().map(|p| p.0).unwrap_or(0.0);
             let ft = longest.last().map(|p| p.0).unwrap_or(1.0);
             let sp = if longest.len() >= 2 {
@@ -138,6 +138,10 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             };
             (it, ft, sp)
         };
+
+    if saveper <= 0.0 {
+        return Err("inferred saveper is <= 0 (duplicate or unsorted timestamps)".into());
+    }
 
     let step_size = unprocessed.len();
     let step_count = ((final_time - initial_time) / saveper).ceil() as usize + 1;
@@ -240,4 +244,55 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         },
         is_vensim: false,
     })
+}
+
+#[cfg(all(test, feature = "file_io"))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn load_dat_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.dat");
+        std::fs::File::create(&path).unwrap();
+
+        let result = load_dat(path.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "empty .dat file should return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn load_dat_duplicate_timestamps_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.dat");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "some_var").unwrap();
+        writeln!(f, "0\t1.0").unwrap();
+        writeln!(f, "0\t2.0").unwrap();
+        writeln!(f, "0\t3.0").unwrap();
+
+        let result = load_dat(path.to_str().unwrap());
+        assert!(result.is_err(), "duplicate timestamps should return Err");
+    }
+
+    #[test]
+    fn load_dat_valid_file_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid.dat");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "test_var").unwrap();
+        writeln!(f, "0\t10.0").unwrap();
+        writeln!(f, "1\t20.0").unwrap();
+        writeln!(f, "2\t30.0").unwrap();
+
+        let result = load_dat(path.to_str().unwrap());
+        assert!(
+            result.is_ok(),
+            "valid .dat file should succeed: {:?}",
+            result.err()
+        );
+    }
 }

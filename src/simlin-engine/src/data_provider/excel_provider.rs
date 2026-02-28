@@ -4,6 +4,28 @@
 
 use calamine::{Data, DataType, Reader, open_workbook_auto};
 
+/// Convert a calamine `Data` cell to a string representation, handling
+/// numeric cells that `as_string()` ignores.
+fn data_to_string(val: &Data) -> Option<String> {
+    match val {
+        Data::String(s) => Some(s.clone()),
+        Data::Float(f) => {
+            if *f == (*f as i64) as f64 {
+                Some(format!("{}", *f as i64))
+            } else {
+                Some(format!("{f}"))
+            }
+        }
+        Data::Int(i) => Some(format!("{i}")),
+        Data::Bool(b) => Some(format!("{b}")),
+        Data::Empty
+        | Data::Error(_)
+        | Data::DateTime(_)
+        | Data::DateTimeIso(_)
+        | Data::DurationIso(_) => None,
+    }
+}
+
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::data_provider::{col_index, is_column_only, parse_cell_ref, parse_row_or_cell_ref};
 
@@ -49,6 +71,9 @@ impl FilesystemDataProvider {
 
             let (time, value) = match (time_val, data_val) {
                 (Some(t), Some(d)) => {
+                    if matches!(t, Data::Empty) || matches!(d, Data::Empty) {
+                        continue;
+                    }
                     let t = t.as_f64().ok_or_else(|| {
                         Error::new(
                             ErrorKind::Import,
@@ -120,6 +145,9 @@ impl FilesystemDataProvider {
 
             let (time, value) = match (time_val, data_val) {
                 (Some(t), Some(d)) => {
+                    if matches!(t, Data::Empty) || matches!(d, Data::Empty) {
+                        continue;
+                    }
                     let t = t.as_f64().ok_or_else(|| {
                         Error::new(
                             ErrorKind::Import,
@@ -249,7 +277,7 @@ impl FilesystemDataProvider {
             let mut last_col = start_col;
             for col in start_col..(range_start.1 + width as u32) {
                 if let Some(val) = range.get_value((row_idx, col))
-                    && val.as_string().is_some_and(|s| !s.trim().is_empty())
+                    && data_to_string(val).is_some_and(|s| !s.trim().is_empty())
                 {
                     last_col = col;
                 }
@@ -262,7 +290,7 @@ impl FilesystemDataProvider {
             let mut last_row = start_row;
             for row in start_row..(range_start.0 + height as u32) {
                 if let Some(val) = range.get_value((row, col))
-                    && val.as_string().is_some_and(|s| !s.trim().is_empty())
+                    && data_to_string(val).is_some_and(|s| !s.trim().is_empty())
                 {
                     last_row = row;
                 }
@@ -274,7 +302,7 @@ impl FilesystemDataProvider {
             let mut last_row = start_row;
             for row in start_row..(range_start.0 + height as u32) {
                 if let Some(val) = range.get_value((row, start_col))
-                    && val.as_string().is_some_and(|s| !s.trim().is_empty())
+                    && data_to_string(val).is_some_and(|s| !s.trim().is_empty())
                 {
                     last_row = row;
                 }
@@ -289,22 +317,22 @@ impl FilesystemDataProvider {
         if start_col == end_col {
             for row in start_row..=end_row {
                 if let Some(val) = range.get_value((row, start_col))
-                    && let Some(s) = val.as_string()
+                    && let Some(s) = data_to_string(val)
                 {
-                    let trimmed = s.trim();
+                    let trimmed = s.trim().to_string();
                     if !trimmed.is_empty() {
-                        elements.push(trimmed.to_string());
+                        elements.push(trimmed);
                     }
                 }
             }
         } else {
             for col in start_col..=end_col {
                 if let Some(val) = range.get_value((start_row, col))
-                    && let Some(s) = val.as_string()
+                    && let Some(s) = data_to_string(val)
                 {
-                    let trimmed = s.trim();
+                    let trimmed = s.trim().to_string();
                     if !trimmed.is_empty() {
-                        elements.push(trimmed.to_string());
+                        elements.push(trimmed);
                     }
                 }
             }
@@ -385,5 +413,31 @@ mod tests {
             result.is_ok(),
             "row-oriented last_cell should be supported for Excel files: {result:?}"
         );
+    }
+
+    #[test]
+    fn data_to_string_handles_numeric_cells() {
+        use super::data_to_string;
+        use calamine::Data;
+
+        assert_eq!(data_to_string(&Data::Float(5.0)), Some("5".to_string()));
+        assert_eq!(data_to_string(&Data::Float(2.75)), Some("2.75".to_string()));
+        assert_eq!(data_to_string(&Data::Int(42)), Some("42".to_string()));
+        assert_eq!(
+            data_to_string(&Data::String("hello".to_string())),
+            Some("hello".to_string())
+        );
+        assert_eq!(data_to_string(&Data::Bool(true)), Some("true".to_string()));
+        assert_eq!(data_to_string(&Data::Empty), None);
+    }
+
+    #[test]
+    fn data_to_string_integer_floats_have_no_decimal() {
+        use super::data_to_string;
+        use calamine::Data;
+
+        assert_eq!(data_to_string(&Data::Float(0.0)), Some("0".to_string()));
+        assert_eq!(data_to_string(&Data::Float(10.0)), Some("10".to_string()));
+        assert_eq!(data_to_string(&Data::Float(-5.0)), Some("-5".to_string()));
     }
 }
