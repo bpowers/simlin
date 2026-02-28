@@ -2007,9 +2007,67 @@ impl Vm {
                     stack.push(result);
                 }
 
-                Opcode::VectorElmMap { .. }
-                | Opcode::VectorSortOrder { .. }
-                | Opcode::AllocateAvailable { .. } => {
+                Opcode::VectorElmMap { write_temp_id } => {
+                    let offset_view = &view_stack[view_stack.len() - 1];
+                    let source_view = &view_stack[view_stack.len() - 2];
+
+                    // Collect all source values
+                    let source_size = source_view.size();
+                    let source_n_dims = source_view.dims.len();
+                    let mut source_values: SmallVec<[f64; 32]> =
+                        SmallVec::with_capacity(source_size);
+                    let mut src_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; source_n_dims];
+                    for _ in 0..source_size {
+                        let flat_off = source_view.flat_offset(&src_indices);
+                        let val = Self::read_view_element(
+                            source_view,
+                            flat_off,
+                            curr,
+                            temp_storage,
+                            context,
+                        );
+                        source_values.push(val);
+                        for d in (0..source_n_dims).rev() {
+                            src_indices[d] += 1;
+                            if src_indices[d] < source_view.dims[d] {
+                                break;
+                            }
+                            src_indices[d] = 0;
+                        }
+                    }
+
+                    // Write mapped results to temp_storage
+                    let temp_off = context.temp_offsets[*write_temp_id as usize];
+                    let offset_size = offset_view.size();
+                    let offset_n_dims = offset_view.dims.len();
+                    let mut off_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; offset_n_dims];
+                    for i in 0..offset_size {
+                        let flat_off = offset_view.flat_offset(&off_indices);
+                        let offset_val = Self::read_view_element(
+                            offset_view,
+                            flat_off,
+                            curr,
+                            temp_storage,
+                            context,
+                        );
+                        let idx = offset_val.round();
+                        temp_storage[temp_off + i] =
+                            if idx.is_nan() || idx < 0.0 || idx >= source_values.len() as f64 {
+                                f64::NAN
+                            } else {
+                                source_values[idx as usize]
+                            };
+                        for d in (0..offset_n_dims).rev() {
+                            off_indices[d] += 1;
+                            if off_indices[d] < offset_view.dims[d] {
+                                break;
+                            }
+                            off_indices[d] = 0;
+                        }
+                    }
+                }
+
+                Opcode::VectorSortOrder { .. } | Opcode::AllocateAvailable { .. } => {
                     unimplemented!("vector operation opcodes not yet dispatched");
                 }
             }
