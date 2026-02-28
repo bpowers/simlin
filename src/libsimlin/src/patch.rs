@@ -562,7 +562,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
 ///
 /// # Thread Safety
 /// - This function is thread-safe for concurrent calls with the same `project` pointer.
-/// - The underlying `engine::Project` uses `Arc<ModelStage1>` and is protected by a `Mutex`.
+/// - The underlying `datamodel::Project` is protected by a `Mutex`.
 /// - Multiple threads may safely modify the same project concurrently.
 /// - Different projects may also be patched concurrently from different threads safely.
 ///
