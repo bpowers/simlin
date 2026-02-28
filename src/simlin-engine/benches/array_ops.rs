@@ -8,14 +8,13 @@
 //! particularly focusing on view management overhead in iteration contexts.
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use simlin_engine::Project as CompiledProject;
-use simlin_engine::Simulation;
+use simlin_engine::CompiledSimulation;
 use simlin_engine::Vm;
 use simlin_engine::datamodel::Project;
 use simlin_engine::datamodel::{
     Aux, Compat, Dimension, Dt, Equation, SimMethod, SimSpecs, Variable,
 };
-use std::sync::Arc;
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 
 /// Create a project with a single large 1D array and a sum reduction
 fn create_sum_project(array_size: u32) -> Project {
@@ -261,16 +260,11 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
     }
 }
 
-/// Compile a project and return the simulation
-fn compile_project(project: Project) -> Result<Simulation, String> {
-    let compiled = Arc::new(CompiledProject::from(project));
-
-    // Check for errors
-    if !compiled.errors.is_empty() {
-        return Err(format!("Project errors: {:?}", compiled.errors));
-    }
-
-    Simulation::new(&compiled, "main").map_err(|e| format!("Failed to create simulation: {e:?}"))
+/// Compile a datamodel project to bytecode via the incremental path.
+fn compile_project(datamodel: &Project) -> Result<CompiledSimulation, String> {
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    compile_project_incremental(&db, state.project, "main").map_err(|e| e.to_string())
 }
 
 /// Benchmark array sum reduction
@@ -279,8 +273,7 @@ fn bench_array_sum(c: &mut Criterion) {
 
     for size in [100, 500, 1000, 5000] {
         let project = create_sum_project(size);
-        let sim = compile_project(project).expect("Should compile");
-        let compiled_bytecode = sim.compile().expect("Should compile to bytecode");
+        let compiled_bytecode = compile_project(&project).expect("Should compile");
 
         group.bench_with_input(
             BenchmarkId::from_parameter(size),
@@ -304,8 +297,7 @@ fn bench_elementwise_add(c: &mut Criterion) {
 
     for size in [100, 500, 1000, 5000] {
         let project = create_elementwise_add_project(size);
-        let sim = compile_project(project).expect("Should compile");
-        let compiled_bytecode = sim.compile().expect("Should compile to bytecode");
+        let compiled_bytecode = compile_project(&project).expect("Should compile");
 
         group.bench_with_input(
             BenchmarkId::from_parameter(size),
@@ -331,8 +323,7 @@ fn bench_same_array_refs(c: &mut Criterion) {
     let size = 1000;
     for num_refs in [2, 3, 4, 5] {
         let project = create_same_array_multi_ref_project(size, num_refs);
-        let sim = compile_project(project).expect("Should compile");
-        let compiled_bytecode = sim.compile().expect("Should compile to bytecode");
+        let compiled_bytecode = compile_project(&project).expect("Should compile");
 
         group.bench_with_input(
             BenchmarkId::new("refs", num_refs),
@@ -356,8 +347,7 @@ fn bench_broadcast(c: &mut Criterion) {
 
     for (dim1, dim2) in [(10, 100), (50, 50), (100, 100)] {
         let project = create_broadcast_project(dim1, dim2);
-        let sim = compile_project(project).expect("Should compile");
-        let compiled_bytecode = sim.compile().expect("Should compile to bytecode");
+        let compiled_bytecode = compile_project(&project).expect("Should compile");
 
         group.bench_with_input(
             BenchmarkId::new("dims", format!("{}x{}", dim1, dim2)),

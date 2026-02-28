@@ -4798,9 +4798,15 @@ pub fn assemble_module(
                 // Extract from/to from the link score name
                 // Format: $:ltm:link_score:from->to or $:ltm:ilink:from->to
                 let arrow_pos = ltm_var.name.find('\u{2192}');
-                let prefix_end =
-                    ltm_var.name.rfind('\u{205A}').unwrap_or(0) + '\u{205A}'.len_utf8();
                 if let Some(arrow) = arrow_pos {
+                    // Find the last separator before the arrow to locate the
+                    // end of the prefix (e.g. "$:ltm:link_score:").  Using
+                    // rfind on the full string would match separators inside
+                    // the `to` name that appear after the arrow.
+                    let prefix_end = ltm_var.name[..arrow]
+                        .rfind('\u{205A}')
+                        .map(|p| p + '\u{205A}'.len_utf8())
+                        .unwrap_or(0);
                     let from_name = &ltm_var.name[prefix_end..arrow];
                     let to_name = &ltm_var.name[arrow + '\u{2192}'.len_utf8()..];
                     let link_id = LtmLinkId::new(db, from_name.to_string(), to_name.to_string());

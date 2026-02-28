@@ -2,13 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use simlin_engine::common::Ident;
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{CompiledSimulation, Project as CompiledProject, Simulation, Vm};
+use simlin_engine::{CompiledSimulation, Vm};
 
 fn build_population_project(stop: f64) -> TestProject {
     TestProject::new("bench_pop")
@@ -24,20 +24,20 @@ fn build_population_project(stop: f64) -> TestProject {
 fn compile_population(stop: f64) -> CompiledSimulation {
     let tp = build_population_project(stop);
     let datamodel = tp.build_datamodel();
-    let project = Arc::new(CompiledProject::from(datamodel));
-    let sim = Simulation::new(&project, "main").unwrap();
-    sim.compile().unwrap()
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    compile_project_incremental(&db, state.project, "main").unwrap()
 }
 
 fn bench_compile(c: &mut Criterion) {
     let tp = build_population_project(1000.0);
     let datamodel = tp.build_datamodel();
-    let project = Arc::new(CompiledProject::from(datamodel));
 
     c.bench_function("compile", |b| {
         b.iter(|| {
-            let sim = Simulation::new(&project, "main").unwrap();
-            sim.compile().unwrap()
+            let mut db = SimlinDb::default();
+            let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+            compile_project_incremental(&db, state.project, "main").unwrap()
         })
     });
 }
@@ -107,9 +107,9 @@ fn bench_full_pipeline(c: &mut Criterion) {
 
     c.bench_function("full_pipeline", |b| {
         b.iter(|| {
-            let project = Arc::new(CompiledProject::from(datamodel.clone()));
-            let sim = Simulation::new(&project, "main").unwrap();
-            let compiled = sim.compile().unwrap();
+            let mut db = SimlinDb::default();
+            let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+            let compiled = compile_project_incremental(&db, state.project, "main").unwrap();
             let mut vm = Vm::new(compiled).unwrap();
             vm.run_to_end().unwrap();
         })
