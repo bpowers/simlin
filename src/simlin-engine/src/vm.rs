@@ -2001,6 +2001,28 @@ impl Vm {
         acc
     }
 
+    /// Read a single element from a RuntimeView at a pre-computed memory offset.
+    /// Handles both variable views (from curr[]) and temp views (from temp_storage[]).
+    /// The `flat_off` parameter is the actual memory offset within the view's storage,
+    /// NOT a sequential iteration index. For contiguous views, flat_off equals the
+    /// iteration index. For non-contiguous or sparse views, the caller must compute
+    /// flat_off via `view.flat_offset(&indices)` or `view.offset_for_iter_index(iter_idx)`.
+    #[allow(dead_code)] // used by vector opcode dispatch in Phase 5
+    fn read_view_element(
+        view: &RuntimeView,
+        flat_off: usize,
+        curr: &[f64],
+        temp_storage: &[f64],
+        context: &ByteCodeContext,
+    ) -> f64 {
+        if view.is_temp {
+            let temp_off = context.temp_offsets[view.base_off as usize];
+            temp_storage[temp_off + flat_off]
+        } else {
+            curr[view.base_off as usize + flat_off]
+        }
+    }
+
     #[cfg(test)]
     pub fn debug_print_bytecode(&self, _model_name: &str) {
         let mut module_keys: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
