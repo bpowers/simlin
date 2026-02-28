@@ -174,23 +174,6 @@ fn inject_ltm_vars(
 }
 
 impl Project {
-    /// Compile a project using caller-provided salsa source handles.
-    ///
-    /// This enables patch-validation paths to reuse an existing persistent
-    /// salsa DB instead of constructing a fresh DB for each compilation.
-    pub fn from_with_salsa_sync(
-        project_datamodel: datamodel::Project,
-        salsa_db: &dyn crate::db::Db,
-        source_project: crate::db::SourceProject,
-        source_models: &HashMap<String, crate::db::SourceModel>,
-    ) -> Self {
-        Self::base_from(
-            project_datamodel,
-            Some((salsa_db, source_project, source_models)),
-            run_default_model_checks,
-        )
-    }
-
     pub(crate) fn base_from<'a, F>(
         project_datamodel: datamodel::Project,
         cached_sources: Option<(
@@ -438,46 +421,6 @@ fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_project_from_with_salsa_sync_uses_provided_sources() {
-        use salsa::Setter;
-
-        use crate::db;
-        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
-
-        let model = x_model("main", vec![x_aux("x", "1", None)]);
-        let project_datamodel = x_project(sim_specs_with_units("years"), &[model]);
-
-        let mut db = db::SimlinDb::default();
-        let state = db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
-        let sync = state.to_sync_result();
-
-        let mut source_models: HashMap<String, db::SourceModel> = HashMap::new();
-        source_models.insert("main".to_string(), sync.models["main"].source);
-
-        let source_var = sync.models["main"].variables["x"].source;
-        source_var
-            .set_equation(&mut db)
-            .to(db::SourceEquation::Scalar("2".to_string()));
-
-        let compiled =
-            Project::from_with_salsa_sync(project_datamodel, &db, sync.project, &source_models);
-        let main = compiled
-            .models
-            .get(&Ident::new("main"))
-            .expect("main model should exist");
-        let x_var = main
-            .variables
-            .get(&Ident::new("x"))
-            .expect("x variable should exist");
-
-        assert_eq!(
-            x_var.scalar_equation().map(|s| s.as_str()),
-            Some("2"),
-            "from_with_salsa_sync should compile from the provided source handles"
-        );
-    }
 
     #[test]
     fn test_project_with_ltm() {

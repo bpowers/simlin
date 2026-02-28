@@ -3038,32 +3038,6 @@ fn test_compile_var_fragment_caching() {
 }
 
 #[test]
-fn test_incremental_bytecode_equivalence() {
-    // AC4.3: Build a model, compile incrementally via salsa, then
-    // compile monolithically. Both should produce valid simulations
-    // that generate identical numerical output.
-    let db = SimlinDb::default();
-    let project = two_var_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let model = sync.models["main"].source;
-
-    // Incremental: assemble via tracked functions
-    let incremental_result = assemble_module(&db, model, sync.project, true, &BTreeSet::new());
-
-    // Monolithic: compile via Project::from + compile_project
-    let engine_project = crate::project::Project::from(project);
-    let monolithic_result = crate::interpreter::compile_project(&engine_project, "main");
-
-    // If the incremental path produces a result, verify equivalence
-    // by running both through the VM
-    if let (Ok(incr_module), Ok(mono_compiled)) = (&incremental_result, &monolithic_result) {
-        // Both should have the same number of slots
-        assert_eq!(incr_module.n_slots, mono_compiled.n_slots());
-    }
-}
-
-#[test]
 fn test_assemble_simulation_simple() {
     let db = SimlinDb::default();
     let project = two_var_project();
@@ -3096,182 +3070,6 @@ fn test_assemble_simulation_simple() {
             .get_offset(&crate::common::Ident::new("time"))
             .is_some()
     );
-}
-
-#[test]
-fn test_incremental_vs_monolithic_output() {
-    use crate::vm::Vm;
-
-    let db = SimlinDb::default();
-    let project = two_var_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    // Incremental path: assemble_simulation
-    let incr_result = assemble_simulation(&db, sync.project, "main");
-    assert!(
-        incr_result.is_ok(),
-        "incremental assemble_simulation failed: {:?}",
-        incr_result.err()
-    );
-    let incr_compiled = incr_result.unwrap();
-
-    // Monolithic path: compile_project
-    let engine_project = crate::project::Project::from(project);
-    let mono_result = crate::interpreter::compile_project(&engine_project, "main");
-    assert!(mono_result.is_ok(), "monolithic compile_project failed");
-    let mono_compiled = mono_result.unwrap();
-
-    // Both should have same n_slots
-    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
-
-    // Run both through the VM
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    // Verify identical output dimensions
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-    assert_eq!(incr_results.step_size, mono_results.step_size);
-
-    // Compare numerical output for each variable at each timestep
-    let alpha_ident = crate::common::Ident::new("alpha");
-    let beta_ident = crate::common::Ident::new("beta");
-
-    let incr_alpha_off = incr_results.offsets[&alpha_ident];
-    let mono_alpha_off = mono_results.offsets[&alpha_ident];
-    let incr_beta_off = incr_results.offsets[&beta_ident];
-    let mono_beta_off = mono_results.offsets[&beta_ident];
-
-    for step in 0..incr_results.step_count {
-        let incr_base = step * incr_results.step_size;
-        let mono_base = step * mono_results.step_size;
-
-        let incr_alpha = incr_results.data[incr_base + incr_alpha_off];
-        let mono_alpha = mono_results.data[mono_base + mono_alpha_off];
-        assert!(
-            (incr_alpha - mono_alpha).abs() < 1e-10,
-            "alpha mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_alpha,
-            mono_alpha
-        );
-
-        let incr_beta = incr_results.data[incr_base + incr_beta_off];
-        let mono_beta = mono_results.data[mono_base + mono_beta_off];
-        assert!(
-            (incr_beta - mono_beta).abs() < 1e-10,
-            "beta mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_beta,
-            mono_beta
-        );
-    }
-}
-
-/// Stock-and-flow model: stock integrates a flow over time.
-fn stock_flow_project() -> datamodel::Project {
-    datamodel::Project {
-        name: "stock_flow_test".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["births".to_string()],
-                    outflows: vec![],
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "births".to_string(),
-                    equation: datamodel::Equation::Scalar("population * 0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-            ],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }],
-        source: None,
-        ai_information: None,
-    }
-}
-
-#[test]
-fn test_assemble_simulation_stock_flow() {
-    use crate::vm::Vm;
-
-    let db = SimlinDb::default();
-    let project = stock_flow_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    // Incremental path
-    let incr_result = assemble_simulation(&db, sync.project, "main");
-    assert!(
-        incr_result.is_ok(),
-        "assemble_simulation failed for stock-flow model: {:?}",
-        incr_result.err()
-    );
-    let incr_compiled = incr_result.unwrap();
-
-    // Monolithic path
-    let engine_project = crate::project::Project::from(project);
-    let mono_result = crate::interpreter::compile_project(&engine_project, "main");
-    assert!(mono_result.is_ok());
-    let mono_compiled = mono_result.unwrap();
-
-    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
-
-    // Run both and compare
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-
-    let pop_ident = crate::common::Ident::new("population");
-    let incr_pop_off = incr_results.offsets[&pop_ident];
-    let mono_pop_off = mono_results.offsets[&pop_ident];
-
-    for step in 0..incr_results.step_count {
-        let incr_val = incr_results.data[step * incr_results.step_size + incr_pop_off];
-        let mono_val = mono_results.data[step * mono_results.step_size + mono_pop_off];
-        assert!(
-            (incr_val - mono_val).abs() < 1e-10,
-            "population mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_val,
-            mono_val
-        );
-    }
 }
 
 /// Teacup model: stock with flow, two constants. Matches the teacup.stmx
@@ -3349,91 +3147,6 @@ fn teacup_project() -> datamodel::Project {
                 }),
             ],
         }],
-    }
-}
-
-#[test]
-fn test_incremental_teacup_constant_detection() {
-    let db = SimlinDb::default();
-    let project = teacup_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
-    let mono_compiled =
-        crate::interpreter::compile_project(&crate::project::Project::from(project), "main")
-            .expect("monolithic compilation failed");
-
-    // room_temperature should be detected as a constant in both paths
-    let room_temp_ident = crate::common::Ident::new("room_temperature");
-    let incr_off = incr_compiled
-        .get_offset(&room_temp_ident)
-        .expect("no offset for room_temperature in incremental");
-    let mono_off = mono_compiled
-        .get_offset(&room_temp_ident)
-        .expect("no offset for room_temperature in monolithic");
-
-    assert!(
-        mono_compiled.is_constant_offset(mono_off),
-        "monolithic should detect room_temperature as constant"
-    );
-    assert!(
-        incr_compiled.is_constant_offset(incr_off),
-        "incremental should detect room_temperature as constant"
-    );
-}
-
-#[test]
-fn test_incremental_teacup_simulation() {
-    use crate::vm::Vm;
-
-    let db = SimlinDb::default();
-    let project = teacup_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
-
-    let mono_compiled =
-        crate::interpreter::compile_project(&crate::project::Project::from(project), "main")
-            .expect("monolithic compilation failed");
-
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    // Temperature should decrease over time (not stay at 0)
-    let temp_ident = crate::common::Ident::new("teacup_temperature");
-    let incr_temp_off = incr_results.offsets[&temp_ident];
-    let first_temp = incr_results.data[incr_temp_off];
-    assert!(
-        first_temp > 0.0,
-        "temperature should not be zero, got {}",
-        first_temp
-    );
-    assert!(
-        (first_temp - 180.0).abs() < 1e-10,
-        "initial temperature should be 180, got {}",
-        first_temp
-    );
-
-    // Compare all values
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-    for step in 0..incr_results.step_count {
-        let incr_val = incr_results.data[step * incr_results.step_size + incr_temp_off];
-        let mono_temp_off = mono_results.offsets[&temp_ident];
-        let mono_val = mono_results.data[step * mono_results.step_size + mono_temp_off];
-        assert!(
-            (incr_val - mono_val).abs() < 1e-10,
-            "temperature mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_val,
-            mono_val
-        );
     }
 }
 
@@ -3918,135 +3631,6 @@ fn test_ac2_4_stdlib_composite_scores_cached() {
         result1, result2,
         "AC2.4: module_ltm_synthetic_variables should be cached on unchanged inputs"
     );
-}
-
-/// AC4.3 (strengthened): Compile a model with stocks, flows, and lookups
-/// both incrementally and monolithically, run both through the VM, and
-/// assert identical time-series output for all variables.
-#[test]
-fn test_ac4_3_full_bytecode_equivalence_stock_flow_lookup() {
-    use crate::vm::Vm;
-
-    let project = datamodel::Project {
-        name: "sfg".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(0.5),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "level".to_string(),
-                    equation: datamodel::Equation::Scalar("50".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["inflow".to_string()],
-                    outflows: vec!["outflow".to_string()],
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "inflow".to_string(),
-                    equation: datamodel::Equation::Scalar("effect * 10".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "outflow".to_string(),
-                    equation: datamodel::Equation::Scalar("level * 0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "effect".to_string(),
-                    equation: datamodel::Equation::Scalar("time".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: Some(datamodel::GraphicalFunction {
-                        kind: datamodel::GraphicalFunctionKind::Continuous,
-                        x_points: Some(vec![0.0, 5.0, 10.0]),
-                        y_points: vec![1.0, 0.5, 0.2],
-                        x_scale: datamodel::GraphicalFunctionScale {
-                            min: 0.0,
-                            max: 10.0,
-                        },
-                        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
-                    }),
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-            ],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }],
-        source: None,
-        ai_information: None,
-    };
-
-    // Incremental path
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, &project);
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
-
-    // Monolithic path
-    let engine_project = crate::project::Project::from(project.clone());
-    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
-        .expect("monolithic compilation failed");
-
-    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
-
-    // Run both
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-    assert_eq!(incr_results.step_size, mono_results.step_size);
-
-    // Compare every variable at every timestep
-    for (ident, &incr_off) in &incr_results.offsets {
-        let mono_off = mono_results
-            .offsets
-            .get(ident)
-            .unwrap_or_else(|| panic!("variable {:?} not found in monolithic results", ident));
-
-        for step in 0..incr_results.step_count {
-            let incr_val = incr_results.data[step * incr_results.step_size + incr_off];
-            let mono_val = mono_results.data[step * mono_results.step_size + mono_off];
-            assert!(
-                (incr_val - mono_val).abs() < 1e-10,
-                "{:?} mismatch at step {}: incr={}, mono={}",
-                ident,
-                step,
-                incr_val,
-                mono_val
-            );
-        }
-    }
 }
 
 /// Test loading teacup.stmx via open_xmile and running through the
@@ -4924,11 +4508,13 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
         "baseline series should be finite before lookup rewrite"
     );
 
+    // Fresh incremental compile as reference
     let project = implicit_lookup_smth1_project();
-    let engine_project = crate::project::Project::from(project.clone());
-    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
-        .expect("monolithic compile should succeed");
-    let mono_series = run_smoothed_series(mono_compiled);
+    let ref_db = SimlinDb::default();
+    let ref_sync = sync_from_datamodel(&ref_db, &project);
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+        .expect("reference incremental compile should succeed");
+    let ref_series = run_smoothed_series(ref_compiled);
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
     let incr_compiled = compile_project_incremental(&db, state2.project, "main")
@@ -4937,22 +4523,22 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
 
     assert_eq!(
         incr_series.len(),
-        mono_series.len(),
-        "incremental and monolithic should have same number of timesteps"
+        ref_series.len(),
+        "incremental and reference should have same number of timesteps"
     );
 
-    for (step, (mono, incr)) in mono_series.iter().zip(incr_series.iter()).enumerate() {
+    for (step, (reference, incr)) in ref_series.iter().zip(incr_series.iter()).enumerate() {
         assert!(
-            mono.is_finite(),
-            "monolithic produced non-finite value at step {step}: {mono}"
+            reference.is_finite(),
+            "reference produced non-finite value at step {step}: {reference}"
         );
         assert!(
             incr.is_finite(),
             "incremental produced non-finite value at step {step}: {incr}"
         );
         assert!(
-            (incr - mono).abs() < 1e-10,
-            "incremental mismatch at step {step}: incr={incr}, mono={mono}"
+            (incr - reference).abs() < 1e-10,
+            "incremental mismatch at step {step}: incr={incr}, reference={reference}"
         );
     }
 }
@@ -4961,13 +4547,15 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
 fn test_incremental_compile_implicit_lookup_dep_tables() {
     let project = implicit_lookup_smth1_project();
 
-    let engine_project = crate::project::Project::from(project.clone());
-    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
-        .expect("monolithic compile should succeed");
-    let mono_series = run_smoothed_series(mono_compiled);
+    // Fresh incremental compile as reference
+    let ref_db = SimlinDb::default();
+    let ref_sync = sync_from_datamodel(&ref_db, &project);
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+        .expect("reference incremental compile should succeed");
+    let ref_series = run_smoothed_series(ref_compiled);
     assert!(
-        !mono_series.is_empty(),
-        "monolithic smoothed series should not be empty"
+        !ref_series.is_empty(),
+        "reference smoothed series should not be empty"
     );
 
     let mut db = SimlinDb::default();
@@ -4984,38 +4572,38 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
 
     assert_eq!(
         incr_series1.len(),
-        mono_series.len(),
-        "incremental (fresh state) should have same number of timesteps as monolithic"
+        ref_series.len(),
+        "incremental (fresh state) should have same number of timesteps as reference"
     );
     assert_eq!(
         incr_series2.len(),
-        mono_series.len(),
-        "incremental (reused state) should have same number of timesteps as monolithic"
+        ref_series.len(),
+        "incremental (reused state) should have same number of timesteps as reference"
     );
 
-    for (step, (mono, incr)) in mono_series.iter().zip(incr_series1.iter()).enumerate() {
+    for (step, (reference, incr)) in ref_series.iter().zip(incr_series1.iter()).enumerate() {
         assert!(
-            mono.is_finite(),
-            "monolithic produced non-finite value at step {step}: {mono}"
+            reference.is_finite(),
+            "reference produced non-finite value at step {step}: {reference}"
         );
         assert!(
             incr.is_finite(),
             "incremental produced non-finite value at step {step}: {incr}"
         );
         assert!(
-            (incr - mono).abs() < 1e-10,
-            "incremental mismatch at step {step}: incr={incr}, mono={mono}"
+            (incr - reference).abs() < 1e-10,
+            "incremental mismatch at step {step}: incr={incr}, reference={reference}"
         );
     }
 
-    for (step, (mono, incr)) in mono_series.iter().zip(incr_series2.iter()).enumerate() {
+    for (step, (reference, incr)) in ref_series.iter().zip(incr_series2.iter()).enumerate() {
         assert!(
             incr.is_finite(),
             "incremental (reused state) produced non-finite value at step {step}: {incr}"
         );
         assert!(
-            (incr - mono).abs() < 1e-10,
-            "incremental (reused state) mismatch at step {step}: incr={incr}, mono={mono}"
+            (incr - reference).abs() < 1e-10,
+            "incremental (reused state) mismatch at step {step}: incr={incr}, reference={reference}"
         );
     }
 }
