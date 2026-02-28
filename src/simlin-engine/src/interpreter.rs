@@ -1451,6 +1451,69 @@ impl ModuleEvaluator<'_> {
                 let start = self.sim.temp_offsets[id];
                 let total_elements = view.dims.iter().product::<usize>();
 
+                // Array-producing builtins need whole-array evaluation rather than
+                // the per-element eval_at_index loop. Detect and handle them first.
+                let whole_array_values: Option<Vec<f64>> = match rhs.as_ref() {
+                    Expr::App(BuiltinFn::VectorSortOrder(array_expr, direction_expr), _) => {
+                        let direction = self.eval(direction_expr).round() as i32;
+                        let mut values = Vec::new();
+                        self.iter_array_elements(array_expr, |val| values.push(val));
+                        let mut indexed: Vec<(usize, f64)> = values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &v)| (i + 1, v))
+                            .collect();
+                        if direction == 1 {
+                            indexed.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+                        Some(
+                            indexed
+                                .iter()
+                                .map(|(orig_idx_1based, _)| *orig_idx_1based as f64)
+                                .collect(),
+                        )
+                    }
+                    Expr::App(BuiltinFn::VectorElmMap(source_array, offset_array), _) => {
+                        let mut source_values = Vec::new();
+                        self.iter_array_elements(source_array, |val| source_values.push(val));
+                        Some(
+                            (0..total_elements)
+                                .map(|i| {
+                                    let raw = self.eval_at_index(offset_array, i).round();
+                                    if raw.is_nan()
+                                        || raw < 0.0
+                                        || raw >= source_values.len() as f64
+                                    {
+                                        f64::NAN
+                                    } else {
+                                        source_values[raw as usize]
+                                    }
+                                })
+                                .collect(),
+                        )
+                    }
+                    Expr::App(BuiltinFn::AllocateAvailable(req_expr, pp_expr, avail_expr), _) => {
+                        Some(self.compute_allocate_available(req_expr, pp_expr, avail_expr))
+                    }
+                    _ => None,
+                };
+
+                if let Some(values) = whole_array_values {
+                    let mut temp_data = (*self.sim.temps).borrow_mut();
+                    for (i, val) in values.iter().enumerate() {
+                        if start + i < temp_data.len() {
+                            temp_data[start + i] = *val;
+                        }
+                    }
+                    return 0.0;
+                }
+
                 // Helper function to evaluate an expression at a specific array index
                 // dims and dim_names are the OUTPUT dimensions; the source view may have
                 // fewer dimensions which requires broadcasting (dimension matching by name).

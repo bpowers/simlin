@@ -13,7 +13,7 @@ pub(crate) mod symbolic;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::ast::{Ast, Loc};
+use crate::ast::{ArrayView, Ast, Loc};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
@@ -648,25 +648,7 @@ impl Var {
                                 exprs
                             }
                             Ast::ApplyToAll(dims, ast) => {
-                                let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
-                                    .enumerate()
-                                    .map(|(i, subscripts)| {
-                                        let ctx = ctx.with_active_subscripts(
-                                            active_dims.clone(),
-                                            &subscripts,
-                                        );
-                                        ctx.lower(ast).map(|mut exprs| {
-                                            let main_expr = exprs.pop().unwrap();
-                                            exprs.push(Expr::AssignCurr(
-                                                off + i,
-                                                Box::new(main_expr),
-                                            ));
-                                            exprs
-                                        })
-                                    })
-                                    .collect();
-                                exprs?.into_iter().flatten().collect()
+                                expand_a2a_with_hoisting(ctx, dims, ast, off)?
                             }
                             Ast::Arrayed(
                                 dims,
@@ -788,20 +770,7 @@ impl Var {
                             exprs
                         }
                         Ast::ApplyToAll(dims, ast) => {
-                            let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
-                                .enumerate()
-                                .map(|(i, subscripts)| {
-                                    let ctx = ctx
-                                        .with_active_subscripts(active_dims.clone(), &subscripts);
-                                    ctx.lower(ast).map(|mut exprs| {
-                                        let main_expr = exprs.pop().unwrap();
-                                        exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
-                                        exprs
-                                    })
-                                })
-                                .collect();
-                            exprs?.into_iter().flatten().collect()
+                            expand_a2a_with_hoisting(ctx, dims, ast, off)?
                         }
                         Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
                             let active_dims = Arc::<[Dimension]>::from(dims.clone());
@@ -857,6 +826,93 @@ impl Var {
             ident: Ident::new(var.ident()),
             ast,
         })
+    }
+}
+
+/// Check if an expression is an array-producing builtin that needs whole-array
+/// evaluation rather than per-element scalar evaluation.
+fn is_array_producing_builtin(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::App(
+            BuiltinFn::VectorElmMap(_, _)
+                | BuiltinFn::VectorSortOrder(_, _)
+                | BuiltinFn::AllocateAvailable(_, _, _),
+            _
+        )
+    )
+}
+
+/// Find the next available temp ID by scanning existing expressions for
+/// AssignTemp nodes. Uses the existing extract_temp_sizes infrastructure
+/// which already walks the full expression tree.
+fn next_available_temp_id(exprs: &[Expr]) -> u32 {
+    let mut temp_sizes_map = HashMap::new();
+    for expr in exprs {
+        extract_temp_sizes(expr, &mut temp_sizes_map);
+    }
+    temp_sizes_map.keys().max().map(|m| m + 1).unwrap_or(0)
+}
+
+/// Construct a contiguous ArrayView from A2A dimensions.
+fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
+    let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+    let dim_names: Vec<String> = dims.iter().map(|d| d.name().to_string()).collect();
+    ArrayView::contiguous_with_names(dim_sizes, dim_names)
+}
+
+/// Handle the A2A expansion for a single lowered expression, detecting
+/// array-producing builtins and hoisting them into AssignTemp pre-computations.
+///
+/// Returns the complete list of expressions (pre-expressions + AssignTemp +
+/// per-element AssignCurr nodes).
+fn expand_a2a_with_hoisting(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    off: usize,
+) -> Result<Vec<Expr>> {
+    // Lower once using element 0's subscripts to detect the expression shape
+    let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
+    let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
+    let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
+    let mut first_exprs = first_ctx.lower(ast)?;
+    let main_expr = first_exprs.pop().unwrap();
+
+    if is_array_producing_builtin(&main_expr) {
+        let temp_id = next_available_temp_id(&first_exprs);
+        let view = array_view_from_dims(dims);
+        let total_elements: usize = dims.iter().map(|d| d.len()).product();
+        let loc = main_expr.get_loc();
+
+        let mut result = first_exprs;
+        result.push(Expr::AssignTemp(temp_id, Box::new(main_expr), view.clone()));
+        for i in 0..total_elements {
+            result.push(Expr::AssignCurr(
+                off + i,
+                Box::new(Expr::TempArrayElement(temp_id, view.clone(), i, loc)),
+            ));
+        }
+        Ok(result)
+    } else {
+        // Not an array-producing builtin: fall back to the standard per-element loop.
+        // We already lowered element 0, so start from there.
+        first_exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+        let rest: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
+            .enumerate()
+            .skip(1)
+            .map(|(i, subscripts)| {
+                let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                ctx.lower(ast).map(|mut exprs| {
+                    let main_expr = exprs.pop().unwrap();
+                    exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                    exprs
+                })
+            })
+            .collect();
+        let mut all_exprs = first_exprs;
+        all_exprs.extend(rest?.into_iter().flatten());
+        Ok(all_exprs)
     }
 }
 
