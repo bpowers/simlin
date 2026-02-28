@@ -804,6 +804,30 @@ pub(crate) enum Opcode {
     /// Size (element count) of top view.
     ArraySize {},
 
+    // === VECTOR OPERATIONS ===
+    // These implement Vensim's array-producing builtins that cannot be
+    // expressed as simple element-wise iteration or scalar reduction.
+    /// Reduces selected array elements to one scalar.
+    /// Reads 2 views (selection mask, expression values) from the view stack
+    /// and 2 scalars (max_value, action) from the arithmetic stack.
+    /// The result is a single scalar pushed onto the arithmetic stack.
+    VectorSelect {},
+
+    /// Element-wise mapping operation; writes full result array to temp_storage.
+    VectorElmMap {
+        write_temp_id: TempId,
+    },
+
+    /// Produces an array of sort-order indices; writes to temp_storage.
+    VectorSortOrder {
+        write_temp_id: TempId,
+    },
+
+    /// Priority-based allocation; writes result array to temp_storage.
+    AllocateAvailable {
+        write_temp_id: TempId,
+    },
+
     // === BROADCASTING ITERATION ===
     // For operations like A[DimA, DimB] * B[DimA] where dims must match by name.
     /// Begin broadcast iteration over multiple source views.
@@ -950,6 +974,14 @@ impl Opcode {
             | Opcode::ArrayMean {}
             | Opcode::ArrayStddev {}
             | Opcode::ArraySize {} => (0, 1),
+
+            // VectorSelect pops 2 scalars (max_value, action), pushes 1 result
+            Opcode::VectorSelect {} => (2, 1),
+            // Array-producing vector ops don't touch the arithmetic stack
+            // (they write to temp_storage and read views + scalars)
+            Opcode::VectorElmMap { .. } => (0, 0),
+            Opcode::VectorSortOrder { .. } => (0, 0),
+            Opcode::AllocateAvailable { .. } => (0, 0),
 
             // Broadcasting
             Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),

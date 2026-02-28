@@ -1938,6 +1938,14 @@ impl Vm {
                 Opcode::EndBroadcastIter {} => {
                     broadcast_stack.pop();
                 }
+
+                // Vector operations -- dispatched in Phase 5
+                Opcode::VectorSelect {}
+                | Opcode::VectorElmMap { .. }
+                | Opcode::VectorSortOrder { .. }
+                | Opcode::AllocateAvailable { .. } => {
+                    unimplemented!("vector operation opcodes not yet dispatched");
+                }
             }
 
             pc += 1;
