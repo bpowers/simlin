@@ -679,7 +679,16 @@ impl ModuleEvaluator<'_> {
             }
             Expr::StaticSubscript(off, view, _) => {
                 let total = view.dims.iter().product::<usize>().max(1);
-                (0..total).map(|i| self.curr[self.off + *off + i]).collect()
+                if view.is_contiguous() {
+                    (0..total)
+                        .map(|i| self.curr[self.off + *off + view.offset + i])
+                        .collect()
+                } else {
+                    // Use stride-based indexing for non-contiguous views
+                    let mut vals = Vec::with_capacity(total);
+                    self.iter_array_elements(pp_expr, |val| vals.push(val));
+                    vals
+                }
             }
             _ => {
                 let mut vals = Vec::new();

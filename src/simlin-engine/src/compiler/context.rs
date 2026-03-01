@@ -768,6 +768,40 @@ impl Context<'_> {
         Ok(result)
     }
 
+    /// Lower an expression like `lower()`, but skip resolving Dimension
+    /// references in Pass 1.  This keeps `IndexExpr3::Dimension` intact so
+    /// that `normalize_subscripts3` can turn them into `ActiveDimRef`, which
+    /// `preserve_wildcards_for_iteration` then converts to `Wildcard` inside
+    /// array-producing builtins.
+    ///
+    /// Used when lowering equations from `Ast::Arrayed` that contain
+    /// array-producing builtins (VectorElmMap, VectorSortOrder, etc.).
+    pub(super) fn lower_preserving_dimensions(&self, expr: &ast::Expr2) -> Result<Vec<Expr>> {
+        let normalized = self.lower_pass0(expr);
+
+        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
+            kind: ErrorKind::Model,
+            code: e.code,
+            details: Some(format!("Error at {}:{}", e.start, e.end)),
+        })?;
+
+        // Use Pass1Context WITHOUT A2A context so Dimension references
+        // are preserved (not resolved to concrete element indices).
+        let mut pass1_ctx = Pass1Context::new();
+        let transformed = pass1_ctx.transform(expr3);
+        let assignments = pass1_ctx.take_assignments();
+
+        let mut result: Vec<Expr> = assignments
+            .iter()
+            .map(|a| self.lower_from_expr3(a))
+            .collect::<Result<Vec<_>>>()?;
+
+        let main_expr = self.lower_from_expr3(&transformed)?;
+        result.push(main_expr);
+
+        Ok(result)
+    }
+
     pub(super) fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Result<Option<Expr>> {
         if flows.is_empty() {
             return Ok(None);
@@ -1221,11 +1255,18 @@ impl Context<'_> {
                             .iter()
                             .any(|op| matches!(op, IndexOp::DimPosition(_)));
 
-                        // Check for operations that preserve dimensions for iteration
+                        // Check for operations that preserve dimensions for iteration.
+                        // ActiveDimRef is included because inside array-producing
+                        // builtins (VectorSortOrder, VectorElmMap etc.) dimension
+                        // references like h[DimA] must keep their full array view
+                        // rather than collapsing to a single element.
                         let has_iteration_preserving_ops = operations.iter().any(|op| {
                             matches!(
                                 op,
-                                IndexOp::Wildcard | IndexOp::SparseRange(_) | IndexOp::Range(_, _)
+                                IndexOp::Wildcard
+                                    | IndexOp::SparseRange(_)
+                                    | IndexOp::Range(_, _)
+                                    | IndexOp::ActiveDimRef(_)
                             )
                         });
 
@@ -1235,7 +1276,22 @@ impl Context<'_> {
                         if has_dim_positions {
                             // Fall through to dynamic handling at the end
                         } else if preserve_for_iteration {
-                            return Ok(Expr::StaticSubscript(off, view, *loc));
+                            // Rebuild view with ActiveDimRef treated as Wildcard
+                            // so the full dimension is preserved for array iteration
+                            let preserved_ops: Vec<IndexOp> = operations
+                                .iter()
+                                .map(|op| match op {
+                                    IndexOp::ActiveDimRef(_) => IndexOp::Wildcard,
+                                    other => other.clone(),
+                                })
+                                .collect();
+                            let preserved_result = build_view_from_ops(
+                                &preserved_ops,
+                                &orig_dims,
+                                &orig_strides,
+                                &view_config,
+                            )?;
+                            return Ok(Expr::StaticSubscript(off, preserved_result.view, *loc));
                         } else {
                             if view.dims.is_empty() {
                                 return Ok(Expr::Var(off + view.offset, *loc));
@@ -1926,15 +1982,72 @@ impl Context<'_> {
             }
             BFn::AllocateAvailable(req, pp, avail) => {
                 let ctx = self.with_preserved_wildcards();
+                let lowered_req = ctx.lower_from_expr3(req)?;
+                // The pp argument needs the full 2D array (requester_dim x XPriority).
+                // In Vensim, pp[region, ptype] means "priority_vector starting from ptype",
+                // but ALLOCATE AVAILABLE reads all 4 XPriority columns for each requester.
+                // Lower pp normally, then expand any single-element-collapsed dimensions
+                // back to full wildcards by replacing the view with a full-array view.
+                let lowered_pp = ctx.lower_from_expr3(pp)?;
+                let lowered_pp = self.expand_pp_view_for_allocate(pp, lowered_pp)?;
                 BuiltinFn::AllocateAvailable(
-                    Box::new(ctx.lower_from_expr3(req)?),
-                    Box::new(ctx.lower_from_expr3(pp)?),
+                    Box::new(lowered_req),
+                    Box::new(lowered_pp),
                     Box::new(self.lower_from_expr3(avail)?),
                 )
             }
             BFn::Previous(a) => BuiltinFn::Previous(Box::new(self.lower_from_expr3(a)?)),
             BFn::Init(a) => BuiltinFn::Init(Box::new(self.lower_from_expr3(a)?)),
         })
+    }
+
+    /// For ALLOCATE AVAILABLE's pp argument, ensure the full variable array
+    /// is accessible.  The Vensim convention pp[requester_dim, ptype] means
+    /// "the priority vector starting at ptype", but ALLOCATE AVAILABLE reads
+    /// all XPriority columns for each requester.  If lowering produced a
+    /// StaticSubscript that collapsed some dimensions (e.g. only region but
+    /// not XPriority), replace it with a full-variable view.
+    fn expand_pp_view_for_allocate(&self, expr3: &Expr3, lowered: Expr) -> Result<Expr> {
+        // Only expand if the lowered expression is a subscripted variable
+        // with fewer dimensions than the full variable.
+        let (current_view, loc) = match &lowered {
+            Expr::StaticSubscript(_, view, loc) => (Some(view), *loc),
+            Expr::Var(_, loc) => (None, *loc),
+            _ => return Ok(lowered),
+        };
+
+        // Find the variable identifier from the Expr3 to look up full dimensions
+        let var_ident = match expr3 {
+            Expr3::Subscript(id, _, _, _) => id,
+            Expr3::Var(id, _, _) => id,
+            _ => return Ok(lowered),
+        };
+
+        let metadata = match self.get_metadata(var_ident) {
+            Ok(m) => m,
+            Err(_) => return Ok(lowered),
+        };
+
+        let full_dims = match metadata.var.get_dimensions() {
+            Some(d) => d,
+            None => return Ok(lowered),
+        };
+
+        let full_ndims = full_dims.len();
+        let current_ndims = current_view.map(|v| v.dims.len()).unwrap_or(0);
+
+        if current_ndims >= full_ndims {
+            return Ok(lowered);
+        }
+
+        // The view has fewer dimensions than the full variable -- some were
+        // collapsed to Single.  Rebuild with a full contiguous view from
+        // the variable's base offset.
+        let base = self.get_base_offset(var_ident)?;
+        let dim_sizes: Vec<usize> = full_dims.iter().map(|d| d.len()).collect();
+        let dim_names: Vec<String> = full_dims.iter().map(|d| d.name().to_string()).collect();
+        let view = ArrayView::contiguous_with_names(dim_sizes, dim_names);
+        Ok(Expr::StaticSubscript(base, view, loc))
     }
 
     /// Lower an IndexExpr3 to SubscriptIndex for dynamic subscript handling.

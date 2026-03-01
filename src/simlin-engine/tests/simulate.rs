@@ -1033,19 +1033,17 @@ fn simulates_quantum_mdl() {
 
 #[test]
 fn simulates_vector_simple_mdl() {
-    simulate_mdl_path_interpreter_only(
-        "../../test/sdeverywhere/models/vector_simple/vector_simple.mdl",
-    );
+    simulate_mdl_path("../../test/sdeverywhere/models/vector_simple/vector_simple.mdl");
 }
 
 #[test]
 fn simulates_allocate_mdl() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/allocate/allocate.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/allocate/allocate.mdl");
 }
 
 #[test]
 fn simulates_allocate_xmile() {
-    simulate_path_interpreter_only("../../test/sdeverywhere/models/allocate/allocate.xmile");
+    simulate_path("../../test/sdeverywhere/models/allocate/allocate.xmile");
 }
 
 #[test]
