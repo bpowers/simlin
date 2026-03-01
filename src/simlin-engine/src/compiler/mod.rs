@@ -995,6 +995,15 @@ fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
 /// handling the case where nested builtins operate on different dimensions.
 /// On the first call (element 0), collects the hoisted AssignTemp expressions.
 /// On subsequent calls, only performs the replacement using the same temp IDs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NestedBuiltinArgMode {
+    /// Expression is consumed as a scalar for the current A2A element.
+    ScalarElement,
+    /// Expression is consumed as an array value (e.g., SUM arg) and must keep
+    /// full-array semantics.
+    ArrayValue,
+}
+
 fn replace_nested_builtins_for_element(
     expr: Expr,
     var_idx: usize,
@@ -1002,17 +1011,23 @@ fn replace_nested_builtins_for_element(
     temp_id: &mut u32,
     hoisted: &mut Vec<Expr>,
     collect_hoisted: bool,
+    arg_mode: NestedBuiltinArgMode,
 ) -> Expr {
     if is_array_producing_builtin(&expr) {
         let id = *temp_id;
         *temp_id += 1;
         let loc = expr.get_loc();
         let builtin_view = find_expr_array_view(&expr).unwrap_or_else(|| var_view.clone());
-        let element_idx = project_var_index_to_temp(var_idx, var_view, &builtin_view);
         if collect_hoisted {
             hoisted.push(Expr::AssignTemp(id, Box::new(expr), builtin_view.clone()));
         }
-        return Expr::TempArrayElement(id, builtin_view, element_idx, loc);
+        return match arg_mode {
+            NestedBuiltinArgMode::ScalarElement => {
+                let element_idx = project_var_index_to_temp(var_idx, var_view, &builtin_view);
+                Expr::TempArrayElement(id, builtin_view, element_idx, loc)
+            }
+            NestedBuiltinArgMode::ArrayValue => Expr::TempArray(id, builtin_view, loc),
+        };
     }
     match expr {
         Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
@@ -1024,6 +1039,7 @@ fn replace_nested_builtins_for_element(
                 temp_id,
                 hoisted,
                 collect_hoisted,
+                arg_mode,
             )),
             Box::new(replace_nested_builtins_for_element(
                 *rhs,
@@ -1032,6 +1048,7 @@ fn replace_nested_builtins_for_element(
                 temp_id,
                 hoisted,
                 collect_hoisted,
+                arg_mode,
             )),
             loc,
         ),
@@ -1044,6 +1061,7 @@ fn replace_nested_builtins_for_element(
                 temp_id,
                 hoisted,
                 collect_hoisted,
+                arg_mode,
             )),
             loc,
         ),
@@ -1055,6 +1073,7 @@ fn replace_nested_builtins_for_element(
                 temp_id,
                 hoisted,
                 collect_hoisted,
+                arg_mode,
             )),
             Box::new(replace_nested_builtins_for_element(
                 *t,
@@ -1063,6 +1082,7 @@ fn replace_nested_builtins_for_element(
                 temp_id,
                 hoisted,
                 collect_hoisted,
+                arg_mode,
             )),
             Box::new(replace_nested_builtins_for_element(
                 *f,
@@ -1071,26 +1091,255 @@ fn replace_nested_builtins_for_element(
                 temp_id,
                 hoisted,
                 collect_hoisted,
+                arg_mode,
             )),
             loc,
         ),
-        // Descend into builtin arguments so that patterns like ABS(VECTOR_ELM_MAP(...))
-        // are correctly hoisted -- the array-producing builtin inside gets replaced with
-        // a TempArrayElement reference, and the outer non-array-producing builtin is
-        // preserved with its sub-expressions updated.
-        Expr::App(builtin, loc) => Expr::App(
-            builtin.map(|sub_expr| {
-                replace_nested_builtins_for_element(
-                    sub_expr,
-                    var_idx,
-                    var_view,
-                    temp_id,
-                    hoisted,
-                    collect_hoisted,
-                )
-            }),
-            loc,
-        ),
+        // Descend into builtin arguments while preserving whether each argument
+        // expects a scalar element or a full array value.
+        Expr::App(builtin, loc) => {
+            let rewritten = match builtin {
+                BuiltinFn::Sum(arg) => {
+                    BuiltinFn::Sum(Box::new(replace_nested_builtins_for_element(
+                        *arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )))
+                }
+                BuiltinFn::Stddev(arg) => {
+                    BuiltinFn::Stddev(Box::new(replace_nested_builtins_for_element(
+                        *arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )))
+                }
+                BuiltinFn::Size(arg) => {
+                    BuiltinFn::Size(Box::new(replace_nested_builtins_for_element(
+                        *arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )))
+                }
+                BuiltinFn::Max(arg, None) => BuiltinFn::Max(
+                    Box::new(replace_nested_builtins_for_element(
+                        *arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )),
+                    None,
+                ),
+                BuiltinFn::Min(arg, None) => BuiltinFn::Min(
+                    Box::new(replace_nested_builtins_for_element(
+                        *arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )),
+                    None,
+                ),
+                BuiltinFn::Mean(args) if args.len() == 1 => {
+                    let mut it = args.into_iter();
+                    let arg = it.next().expect("Mean(args) len checked");
+                    BuiltinFn::Mean(vec![replace_nested_builtins_for_element(
+                        arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )])
+                }
+                BuiltinFn::Rank(arg, opt) => BuiltinFn::Rank(
+                    Box::new(replace_nested_builtins_for_element(
+                        *arg,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )),
+                    opt.map(|(a, b)| {
+                        (
+                            Box::new(replace_nested_builtins_for_element(
+                                *a,
+                                var_idx,
+                                var_view,
+                                temp_id,
+                                hoisted,
+                                collect_hoisted,
+                                NestedBuiltinArgMode::ScalarElement,
+                            )),
+                            b.map(|c| {
+                                Box::new(replace_nested_builtins_for_element(
+                                    *c,
+                                    var_idx,
+                                    var_view,
+                                    temp_id,
+                                    hoisted,
+                                    collect_hoisted,
+                                    NestedBuiltinArgMode::ScalarElement,
+                                ))
+                            }),
+                        )
+                    }),
+                ),
+                BuiltinFn::VectorSelect(selection, expr, max_value, action, error_handling) => {
+                    BuiltinFn::VectorSelect(
+                        Box::new(replace_nested_builtins_for_element(
+                            *selection,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *expr,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *max_value,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ScalarElement,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *action,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ScalarElement,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *error_handling,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ScalarElement,
+                        )),
+                    )
+                }
+                BuiltinFn::VectorElmMap(source, offsets) => BuiltinFn::VectorElmMap(
+                    Box::new(replace_nested_builtins_for_element(
+                        *source,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )),
+                    Box::new(replace_nested_builtins_for_element(
+                        *offsets,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        NestedBuiltinArgMode::ArrayValue,
+                    )),
+                ),
+                BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
+                    BuiltinFn::VectorSortOrder(
+                        Box::new(replace_nested_builtins_for_element(
+                            *array_expr,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *direction_expr,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ScalarElement,
+                        )),
+                    )
+                }
+                BuiltinFn::AllocateAvailable(requests, profile, avail) => {
+                    BuiltinFn::AllocateAvailable(
+                        Box::new(replace_nested_builtins_for_element(
+                            *requests,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *profile,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *avail,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ScalarElement,
+                        )),
+                    )
+                }
+                other => other.map(|sub_expr| {
+                    replace_nested_builtins_for_element(
+                        sub_expr,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        arg_mode,
+                    )
+                }),
+            };
+            Expr::App(rewritten, loc)
+        }
         other => other,
     }
 }
@@ -1378,6 +1627,7 @@ fn expand_a2a_hoisted(
                     &mut temp_id,
                     &mut hoisted,
                     true,
+                    NestedBuiltinArgMode::ScalarElement,
                 );
                 result.extend(hoisted);
                 result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
@@ -1394,6 +1644,7 @@ fn expand_a2a_hoisted(
                 &mut temp_id,
                 &mut hoisted,
                 true,
+                NestedBuiltinArgMode::ScalarElement,
             );
             result.extend(hoisted);
             result.push(Expr::AssignCurr(off, Box::new(rewritten)));
@@ -1412,6 +1663,7 @@ fn expand_a2a_hoisted(
                     &mut tid,
                     &mut unused,
                     false,
+                    NestedBuiltinArgMode::ScalarElement,
                 );
                 result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
             }
@@ -1540,6 +1792,7 @@ fn expand_arrayed_hoisted(
                 &mut temp_id,
                 &mut hoisted,
                 true,
+                NestedBuiltinArgMode::ScalarElement,
             );
             result.extend(hoisted);
             ast_temp_bases.insert(hoisting_ast as *const _, base_temp_id);
@@ -1620,6 +1873,7 @@ fn expand_arrayed_hoisted(
                         &mut temp_id,
                         &mut hoisted,
                         true,
+                        NestedBuiltinArgMode::ScalarElement,
                     );
                     result.extend(hoisted);
                     result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
@@ -1663,6 +1917,7 @@ fn expand_arrayed_hoisted(
                         &mut temp_id,
                         &mut new_hoisted,
                         true,
+                        NestedBuiltinArgMode::ScalarElement,
                     );
                     result.extend(new_hoisted);
                     ast_temp_bases.insert(ast_ptr, new_base);
@@ -1681,6 +1936,7 @@ fn expand_arrayed_hoisted(
                     &mut tid,
                     &mut unused,
                     false,
+                    NestedBuiltinArgMode::ScalarElement,
                 );
                 result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
             } else if let Some(ast) = elem_ast {

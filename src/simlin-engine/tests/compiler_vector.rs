@@ -96,6 +96,73 @@ fn vector_elm_map_a2a_produces_correct_values_vm() {
     project.assert_vm_result("result", &[10.0, 30.0, 20.0]);
 }
 
+#[test]
+fn nested_vector_elm_map_inside_max_interpreter() {
+    // source = [10, 20, 30], offsets = [2, 0, 1] => VEM = [30, 10, 20]
+    // MAX(VEM, 15) should be element-wise: [30, 15, 20]
+    let project = TestProject::new("vem_nested_max_interp")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .array_aux(
+            "result[D]",
+            "max(vector_elm_map(source[*], offsets[*]), 15)",
+        );
+
+    project.assert_interpreter_result("result", &[30.0, 15.0, 20.0]);
+}
+
+#[test]
+fn nested_vector_elm_map_inside_max_vm() {
+    let project = TestProject::new("vem_nested_max_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .array_aux(
+            "result[D]",
+            "max(vector_elm_map(source[*], offsets[*]), 15)",
+        );
+
+    project.assert_vm_result("result", &[30.0, 15.0, 20.0]);
+}
+
+#[test]
+fn nested_vector_elm_map_inside_sum_interpreter() {
+    // source = [10, 20, 30], offsets = [2, 0, 1] => VEM = [30, 10, 20]
+    // SUM(VEM) = 60
+    let project = TestProject::new("vem_nested_sum_interp")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .scalar_aux("result", "sum(vector_elm_map(source[*], offsets[*]))");
+
+    project.assert_interpreter_result("result", &[60.0, 60.0]);
+}
+
+#[test]
+fn nested_vector_elm_map_inside_sum_in_array_context_interpreter() {
+    // In array context, SUM(VEM(...)) should still evaluate VEM as an array,
+    // not as an element-local scalar.
+    let project = TestProject::new("vem_nested_sum_array_context_interp")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .array_aux("result[D]", "sum(vector_elm_map(source[*], offsets[*]))");
+
+    project.assert_interpreter_result("result", &[60.0, 60.0, 60.0]);
+}
+
+#[test]
+fn nested_vector_sort_order_inside_sum_in_array_context_interpreter() {
+    // vals = [30, 10, 20], vector_sort_order(vals, 1) = [2, 3, 1], SUM = 6
+    let project = TestProject::new("vso_nested_sum_array_context_interp")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+        .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
+
+    project.assert_interpreter_result("result", &[6.0, 6.0, 6.0]);
+}
+
 // ---------------------------------------------------------------------------
 // AC4.3 - AllocateAvailable: AssignTemp hoisting in array context
 // ---------------------------------------------------------------------------
@@ -164,4 +231,39 @@ fn allocate_available_a2a_sums_to_supply_interpreter() {
 fn allocate_available_a2a_sums_to_supply_vm() {
     let project = make_alloc_project("alloc_a2a_sum_vm");
     project.assert_scalar_result("total_alloc", 40.0);
+}
+
+#[test]
+fn nested_allocate_available_inside_sum_in_array_context_interpreter() {
+    // allocate_available(request, pp, supply) returns a D-array whose total is supply.
+    // SUM(...) should therefore be 40, and in array context each element should
+    // receive that same scalar reduction result.
+    let project = TestProject::new("alloc_nested_sum_array_context_interp")
+        .indexed_dimension("D", 3)
+        .indexed_dimension("XP", 4)
+        .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .scalar_const("supply", 40.0)
+        .array_with_ranges(
+            "pp[D,XP]",
+            vec![
+                ("1,1", "3"),
+                ("1,2", "1"),
+                ("1,3", "1"),
+                ("1,4", "0"),
+                ("2,1", "3"),
+                ("2,2", "1"),
+                ("2,3", "1"),
+                ("2,4", "0"),
+                ("3,1", "3"),
+                ("3,2", "1"),
+                ("3,3", "1"),
+                ("3,4", "0"),
+            ],
+        )
+        .array_aux(
+            "result[D]",
+            "sum(allocate_available(request[*], pp[*,1], supply))",
+        );
+
+    project.assert_interpreter_result("result", &[40.0, 40.0, 40.0]);
 }
