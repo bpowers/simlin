@@ -127,6 +127,23 @@ fn nested_vector_elm_map_inside_max_vm() {
 }
 
 #[test]
+fn scalar_max_with_vector_elm_map_returns_structured_vm_compile_error() {
+    let project = TestProject::new("vem_scalar_max_vm_error")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .scalar_aux("result", "max(vector_elm_map(source[*], offsets[*]), 15)");
+
+    let err = project
+        .run_vm()
+        .expect_err("scalar max(vector_elm_map(...), 15) should fail with a compile error");
+    assert!(
+        err.contains("array-producing builtin outside AssignTemp context"),
+        "expected structured compile error, got: {err}"
+    );
+}
+
+#[test]
 fn nested_vector_elm_map_inside_sum_interpreter() {
     // source = [10, 20, 30], offsets = [2, 0, 1] => VEM = [30, 10, 20]
     // SUM(VEM) = 60
@@ -137,6 +154,17 @@ fn nested_vector_elm_map_inside_sum_interpreter() {
         .scalar_aux("result", "sum(vector_elm_map(source[*], offsets[*]))");
 
     project.assert_interpreter_result("result", &[60.0, 60.0]);
+}
+
+#[test]
+fn nested_vector_elm_map_inside_sum_vm() {
+    let project = TestProject::new("vem_nested_sum_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .scalar_aux("result", "sum(vector_elm_map(source[*], offsets[*]))");
+
+    project.assert_vm_result("result", &[60.0, 60.0]);
 }
 
 #[test]
@@ -153,6 +181,17 @@ fn nested_vector_elm_map_inside_sum_in_array_context_interpreter() {
 }
 
 #[test]
+fn nested_vector_elm_map_inside_sum_in_array_context_vm() {
+    let project = TestProject::new("vem_nested_sum_array_context_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .array_aux("result[D]", "sum(vector_elm_map(source[*], offsets[*]))");
+
+    project.assert_vm_result("result", &[60.0, 60.0, 60.0]);
+}
+
+#[test]
 fn nested_vector_sort_order_inside_sum_in_array_context_interpreter() {
     // vals = [30, 10, 20], vector_sort_order(vals, 1) = [2, 3, 1], SUM = 6
     let project = TestProject::new("vso_nested_sum_array_context_interp")
@@ -161,6 +200,16 @@ fn nested_vector_sort_order_inside_sum_in_array_context_interpreter() {
         .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
 
     project.assert_interpreter_result("result", &[6.0, 6.0, 6.0]);
+}
+
+#[test]
+fn nested_vector_sort_order_inside_sum_in_array_context_vm() {
+    let project = TestProject::new("vso_nested_sum_array_context_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+        .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
+
+    project.assert_vm_result("result", &[6.0, 6.0, 6.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,4 +315,36 @@ fn nested_allocate_available_inside_sum_in_array_context_interpreter() {
         );
 
     project.assert_interpreter_result("result", &[40.0, 40.0, 40.0]);
+}
+
+#[test]
+fn nested_allocate_available_inside_sum_in_array_context_vm() {
+    let project = TestProject::new("alloc_nested_sum_array_context_vm")
+        .indexed_dimension("D", 3)
+        .indexed_dimension("XP", 4)
+        .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .scalar_const("supply", 40.0)
+        .array_with_ranges(
+            "pp[D,XP]",
+            vec![
+                ("1,1", "3"),
+                ("1,2", "1"),
+                ("1,3", "1"),
+                ("1,4", "0"),
+                ("2,1", "3"),
+                ("2,2", "1"),
+                ("2,3", "1"),
+                ("2,4", "0"),
+                ("3,1", "3"),
+                ("3,2", "1"),
+                ("3,3", "1"),
+                ("3,4", "0"),
+            ],
+        )
+        .array_aux(
+            "result[D]",
+            "sum(allocate_available(request[*], pp[*,1], supply))",
+        );
+
+    project.assert_vm_result("result", &[40.0, 40.0, 40.0]);
 }
