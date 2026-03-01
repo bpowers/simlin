@@ -909,14 +909,16 @@ fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
 }
 
 /// Replace array-producing builtins in an expression tree with
-/// TempArrayElement references for a specific element index. On the first
-/// call (element 0), collects the hoisted AssignTemp expressions. On
-/// subsequent calls, only performs the replacement using the same temp IDs.
+/// TempArrayElement references. Each nested builtin's index is projected
+/// from the variable's element index using that builtin's own ArrayView,
+/// handling the case where nested builtins operate on different dimensions.
+/// On the first call (element 0), collects the hoisted AssignTemp expressions.
+/// On subsequent calls, only performs the replacement using the same temp IDs.
 fn replace_nested_builtins_for_element(
     expr: Expr,
-    element_idx: usize,
+    var_idx: usize,
+    var_view: &ArrayView,
     temp_id: &mut u32,
-    view: &ArrayView,
     hoisted: &mut Vec<Expr>,
     collect_hoisted: bool,
 ) -> Expr {
@@ -924,10 +926,8 @@ fn replace_nested_builtins_for_element(
         let id = *temp_id;
         *temp_id += 1;
         let loc = expr.get_loc();
-        // Each nested builtin may operate on different dimensions than the
-        // overall expression, so extract this builtin's own view rather
-        // than using the caller's shared view.
-        let builtin_view = find_expr_array_view(&expr).unwrap_or_else(|| view.clone());
+        let builtin_view = find_expr_array_view(&expr).unwrap_or_else(|| var_view.clone());
+        let element_idx = project_var_index_to_temp(var_idx, var_view, &builtin_view);
         if collect_hoisted {
             hoisted.push(Expr::AssignTemp(id, Box::new(expr), builtin_view.clone()));
         }
@@ -938,17 +938,17 @@ fn replace_nested_builtins_for_element(
             op,
             Box::new(replace_nested_builtins_for_element(
                 *lhs,
-                element_idx,
+                var_idx,
+                var_view,
                 temp_id,
-                view,
                 hoisted,
                 collect_hoisted,
             )),
             Box::new(replace_nested_builtins_for_element(
                 *rhs,
-                element_idx,
+                var_idx,
+                var_view,
                 temp_id,
-                view,
                 hoisted,
                 collect_hoisted,
             )),
@@ -958,9 +958,9 @@ fn replace_nested_builtins_for_element(
             op,
             Box::new(replace_nested_builtins_for_element(
                 *inner,
-                element_idx,
+                var_idx,
+                var_view,
                 temp_id,
-                view,
                 hoisted,
                 collect_hoisted,
             )),
@@ -969,25 +969,25 @@ fn replace_nested_builtins_for_element(
         Expr::If(cond, t, f, loc) => Expr::If(
             Box::new(replace_nested_builtins_for_element(
                 *cond,
-                element_idx,
+                var_idx,
+                var_view,
                 temp_id,
-                view,
                 hoisted,
                 collect_hoisted,
             )),
             Box::new(replace_nested_builtins_for_element(
                 *t,
-                element_idx,
+                var_idx,
+                var_view,
                 temp_id,
-                view,
                 hoisted,
                 collect_hoisted,
             )),
             Box::new(replace_nested_builtins_for_element(
                 *f,
-                element_idx,
+                var_idx,
+                var_view,
                 temp_id,
-                view,
                 hoisted,
                 collect_hoisted,
             )),
@@ -1001,9 +1001,9 @@ fn replace_nested_builtins_for_element(
             builtin.map(|sub_expr| {
                 replace_nested_builtins_for_element(
                     sub_expr,
-                    element_idx,
+                    var_idx,
+                    var_view,
                     temp_id,
-                    view,
                     hoisted,
                     collect_hoisted,
                 )
@@ -1049,37 +1049,31 @@ fn expand_arrayed_with_hoisting(
 ) -> Result<Vec<Expr>> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
 
-    // Lower first element to detect array-producing builtins
-    let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
-    let first_key = CanonicalElementName::from_raw(&first_subscripts.join(","));
-    let first_ast = elements.get(&first_key).or(if apply_default_for_missing {
-        default_ast
-    } else {
-        None
-    });
+    // Scan ALL subscript combinations to find any equation that needs hoisting.
+    // The first element alone may be a constant override while later elements
+    // use a default (or explicit equation) containing array-producing builtins.
+    let mut hoisting_ast: Option<&crate::ast::Expr2> = None;
+    for subscripts in SubscriptIterator::new(dims) {
+        let key = CanonicalElementName::from_raw(&subscripts.join(","));
+        let ast = elements.get(&key).or(if apply_default_for_missing {
+            default_ast
+        } else {
+            None
+        });
+        if let Some(ast) = ast {
+            let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+            let mut probe_exprs = probe_ctx.lower(ast)?;
+            let probe_main = probe_exprs.pop().unwrap();
+            if is_array_producing_builtin(&probe_main)
+                || contains_array_producing_builtin(&probe_main)
+            {
+                hoisting_ast = Some(ast);
+                break;
+            }
+        }
+    }
 
-    // Lowering the first element here is probe work only -- if hoisting is needed,
-    // expand_a2a_with_hoisting will lower again. The redundant work is intentional:
-    // detecting the need for hoisting requires a lowered expression, but the A2A
-    // path needs to re-lower with different subscript context. The cost is at
-    // compile time only, not runtime.
-    let needs_hoisting = if let Some(first_ast) = first_ast {
-        let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
-        let mut probe_exprs = first_ctx.lower(first_ast)?;
-        let probe_main = probe_exprs.pop().unwrap();
-        is_array_producing_builtin(&probe_main) || contains_array_producing_builtin(&probe_main)
-    } else {
-        false
-    };
-
-    if needs_hoisting {
-        // Array-producing builtins need A2A-style lowering which preserves
-        // full array views. Hoist the detected equation into AssignTemp
-        // pre-computations, but respect per-element overrides (EXCEPT
-        // semantics): elements using the hoisted equation get TempArrayElement
-        // reads, while overrides are lowered normally.
-        let hoisting_ast = first_ast.unwrap();
-        let hoisting_from_default = !elements.contains_key(&first_key);
+    if let Some(hoisting_ast) = hoisting_ast {
         expand_arrayed_hoisted(
             ctx,
             dims,
@@ -1088,7 +1082,6 @@ fn expand_arrayed_with_hoisting(
             apply_default_for_missing,
             off,
             &active_dims,
-            hoisting_from_default,
             hoisting_ast,
         )
     } else {
@@ -1227,16 +1220,14 @@ fn expand_a2a_hoisted(
         // already-computed temps.
         let base_temp_id = next_available_temp_id(&first_exprs);
         let var_view = array_view_from_dims(dims);
-        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
 
         let mut hoisted = Vec::new();
         let mut temp_id = base_temp_id;
-        let first_temp_idx = project_var_index_to_temp(0, &var_view, &builtin_view);
         let rewritten = replace_nested_builtins_for_element(
             main_expr,
-            first_temp_idx,
+            0,
+            &var_view,
             &mut temp_id,
-            &builtin_view,
             &mut hoisted,
             true,
         );
@@ -1254,12 +1245,11 @@ fn expand_a2a_hoisted(
 
             let mut tid = base_temp_id;
             let mut unused = Vec::new();
-            let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
             let elem_rewritten = replace_nested_builtins_for_element(
                 elem_main,
-                temp_idx,
+                i,
+                &var_view,
                 &mut tid,
-                &builtin_view,
                 &mut unused,
                 false,
             );
@@ -1272,8 +1262,9 @@ fn expand_a2a_hoisted(
 }
 
 /// Handle Arrayed equations where the hoisting equation coexists with
-/// per-element overrides (EXCEPT semantics). Elements sharing the hoisted
-/// equation get TempArrayElement reads; overrides are lowered normally.
+/// per-element overrides (EXCEPT semantics). Elements whose resolved equation
+/// contains array-producing builtins get TempArrayElement reads; all others
+/// are lowered normally. Each element is individually probed to classify it.
 #[allow(clippy::too_many_arguments)]
 fn expand_arrayed_hoisted(
     ctx: &Context,
@@ -1283,7 +1274,6 @@ fn expand_arrayed_hoisted(
     apply_default_for_missing: bool,
     off: usize,
     active_dims: &Arc<[Dimension]>,
-    hoisting_from_default: bool,
     hoisting_ast: &crate::ast::Expr2,
 ) -> Result<Vec<Expr>> {
     let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
@@ -1306,14 +1296,20 @@ fn expand_arrayed_hoisted(
 
         for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
             let key = CanonicalElementName::from_raw(&subscripts.join(","));
-            let uses_hoisted = if hoisting_from_default {
-                // Default has builtins: elements NOT in the map use default.
-                // Elements IN the map are overrides with different equations.
-                !elements.contains_key(&key)
+            let elem_ast = elements.get(&key).or(if apply_default_for_missing {
+                default_ast
             } else {
-                // Hoisting from an element: all elements in the map share
-                // the same equation (A2A expressed as Arrayed).
-                elements.contains_key(&key)
+                None
+            });
+
+            let uses_hoisted = if let Some(ast) = elem_ast {
+                let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut probe_exprs = probe_ctx.lower(ast)?;
+                let probe_main = probe_exprs.pop().unwrap();
+                is_array_producing_builtin(&probe_main)
+                    || contains_array_producing_builtin(&probe_main)
+            } else {
+                false
             };
 
             if uses_hoisted {
@@ -1327,39 +1323,30 @@ fn expand_arrayed_hoisted(
                         loc,
                     )),
                 ));
+            } else if let Some(ast) = elem_ast {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+                result.extend(elem_exprs);
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
             } else {
-                let override_ast = elements.get(&key).or(if apply_default_for_missing {
-                    default_ast
-                } else {
-                    None
-                });
-                if let Some(ast) = override_ast {
-                    let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                    let mut elem_exprs = elem_ctx.lower(ast)?;
-                    let elem_main = elem_exprs.pop().unwrap();
-                    result.extend(elem_exprs);
-                    result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
-                } else {
-                    result.push(Expr::AssignCurr(
-                        off + i,
-                        Box::new(Expr::Const(0.0, Loc::default())),
-                    ));
-                }
+                result.push(Expr::AssignCurr(
+                    off + i,
+                    Box::new(Expr::Const(0.0, Loc::default())),
+                ));
             }
         }
         Ok(result)
     } else if contains_array_producing_builtin(&main_expr) {
         let base_temp_id = next_available_temp_id(&first_exprs);
-        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
 
         let mut hoisted = Vec::new();
         let mut temp_id = base_temp_id;
-        let first_temp_idx = project_var_index_to_temp(0, &var_view, &builtin_view);
         let rewritten = replace_nested_builtins_for_element(
             main_expr,
-            first_temp_idx,
+            0,
+            &var_view,
             &mut temp_id,
-            &builtin_view,
             &mut hoisted,
             true,
         );
@@ -1370,14 +1357,20 @@ fn expand_arrayed_hoisted(
 
         for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
             let key = CanonicalElementName::from_raw(&subscripts.join(","));
-            let uses_hoisted = if hoisting_from_default {
-                // Default has builtins: elements NOT in the map use default.
-                // Elements IN the map are overrides with different equations.
-                !elements.contains_key(&key)
+            let elem_ast = elements.get(&key).or(if apply_default_for_missing {
+                default_ast
             } else {
-                // Hoisting from an element: all elements in the map share
-                // the same equation (A2A expressed as Arrayed).
-                elements.contains_key(&key)
+                None
+            });
+
+            let uses_hoisted = if let Some(ast) = elem_ast {
+                let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut probe_exprs = probe_ctx.lower(ast)?;
+                let probe_main = probe_exprs.pop().unwrap();
+                is_array_producing_builtin(&probe_main)
+                    || contains_array_producing_builtin(&probe_main)
+            } else {
+                false
             };
 
             if uses_hoisted {
@@ -1386,34 +1379,26 @@ fn expand_arrayed_hoisted(
                 let elem_main = elem_exprs.pop().unwrap();
                 let mut tid = base_temp_id;
                 let mut unused = Vec::new();
-                let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
                 let elem_rewritten = replace_nested_builtins_for_element(
                     elem_main,
-                    temp_idx,
+                    i,
+                    &var_view,
                     &mut tid,
-                    &builtin_view,
                     &mut unused,
                     false,
                 );
                 result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            } else if let Some(ast) = elem_ast {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+                result.extend(elem_exprs);
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
             } else {
-                let override_ast = elements.get(&key).or(if apply_default_for_missing {
-                    default_ast
-                } else {
-                    None
-                });
-                if let Some(ast) = override_ast {
-                    let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                    let mut elem_exprs = elem_ctx.lower(ast)?;
-                    let elem_main = elem_exprs.pop().unwrap();
-                    result.extend(elem_exprs);
-                    result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
-                } else {
-                    result.push(Expr::AssignCurr(
-                        off + i,
-                        Box::new(Expr::Const(0.0, Loc::default())),
-                    ));
-                }
+                result.push(Expr::AssignCurr(
+                    off + i,
+                    Box::new(Expr::Const(0.0, Loc::default())),
+                ));
             }
         }
         Ok(result)

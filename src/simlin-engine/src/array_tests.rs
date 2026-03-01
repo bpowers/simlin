@@ -3642,3 +3642,135 @@ mod arrayed_except_hoisting_tests {
         );
     }
 }
+
+/// When the first element is an override constant and later elements use the
+/// default (which contains an array-producing builtin), the hoisting detection
+/// must scan beyond the first element to find the builtin.
+mod first_element_override_hoisting_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Override element 1 = 99
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("1", "99")],
+            )
+    }
+
+    #[test]
+    fn first_override_rest_default_interpreter() {
+        let project = make_project("first_override_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 20.0).abs() < 1e-9,
+            "element 2 (default, offset 1): expected 20, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn first_override_rest_default_vm() {
+        let project = make_project("first_override_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 20.0).abs() < 1e-9,
+            "element 2 (default, offset 1): expected 20, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When all elements are specified (no default) and some have builtins while
+/// others are constants, only elements with builtins should get TempArrayElement
+/// reads. Elements with constants must be lowered normally.
+mod mixed_element_hoisting_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Elements 1,2 use vector_elm_map; element 3 is a constant
+            .array_with_ranges(
+                "result[D]",
+                vec![
+                    ("1", "vector_elm_map(source[*], offsets[*])"),
+                    ("2", "vector_elm_map(source[*], offsets[*])"),
+                    ("3", "42"),
+                ],
+            )
+    }
+
+    #[test]
+    fn mixed_elements_interpreter() {
+        let project = make_project("mixed_elements_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (builtin, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (builtin, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (constant): expected 42, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn mixed_elements_vm() {
+        let project = make_project("mixed_elements_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (builtin, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (builtin, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (constant): expected 42, got {}",
+            vals[2]
+        );
+    }
+}
