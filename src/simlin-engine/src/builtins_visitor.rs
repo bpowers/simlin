@@ -361,12 +361,56 @@ impl<'a> BuiltinVisitor<'a> {
                             Var(ident, _) => is_module_backed_ident(ident),
                             _ => true,
                         }));
+                // LoadInitial only supports direct variable offsets. Rewrite
+                // INIT(expr) and INIT(module_var) to INIT($temp_arg), where
+                // $temp_arg captures expr/module_var each timestep and INIT
+                // freezes the t=0 snapshot of that scalar.
+                let init_needs_temp_arg = func == "init"
+                    && args.len() == 1
+                    && args.first().is_some_and(|a| match a {
+                        Var(ident, _) => is_module_backed_ident(ident),
+                        _ => true,
+                    });
+                if init_needs_temp_arg {
+                    let arg = args.into_iter().next().expect("init arity checked");
+                    let transformed_arg = if self.active_subscript.is_some() {
+                        self.substitute_dimension_refs(arg)
+                    } else {
+                        arg
+                    };
+                    let subscript_suffix = self.subscript_suffix();
+                    let id = if subscript_suffix.is_empty() {
+                        format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n)
+                    } else {
+                        format!(
+                            "$⁚{}⁚{}⁚arg0⁚{}",
+                            self.variable_name, self.n, subscript_suffix
+                        )
+                    };
+                    let eqn = print_eqn(&transformed_arg);
+                    let x_var = datamodel::Variable::Aux(datamodel::Aux {
+                        ident: id.clone(),
+                        equation: datamodel::Equation::Scalar(eqn),
+                        documentation: "".to_string(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    });
+                    self.vars.insert(Ident::new(&id), x_var);
+                    self.n += 1;
+                    return Ok(App(
+                        UntypedBuiltinFn(func, vec![Var(RawIdent::new_from_str(&id), loc)]),
+                        loc,
+                    ));
+                }
                 if previous_needs_module {
                     // Fall through to module expansion for 2-arg form,
                     // complex-argument forms, and module variable arguments.
                 } else if is_builtin_fn(&func) {
-                    // INIT always stays on the builtin path (LoadInitial);
-                    // there is no stdlib "init" model anymore.
+                    // Builtins that survive routing stay as builtins (e.g.
+                    // PREVIOUS(var) and INIT(var)) and compile to opcodes.
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
