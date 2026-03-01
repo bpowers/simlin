@@ -13,16 +13,17 @@ Equation text flows through these stages in order:
 3. **`src/ast/`** - AST type system with progressive lowering: `Expr0` (parsed) -> `Expr1` (modules expanded) -> `Expr2` (dimensions resolved) -> `Expr3` (subscripts expanded). `array_view.rs` tracks array dimensions and sparsity.
 4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`, `PREVIOUS`, `INIT`). `builtins_visitor.rs` handles implicit module instantiation from `MODULE()` calls.
 5. **`src/compiler/`** - Multi-pass compilation to bytecode:
-   - `mod.rs` - Orchestration
-   - `context.rs` - Symbol tables and variable metadata
+   - `mod.rs` - Orchestration; includes A2A hoisting logic that detects array-producing builtins (VectorElmMap, VectorSortOrder, AllocateAvailable) during array expansion, hoists them into `AssignTemp` pre-computations, and emits per-element `TempArrayElement` reads
+   - `context.rs` - Symbol tables and variable metadata; `lower_preserving_dimensions()` skips Pass 1 dimension resolution to keep full array views for array-producing builtins
    - `expr.rs` - Expression compilation
-   - `codegen.rs` - Bytecode emission
+   - `codegen.rs` - Bytecode emission; routes array-producing builtins through dedicated opcodes instead of element-wise iteration
    - `dimensions.rs` - Dimension checking/inference
    - `subscript.rs` - Array subscript expansion and iteration
    - `pretty.rs` - Debug pretty-printing
-6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.). Includes `LoadPrev` and `LoadInitial` opcodes for `PREVIOUS()`/`INIT()` intrinsics.
-7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`. Maintains `prev_values` and `initial_values` snapshot buffers for `LoadPrev`/`LoadInitial` opcodes.
+6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.). Includes `LoadPrev`/`LoadInitial` opcodes for `PREVIOUS()`/`INIT()` intrinsics and vector operation opcodes (`VectorSelect`, `VectorElmMap`, `VectorSortOrder`, `AllocateAvailable`) that operate on view-stack arrays and write results to temp storage.
+7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`. Maintains `prev_values` and `initial_values` snapshot buffers for `LoadPrev`/`LoadInitial` opcodes. Implements vector operation dispatch (VectorSelect, VectorElmMap, VectorSortOrder, AllocateAvailable).
 8. **`src/interpreter.rs`** - AST-walking interpreter. Deprecated for production use; retained as a reference spec for VM correctness verification. `compile()` is test-only; production compilation uses `db::compile_project_incremental`.
+9. **`src/alloc.rs`** - Allocation helpers shared by interpreter and VM: `allocate_available()` (bisection-based priority allocation), `alloc_curve()` (per-requester allocation curves for 6 profile types), `normal_cdf()`/`erfc_approx()`.
 
 ## Data model and project structure
 

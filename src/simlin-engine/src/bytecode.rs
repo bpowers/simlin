@@ -804,6 +804,30 @@ pub(crate) enum Opcode {
     /// Size (element count) of top view.
     ArraySize {},
 
+    // === VECTOR OPERATIONS ===
+    // These implement Vensim's array-producing builtins that cannot be
+    // expressed as simple element-wise iteration or scalar reduction.
+    /// Reduces selected array elements to one scalar.
+    /// Reads 2 views (selection mask, expression values) from the view stack
+    /// and 2 scalars (max_value, action) from the arithmetic stack.
+    /// The result is a single scalar pushed onto the arithmetic stack.
+    VectorSelect {},
+
+    /// Element-wise mapping operation; writes full result array to temp_storage.
+    VectorElmMap {
+        write_temp_id: TempId,
+    },
+
+    /// Produces an array of sort-order indices; writes to temp_storage.
+    VectorSortOrder {
+        write_temp_id: TempId,
+    },
+
+    /// Priority-based allocation; writes result array to temp_storage.
+    AllocateAvailable {
+        write_temp_id: TempId,
+    },
+
     // === BROADCASTING ITERATION ===
     // For operations like A[DimA, DimB] * B[DimA] where dims must match by name.
     /// Begin broadcast iteration over multiple source views.
@@ -950,6 +974,15 @@ impl Opcode {
             | Opcode::ArrayMean {}
             | Opcode::ArrayStddev {}
             | Opcode::ArraySize {} => (0, 1),
+
+            // VectorSelect pops 2 scalars (max_value, action), pushes 1 result
+            Opcode::VectorSelect {} => (2, 1),
+            // VectorElmMap writes to temp_storage without touching the arithmetic stack.
+            // VectorSortOrder/AllocateAvailable pop 1 scalar each (direction and avail
+            // respectively) and write their result arrays to temp_storage.
+            Opcode::VectorElmMap { .. } => (0, 0),
+            Opcode::VectorSortOrder { .. } => (1, 0),
+            Opcode::AllocateAvailable { .. } => (1, 0),
 
             // Broadcasting
             Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),
@@ -1516,6 +1549,27 @@ mod tests {
         assert_eq!((Opcode::ArrayMean {}).stack_effect(), (0, 1));
         assert_eq!((Opcode::ArrayStddev {}).stack_effect(), (0, 1));
         assert_eq!((Opcode::ArraySize {}).stack_effect(), (0, 1));
+    }
+
+    #[test]
+    fn test_stack_effect_vector_ops() {
+        // VectorSelect: pops max_value + action scalars, pushes 1 result
+        assert_eq!((Opcode::VectorSelect {}).stack_effect(), (2, 1));
+        // VectorElmMap: reads views, writes to temp_storage, no arithmetic stack effect
+        assert_eq!(
+            (Opcode::VectorElmMap { write_temp_id: 0 }).stack_effect(),
+            (0, 0)
+        );
+        // VectorSortOrder: pops 1 scalar (direction), writes to temp_storage
+        assert_eq!(
+            (Opcode::VectorSortOrder { write_temp_id: 0 }).stack_effect(),
+            (1, 0)
+        );
+        // AllocateAvailable: pops 1 scalar (avail), writes to temp_storage
+        assert_eq!(
+            (Opcode::AllocateAvailable { write_temp_id: 0 }).stack_effect(),
+            (1, 0)
+        );
     }
 
     // =========================================================================

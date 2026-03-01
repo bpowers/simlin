@@ -318,6 +318,35 @@ impl TestProject {
         self
     }
 
+    /// Add an array variable with a default equation and per-element overrides (EXCEPT semantics)
+    pub fn array_with_default_and_overrides(
+        mut self,
+        name_with_dims: &str,
+        default_equation: &str,
+        overrides: Vec<(&str, &str)>,
+    ) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        let arrayed_equations = overrides
+            .into_iter()
+            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+            .collect();
+        self.variables.push(Variable::Aux(datamodel::Aux {
+            ident: name,
+            equation: Equation::Arrayed(
+                dims,
+                arrayed_equations,
+                Some(default_equation.to_string()),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
     /// Build the datamodel Project
     pub fn build_datamodel(&self) -> Project {
         Project {
@@ -631,6 +660,29 @@ impl TestProject {
             .get(var_name)
             .unwrap_or_else(|| panic!("Variable {var_name} not found in results"))
             .clone()
+    }
+
+    /// Get VM results for a variable (allows checking for NaN values)
+    pub fn vm_result(&self, var_name: &str) -> Vec<f64> {
+        let results = self.run_vm().expect("VM should run successfully");
+
+        results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in VM results"))
+            .clone()
+    }
+
+    /// Returns true if the flow runlist for the compiled module contains at least one
+    /// AssignTemp node (indicating A2A hoisting occurred for array-producing builtins).
+    pub fn flow_runlist_has_assign_temp(&self) -> bool {
+        let module = match self.build_module() {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        module
+            .runlist_flows
+            .iter()
+            .any(|e| matches!(e, crate::compiler::Expr::AssignTemp(_, _, _)))
     }
 
     /// Test that simulation creation succeeds

@@ -205,6 +205,18 @@ pub(crate) enum SymbolicOpcode {
     ArrayStddev {},
     ArraySize {},
 
+    // === VECTOR OPERATIONS (unchanged) ===
+    VectorSelect {},
+    VectorElmMap {
+        write_temp_id: TempId,
+    },
+    VectorSortOrder {
+        write_temp_id: TempId,
+    },
+    AllocateAvailable {
+        write_temp_id: TempId,
+    },
+
     // === BROADCASTING ITERATION (unchanged) ===
     BeginBroadcastIter {
         n_sources: u8,
@@ -602,6 +614,16 @@ pub(crate) fn symbolize_opcode(
         Opcode::ArrayMean {} => Ok(SymbolicOpcode::ArrayMean {}),
         Opcode::ArrayStddev {} => Ok(SymbolicOpcode::ArrayStddev {}),
         Opcode::ArraySize {} => Ok(SymbolicOpcode::ArraySize {}),
+        Opcode::VectorSelect {} => Ok(SymbolicOpcode::VectorSelect {}),
+        Opcode::VectorElmMap { write_temp_id } => Ok(SymbolicOpcode::VectorElmMap {
+            write_temp_id: *write_temp_id,
+        }),
+        Opcode::VectorSortOrder { write_temp_id } => Ok(SymbolicOpcode::VectorSortOrder {
+            write_temp_id: *write_temp_id,
+        }),
+        Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
+            write_temp_id: *write_temp_id,
+        }),
         Opcode::BeginBroadcastIter {
             n_sources,
             dest_temp_id,
@@ -891,6 +913,16 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::ArrayMean {} => Ok(Opcode::ArrayMean {}),
         SymbolicOpcode::ArrayStddev {} => Ok(Opcode::ArrayStddev {}),
         SymbolicOpcode::ArraySize {} => Ok(Opcode::ArraySize {}),
+        SymbolicOpcode::VectorSelect {} => Ok(Opcode::VectorSelect {}),
+        SymbolicOpcode::VectorElmMap { write_temp_id } => Ok(Opcode::VectorElmMap {
+            write_temp_id: *write_temp_id,
+        }),
+        SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
+            write_temp_id: *write_temp_id,
+        }),
+        SymbolicOpcode::AllocateAvailable { write_temp_id } => Ok(Opcode::AllocateAvailable {
+            write_temp_id: *write_temp_id,
+        }),
         SymbolicOpcode::BeginBroadcastIter {
             n_sources,
             dest_temp_id,

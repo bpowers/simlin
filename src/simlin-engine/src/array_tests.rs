@@ -3453,3 +3453,776 @@ mod vector_select_action_tests {
         project.assert_interpreter_result("result", &[99.0, 99.0]);
     }
 }
+
+mod vector_elm_map_tests {
+    use crate::test_common::TestProject;
+
+    // source[D] = [10, 20, 30] (3 elements, valid indices 0..2)
+    // offsets[D] = [0, 2, 5]   -- index 5 exceeds source length, so third element -> NaN
+    fn make_oob_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "5")])
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])")
+    }
+
+    #[test]
+    fn in_bounds_elements_map_correctly_interpreter() {
+        let project = make_oob_project("vem_inbounds_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 10.0).abs() < 1e-9,
+            "element 0 (offset 0): expected 10, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 30.0).abs() < 1e-9,
+            "element 1 (offset 2): expected 30, got {}",
+            vals[1]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_element_returns_nan_interpreter() {
+        let project = make_oob_project("vem_oob_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            vals[2].is_nan(),
+            "element 2 (offset 5, source len 3): expected NaN, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn in_bounds_elements_map_correctly_vm() {
+        let project = make_oob_project("vem_inbounds_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 10.0).abs() < 1e-9,
+            "element 0 (offset 0): expected 10, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 30.0).abs() < 1e-9,
+            "element 1 (offset 2): expected 30, got {}",
+            vals[1]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_element_returns_nan_vm() {
+        let project = make_oob_project("vem_oob_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            vals[2].is_nan(),
+            "element 2 (offset 5, source len 3): expected NaN, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn negative_offset_returns_nan_interpreter() {
+        // A negative offset value (stored as a float like -1.0) should also produce NaN.
+        let project = TestProject::new("vem_neg_interp")
+            .indexed_dimension("D", 2)
+            .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
+            .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 2, "expected 2 elements");
+        assert!(
+            vals[0].is_nan(),
+            "element 0 (offset -1): expected NaN, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 100.0).abs() < 1e-9,
+            "element 1 (offset 0): expected 100, got {}",
+            vals[1]
+        );
+    }
+
+    #[test]
+    fn negative_offset_returns_nan_vm() {
+        let project = TestProject::new("vem_neg_vm")
+            .indexed_dimension("D", 2)
+            .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
+            .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 2, "expected 2 elements");
+        assert!(
+            vals[0].is_nan(),
+            "element 0 (offset -1): expected NaN, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 100.0).abs() < 1e-9,
+            "element 1 (offset 0): expected 100, got {}",
+            vals[1]
+        );
+    }
+}
+
+mod arrayed_except_hoisting_tests {
+    use crate::test_common::TestProject;
+
+    /// Arrayed equation with a default that uses an array-producing builtin
+    /// and an element override (EXCEPT semantics). The override must not be
+    /// silently replaced by the default during A2A hoisting.
+    fn make_except_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            // Override element 3 = 42
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("3", "42")],
+            )
+    }
+
+    #[test]
+    fn arrayed_except_preserves_override_interpreter() {
+        let project = make_except_project("arrayed_except_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (override): expected 42, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn arrayed_except_preserves_override_vm() {
+        let project = make_except_project("arrayed_except_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (override): expected 42, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn arrayed_except_hoists_correctly() {
+        let project = make_except_project("arrayed_except_hoist");
+        assert!(
+            project.flow_runlist_has_assign_temp(),
+            "A2A hoisting should produce AssignTemp for the default equation's vector builtin"
+        );
+    }
+}
+
+/// When the first element is an override constant and later elements use the
+/// default (which contains an array-producing builtin), the hoisting detection
+/// must scan beyond the first element to find the builtin.
+mod first_element_override_hoisting_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Override element 1 = 99
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("1", "99")],
+            )
+    }
+
+    #[test]
+    fn first_override_rest_default_interpreter() {
+        let project = make_project("first_override_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 20.0).abs() < 1e-9,
+            "element 2 (default, offset 1): expected 20, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn first_override_rest_default_vm() {
+        let project = make_project("first_override_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 20.0).abs() < 1e-9,
+            "element 2 (default, offset 1): expected 20, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When all elements are specified (no default) and some have builtins while
+/// others are constants, only elements with builtins should get TempArrayElement
+/// reads. Elements with constants must be lowered normally.
+mod mixed_element_hoisting_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Elements 1,2 use vector_elm_map; element 3 is a constant
+            .array_with_ranges(
+                "result[D]",
+                vec![
+                    ("1", "vector_elm_map(source[*], offsets[*])"),
+                    ("2", "vector_elm_map(source[*], offsets[*])"),
+                    ("3", "42"),
+                ],
+            )
+    }
+
+    #[test]
+    fn mixed_elements_interpreter() {
+        let project = make_project("mixed_elements_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (builtin, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (builtin, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (constant): expected 42, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn mixed_elements_vm() {
+        let project = make_project("mixed_elements_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (builtin, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (builtin, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (constant): expected 42, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When the default equation has a NESTED array-producing builtin (e.g.,
+/// `10 + vector_elm_map(...)`) and element 1 is overridden, element 0 must
+/// use the override value, not the hoisting expression. The nested hoisting
+/// path must probe each element individually, including element 0.
+mod nested_hoisting_first_override_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: 10 + vector_elm_map(source[*], offsets[*])
+            // VEM = [30, 10, 20], so 10 + VEM = [40, 20, 30]
+            // Override element 1 = 99
+            .array_with_default_and_overrides(
+                "result[D]",
+                "10 + vector_elm_map(source[*], offsets[*])",
+                vec![("1", "99")],
+            )
+    }
+
+    #[test]
+    fn nested_first_override_interpreter() {
+        let project = make_project("nested_first_override_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn nested_first_override_vm() {
+        let project = make_project("nested_first_override_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When an override element wraps the SAME nested builtin with different
+/// arithmetic (e.g., default = `10 + vem(...)`, override = `100 + vem(...)`),
+/// each element must use its OWN AST, not the first hoisting expression.
+mod nested_override_different_wrapping_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: 10 + vector_elm_map(source[*], offsets[*])
+            // VEM = [30, 10, 20], so default = [40, 20, 30]
+            // Override element 1: 100 + vector_elm_map(source[*], offsets[*])
+            // Element 1 should be 100 + 30 = 130
+            .array_with_default_and_overrides(
+                "result[D]",
+                "10 + vector_elm_map(source[*], offsets[*])",
+                vec![("1", "100 + vector_elm_map(source[*], offsets[*])")],
+            )
+    }
+
+    #[test]
+    fn nested_different_wrapping_interpreter() {
+        let project = make_project("nested_diff_wrap_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 130.0).abs() < 1e-9,
+            "element 0 (override, 100+VEM[0]): expected 130, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn nested_different_wrapping_vm() {
+        let project = make_project("nested_diff_wrap_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 130.0).abs() < 1e-9,
+            "element 0 (override, 100+VEM[0]): expected 130, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When the default is a top-level builtin but an override wraps it (nested),
+/// the override must be handled via nested hoisting instead of failing codegen.
+mod toplevel_default_nested_override_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            // Override element 3: vector_elm_map(source[*], offsets[*]) + 100
+            // Element 3 should be 20 + 100 = 120
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("3", "vector_elm_map(source[*], offsets[*]) + 100")],
+            )
+    }
+
+    #[test]
+    fn toplevel_default_nested_override_interpreter() {
+        let project = make_project("toplevel_nested_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 120.0).abs() < 1e-9,
+            "element 2 (override VEM[2]+100): expected 120, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn toplevel_default_nested_override_vm() {
+        let project = make_project("toplevel_nested_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 120.0).abs() < 1e-9,
+            "element 2 (override VEM[2]+100): expected 120, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When the default uses one array-producing builtin and an override uses a
+/// completely different one (e.g., VEM vs VSO), each must get its own AssignTemp
+/// blocks with independent temp IDs.
+mod different_builtin_override_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            // Override element 3: vector_sort_order(source[*], 1) -> [1, 2, 3]
+            // Element 3 should be VSO[2] = 3
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("3", "vector_sort_order(source[*], 1)")],
+            )
+    }
+
+    #[test]
+    fn different_builtin_override_interpreter() {
+        let project = make_project("diff_builtin_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 3.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 3, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn different_builtin_override_vm() {
+        let project = make_project("diff_builtin_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 3.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 3, got {}",
+            vals[2]
+        );
+    }
+}
+
+#[cfg(test)]
+mod vector_op_invalid_view_tests {
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn vector_select_invalid_view_returns_nan() {
+        // A reversed dynamic range (start > end) creates an invalid view.
+        // VECTOR SELECT should propagate NaN instead of returning max_value.
+        let project = TestProject::new("vsel_invalid")
+            .indexed_dimension("D", 3)
+            .array_aux("sel[D]", "1")
+            .array_aux("data[D]", "D * 10")
+            .scalar_const("high_idx", 5.0)
+            .scalar_const("low_idx", 1.0)
+            .scalar_aux(
+                "result",
+                "vector_select(sel[high_idx:low_idx], data[*], -999, 0, 0)",
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert!(
+            vals[0].is_nan(),
+            "VECTOR SELECT with invalid view should return NaN, got {}",
+            vals[0]
+        );
+    }
+
+    #[test]
+    fn vector_select_invalid_expr_view_returns_nan() {
+        // Invalid view on the expr (second) argument should also propagate NaN.
+        let project = TestProject::new("vsel_invalid_expr")
+            .indexed_dimension("D", 3)
+            .array_aux("sel[D]", "1")
+            .array_aux("data[D]", "D * 10")
+            .scalar_const("high_idx", 5.0)
+            .scalar_const("low_idx", 1.0)
+            .scalar_aux(
+                "result",
+                "vector_select(sel[*], data[high_idx:low_idx], -999, 0, 0)",
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert!(
+            vals[0].is_nan(),
+            "VECTOR SELECT with invalid expr view should return NaN, got {}",
+            vals[0]
+        );
+    }
+}
+
+/// When a vector builtin's scalar argument depends on the active A2A dimension,
+/// each element must be hoisted with its own AssignTemp (per-element hoisting).
+/// Without this, the first element's scalar value is reused for all elements.
+#[cfg(test)]
+mod dimension_dependent_scalar_arg_tests {
+    use crate::test_common::TestProject;
+
+    fn make_vso_dim_dep_project(name: &str) -> TestProject {
+        // vals = [10, 30, 20], dir = [-1, 1, 1]
+        // result[D] = vector_sort_order(vals[*], dir[D])
+        //
+        // Element 0 (dir=-1, descending): sort_order = [2, 3, 1] -> result[0] = 2
+        // Element 1 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[1] = 3
+        // Element 2 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[2] = 2
+        //
+        // Without fix (all use dir[0]=-1): sort_order = [2, 3, 1] -> result[2] = 1
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
+            .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
+            .array_aux("result[D]", "vector_sort_order(vals[*], dir[D])")
+    }
+
+    fn assert_vso_dim_dep_results(vals: &[f64]) {
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 2.0).abs() < 1e-9,
+            "result[0] (desc): expected 2, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 3.0).abs() < 1e-9,
+            "result[1] (asc): expected 3, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 2.0).abs() < 1e-9,
+            "result[2] (asc): expected 2, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn vso_direction_varies_by_dimension_vm() {
+        let project = make_vso_dim_dep_project("vso_dim_dep_vm");
+        project.assert_compiles();
+        project.assert_sim_builds();
+        assert_vso_dim_dep_results(&project.vm_result("result"));
+    }
+
+    #[test]
+    fn vso_direction_varies_by_dimension_interpreter() {
+        let project = make_vso_dim_dep_project("vso_dim_dep_interp");
+        project.assert_compiles();
+        project.assert_sim_builds();
+        assert_vso_dim_dep_results(&project.interpreter_result("result"));
+    }
+
+    #[test]
+    fn vso_nested_direction_varies_by_dimension_vm() {
+        // result[D] = 10 + vector_sort_order(vals[*], dir[D])
+        // Nested builtin with dimension-dependent scalar arg.
+        // Same expected values as top-level case, shifted by +10.
+        let project = TestProject::new("vso_nested_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
+            .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
+            .array_aux("result[D]", "10 + vector_sort_order(vals[*], dir[D])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 12.0).abs() < 1e-9,
+            "result[0] (10 + desc[0]): expected 12, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 13.0).abs() < 1e-9,
+            "result[1] (10 + asc[1]): expected 13, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 12.0).abs() < 1e-9,
+            "result[2] (10 + asc[2]): expected 12, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn vso_except_direction_varies_by_dimension_vm() {
+        // Default: vector_sort_order(vals[*], dir[D]) with dir varying
+        // Override element 2 with constant 999 so elements 1 and 3 use the
+        // default with different directions. Override must be in the middle to
+        // expose the bug: for these values, asc and desc sort orders share the
+        // same middle element but differ at positions 0 and 2.
+        let project = TestProject::new("vso_except_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
+            .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_sort_order(vals[*], dir[D])",
+                vec![("2", "999")],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        // Element 0 (dir=-1, desc): sort_order = [2, 3, 1] -> result[0] = 2
+        assert!(
+            (vals[0] - 2.0).abs() < 1e-9,
+            "result[0] (desc): expected 2, got {}",
+            vals[0]
+        );
+        // Element 1 (override): 999
+        assert!(
+            (vals[1] - 999.0).abs() < 1e-9,
+            "result[1] (override): expected 999, got {}",
+            vals[1]
+        );
+        // Element 2 (dir=1, asc): sort_order = [1, 3, 2] -> result[2] = 2
+        // Without fix (desc shared): sort_order = [2, 3, 1] -> result[2] = 1
+        assert!(
+            (vals[2] - 2.0).abs() < 1e-9,
+            "result[2] (asc): expected 2, got {}",
+            vals[2]
+        );
+    }
+}

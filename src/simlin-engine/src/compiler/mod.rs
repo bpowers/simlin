@@ -13,7 +13,7 @@ pub(crate) mod symbolic;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::ast::{Ast, Loc};
+use crate::ast::{ArrayView, Ast, Loc};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
@@ -648,84 +648,21 @@ impl Var {
                                 exprs
                             }
                             Ast::ApplyToAll(dims, ast) => {
-                                let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
-                                    .enumerate()
-                                    .map(|(i, subscripts)| {
-                                        let ctx = ctx.with_active_subscripts(
-                                            active_dims.clone(),
-                                            &subscripts,
-                                        );
-                                        ctx.lower(ast).map(|mut exprs| {
-                                            let main_expr = exprs.pop().unwrap();
-                                            exprs.push(Expr::AssignCurr(
-                                                off + i,
-                                                Box::new(main_expr),
-                                            ));
-                                            exprs
-                                        })
-                                    })
-                                    .collect();
-                                exprs?.into_iter().flatten().collect()
+                                expand_a2a_with_hoisting(ctx, dims, ast, off)?
                             }
                             Ast::Arrayed(
                                 dims,
                                 elements,
                                 default_ast,
                                 apply_default_for_missing,
-                            ) => {
-                                let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
-                                    .enumerate()
-                                    .map(|(i, subscripts)| {
-                                        let subscript_str = subscripts.join(",");
-                                        let canonical_key =
-                                            CanonicalElementName::from_raw(&subscript_str);
-                                        let ast = match elements.get(&canonical_key) {
-                                            Some(ast) => ast,
-                                            None => {
-                                                if *apply_default_for_missing
-                                                    && let Some(default_ast) = default_ast
-                                                {
-                                                    let ctx = ctx.with_active_subscripts(
-                                                        active_dims.clone(),
-                                                        &subscripts,
-                                                    );
-                                                    return ctx.lower(default_ast).map(
-                                                        |mut exprs| {
-                                                            let main_expr = exprs.pop().unwrap();
-                                                            exprs.push(Expr::AssignCurr(
-                                                                off + i,
-                                                                Box::new(main_expr),
-                                                            ));
-                                                            exprs
-                                                        },
-                                                    );
-                                                }
-                                                // Vensim defaults undefined subscript
-                                                // elements to 0 when no array default is present.
-                                                return Ok(vec![Expr::AssignCurr(
-                                                    off + i,
-                                                    Box::new(Expr::Const(0.0, Loc::default())),
-                                                )]);
-                                            }
-                                        };
-                                        let ctx = ctx.with_active_subscripts(
-                                            active_dims.clone(),
-                                            &subscripts,
-                                        );
-                                        ctx.lower(ast).map(|mut exprs| {
-                                            let main_expr = exprs.pop().unwrap();
-                                            exprs.push(Expr::AssignCurr(
-                                                off + i,
-                                                Box::new(main_expr),
-                                            ));
-                                            exprs
-                                        })
-                                    })
-                                    .collect();
-                                exprs?.into_iter().flatten().collect()
-                            }
+                            ) => expand_arrayed_with_hoisting(
+                                ctx,
+                                dims,
+                                elements,
+                                default_ast.as_ref(),
+                                *apply_default_for_missing,
+                                off,
+                            )?,
                         }
                     } else {
                         let Some(ast) = ast.as_ref() else {
@@ -788,66 +725,17 @@ impl Var {
                             exprs
                         }
                         Ast::ApplyToAll(dims, ast) => {
-                            let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
-                                .enumerate()
-                                .map(|(i, subscripts)| {
-                                    let ctx = ctx
-                                        .with_active_subscripts(active_dims.clone(), &subscripts);
-                                    ctx.lower(ast).map(|mut exprs| {
-                                        let main_expr = exprs.pop().unwrap();
-                                        exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
-                                        exprs
-                                    })
-                                })
-                                .collect();
-                            exprs?.into_iter().flatten().collect()
+                            expand_a2a_with_hoisting(ctx, dims, ast, off)?
                         }
                         Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
-                            let active_dims = Arc::<[Dimension]>::from(dims.clone());
-                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
-                                .enumerate()
-                                .map(|(i, subscripts)| {
-                                    let subscript_str = subscripts.join(",");
-                                    let canonical_key =
-                                        CanonicalElementName::from_raw(&subscript_str);
-                                    let ast = match elements.get(&canonical_key) {
-                                        Some(ast) => ast,
-                                        None => {
-                                            if *apply_default_for_missing
-                                                && let Some(default_ast) = default_ast
-                                            {
-                                                let ctx = ctx.with_active_subscripts(
-                                                    active_dims.clone(),
-                                                    &subscripts,
-                                                );
-                                                return ctx.lower(default_ast).map(|mut exprs| {
-                                                    let main_expr = exprs.pop().unwrap();
-                                                    exprs.push(Expr::AssignCurr(
-                                                        off + i,
-                                                        Box::new(main_expr),
-                                                    ));
-                                                    exprs
-                                                });
-                                            }
-                                            // Vensim defaults undefined subscript
-                                            // elements to 0 when no array default is present.
-                                            return Ok(vec![Expr::AssignCurr(
-                                                off + i,
-                                                Box::new(Expr::Const(0.0, Loc::default())),
-                                            )]);
-                                        }
-                                    };
-                                    let ctx = ctx
-                                        .with_active_subscripts(active_dims.clone(), &subscripts);
-                                    ctx.lower(ast).map(|mut exprs| {
-                                        let main_expr = exprs.pop().unwrap();
-                                        exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
-                                        exprs
-                                    })
-                                })
-                                .collect();
-                            exprs?.into_iter().flatten().collect()
+                            expand_arrayed_with_hoisting(
+                                ctx,
+                                dims,
+                                elements,
+                                default_ast.as_ref(),
+                                *apply_default_for_missing,
+                                off,
+                            )?
                         }
                     }
                 }
@@ -857,6 +745,977 @@ impl Var {
             ident: Ident::new(var.ident()),
             ast,
         })
+    }
+}
+
+/// Check if an expression is an array-producing builtin that needs whole-array
+/// evaluation rather than per-element scalar evaluation.
+fn is_array_producing_builtin(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::App(
+            BuiltinFn::VectorElmMap(_, _)
+                | BuiltinFn::VectorSortOrder(_, _)
+                | BuiltinFn::AllocateAvailable(_, _, _),
+            _
+        )
+    )
+}
+
+/// Extract the output ArrayView from an expression, analogous to the
+/// interpreter's `find_array_dims`.  For array-producing builtins, the
+/// output dimensions come from the builtin's "shaping" argument:
+///   VectorElmMap(_, offset)    -> offset's view
+///   VectorSortOrder(arr, _)    -> arr's view
+///   AllocateAvailable(req,_,_) -> req's view
+fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
+    match expr {
+        Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(view.clone()),
+        Expr::App(builtin, _) => match builtin {
+            BuiltinFn::VectorElmMap(_, offset) => find_expr_array_view(offset),
+            BuiltinFn::VectorSortOrder(arr, _) => find_expr_array_view(arr),
+            BuiltinFn::AllocateAvailable(req, _, _) => find_expr_array_view(req),
+            BuiltinFn::Abs(e)
+            | BuiltinFn::Arccos(e)
+            | BuiltinFn::Arcsin(e)
+            | BuiltinFn::Arctan(e)
+            | BuiltinFn::Cos(e)
+            | BuiltinFn::Exp(e)
+            | BuiltinFn::Int(e)
+            | BuiltinFn::Ln(e)
+            | BuiltinFn::Log10(e)
+            | BuiltinFn::Sin(e)
+            | BuiltinFn::Sqrt(e)
+            | BuiltinFn::Tan(e) => find_expr_array_view(e),
+            _ => None,
+        },
+        Expr::Op1(_, inner, _) => find_expr_array_view(inner),
+        Expr::Op2(_, lhs, rhs, _) => {
+            find_expr_array_view(lhs).or_else(|| find_expr_array_view(rhs))
+        }
+        Expr::If(_, t, f, _) => find_expr_array_view(t).or_else(|| find_expr_array_view(f)),
+        _ => None,
+    }
+}
+
+/// Given a variable's linear element index and its dimensions, compute the
+/// corresponding index into a temp array whose dimensions are a subset.
+///
+/// For example, variable dims = [DimA(3), DimB(2)] and temp dims = [DimA(3)]:
+///   var_idx 0 (A1,B1) -> temp_idx 0 (A1)
+///   var_idx 1 (A1,B2) -> temp_idx 0 (A1)
+///   var_idx 2 (A2,B1) -> temp_idx 1 (A2)
+///   etc.
+///
+/// Matching is done by dimension name. Dimensions in the temp that are not
+/// in the variable are iterated at position 0 (should not occur in practice).
+fn project_var_index_to_temp(var_idx: usize, var_view: &ArrayView, temp_view: &ArrayView) -> usize {
+    // Decompose var_idx into per-dimension coordinates (row-major)
+    let mut remaining = var_idx;
+    let var_ndims = var_view.dims.len();
+    let mut var_coords: Vec<usize> = vec![0; var_ndims];
+    for d in (0..var_ndims).rev() {
+        var_coords[d] = remaining % var_view.dims[d];
+        remaining /= var_view.dims[d];
+    }
+
+    // Build temp coordinates by matching dimension names
+    let temp_ndims = temp_view.dims.len();
+    let mut temp_coords: Vec<usize> = vec![0; temp_ndims];
+    for (td, temp_name) in temp_view.dim_names.iter().enumerate() {
+        if temp_name.is_empty() {
+            continue;
+        }
+        for (vd, var_name) in var_view.dim_names.iter().enumerate() {
+            if var_name == temp_name {
+                temp_coords[td] = var_coords[vd];
+                break;
+            }
+        }
+    }
+
+    // Recompose into linear index (row-major)
+    let mut temp_idx = 0;
+    let mut stride = 1;
+    for d in (0..temp_ndims).rev() {
+        temp_idx += temp_coords[d] * stride;
+        stride *= temp_view.dims[d];
+    }
+    temp_idx
+}
+
+/// Offset all temp-related IDs (AssignTemp, TempArray, TempArrayElement) in an
+/// expression by `offset` so they don't collide with previously emitted temps.
+fn remap_temp_ids(expr: Expr, offset: u32) -> Expr {
+    if offset == 0 {
+        return expr;
+    }
+    match expr {
+        Expr::AssignTemp(id, inner, view) => {
+            Expr::AssignTemp(id + offset, Box::new(remap_temp_ids(*inner, offset)), view)
+        }
+        Expr::TempArray(id, view, loc) => Expr::TempArray(id + offset, view, loc),
+        Expr::TempArrayElement(id, view, idx, loc) => {
+            Expr::TempArrayElement(id + offset, view, idx, loc)
+        }
+        Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
+            op,
+            Box::new(remap_temp_ids(*lhs, offset)),
+            Box::new(remap_temp_ids(*rhs, offset)),
+            loc,
+        ),
+        Expr::Op1(op, inner, loc) => Expr::Op1(op, Box::new(remap_temp_ids(*inner, offset)), loc),
+        Expr::If(cond, t, f, loc) => Expr::If(
+            Box::new(remap_temp_ids(*cond, offset)),
+            Box::new(remap_temp_ids(*t, offset)),
+            Box::new(remap_temp_ids(*f, offset)),
+            loc,
+        ),
+        Expr::App(builtin, loc) => Expr::App(builtin.map(|e| remap_temp_ids(e, offset)), loc),
+        Expr::AssignCurr(off, inner) => {
+            Expr::AssignCurr(off, Box::new(remap_temp_ids(*inner, offset)))
+        }
+        Expr::AssignNext(off, inner) => {
+            Expr::AssignNext(off, Box::new(remap_temp_ids(*inner, offset)))
+        }
+        Expr::Subscript(off, indices, dim_sizes, loc) => {
+            let indices = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    SubscriptIndex::Single(e) => SubscriptIndex::Single(remap_temp_ids(e, offset)),
+                    SubscriptIndex::Range(lo, hi) => SubscriptIndex::Range(
+                        remap_temp_ids(lo, offset),
+                        remap_temp_ids(hi, offset),
+                    ),
+                })
+                .collect();
+            Expr::Subscript(off, indices, dim_sizes, loc)
+        }
+        Expr::EvalModule(ident, model, inputs, args) => {
+            let args = args
+                .into_iter()
+                .map(|e| remap_temp_ids(e, offset))
+                .collect();
+            Expr::EvalModule(ident, model, inputs, args)
+        }
+        other => other,
+    }
+}
+
+/// Find the highest temp ID referenced in an expression, if any.
+fn find_max_temp_id(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::AssignTemp(id, inner, _) => Some((*id).max(find_max_temp_id(inner).unwrap_or(*id))),
+        Expr::TempArray(id, _, _) | Expr::TempArrayElement(id, _, _, _) => Some(*id),
+        Expr::Op2(_, lhs, rhs, _) => match (find_max_temp_id(lhs), find_max_temp_id(rhs)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, None) | (None, a) => a,
+        },
+        Expr::Op1(_, inner, _) | Expr::AssignCurr(_, inner) | Expr::AssignNext(_, inner) => {
+            find_max_temp_id(inner)
+        }
+        Expr::If(cond, t, f, _) => [
+            find_max_temp_id(cond),
+            find_max_temp_id(t),
+            find_max_temp_id(f),
+        ]
+        .into_iter()
+        .flatten()
+        .max(),
+        Expr::App(builtin, _) => {
+            let mut max_id = None;
+            builtin.for_each_expr_ref(|e| {
+                if let Some(id) = find_max_temp_id(e) {
+                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
+                }
+            });
+            max_id
+        }
+        Expr::Subscript(_, indices, _, _) => {
+            let mut max_id = None;
+            for idx in indices {
+                let ids = match idx {
+                    SubscriptIndex::Single(e) => [find_max_temp_id(e), None],
+                    SubscriptIndex::Range(lo, hi) => [find_max_temp_id(lo), find_max_temp_id(hi)],
+                };
+                for id in ids.into_iter().flatten() {
+                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
+                }
+            }
+            max_id
+        }
+        Expr::EvalModule(_, _, _, args) => {
+            let mut max_id = None;
+            for arg in args {
+                if let Some(id) = find_max_temp_id(arg) {
+                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
+                }
+            }
+            max_id
+        }
+        _ => None,
+    }
+}
+
+/// Recursively check whether any subexpression is an array-producing builtin.
+fn contains_array_producing_builtin(expr: &Expr) -> bool {
+    if is_array_producing_builtin(expr) {
+        return true;
+    }
+    match expr {
+        Expr::Op2(_, lhs, rhs, _) => {
+            contains_array_producing_builtin(lhs) || contains_array_producing_builtin(rhs)
+        }
+        Expr::Op1(_, inner, _) | Expr::AssignTemp(_, inner, _) | Expr::AssignCurr(_, inner) => {
+            contains_array_producing_builtin(inner)
+        }
+        Expr::If(cond, t, f, _) => {
+            contains_array_producing_builtin(cond)
+                || contains_array_producing_builtin(t)
+                || contains_array_producing_builtin(f)
+        }
+        Expr::App(builtin, _) => builtin_contains_array_producing(builtin),
+        _ => false,
+    }
+}
+
+fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
+    let mut found = false;
+    builtin.for_each_expr_ref(|e| {
+        if !found && contains_array_producing_builtin(e) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Replace array-producing builtins in an expression tree with
+/// TempArrayElement references. Each nested builtin's index is projected
+/// from the variable's element index using that builtin's own ArrayView,
+/// handling the case where nested builtins operate on different dimensions.
+/// On the first call (element 0), collects the hoisted AssignTemp expressions.
+/// On subsequent calls, only performs the replacement using the same temp IDs.
+fn replace_nested_builtins_for_element(
+    expr: Expr,
+    var_idx: usize,
+    var_view: &ArrayView,
+    temp_id: &mut u32,
+    hoisted: &mut Vec<Expr>,
+    collect_hoisted: bool,
+) -> Expr {
+    if is_array_producing_builtin(&expr) {
+        let id = *temp_id;
+        *temp_id += 1;
+        let loc = expr.get_loc();
+        let builtin_view = find_expr_array_view(&expr).unwrap_or_else(|| var_view.clone());
+        let element_idx = project_var_index_to_temp(var_idx, var_view, &builtin_view);
+        if collect_hoisted {
+            hoisted.push(Expr::AssignTemp(id, Box::new(expr), builtin_view.clone()));
+        }
+        return Expr::TempArrayElement(id, builtin_view, element_idx, loc);
+    }
+    match expr {
+        Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
+            op,
+            Box::new(replace_nested_builtins_for_element(
+                *lhs,
+                var_idx,
+                var_view,
+                temp_id,
+                hoisted,
+                collect_hoisted,
+            )),
+            Box::new(replace_nested_builtins_for_element(
+                *rhs,
+                var_idx,
+                var_view,
+                temp_id,
+                hoisted,
+                collect_hoisted,
+            )),
+            loc,
+        ),
+        Expr::Op1(op, inner, loc) => Expr::Op1(
+            op,
+            Box::new(replace_nested_builtins_for_element(
+                *inner,
+                var_idx,
+                var_view,
+                temp_id,
+                hoisted,
+                collect_hoisted,
+            )),
+            loc,
+        ),
+        Expr::If(cond, t, f, loc) => Expr::If(
+            Box::new(replace_nested_builtins_for_element(
+                *cond,
+                var_idx,
+                var_view,
+                temp_id,
+                hoisted,
+                collect_hoisted,
+            )),
+            Box::new(replace_nested_builtins_for_element(
+                *t,
+                var_idx,
+                var_view,
+                temp_id,
+                hoisted,
+                collect_hoisted,
+            )),
+            Box::new(replace_nested_builtins_for_element(
+                *f,
+                var_idx,
+                var_view,
+                temp_id,
+                hoisted,
+                collect_hoisted,
+            )),
+            loc,
+        ),
+        // Descend into builtin arguments so that patterns like ABS(VECTOR_ELM_MAP(...))
+        // are correctly hoisted -- the array-producing builtin inside gets replaced with
+        // a TempArrayElement reference, and the outer non-array-producing builtin is
+        // preserved with its sub-expressions updated.
+        Expr::App(builtin, loc) => Expr::App(
+            builtin.map(|sub_expr| {
+                replace_nested_builtins_for_element(
+                    sub_expr,
+                    var_idx,
+                    var_view,
+                    temp_id,
+                    hoisted,
+                    collect_hoisted,
+                )
+            }),
+            loc,
+        ),
+        other => other,
+    }
+}
+
+/// Find the next available temp ID by scanning existing expressions for
+/// AssignTemp nodes. Uses the existing extract_temp_sizes infrastructure
+/// which already walks the full expression tree.
+fn next_available_temp_id(exprs: &[Expr]) -> u32 {
+    let mut temp_sizes_map = HashMap::new();
+    for expr in exprs {
+        extract_temp_sizes(expr, &mut temp_sizes_map);
+    }
+    temp_sizes_map.keys().max().map(|m| m + 1).unwrap_or(0)
+}
+
+/// Construct a contiguous ArrayView from A2A dimensions.
+fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
+    let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+    let dim_names: Vec<String> = dims.iter().map(|d| d.name().to_string()).collect();
+    ArrayView::contiguous_with_names(dim_sizes, dim_names)
+}
+
+/// Handle the Arrayed expansion, detecting array-producing builtins in
+/// per-element expressions and hoisting them into AssignTemp pre-computations.
+///
+/// When a per-element expression is (or contains) an array-producing builtin
+/// like VectorElmMap, VectorSortOrder, or AllocateAvailable, the builtin must
+/// be evaluated once for the whole array and stored in temp. Each element then
+/// reads its result via TempArrayElement.
+fn expand_arrayed_with_hoisting(
+    ctx: &Context,
+    dims: &[Dimension],
+    elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
+    default_ast: Option<&crate::ast::Expr2>,
+    apply_default_for_missing: bool,
+    off: usize,
+) -> Result<Vec<Expr>> {
+    let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
+
+    // Scan ALL subscript combinations to find any equation that needs hoisting.
+    // The first element alone may be a constant override while later elements
+    // use a default (or explicit equation) containing array-producing builtins.
+    let mut hoisting_ast: Option<&crate::ast::Expr2> = None;
+    for subscripts in SubscriptIterator::new(dims) {
+        let key = CanonicalElementName::from_raw(&subscripts.join(","));
+        let ast = elements.get(&key).or(if apply_default_for_missing {
+            default_ast
+        } else {
+            None
+        });
+        if let Some(ast) = ast {
+            let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+            let mut probe_exprs = probe_ctx.lower(ast)?;
+            let probe_main = probe_exprs.pop().unwrap();
+            if is_array_producing_builtin(&probe_main)
+                || contains_array_producing_builtin(&probe_main)
+            {
+                hoisting_ast = Some(ast);
+                break;
+            }
+        }
+    }
+
+    if let Some(hoisting_ast) = hoisting_ast {
+        expand_arrayed_hoisted(
+            ctx,
+            dims,
+            elements,
+            default_ast,
+            apply_default_for_missing,
+            off,
+            &active_dims,
+            hoisting_ast,
+        )
+    } else {
+        // No array-producing builtins: standard per-element expansion
+        let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
+            .enumerate()
+            .map(|(i, subscripts)| {
+                let subscript_str = subscripts.join(",");
+                let canonical_key = CanonicalElementName::from_raw(&subscript_str);
+                let ast = match elements.get(&canonical_key) {
+                    Some(ast) => ast,
+                    None => {
+                        if apply_default_for_missing && let Some(default_ast) = default_ast {
+                            let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                            return ctx.lower(default_ast).map(|mut exprs| {
+                                let main_expr = exprs.pop().unwrap();
+                                exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                                exprs
+                            });
+                        }
+                        return Ok(vec![Expr::AssignCurr(
+                            off + i,
+                            Box::new(Expr::Const(0.0, Loc::default())),
+                        )]);
+                    }
+                };
+                let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                ctx.lower(ast).map(|mut exprs| {
+                    let main_expr = exprs.pop().unwrap();
+                    exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                    exprs
+                })
+            })
+            .collect();
+        Ok(exprs?.into_iter().flatten().collect())
+    }
+}
+
+/// Handle the A2A expansion for a single lowered expression, detecting
+/// array-producing builtins and hoisting them into AssignTemp pre-computations.
+///
+/// Returns the complete list of expressions (pre-expressions + AssignTemp +
+/// per-element AssignCurr nodes).
+///
+fn expand_a2a_with_hoisting(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    off: usize,
+) -> Result<Vec<Expr>> {
+    // Lower once using element 0's subscripts to detect the expression shape.
+    let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
+    let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
+    let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
+    let mut first_exprs = first_ctx.lower(ast)?;
+    let main_expr = first_exprs.pop().unwrap();
+
+    if is_array_producing_builtin(&main_expr) || contains_array_producing_builtin(&main_expr) {
+        // Re-lower with lower_preserving_dimensions so that
+        // IndexExpr3::Dimension references survive Pass 1 and reach
+        // normalize_subscripts3 as ActiveDimRef.  Inside array-producing
+        // builtins (lowered with preserve_wildcards_for_iteration)
+        // ActiveDimRef is kept as Wildcard, preserving full array views.
+        // Without this, Pass 1 resolves Dimension to a constant index
+        // based on the first element's active subscripts, collapsing
+        // array arguments to scalars.
+        let mut first_exprs = first_ctx.lower_preserving_dimensions(ast)?;
+        let main_expr = first_exprs.pop().unwrap();
+        return expand_a2a_hoisted(ctx, dims, ast, off, &active_dims, first_exprs, main_expr);
+    }
+
+    // Not an array-producing builtin: fall back to the standard per-element loop.
+    // We already lowered element 0, so start from there.
+    first_exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+    let rest: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
+        .enumerate()
+        .skip(1)
+        .map(|(i, subscripts)| {
+            let ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+            ctx.lower(ast).map(|mut exprs| {
+                let main_expr = exprs.pop().unwrap();
+                exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                exprs
+            })
+        })
+        .collect();
+    let mut all_exprs = first_exprs;
+    all_exprs.extend(rest?.into_iter().flatten());
+    Ok(all_exprs)
+}
+
+/// Detect whether an array-producing builtin's lowered expression depends on
+/// the active A2A dimension (e.g. `dir[D]` varies per element). Compares the
+/// lowered expression for element 0 against element 1 and the last element to
+/// handle both single- and multi-dimensional cases.
+fn expression_depends_on_active_dimension(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    active_dims: &Arc<[Dimension]>,
+    reference_expr: &Expr,
+) -> Result<bool> {
+    // Compare element 0's lowered expression against every other element.
+    // Early-exits on the first mismatch, so dimension-dependent expressions
+    // are typically O(1). For dimension-independent expressions, the O(N)
+    // cost is acceptable at compile time since SD model arrays are small.
+    for subscripts in SubscriptIterator::new(dims).skip(1) {
+        let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+        let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+        let elem_main = elem_exprs.pop().unwrap();
+        if *reference_expr != elem_main {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Inner function for `expand_a2a_with_hoisting` when array-producing builtins
+/// are detected. Handles both top-level and nested array-producing builtins.
+fn expand_a2a_hoisted(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    off: usize,
+    active_dims: &Arc<[Dimension]>,
+    first_exprs: Vec<Expr>,
+    main_expr: Expr,
+) -> Result<Vec<Expr>> {
+    if is_array_producing_builtin(&main_expr) {
+        let needs_per_element =
+            expression_depends_on_active_dimension(ctx, dims, ast, active_dims, &main_expr)?;
+
+        if needs_per_element {
+            return expand_a2a_per_element_hoisted(
+                ctx,
+                dims,
+                ast,
+                off,
+                active_dims,
+                first_exprs,
+                main_expr,
+            );
+        }
+
+        let temp_id = next_available_temp_id(&first_exprs);
+        let var_view = array_view_from_dims(dims);
+        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
+        let total_elements: usize = dims.iter().map(|d| d.len()).product();
+        let loc = main_expr.get_loc();
+
+        let mut result = first_exprs;
+        result.push(Expr::AssignTemp(
+            temp_id,
+            Box::new(main_expr),
+            builtin_view.clone(),
+        ));
+        for i in 0..total_elements {
+            let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
+            result.push(Expr::AssignCurr(
+                off + i,
+                Box::new(Expr::TempArrayElement(
+                    temp_id,
+                    builtin_view.clone(),
+                    temp_idx,
+                    loc,
+                )),
+            ));
+        }
+        Ok(result)
+    } else if contains_array_producing_builtin(&main_expr) {
+        // The top-level expression is not an array-producing builtin, but it
+        // contains one nested inside (e.g. `10 + VECTOR ELM MAP(...)`).
+        let needs_per_element =
+            expression_depends_on_active_dimension(ctx, dims, ast, active_dims, &main_expr)?;
+
+        let base_temp_id = next_available_temp_id(&first_exprs);
+        let var_view = array_view_from_dims(dims);
+        let mut result = first_exprs;
+
+        if needs_per_element {
+            // Scalar args vary by element: each element gets its own
+            // AssignTemp blocks so the nested builtin is re-evaluated.
+            let mut temp_id = base_temp_id;
+            for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+
+                // Preserve pre-expressions; remap with a consistent base.
+                let remap_base = temp_id;
+                if !elem_exprs.is_empty() {
+                    let remapped: Vec<_> = elem_exprs
+                        .into_iter()
+                        .map(|e| remap_temp_ids(e, remap_base))
+                        .collect();
+                    for e in &remapped {
+                        if let Some(max) = find_max_temp_id(e) {
+                            temp_id = temp_id.max(max + 1);
+                        }
+                    }
+                    result.extend(remapped);
+                }
+                let elem_main = remap_temp_ids(elem_main, remap_base);
+                if let Some(max) = find_max_temp_id(&elem_main) {
+                    temp_id = temp_id.max(max + 1);
+                }
+
+                let mut hoisted = Vec::new();
+                let elem_rewritten = replace_nested_builtins_for_element(
+                    elem_main,
+                    i,
+                    &var_view,
+                    &mut temp_id,
+                    &mut hoisted,
+                    true,
+                );
+                result.extend(hoisted);
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            }
+        } else {
+            // Scalar args are constant: hoist once from element 0, then
+            // rewrite subsequent elements to read from the shared temps.
+            let mut hoisted = Vec::new();
+            let mut temp_id = base_temp_id;
+            let rewritten = replace_nested_builtins_for_element(
+                main_expr,
+                0,
+                &var_view,
+                &mut temp_id,
+                &mut hoisted,
+                true,
+            );
+            result.extend(hoisted);
+            result.push(Expr::AssignCurr(off, Box::new(rewritten)));
+
+            for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+
+                let mut tid = base_temp_id;
+                let mut unused = Vec::new();
+                let elem_rewritten = replace_nested_builtins_for_element(
+                    elem_main,
+                    i,
+                    &var_view,
+                    &mut tid,
+                    &mut unused,
+                    false,
+                );
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            }
+        }
+        Ok(result)
+    } else {
+        unreachable!("expand_a2a_hoisted called without array-producing builtin")
+    }
+}
+
+/// Per-element hoisting for array-producing builtins whose scalar arguments
+/// depend on the active dimension (e.g. `vector_sort_order(vals[*], dir[D])`).
+/// Each element gets its own AssignTemp so the builtin is re-evaluated with
+/// the correct scalar argument value for that element.
+#[allow(clippy::too_many_arguments)]
+fn expand_a2a_per_element_hoisted(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    off: usize,
+    active_dims: &Arc<[Dimension]>,
+    first_exprs: Vec<Expr>,
+    first_main_expr: Expr,
+) -> Result<Vec<Expr>> {
+    let var_view = array_view_from_dims(dims);
+    let base_temp_id = next_available_temp_id(&first_exprs);
+
+    let mut result = first_exprs;
+
+    let mut next_tid = base_temp_id;
+
+    for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
+        let main_expr = if i == 0 {
+            first_main_expr.clone()
+        } else {
+            let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+            let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+            let main = elem_exprs.pop().unwrap();
+            // Preserve pre-expressions (e.g. intermediate temps from complex
+            // subexpressions). Remap with a consistent base so temp refs in
+            // the main expression stay aligned with pre-expression definitions.
+            let remap_base = next_tid;
+            if !elem_exprs.is_empty() {
+                let remapped: Vec<_> = elem_exprs
+                    .into_iter()
+                    .map(|e| remap_temp_ids(e, remap_base))
+                    .collect();
+                for e in &remapped {
+                    if let Some(max) = find_max_temp_id(e) {
+                        next_tid = next_tid.max(max + 1);
+                    }
+                }
+                result.extend(remapped);
+            }
+            let main = remap_temp_ids(main, remap_base);
+            if let Some(max) = find_max_temp_id(&main) {
+                next_tid = next_tid.max(max + 1);
+            }
+            main
+        };
+
+        let temp_id = next_tid;
+        next_tid = temp_id + 1;
+        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
+        let loc = main_expr.get_loc();
+        let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
+
+        result.push(Expr::AssignTemp(
+            temp_id,
+            Box::new(main_expr),
+            builtin_view.clone(),
+        ));
+        result.push(Expr::AssignCurr(
+            off + i,
+            Box::new(Expr::TempArrayElement(temp_id, builtin_view, temp_idx, loc)),
+        ));
+    }
+
+    Ok(result)
+}
+
+/// Handle Arrayed equations where the hoisting equation coexists with
+/// per-element overrides (EXCEPT semantics). Elements whose resolved equation
+/// contains array-producing builtins get TempArrayElement reads; all others
+/// are lowered normally. Each element is individually probed to classify it.
+#[allow(clippy::too_many_arguments)]
+fn expand_arrayed_hoisted(
+    ctx: &Context,
+    dims: &[Dimension],
+    elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
+    default_ast: Option<&crate::ast::Expr2>,
+    apply_default_for_missing: bool,
+    off: usize,
+    active_dims: &Arc<[Dimension]>,
+    hoisting_ast: &crate::ast::Expr2,
+) -> Result<Vec<Expr>> {
+    let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
+    let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
+    let mut first_exprs = first_ctx.lower_preserving_dimensions(hoisting_ast)?;
+    let main_expr = first_exprs.pop().unwrap();
+    let var_view = array_view_from_dims(dims);
+
+    if contains_array_producing_builtin(&main_expr) {
+        let hoisting_dim_dependent = expression_depends_on_active_dimension(
+            ctx,
+            dims,
+            hoisting_ast,
+            active_dims,
+            &main_expr,
+        )?;
+        let base_temp_id = next_available_temp_id(&first_exprs);
+
+        let mut result = first_exprs;
+        let mut temp_id = base_temp_id;
+
+        // When the hoisting expression's scalar args are constant, hoist once
+        // and share the temps. When they depend on the active dimension, each
+        // element gets its own AssignTemp blocks.
+        let mut ast_temp_bases: HashMap<*const crate::ast::Expr2, u32> = HashMap::new();
+        if !hoisting_dim_dependent {
+            let mut hoisted = Vec::new();
+            let _ = replace_nested_builtins_for_element(
+                main_expr,
+                0,
+                &var_view,
+                &mut temp_id,
+                &mut hoisted,
+                true,
+            );
+            result.extend(hoisted);
+            ast_temp_bases.insert(hoisting_ast as *const _, base_temp_id);
+        }
+
+        for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
+            let key = CanonicalElementName::from_raw(&subscripts.join(","));
+            let elem_ast = elements.get(&key).or(if apply_default_for_missing {
+                default_ast
+            } else {
+                None
+            });
+
+            let uses_hoisted = if let Some(ast) = elem_ast {
+                let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut probe_exprs = probe_ctx.lower(ast)?;
+                let probe_main = probe_exprs.pop().unwrap();
+                contains_array_producing_builtin(&probe_main)
+            } else {
+                false
+            };
+
+            if uses_hoisted {
+                let ast = elem_ast.unwrap();
+                let ast_ptr = ast as *const crate::ast::Expr2;
+
+                // Check if this AST's expression depends on the active
+                // dimension. For the hoisting_ast, this was pre-computed.
+                // For overrides, probe on first encounter.
+                let is_dim_dependent = if std::ptr::eq(ast, hoisting_ast) {
+                    hoisting_dim_dependent
+                } else if ast_temp_bases.contains_key(&ast_ptr) {
+                    false
+                } else {
+                    let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                    let mut probe_exprs = probe_ctx.lower_preserving_dimensions(ast)?;
+                    let probe_main = probe_exprs.pop().unwrap();
+                    expression_depends_on_active_dimension(
+                        ctx,
+                        dims,
+                        ast,
+                        active_dims,
+                        &probe_main,
+                    )?
+                };
+
+                if is_dim_dependent {
+                    // Per-element hoisting: each element creates its own
+                    // AssignTemp blocks.
+                    let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                    let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                    let elem_main = elem_exprs.pop().unwrap();
+
+                    // Preserve pre-expressions; remap with a consistent base.
+                    let remap_base = temp_id;
+                    if !elem_exprs.is_empty() {
+                        let remapped: Vec<_> = elem_exprs
+                            .into_iter()
+                            .map(|e| remap_temp_ids(e, remap_base))
+                            .collect();
+                        for e in &remapped {
+                            if let Some(max) = find_max_temp_id(e) {
+                                temp_id = temp_id.max(max + 1);
+                            }
+                        }
+                        result.extend(remapped);
+                    }
+                    let elem_main = remap_temp_ids(elem_main, remap_base);
+                    if let Some(max) = find_max_temp_id(&elem_main) {
+                        temp_id = temp_id.max(max + 1);
+                    }
+
+                    let mut hoisted = Vec::new();
+                    let elem_rewritten = replace_nested_builtins_for_element(
+                        elem_main,
+                        i,
+                        &var_view,
+                        &mut temp_id,
+                        &mut hoisted,
+                        true,
+                    );
+                    result.extend(hoisted);
+                    result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+                    continue;
+                }
+
+                // If this AST hasn't been seen before (different override),
+                // emit its own AssignTemp blocks with fresh temp IDs.
+                let elem_base_tid = if let Some(&tid) = ast_temp_bases.get(&ast_ptr) {
+                    tid
+                } else {
+                    let disc_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                    let mut disc_exprs = disc_ctx.lower_preserving_dimensions(ast)?;
+                    let disc_main = disc_exprs.pop().unwrap();
+                    // lower_preserving_dimensions restarts temp IDs at 0;
+                    // remap pre-expressions AND the main expression so they
+                    // don't collide with previously emitted temps in [0, temp_id).
+                    let disc_exprs: Vec<_> = disc_exprs
+                        .into_iter()
+                        .map(|e| remap_temp_ids(e, temp_id))
+                        .collect();
+                    let disc_main = remap_temp_ids(disc_main, temp_id);
+                    for e in &disc_exprs {
+                        if let Some(max) = find_max_temp_id(e) {
+                            temp_id = temp_id.max(max + 1);
+                        }
+                    }
+                    if let Some(max) = find_max_temp_id(&disc_main) {
+                        temp_id = temp_id.max(max + 1);
+                    }
+                    result.extend(disc_exprs);
+                    // new_base must be set AFTER advancing past remapped
+                    // pre-expressions so subsequent elements' TempArrayElement
+                    // reads align with the hoisted AssignTemp IDs.
+                    let new_base = temp_id;
+                    let mut new_hoisted = Vec::new();
+                    let _ = replace_nested_builtins_for_element(
+                        disc_main,
+                        i,
+                        &var_view,
+                        &mut temp_id,
+                        &mut new_hoisted,
+                        true,
+                    );
+                    result.extend(new_hoisted);
+                    ast_temp_bases.insert(ast_ptr, new_base);
+                    new_base
+                };
+
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+                let mut tid = elem_base_tid;
+                let mut unused = Vec::new();
+                let elem_rewritten = replace_nested_builtins_for_element(
+                    elem_main,
+                    i,
+                    &var_view,
+                    &mut tid,
+                    &mut unused,
+                    false,
+                );
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            } else if let Some(ast) = elem_ast {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+                // lower() restarts temp IDs at 0 for each call. Remap any
+                // temp IDs produced here so they don't collide with the
+                // hoisted temps that occupy IDs [0, temp_id).
+                let elem_exprs: Vec<_> = elem_exprs
+                    .into_iter()
+                    .map(|e| remap_temp_ids(e, temp_id))
+                    .collect();
+                let elem_main = remap_temp_ids(elem_main, temp_id);
+                // Advance temp_id past any remapped IDs
+                for e in &elem_exprs {
+                    if let Some(max) = find_max_temp_id(e) {
+                        temp_id = temp_id.max(max + 1);
+                    }
+                }
+                if let Some(max) = find_max_temp_id(&elem_main) {
+                    temp_id = temp_id.max(max + 1);
+                }
+                result.extend(elem_exprs);
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
+            } else {
+                result.push(Expr::AssignCurr(
+                    off + i,
+                    Box::new(Expr::Const(0.0, Loc::default())),
+                ));
+            }
+        }
+        Ok(result)
+    } else {
+        unreachable!("expand_arrayed_hoisted called without array-producing builtin")
     }
 }
 
