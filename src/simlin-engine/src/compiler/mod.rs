@@ -875,6 +875,29 @@ fn remap_temp_ids(expr: Expr, offset: u32) -> Expr {
         Expr::AssignCurr(off, inner) => {
             Expr::AssignCurr(off, Box::new(remap_temp_ids(*inner, offset)))
         }
+        Expr::AssignNext(off, inner) => {
+            Expr::AssignNext(off, Box::new(remap_temp_ids(*inner, offset)))
+        }
+        Expr::Subscript(off, indices, dim_sizes, loc) => {
+            let indices = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    SubscriptIndex::Single(e) => SubscriptIndex::Single(remap_temp_ids(e, offset)),
+                    SubscriptIndex::Range(lo, hi) => SubscriptIndex::Range(
+                        remap_temp_ids(lo, offset),
+                        remap_temp_ids(hi, offset),
+                    ),
+                })
+                .collect();
+            Expr::Subscript(off, indices, dim_sizes, loc)
+        }
+        Expr::EvalModule(ident, model, inputs, args) => {
+            let args = args
+                .into_iter()
+                .map(|e| remap_temp_ids(e, offset))
+                .collect();
+            Expr::EvalModule(ident, model, inputs, args)
+        }
         other => other,
     }
 }
@@ -888,7 +911,9 @@ fn find_max_temp_id(expr: &Expr) -> Option<u32> {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, None) | (None, a) => a,
         },
-        Expr::Op1(_, inner, _) | Expr::AssignCurr(_, inner) => find_max_temp_id(inner),
+        Expr::Op1(_, inner, _) | Expr::AssignCurr(_, inner) | Expr::AssignNext(_, inner) => {
+            find_max_temp_id(inner)
+        }
         Expr::If(cond, t, f, _) => [
             find_max_temp_id(cond),
             find_max_temp_id(t),
@@ -904,6 +929,28 @@ fn find_max_temp_id(expr: &Expr) -> Option<u32> {
                     max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
                 }
             });
+            max_id
+        }
+        Expr::Subscript(_, indices, _, _) => {
+            let mut max_id = None;
+            for idx in indices {
+                let ids = match idx {
+                    SubscriptIndex::Single(e) => [find_max_temp_id(e), None],
+                    SubscriptIndex::Range(lo, hi) => [find_max_temp_id(lo), find_max_temp_id(hi)],
+                };
+                for id in ids.into_iter().flatten() {
+                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
+                }
+            }
+            max_id
+        }
+        Expr::EvalModule(_, _, _, args) => {
+            let mut max_id = None;
+            for arg in args {
+                if let Some(id) = find_max_temp_id(arg) {
+                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
+                }
+            }
             max_id
         }
         _ => None,
@@ -1218,24 +1265,15 @@ fn expression_depends_on_active_dimension(
     active_dims: &Arc<[Dimension]>,
     reference_expr: &Expr,
 ) -> Result<bool> {
-    let total_elements: usize = dims.iter().map(|d| d.len()).product();
-    if total_elements < 2 {
-        return Ok(false);
-    }
-    let mut iter = SubscriptIterator::new(dims);
-    let second_subscripts: Vec<String> = iter.nth(1).unwrap_or_default();
-    let second_ctx = ctx.with_active_subscripts(active_dims.clone(), &second_subscripts);
-    let mut second_exprs = second_ctx.lower_preserving_dimensions(ast)?;
-    let second_main = second_exprs.pop().unwrap();
-    if *reference_expr != second_main {
-        return Ok(true);
-    }
-    if total_elements > 2 {
-        let last_subscripts: Vec<String> = iter.last().unwrap_or_default();
-        let last_ctx = ctx.with_active_subscripts(active_dims.clone(), &last_subscripts);
-        let mut last_exprs = last_ctx.lower_preserving_dimensions(ast)?;
-        let last_main = last_exprs.pop().unwrap();
-        if *reference_expr != last_main {
+    // Compare element 0's lowered expression against every other element.
+    // Early-exits on the first mismatch, so dimension-dependent expressions
+    // are typically O(1). For dimension-independent expressions, the O(N)
+    // cost is acceptable at compile time since SD model arrays are small.
+    for subscripts in SubscriptIterator::new(dims).skip(1) {
+        let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+        let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+        let elem_main = elem_exprs.pop().unwrap();
+        if *reference_expr != elem_main {
             return Ok(true);
         }
     }
