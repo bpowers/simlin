@@ -111,6 +111,9 @@ impl ModelStage1 {
     /// equations in this model. These variables must be included in the
     /// Initials runlist so that INIT(x) can read x's initial value even
     /// when x is not a stock or module.
+    ///
+    /// Parallel logic exists in db.rs variable_direct_dependencies_impl for
+    /// the salsa incremental path.
     fn init_referenced_vars(&self) -> HashSet<Ident<Canonical>> {
         self.variables
             .values()

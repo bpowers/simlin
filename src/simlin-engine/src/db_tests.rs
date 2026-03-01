@@ -4822,7 +4822,7 @@ fn test_initial_sync_marks_stdlib_models() {
     }
 }
 
-// ── Phase 1 scaffolding verification tests ──────────────────────────
+// ── PREVIOUS/INIT opcode verification tests ──────────────────────────
 
 /// 1-arg PREVIOUS(x) compiles to the LoadPrev opcode. Verify that
 /// interpreter and VM produce identical results, and that PREVIOUS

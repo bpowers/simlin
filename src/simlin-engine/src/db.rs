@@ -913,6 +913,8 @@ fn variable_direct_dependencies_impl(
             let implicit_vars =
                 extract_implicit_var_deps(parsed, &dims, &dim_context, module_inputs);
 
+            // Also used in model.rs ModelStage1::init_referenced_vars() for the
+            // monolithic (non-salsa) compilation path.
             let init_referenced_vars = match lowered.ast() {
                 Some(ast) => init_referenced_idents(ast),
                 None => BTreeSet::new(),
