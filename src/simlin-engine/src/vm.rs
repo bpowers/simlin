@@ -3265,6 +3265,24 @@ mod vm_reset_and_run_initials_tests {
     }
 
     #[test]
+    fn test_init_on_module_backed_var_freezes_initial_value() {
+        let tp = TestProject::new("init_module_backed")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .aux("x", "TIME", None)
+            .aux("delayed", "PREVIOUS(x, 99)", None)
+            .aux("frozen", "INIT(delayed)", None);
+
+        let vm = tp.run_vm().expect("VM should run");
+        let frozen_vals = vm.get("frozen").expect("frozen not in results");
+        for (step, val) in frozen_vals.iter().enumerate() {
+            assert!(
+                (val - 99.0).abs() < 1e-10,
+                "frozen should be 99.0 at every step, got {val} at step {step}"
+            );
+        }
+    }
+
+    #[test]
     fn test_compiled_simulation_clone_produces_equivalent_vm() {
         let tp = pop_model();
         let (_, compiled) = build_compiled(&tp);

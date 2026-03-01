@@ -968,6 +968,7 @@ fn variable_direct_dependencies_impl(
 }
 
 #[salsa::tracked(returns(ref))]
+/// Default direct dependency extraction (no module-input specialization).
 pub fn variable_direct_dependencies(
     db: &dyn Db,
     var: SourceVariable,
@@ -993,6 +994,7 @@ pub fn variable_direct_dependencies_with_inputs(
 }
 
 #[salsa::tracked(returns(ref))]
+/// Dependency extraction using caller-provided module-ident context.
 pub fn variable_direct_dependencies_with_context<'db>(
     db: &'db dyn Db,
     var: SourceVariable,
@@ -3421,7 +3423,7 @@ pub fn compile_var_fragment(
 
     // Build metadata from the full, input-agnostic dependency set so both
     // branches of `if isModuleInput(...)` remain compilable in the mini-context.
-    let deps = variable_direct_dependencies(db, var, project);
+    let deps = variable_direct_dependencies_with_context(db, var, project, module_ident_context);
 
     // Get project dimensions and build dimension context
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));

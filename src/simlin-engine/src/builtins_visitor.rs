@@ -349,29 +349,24 @@ impl<'a> BuiltinVisitor<'a> {
                 //   - PREVIOUS(module_var) -- modules occupy multiple slots,
                 //     so LoadPrev at the base offset reads the wrong value
                 //
-                // INIT(x) always passes through as a builtin -- it compiles
-                // to the LoadInitial opcode.
-                if func == "previous"
+                let is_module_backed_ident = |ident: &RawIdent| {
+                    let canonical = Ident::new(&canonicalize(ident.as_str()));
+                    self.module_idents
+                        .is_some_and(|ids| ids.contains(&canonical))
+                        || ident.as_str().contains('\u{205A}')
+                };
+                let previous_needs_module = func == "previous"
                     && (args.len() > 1
                         || args.first().is_none_or(|a| match a {
-                            Var(ident, _) => {
-                                // Module variables occupy multiple slots;
-                                // LoadPrev at the module base offset reads
-                                // an internal sub-variable, not the output.
-                                // Check both the explicit module_idents set
-                                // and the implicit module naming convention
-                                // (ratio separator U+205A).
-                                let canonical = Ident::new(&canonicalize(ident.as_str()));
-                                self.module_idents
-                                    .is_some_and(|ids| ids.contains(&canonical))
-                                    || ident.as_str().contains('\u{205A}')
-                            }
+                            Var(ident, _) => is_module_backed_ident(ident),
                             _ => true,
-                        }))
-                {
+                        }));
+                if previous_needs_module {
                     // Fall through to module expansion for 2-arg form,
                     // complex-argument forms, and module variable arguments.
                 } else if is_builtin_fn(&func) {
+                    // INIT always stays on the builtin path (LoadInitial);
+                    // there is no stdlib "init" model anymore.
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
