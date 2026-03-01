@@ -919,7 +919,9 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
         Expr::Op2(_, lhs, rhs, _) => {
             contains_array_producing_builtin(lhs) || contains_array_producing_builtin(rhs)
         }
-        Expr::Op1(_, inner, _) => contains_array_producing_builtin(inner),
+        Expr::Op1(_, inner, _) | Expr::AssignTemp(_, inner, _) | Expr::AssignCurr(_, inner) => {
+            contains_array_producing_builtin(inner)
+        }
         Expr::If(cond, t, f, _) => {
             contains_array_producing_builtin(cond)
                 || contains_array_producing_builtin(t)
@@ -928,6 +930,13 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
         Expr::App(builtin, _) => builtin_contains_array_producing(builtin),
         _ => false,
     }
+}
+
+/// Check if any expression in a list contains an array-producing builtin.
+fn any_expr_has_array_producing(exprs: &[Expr]) -> bool {
+    exprs
+        .iter()
+        .any(|e| is_array_producing_builtin(e) || contains_array_producing_builtin(e))
 }
 
 fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
@@ -1098,6 +1107,7 @@ fn expand_arrayed_with_hoisting(
             let probe_main = probe_exprs.pop().unwrap();
             if is_array_producing_builtin(&probe_main)
                 || contains_array_producing_builtin(&probe_main)
+                || any_expr_has_array_producing(&probe_exprs)
             {
                 hoisting_ast = Some(ast);
                 break;
@@ -1171,7 +1181,10 @@ fn expand_a2a_with_hoisting(
     let mut first_exprs = first_ctx.lower(ast)?;
     let main_expr = first_exprs.pop().unwrap();
 
-    if is_array_producing_builtin(&main_expr) || contains_array_producing_builtin(&main_expr) {
+    if is_array_producing_builtin(&main_expr)
+        || contains_array_producing_builtin(&main_expr)
+        || any_expr_has_array_producing(&first_exprs)
+    {
         // Re-lower with lower_preserving_dimensions so that
         // IndexExpr3::Dimension references survive Pass 1 and reach
         // normalize_subscripts3 as ActiveDimRef.  Inside array-producing
@@ -1354,6 +1367,7 @@ fn expand_arrayed_hoisted(
                 let mut probe_exprs = probe_ctx.lower(ast)?;
                 let probe_main = probe_exprs.pop().unwrap();
                 contains_array_producing_builtin(&probe_main)
+                    || any_expr_has_array_producing(&probe_exprs)
             } else {
                 false
             };
@@ -1371,6 +1385,18 @@ fn expand_arrayed_hoisted(
                     let mut disc_exprs = disc_ctx.lower_preserving_dimensions(ast)?;
                     let disc_main = disc_exprs.pop().unwrap();
                     let new_base = temp_id;
+                    // lower_preserving_dimensions restarts temp IDs at 0;
+                    // remap any pre-expressions so they don't collide with
+                    // previously emitted temps in [0, temp_id).
+                    let disc_exprs: Vec<_> = disc_exprs
+                        .into_iter()
+                        .map(|e| remap_temp_ids(e, temp_id))
+                        .collect();
+                    for e in &disc_exprs {
+                        if let Some(max) = find_max_temp_id(e) {
+                            temp_id = temp_id.max(max + 1);
+                        }
+                    }
                     result.extend(disc_exprs);
                     let mut new_hoisted = Vec::new();
                     let _ = replace_nested_builtins_for_element(
