@@ -1947,95 +1947,110 @@ impl Vm {
                     let expr_view = &view_stack[view_stack.len() - 1];
                     let sel_view = &view_stack[view_stack.len() - 2];
 
-                    // Match interpreter's zip semantics: stop at the shorter array
-                    let size = sel_view.size().min(expr_view.size());
-                    let n_dims = sel_view.dims.len();
+                    if !sel_view.is_valid || !expr_view.is_valid {
+                        stack.push(f64::NAN);
+                    } else {
+                        // Match interpreter's zip semantics: stop at the shorter array
+                        let size = sel_view.size().min(expr_view.size());
+                        let n_dims = sel_view.dims.len();
 
-                    let mut selected: SmallVec<[f64; 32]> = SmallVec::new();
-                    let mut sel_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
-                    let mut expr_indices: SmallVec<[u16; 4]> =
-                        smallvec::smallvec![0; expr_view.dims.len()];
+                        let mut selected: SmallVec<[f64; 32]> = SmallVec::new();
+                        let mut sel_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+                        let mut expr_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; expr_view.dims.len()];
 
-                    for _ in 0..size {
-                        let sel_off = sel_view.flat_offset(&sel_indices);
-                        let sel_val =
-                            Self::read_view_element(sel_view, sel_off, curr, temp_storage, context);
-
-                        if is_truthy(sel_val) {
-                            let expr_off = expr_view.flat_offset(&expr_indices);
-                            let expr_val = Self::read_view_element(
-                                expr_view,
-                                expr_off,
+                        for _ in 0..size {
+                            let sel_off = sel_view.flat_offset(&sel_indices);
+                            let sel_val = Self::read_view_element(
+                                sel_view,
+                                sel_off,
                                 curr,
                                 temp_storage,
                                 context,
                             );
-                            selected.push(expr_val);
+
+                            if is_truthy(sel_val) {
+                                let expr_off = expr_view.flat_offset(&expr_indices);
+                                let expr_val = Self::read_view_element(
+                                    expr_view,
+                                    expr_off,
+                                    curr,
+                                    temp_storage,
+                                    context,
+                                );
+                                selected.push(expr_val);
+                            }
+
+                            increment_indices(&mut sel_indices, &sel_view.dims);
+                            increment_indices(&mut expr_indices, &expr_view.dims);
                         }
 
-                        increment_indices(&mut sel_indices, &sel_view.dims);
-                        increment_indices(&mut expr_indices, &expr_view.dims);
+                        let result = if selected.is_empty() {
+                            max_value
+                        } else {
+                            match action {
+                                1 => selected.iter().cloned().fold(f64::INFINITY, f64::min),
+                                2 => selected.iter().sum::<f64>() / selected.len() as f64,
+                                3 => selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                                4 => selected.iter().product(),
+                                _ => selected.iter().sum(),
+                            }
+                        };
+                        stack.push(result);
                     }
-
-                    let result = if selected.is_empty() {
-                        max_value
-                    } else {
-                        match action {
-                            1 => selected.iter().cloned().fold(f64::INFINITY, f64::min),
-                            2 => selected.iter().sum::<f64>() / selected.len() as f64,
-                            3 => selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-                            4 => selected.iter().product(),
-                            _ => selected.iter().sum(),
-                        }
-                    };
-                    stack.push(result);
                 }
 
                 Opcode::VectorElmMap { write_temp_id } => {
                     let offset_view = &view_stack[view_stack.len() - 1];
                     let source_view = &view_stack[view_stack.len() - 2];
 
-                    // Collect all source values
-                    let source_size = source_view.size();
-                    let source_n_dims = source_view.dims.len();
-                    let mut source_values: SmallVec<[f64; 32]> =
-                        SmallVec::with_capacity(source_size);
-                    let mut src_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; source_n_dims];
-                    for _ in 0..source_size {
-                        let flat_off = source_view.flat_offset(&src_indices);
-                        let val = Self::read_view_element(
-                            source_view,
-                            flat_off,
-                            curr,
-                            temp_storage,
-                            context,
-                        );
-                        source_values.push(val);
-                        increment_indices(&mut src_indices, &source_view.dims);
-                    }
+                    if !source_view.is_valid || !offset_view.is_valid {
+                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
+                    } else {
+                        // Collect all source values
+                        let source_size = source_view.size();
+                        let source_n_dims = source_view.dims.len();
+                        let mut source_values: SmallVec<[f64; 32]> =
+                            SmallVec::with_capacity(source_size);
+                        let mut src_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; source_n_dims];
+                        for _ in 0..source_size {
+                            let flat_off = source_view.flat_offset(&src_indices);
+                            let val = Self::read_view_element(
+                                source_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            source_values.push(val);
+                            increment_indices(&mut src_indices, &source_view.dims);
+                        }
 
-                    // Write mapped results to temp_storage
-                    let temp_off = context.temp_offsets[*write_temp_id as usize];
-                    let offset_size = offset_view.size();
-                    let offset_n_dims = offset_view.dims.len();
-                    let mut off_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; offset_n_dims];
-                    for i in 0..offset_size {
-                        let flat_off = offset_view.flat_offset(&off_indices);
-                        let offset_val = Self::read_view_element(
-                            offset_view,
-                            flat_off,
-                            curr,
-                            temp_storage,
-                            context,
-                        );
-                        let idx = offset_val.round();
-                        temp_storage[temp_off + i] =
-                            if idx.is_nan() || idx < 0.0 || idx >= source_values.len() as f64 {
-                                f64::NAN
-                            } else {
-                                source_values[idx as usize]
-                            };
-                        increment_indices(&mut off_indices, &offset_view.dims);
+                        // Write mapped results to temp_storage
+                        let temp_off = context.temp_offsets[*write_temp_id as usize];
+                        let offset_size = offset_view.size();
+                        let offset_n_dims = offset_view.dims.len();
+                        let mut off_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; offset_n_dims];
+                        for i in 0..offset_size {
+                            let flat_off = offset_view.flat_offset(&off_indices);
+                            let offset_val = Self::read_view_element(
+                                offset_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            let idx = offset_val.round();
+                            temp_storage[temp_off + i] =
+                                if idx.is_nan() || idx < 0.0 || idx >= source_values.len() as f64 {
+                                    f64::NAN
+                                } else {
+                                    source_values[idx as usize]
+                                };
+                            increment_indices(&mut off_indices, &offset_view.dims);
+                        }
                     }
                 }
 
@@ -2044,38 +2059,42 @@ impl Vm {
 
                     let input_view = &view_stack[view_stack.len() - 1];
 
-                    let size = input_view.size();
-                    let n_dims = input_view.dims.len();
-
-                    // Collect (value, 1-based-index) pairs
-                    let mut indexed: SmallVec<[(f64, u16); 32]> = SmallVec::with_capacity(size);
-                    let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
-                    for i in 0..size {
-                        let flat_off = input_view.flat_offset(&indices);
-                        let val = Self::read_view_element(
-                            input_view,
-                            flat_off,
-                            curr,
-                            temp_storage,
-                            context,
-                        );
-                        indexed.push((val, (i + 1) as u16));
-                        increment_indices(&mut indices, &input_view.dims);
-                    }
-
-                    if direction == 1 {
-                        indexed.sort_by(|a, b| {
-                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                    if !input_view.is_valid {
+                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
                     } else {
-                        indexed.sort_by(|a, b| {
-                            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                    }
+                        let size = input_view.size();
+                        let n_dims = input_view.dims.len();
 
-                    let temp_off = context.temp_offsets[*write_temp_id as usize];
-                    for (i, &(_, orig_idx)) in indexed.iter().enumerate() {
-                        temp_storage[temp_off + i] = orig_idx as f64;
+                        // Collect (value, 1-based-index) pairs
+                        let mut indexed: SmallVec<[(f64, u16); 32]> = SmallVec::with_capacity(size);
+                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+                        for i in 0..size {
+                            let flat_off = input_view.flat_offset(&indices);
+                            let val = Self::read_view_element(
+                                input_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            indexed.push((val, (i + 1) as u16));
+                            increment_indices(&mut indices, &input_view.dims);
+                        }
+
+                        if direction == 1 {
+                            indexed.sort_by(|a, b| {
+                                a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            indexed.sort_by(|a, b| {
+                                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+
+                        let temp_off = context.temp_offsets[*write_temp_id as usize];
+                        for (i, &(_, orig_idx)) in indexed.iter().enumerate() {
+                            temp_storage[temp_off + i] = orig_idx as f64;
+                        }
                     }
                 }
 
@@ -2085,83 +2104,89 @@ impl Vm {
                     let profile_view = &view_stack[view_stack.len() - 1];
                     let requests_view = &view_stack[view_stack.len() - 2];
 
-                    // Collect request values
-                    let req_size = requests_view.size();
-                    let req_n_dims = requests_view.dims.len();
-                    let mut requests: SmallVec<[f64; 32]> = SmallVec::with_capacity(req_size);
-                    let mut req_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; req_n_dims];
-                    for _ in 0..req_size {
-                        let flat_off = requests_view.flat_offset(&req_indices);
-                        let val = Self::read_view_element(
-                            requests_view,
-                            flat_off,
-                            curr,
-                            temp_storage,
-                            context,
-                        );
-                        requests.push(val);
-                        increment_indices(&mut req_indices, &requests_view.dims);
-                    }
-
-                    let n = requests.len();
-
-                    // Collect profile values (flat 2D array: n requesters x pp_cols)
-                    let pp_size = profile_view.size();
-                    let pp_n_dims = profile_view.dims.len();
-                    let mut pp_values: SmallVec<[f64; 32]> = SmallVec::with_capacity(pp_size);
-                    let mut pp_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; pp_n_dims];
-                    for _ in 0..pp_size {
-                        let flat_off = profile_view.flat_offset(&pp_indices);
-                        let val = Self::read_view_element(
-                            profile_view,
-                            flat_off,
-                            curr,
-                            temp_storage,
-                            context,
-                        );
-                        pp_values.push(val);
-                        increment_indices(&mut pp_indices, &profile_view.dims);
-                    }
-
-                    // Build profile tuples from flat array
-                    let pp_cols = if !pp_values.is_empty() && n > 0 && pp_size.is_multiple_of(n) {
-                        pp_size / n
+                    if !requests_view.is_valid || !profile_view.is_valid {
+                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
                     } else {
-                        4
-                    };
+                        // Collect request values
+                        let req_size = requests_view.size();
+                        let req_n_dims = requests_view.dims.len();
+                        let mut requests: SmallVec<[f64; 32]> = SmallVec::with_capacity(req_size);
+                        let mut req_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; req_n_dims];
+                        for _ in 0..req_size {
+                            let flat_off = requests_view.flat_offset(&req_indices);
+                            let val = Self::read_view_element(
+                                requests_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            requests.push(val);
+                            increment_indices(&mut req_indices, &requests_view.dims);
+                        }
 
-                    let mut profiles: SmallVec<[(f64, f64, f64, f64); 32]> =
-                        SmallVec::with_capacity(n);
-                    for i in 0..n {
-                        let base = i * pp_cols;
-                        let ptype = if base < pp_values.len() {
-                            pp_values[base]
-                        } else {
-                            0.0
-                        };
-                        let ppriority = if base + 1 < pp_values.len() {
-                            pp_values[base + 1]
-                        } else {
-                            0.0
-                        };
-                        let pwidth = if base + 2 < pp_values.len() {
-                            pp_values[base + 2]
-                        } else {
-                            1.0
-                        };
-                        let pextra = if base + 3 < pp_values.len() {
-                            pp_values[base + 3]
-                        } else {
-                            0.0
-                        };
-                        profiles.push((ptype, ppriority, pwidth, pextra));
-                    }
+                        let n = requests.len();
 
-                    let result = allocate_available(&requests, &profiles, avail);
+                        // Collect profile values (flat 2D array: n requesters x pp_cols)
+                        let pp_size = profile_view.size();
+                        let pp_n_dims = profile_view.dims.len();
+                        let mut pp_values: SmallVec<[f64; 32]> = SmallVec::with_capacity(pp_size);
+                        let mut pp_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; pp_n_dims];
+                        for _ in 0..pp_size {
+                            let flat_off = profile_view.flat_offset(&pp_indices);
+                            let val = Self::read_view_element(
+                                profile_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            pp_values.push(val);
+                            increment_indices(&mut pp_indices, &profile_view.dims);
+                        }
 
-                    let temp_off = context.temp_offsets[*write_temp_id as usize];
-                    for (i, &val) in result.iter().enumerate() {
-                        temp_storage[temp_off + i] = val;
+                        // Build profile tuples from flat array
+                        let pp_cols = if !pp_values.is_empty() && n > 0 && pp_size.is_multiple_of(n)
+                        {
+                            pp_size / n
+                        } else {
+                            4
+                        };
+
+                        let mut profiles: SmallVec<[(f64, f64, f64, f64); 32]> =
+                            SmallVec::with_capacity(n);
+                        for i in 0..n {
+                            let base = i * pp_cols;
+                            let ptype = if base < pp_values.len() {
+                                pp_values[base]
+                            } else {
+                                0.0
+                            };
+                            let ppriority = if base + 1 < pp_values.len() {
+                                pp_values[base + 1]
+                            } else {
+                                0.0
+                            };
+                            let pwidth = if base + 2 < pp_values.len() {
+                                pp_values[base + 2]
+                            } else {
+                                1.0
+                            };
+                            let pextra = if base + 3 < pp_values.len() {
+                                pp_values[base + 3]
+                            } else {
+                                0.0
+                            };
+                            profiles.push((ptype, ppriority, pwidth, pextra));
+                        }
+
+                        let result = allocate_available(&requests, &profiles, avail);
+
+                        let temp_off = context.temp_offsets[*write_temp_id as usize];
+                        for (i, &val) in result.iter().enumerate() {
+                            temp_storage[temp_off + i] = val;
+                        }
                     }
                 }
             }
@@ -2230,6 +2255,21 @@ impl Vm {
             temp_storage[temp_off + flat_off]
         } else {
             curr[view.base_off as usize + flat_off]
+        }
+    }
+
+    /// Fill a temp storage region with NaN. Uses `temp_offsets` to determine
+    /// the correct region size, independent of potentially-invalid runtime views.
+    fn fill_temp_nan(temp_storage: &mut [f64], context: &ByteCodeContext, temp_id: TempId) {
+        let idx = temp_id as usize;
+        let start = context.temp_offsets[idx];
+        let end = context
+            .temp_offsets
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(context.temp_total_size);
+        for slot in &mut temp_storage[start..end] {
+            *slot = f64::NAN;
         }
     }
 

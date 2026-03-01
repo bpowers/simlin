@@ -4039,3 +4039,57 @@ mod different_builtin_override_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod vector_op_invalid_view_tests {
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn vector_select_invalid_view_returns_nan() {
+        // A reversed dynamic range (start > end) creates an invalid view.
+        // VECTOR SELECT should propagate NaN instead of returning max_value.
+        let project = TestProject::new("vsel_invalid")
+            .indexed_dimension("D", 3)
+            .array_aux("sel[D]", "1")
+            .array_aux("data[D]", "D * 10")
+            .scalar_const("high_idx", 5.0)
+            .scalar_const("low_idx", 1.0)
+            .scalar_aux(
+                "result",
+                "vector_select(sel[high_idx:low_idx], data[*], -999, 0, 0)",
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert!(
+            vals[0].is_nan(),
+            "VECTOR SELECT with invalid view should return NaN, got {}",
+            vals[0]
+        );
+    }
+
+    #[test]
+    fn vector_select_invalid_expr_view_returns_nan() {
+        // Invalid view on the expr (second) argument should also propagate NaN.
+        let project = TestProject::new("vsel_invalid_expr")
+            .indexed_dimension("D", 3)
+            .array_aux("sel[D]", "1")
+            .array_aux("data[D]", "D * 10")
+            .scalar_const("high_idx", 5.0)
+            .scalar_const("low_idx", 1.0)
+            .scalar_aux(
+                "result",
+                "vector_select(sel[*], data[high_idx:low_idx], -999, 0, 0)",
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert!(
+            vals[0].is_nan(),
+            "VECTOR SELECT with invalid expr view should return NaN, got {}",
+            vals[0]
+        );
+    }
+}
