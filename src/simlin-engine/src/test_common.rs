@@ -318,6 +318,35 @@ impl TestProject {
         self
     }
 
+    /// Add an array variable with a default equation and per-element overrides (EXCEPT semantics)
+    pub fn array_with_default_and_overrides(
+        mut self,
+        name_with_dims: &str,
+        default_equation: &str,
+        overrides: Vec<(&str, &str)>,
+    ) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        let arrayed_equations = overrides
+            .into_iter()
+            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+            .collect();
+        self.variables.push(Variable::Aux(datamodel::Aux {
+            ident: name,
+            equation: Equation::Arrayed(
+                dims,
+                arrayed_equations,
+                Some(default_equation.to_string()),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
     /// Build the datamodel Project
     pub fn build_datamodel(&self) -> Project {
         Project {

@@ -3568,3 +3568,77 @@ mod vector_elm_map_tests {
         );
     }
 }
+
+mod arrayed_except_hoisting_tests {
+    use crate::test_common::TestProject;
+
+    /// Arrayed equation with a default that uses an array-producing builtin
+    /// and an element override (EXCEPT semantics). The override must not be
+    /// silently replaced by the default during A2A hoisting.
+    fn make_except_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            // Override element 3 = 42
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("3", "42")],
+            )
+    }
+
+    #[test]
+    fn arrayed_except_preserves_override_interpreter() {
+        let project = make_except_project("arrayed_except_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (override): expected 42, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn arrayed_except_preserves_override_vm() {
+        let project = make_except_project("arrayed_except_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default, offset 2): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default, offset 0): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 42.0).abs() < 1e-9,
+            "element 2 (override): expected 42, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn arrayed_except_hoists_correctly() {
+        let project = make_except_project("arrayed_except_hoist");
+        assert!(
+            project.flow_runlist_has_assign_temp(),
+            "A2A hoisting should produce AssignTemp for the default equation's vector builtin"
+        );
+    }
+}
