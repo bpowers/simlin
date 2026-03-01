@@ -932,13 +932,6 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
     }
 }
 
-/// Check if any expression in a list contains an array-producing builtin.
-fn any_expr_has_array_producing(exprs: &[Expr]) -> bool {
-    exprs
-        .iter()
-        .any(|e| is_array_producing_builtin(e) || contains_array_producing_builtin(e))
-}
-
 fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
     let mut found = false;
     builtin.for_each_expr_ref(|e| {
@@ -1107,7 +1100,6 @@ fn expand_arrayed_with_hoisting(
             let probe_main = probe_exprs.pop().unwrap();
             if is_array_producing_builtin(&probe_main)
                 || contains_array_producing_builtin(&probe_main)
-                || any_expr_has_array_producing(&probe_exprs)
             {
                 hoisting_ast = Some(ast);
                 break;
@@ -1181,10 +1173,7 @@ fn expand_a2a_with_hoisting(
     let mut first_exprs = first_ctx.lower(ast)?;
     let main_expr = first_exprs.pop().unwrap();
 
-    if is_array_producing_builtin(&main_expr)
-        || contains_array_producing_builtin(&main_expr)
-        || any_expr_has_array_producing(&first_exprs)
-    {
+    if is_array_producing_builtin(&main_expr) || contains_array_producing_builtin(&main_expr) {
         // Re-lower with lower_preserving_dimensions so that
         // IndexExpr3::Dimension references survive Pass 1 and reach
         // normalize_subscripts3 as ActiveDimRef.  Inside array-producing
@@ -1367,7 +1356,6 @@ fn expand_arrayed_hoisted(
                 let mut probe_exprs = probe_ctx.lower(ast)?;
                 let probe_main = probe_exprs.pop().unwrap();
                 contains_array_producing_builtin(&probe_main)
-                    || any_expr_has_array_producing(&probe_exprs)
             } else {
                 false
             };

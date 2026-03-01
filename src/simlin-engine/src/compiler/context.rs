@@ -2041,8 +2041,12 @@ impl Context<'_> {
         }
 
         // The view has fewer dimensions than the full variable -- some were
-        // collapsed to Single.  Rebuild with a full contiguous view from
-        // the variable's base offset.
+        // collapsed by per-element subscript evaluation.  Rebuild with a
+        // full contiguous view because ALLOCATE AVAILABLE needs the complete
+        // priority profile array (all requesters' profiles) to perform
+        // simultaneous allocation.  Any explicit subscripts that restricted
+        // dimensions are intentionally overridden: the allocator requires
+        // the full array regardless of the calling element's context.
         let base = self.get_base_offset(var_ident)?;
         let dim_sizes: Vec<usize> = full_dims.iter().map(|d| d.len()).collect();
         let dim_names: Vec<String> = full_dims.iter().map(|d| d.name().to_string()).collect();
