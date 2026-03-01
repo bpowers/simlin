@@ -1222,16 +1222,28 @@ fn expand_a2a_hoisted(
         let total_elements: usize = dims.iter().map(|d| d.len()).product();
 
         // Check whether scalar arguments depend on the active dimension by
-        // comparing lowered expressions for element 0 vs element 1.  When they
-        // differ (e.g. direction arg varies per element), each element needs
-        // its own AssignTemp so the builtin is re-evaluated with correct args.
+        // comparing lowered expressions for element 0 vs element 1 AND the
+        // last element.  Checking element 1 catches single-dimension cases;
+        // checking the last element catches multi-dimensional cases where the
+        // scalar arg depends on an outer dimension (elements 0 and 1 share the
+        // same outer subscript but the last element differs in all dimensions).
         let needs_per_element = if total_elements >= 2 {
-            let second_subscripts: Vec<String> =
-                SubscriptIterator::new(dims).nth(1).unwrap_or_default();
+            let mut iter = SubscriptIterator::new(dims);
+            let second_subscripts: Vec<String> = iter.nth(1).unwrap_or_default();
             let second_ctx = ctx.with_active_subscripts(active_dims.clone(), &second_subscripts);
             let mut second_exprs = second_ctx.lower_preserving_dimensions(ast)?;
             let second_main = second_exprs.pop().unwrap();
-            main_expr != second_main
+            if main_expr != second_main {
+                true
+            } else if total_elements > 2 {
+                let last_subscripts: Vec<String> = iter.last().unwrap_or_default();
+                let last_ctx = ctx.with_active_subscripts(active_dims.clone(), &last_subscripts);
+                let mut last_exprs = last_ctx.lower_preserving_dimensions(ast)?;
+                let last_main = last_exprs.pop().unwrap();
+                main_expr != last_main
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -1338,7 +1350,6 @@ fn expand_a2a_per_element_hoisted(
     first_main_expr: Expr,
 ) -> Result<Vec<Expr>> {
     let var_view = array_view_from_dims(dims);
-    let total_elements: usize = dims.iter().map(|d| d.len()).product();
     let base_temp_id = next_available_temp_id(&first_exprs);
 
     let mut result = first_exprs;
@@ -1367,10 +1378,6 @@ fn expand_a2a_per_element_hoisted(
             Box::new(Expr::TempArrayElement(temp_id, builtin_view, temp_idx, loc)),
         ));
     }
-
-    // Ensure temp IDs don't collide: reserve total_elements temp slots.
-    // The next_available_temp_id callers after this will see base_temp_id + total_elements.
-    let _ = total_elements;
 
     Ok(result)
 }
@@ -1452,20 +1459,27 @@ fn expand_arrayed_hoisted(
                     let disc_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                     let mut disc_exprs = disc_ctx.lower_preserving_dimensions(ast)?;
                     let disc_main = disc_exprs.pop().unwrap();
-                    let new_base = temp_id;
                     // lower_preserving_dimensions restarts temp IDs at 0;
-                    // remap any pre-expressions so they don't collide with
-                    // previously emitted temps in [0, temp_id).
+                    // remap pre-expressions AND the main expression so they
+                    // don't collide with previously emitted temps in [0, temp_id).
                     let disc_exprs: Vec<_> = disc_exprs
                         .into_iter()
                         .map(|e| remap_temp_ids(e, temp_id))
                         .collect();
+                    let disc_main = remap_temp_ids(disc_main, temp_id);
                     for e in &disc_exprs {
                         if let Some(max) = find_max_temp_id(e) {
                             temp_id = temp_id.max(max + 1);
                         }
                     }
+                    if let Some(max) = find_max_temp_id(&disc_main) {
+                        temp_id = temp_id.max(max + 1);
+                    }
                     result.extend(disc_exprs);
+                    // new_base must be set AFTER advancing past remapped
+                    // pre-expressions so subsequent elements' TempArrayElement
+                    // reads align with the hoisted AssignTemp IDs.
+                    let new_base = temp_id;
                     let mut new_hoisted = Vec::new();
                     let _ = replace_nested_builtins_for_element(
                         disc_main,

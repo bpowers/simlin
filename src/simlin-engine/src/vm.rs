@@ -2066,7 +2066,8 @@ impl Vm {
                         let n_dims = input_view.dims.len();
 
                         // Collect (value, 1-based-index) pairs
-                        let mut indexed: SmallVec<[(f64, u16); 32]> = SmallVec::with_capacity(size);
+                        let mut indexed: SmallVec<[(f64, usize); 32]> =
+                            SmallVec::with_capacity(size);
                         let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
                         for i in 0..size {
                             let flat_off = input_view.flat_offset(&indices);
@@ -2077,7 +2078,7 @@ impl Vm {
                                 temp_storage,
                                 context,
                             );
-                            indexed.push((val, (i + 1) as u16));
+                            indexed.push((val, i + 1));
                             increment_indices(&mut indices, &input_view.dims);
                         }
 
