@@ -130,6 +130,11 @@ fn module_deps(
                     }
                 }
 
+                // During initialization, modules need their stock
+                // inputs initialized first (e.g. SMOOTH3 needs its
+                // input stock's initial value).  Unlike the DT phase
+                // where stocks use their previous-timestep value, the
+                // initial phase must respect stock dependencies.
                 inputs
                     .iter()
                     .flat_map(|input| {
@@ -140,11 +145,7 @@ fn module_deps(
                                 None => src.as_str(),
                             };
 
-                            if is_stock(src) {
-                                None
-                            } else {
-                                Some(Ident::new(direct_dep))
-                            }
+                            Some(Ident::new(direct_dep))
                         } else {
                             None
                         }
@@ -985,7 +986,7 @@ impl ModelStage1 {
                         let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
                         let runlist = match part {
                             StepPart::Initials => {
-                                let needed: HashSet<&Ident<Canonical>> = runlist
+                                let needed: BTreeSet<&Ident<Canonical>> = runlist
                                     .iter()
                                     .cloned()
                                     .filter(|id| {
@@ -993,7 +994,7 @@ impl ModelStage1 {
                                         v.is_stock() || v.is_module()
                                     })
                                     .collect();
-                                let mut runlist: HashSet<&Ident<Canonical>> =
+                                let mut runlist: BTreeSet<&Ident<Canonical>> =
                                     needed.iter().flat_map(|id| &deps[*id]).collect();
                                 runlist.extend(needed);
                                 let runlist = runlist.into_iter().collect();
@@ -1278,7 +1279,7 @@ impl ModelStage1 {
                         let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
                         let runlist = match part {
                             StepPart::Initials => {
-                                let needed: HashSet<&Ident<Canonical>> = runlist
+                                let needed: BTreeSet<&Ident<Canonical>> = runlist
                                     .iter()
                                     .cloned()
                                     .filter(|id| {
@@ -1286,7 +1287,7 @@ impl ModelStage1 {
                                         v.is_stock() || v.is_module()
                                     })
                                     .collect();
-                                let mut runlist: HashSet<&Ident<Canonical>> =
+                                let mut runlist: BTreeSet<&Ident<Canonical>> =
                                     needed.iter().flat_map(|id| &deps[*id]).collect();
                                 runlist.extend(needed);
                                 let runlist = runlist.into_iter().collect();

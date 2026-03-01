@@ -5596,3 +5596,126 @@ fn test_previous_self_initial_value() {
         "f at step 5 should be 2 (IF Time = 5 THEN 2 branch)"
     );
 }
+
+/// Regression test: SMOOTH3 with a stock input must initialize to
+/// the stock's initial value.  Previously, `module_deps` filtered
+/// out stock inputs during the initial phase, breaking the
+/// dependency graph.  Combined with non-deterministic HashSet
+/// iteration in `build_runlist`, this caused the SMOOTH3 module to
+/// sometimes be initialized before its stock input, reading 0
+/// instead of the correct initial value.
+///
+/// Exercises both interpreter and incremental-VM paths and compares
+/// their step-0 results to catch ordering mismatches.
+#[test]
+fn test_smooth3_stock_input_initialization() {
+    use crate::interpreter::Simulation;
+    use crate::vm::Vm;
+    use std::rc::Rc;
+
+    // Build a minimal model: a stock with initial value 42 and a
+    // SMOOTH3 whose input is that stock.  At t=0 the SMOOTH3 must
+    // equal 42.
+    let project = datamodel::Project {
+        name: "smooth3_stock_init".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "my_stock".to_string(),
+                    equation: datamodel::Equation::Scalar("42".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["drain".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "drain".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "delay_time".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "smoothed".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "SMTH3(my_stock, delay_time)".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    // Interpreter path
+    let engine_project = Rc::new(crate::Project::from(project.clone()));
+    let sim = Simulation::new(&engine_project, "main").expect("interpreter should compile");
+    let interp_results = sim.run_to_end().expect("interpreter should run");
+
+    let smoothed_ident = crate::common::Ident::new("smoothed");
+    let interp_off = interp_results.offsets[&smoothed_ident];
+    let interp_step0 = interp_results.data[interp_off];
+    assert_eq!(
+        interp_step0, 42.0,
+        "interpreter: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
+    );
+
+    // Incremental VM path
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("incremental compile should succeed");
+    let mut vm = Vm::new(compiled).expect("VM should build");
+    vm.run_to_end().expect("VM should run");
+    let vm_results = vm.into_results();
+
+    let vm_off = vm_results.offsets[&smoothed_ident];
+    let vm_step0 = vm_results.data[vm_off];
+    assert_eq!(
+        vm_step0, 42.0,
+        "VM: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
+    );
+
+    // Both paths must agree
+    assert_eq!(
+        interp_step0, vm_step0,
+        "interpreter and VM must agree on SMOOTH3 initial value"
+    );
+}
