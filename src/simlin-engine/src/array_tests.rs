@@ -4151,4 +4151,78 @@ mod dimension_dependent_scalar_arg_tests {
         project.assert_sim_builds();
         assert_vso_dim_dep_results(&project.interpreter_result("result"));
     }
+
+    #[test]
+    fn vso_nested_direction_varies_by_dimension_vm() {
+        // result[D] = 10 + vector_sort_order(vals[*], dir[D])
+        // Nested builtin with dimension-dependent scalar arg.
+        // Same expected values as top-level case, shifted by +10.
+        let project = TestProject::new("vso_nested_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
+            .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
+            .array_aux("result[D]", "10 + vector_sort_order(vals[*], dir[D])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 12.0).abs() < 1e-9,
+            "result[0] (10 + desc[0]): expected 12, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 13.0).abs() < 1e-9,
+            "result[1] (10 + asc[1]): expected 13, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 12.0).abs() < 1e-9,
+            "result[2] (10 + asc[2]): expected 12, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn vso_except_direction_varies_by_dimension_vm() {
+        // Default: vector_sort_order(vals[*], dir[D]) with dir varying
+        // Override element 2 with constant 999 so elements 1 and 3 use the
+        // default with different directions. Override must be in the middle to
+        // expose the bug: for these values, asc and desc sort orders share the
+        // same middle element but differ at positions 0 and 2.
+        let project = TestProject::new("vso_except_vm")
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
+            .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_sort_order(vals[*], dir[D])",
+                vec![("2", "999")],
+            );
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        // Element 0 (dir=-1, desc): sort_order = [2, 3, 1] -> result[0] = 2
+        assert!(
+            (vals[0] - 2.0).abs() < 1e-9,
+            "result[0] (desc): expected 2, got {}",
+            vals[0]
+        );
+        // Element 1 (override): 999
+        assert!(
+            (vals[1] - 999.0).abs() < 1e-9,
+            "result[1] (override): expected 999, got {}",
+            vals[1]
+        );
+        // Element 2 (dir=1, asc): sort_order = [1, 3, 2] -> result[2] = 2
+        // Without fix (desc shared): sort_order = [2, 3, 1] -> result[2] = 1
+        assert!(
+            (vals[2] - 2.0).abs() < 1e-9,
+            "result[2] (asc): expected 2, got {}",
+            vals[2]
+        );
+    }
 }

@@ -1207,6 +1207,41 @@ fn expand_a2a_with_hoisting(
     Ok(all_exprs)
 }
 
+/// Detect whether an array-producing builtin's lowered expression depends on
+/// the active A2A dimension (e.g. `dir[D]` varies per element). Compares the
+/// lowered expression for element 0 against element 1 and the last element to
+/// handle both single- and multi-dimensional cases.
+fn expression_depends_on_active_dimension(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    active_dims: &Arc<[Dimension]>,
+    reference_expr: &Expr,
+) -> Result<bool> {
+    let total_elements: usize = dims.iter().map(|d| d.len()).product();
+    if total_elements < 2 {
+        return Ok(false);
+    }
+    let mut iter = SubscriptIterator::new(dims);
+    let second_subscripts: Vec<String> = iter.nth(1).unwrap_or_default();
+    let second_ctx = ctx.with_active_subscripts(active_dims.clone(), &second_subscripts);
+    let mut second_exprs = second_ctx.lower_preserving_dimensions(ast)?;
+    let second_main = second_exprs.pop().unwrap();
+    if *reference_expr != second_main {
+        return Ok(true);
+    }
+    if total_elements > 2 {
+        let last_subscripts: Vec<String> = iter.last().unwrap_or_default();
+        let last_ctx = ctx.with_active_subscripts(active_dims.clone(), &last_subscripts);
+        let mut last_exprs = last_ctx.lower_preserving_dimensions(ast)?;
+        let last_main = last_exprs.pop().unwrap();
+        if *reference_expr != last_main {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Inner function for `expand_a2a_with_hoisting` when array-producing builtins
 /// are detected. Handles both top-level and nested array-producing builtins.
 fn expand_a2a_hoisted(
@@ -1219,34 +1254,8 @@ fn expand_a2a_hoisted(
     main_expr: Expr,
 ) -> Result<Vec<Expr>> {
     if is_array_producing_builtin(&main_expr) {
-        let total_elements: usize = dims.iter().map(|d| d.len()).product();
-
-        // Check whether scalar arguments depend on the active dimension by
-        // comparing lowered expressions for element 0 vs element 1 AND the
-        // last element.  Checking element 1 catches single-dimension cases;
-        // checking the last element catches multi-dimensional cases where the
-        // scalar arg depends on an outer dimension (elements 0 and 1 share the
-        // same outer subscript but the last element differs in all dimensions).
-        let needs_per_element = if total_elements >= 2 {
-            let mut iter = SubscriptIterator::new(dims);
-            let second_subscripts: Vec<String> = iter.nth(1).unwrap_or_default();
-            let second_ctx = ctx.with_active_subscripts(active_dims.clone(), &second_subscripts);
-            let mut second_exprs = second_ctx.lower_preserving_dimensions(ast)?;
-            let second_main = second_exprs.pop().unwrap();
-            if main_expr != second_main {
-                true
-            } else if total_elements > 2 {
-                let last_subscripts: Vec<String> = iter.last().unwrap_or_default();
-                let last_ctx = ctx.with_active_subscripts(active_dims.clone(), &last_subscripts);
-                let mut last_exprs = last_ctx.lower_preserving_dimensions(ast)?;
-                let last_main = last_exprs.pop().unwrap();
-                main_expr != last_main
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let needs_per_element =
+            expression_depends_on_active_dimension(ctx, dims, ast, active_dims, &main_expr)?;
 
         if needs_per_element {
             return expand_a2a_per_element_hoisted(
@@ -1263,6 +1272,7 @@ fn expand_a2a_hoisted(
         let temp_id = next_available_temp_id(&first_exprs);
         let var_view = array_view_from_dims(dims);
         let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
+        let total_elements: usize = dims.iter().map(|d| d.len()).product();
         let loc = main_expr.get_loc();
 
         let mut result = first_exprs;
@@ -1286,48 +1296,68 @@ fn expand_a2a_hoisted(
         Ok(result)
     } else if contains_array_producing_builtin(&main_expr) {
         // The top-level expression is not an array-producing builtin, but it
-        // contains one nested inside (e.g. `10 + VECTOR ELM MAP(...)`). Hoist
-        // the nested builtin(s) into AssignTemp pre-computations using element
-        // 0's lowering (which has correct array views from
-        // `with_preserved_wildcards`). Then for each element, re-lower and
-        // replace the nested builtins with TempArrayElement reads from the
-        // already-computed temps.
+        // contains one nested inside (e.g. `10 + VECTOR ELM MAP(...)`).
+        let needs_per_element =
+            expression_depends_on_active_dimension(ctx, dims, ast, active_dims, &main_expr)?;
+
         let base_temp_id = next_available_temp_id(&first_exprs);
         let var_view = array_view_from_dims(dims);
-
-        let mut hoisted = Vec::new();
-        let mut temp_id = base_temp_id;
-        let rewritten = replace_nested_builtins_for_element(
-            main_expr,
-            0,
-            &var_view,
-            &mut temp_id,
-            &mut hoisted,
-            true,
-        );
-
         let mut result = first_exprs;
-        result.extend(hoisted);
-        result.push(Expr::AssignCurr(off, Box::new(rewritten)));
 
-        // Remaining elements: re-lower, then replace nested builtins with
-        // TempArrayElement reads at the correct element index.
-        for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
-            let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-            let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
-            let elem_main = elem_exprs.pop().unwrap();
+        if needs_per_element {
+            // Scalar args vary by element: each element gets its own
+            // AssignTemp blocks so the nested builtin is re-evaluated.
+            let mut temp_id = base_temp_id;
+            for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
 
-            let mut tid = base_temp_id;
-            let mut unused = Vec::new();
-            let elem_rewritten = replace_nested_builtins_for_element(
-                elem_main,
-                i,
+                let mut hoisted = Vec::new();
+                let elem_rewritten = replace_nested_builtins_for_element(
+                    elem_main,
+                    i,
+                    &var_view,
+                    &mut temp_id,
+                    &mut hoisted,
+                    true,
+                );
+                result.extend(hoisted);
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            }
+        } else {
+            // Scalar args are constant: hoist once from element 0, then
+            // rewrite subsequent elements to read from the shared temps.
+            let mut hoisted = Vec::new();
+            let mut temp_id = base_temp_id;
+            let rewritten = replace_nested_builtins_for_element(
+                main_expr,
+                0,
                 &var_view,
-                &mut tid,
-                &mut unused,
-                false,
+                &mut temp_id,
+                &mut hoisted,
+                true,
             );
-            result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            result.extend(hoisted);
+            result.push(Expr::AssignCurr(off, Box::new(rewritten)));
+
+            for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
+                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let elem_main = elem_exprs.pop().unwrap();
+
+                let mut tid = base_temp_id;
+                let mut unused = Vec::new();
+                let elem_rewritten = replace_nested_builtins_for_element(
+                    elem_main,
+                    i,
+                    &var_view,
+                    &mut tid,
+                    &mut unused,
+                    false,
+                );
+                result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+            }
         }
         Ok(result)
     } else {
@@ -1404,31 +1434,35 @@ fn expand_arrayed_hoisted(
     let var_view = array_view_from_dims(dims);
 
     if contains_array_producing_builtin(&main_expr) {
+        let hoisting_dim_dependent = expression_depends_on_active_dimension(
+            ctx,
+            dims,
+            hoisting_ast,
+            active_dims,
+            &main_expr,
+        )?;
         let base_temp_id = next_available_temp_id(&first_exprs);
 
-        // Build AssignTemp blocks from the hoisting expression.
-        // replace_nested_builtins_for_element handles both top-level builtins
-        // (the entire expression IS a builtin) and nested builtins (a builtin
-        // wrapped in arithmetic), so we don't need separate branches.
-        let mut hoisted = Vec::new();
-        let mut temp_id = base_temp_id;
-        let _ = replace_nested_builtins_for_element(
-            main_expr,
-            0,
-            &var_view,
-            &mut temp_id,
-            &mut hoisted,
-            true,
-        );
-
         let mut result = first_exprs;
-        result.extend(hoisted);
+        let mut temp_id = base_temp_id;
 
-        // Track which ASTs have had their temps emitted, keyed by pointer.
-        // All elements using the default equation share one set of temps;
-        // each distinct override gets its own AssignTemp blocks.
+        // When the hoisting expression's scalar args are constant, hoist once
+        // and share the temps. When they depend on the active dimension, each
+        // element gets its own AssignTemp blocks.
         let mut ast_temp_bases: HashMap<*const crate::ast::Expr2, u32> = HashMap::new();
-        ast_temp_bases.insert(hoisting_ast as *const _, base_temp_id);
+        if !hoisting_dim_dependent {
+            let mut hoisted = Vec::new();
+            let _ = replace_nested_builtins_for_element(
+                main_expr,
+                0,
+                &var_view,
+                &mut temp_id,
+                &mut hoisted,
+                true,
+            );
+            result.extend(hoisted);
+            ast_temp_bases.insert(hoisting_ast as *const _, base_temp_id);
+        }
 
         for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
             let key = CanonicalElementName::from_raw(&subscripts.join(","));
@@ -1450,6 +1484,47 @@ fn expand_arrayed_hoisted(
             if uses_hoisted {
                 let ast = elem_ast.unwrap();
                 let ast_ptr = ast as *const crate::ast::Expr2;
+
+                // Check if this AST's expression depends on the active
+                // dimension. For the hoisting_ast, this was pre-computed.
+                // For overrides, probe on first encounter.
+                let is_dim_dependent = if std::ptr::eq(ast, hoisting_ast) {
+                    hoisting_dim_dependent
+                } else if ast_temp_bases.contains_key(&ast_ptr) {
+                    false
+                } else {
+                    let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                    let mut probe_exprs = probe_ctx.lower_preserving_dimensions(ast)?;
+                    let probe_main = probe_exprs.pop().unwrap();
+                    expression_depends_on_active_dimension(
+                        ctx,
+                        dims,
+                        ast,
+                        active_dims,
+                        &probe_main,
+                    )?
+                };
+
+                if is_dim_dependent {
+                    // Per-element hoisting: each element creates its own
+                    // AssignTemp blocks.
+                    let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                    let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                    let elem_main = elem_exprs.pop().unwrap();
+
+                    let mut hoisted = Vec::new();
+                    let elem_rewritten = replace_nested_builtins_for_element(
+                        elem_main,
+                        i,
+                        &var_view,
+                        &mut temp_id,
+                        &mut hoisted,
+                        true,
+                    );
+                    result.extend(hoisted);
+                    result.push(Expr::AssignCurr(off + i, Box::new(elem_rewritten)));
+                    continue;
+                }
 
                 // If this AST hasn't been seen before (different override),
                 // emit its own AssignTemp blocks with fresh temp IDs.
