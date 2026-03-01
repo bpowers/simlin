@@ -986,7 +986,7 @@ impl ModelStage1 {
                         let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
                         let runlist = match part {
                             StepPart::Initials => {
-                                let needed: BTreeSet<&Ident<Canonical>> = runlist
+                                let needed: HashSet<&Ident<Canonical>> = runlist
                                     .iter()
                                     .cloned()
                                     .filter(|id| {
@@ -994,7 +994,7 @@ impl ModelStage1 {
                                         v.is_stock() || v.is_module()
                                     })
                                     .collect();
-                                let mut runlist: BTreeSet<&Ident<Canonical>> =
+                                let mut runlist: HashSet<&Ident<Canonical>> =
                                     needed.iter().flat_map(|id| &deps[*id]).collect();
                                 runlist.extend(needed);
                                 let runlist = runlist.into_iter().collect();
@@ -1279,7 +1279,7 @@ impl ModelStage1 {
                         let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
                         let runlist = match part {
                             StepPart::Initials => {
-                                let needed: BTreeSet<&Ident<Canonical>> = runlist
+                                let needed: HashSet<&Ident<Canonical>> = runlist
                                     .iter()
                                     .cloned()
                                     .filter(|id| {
@@ -1287,7 +1287,7 @@ impl ModelStage1 {
                                         v.is_stock() || v.is_module()
                                     })
                                     .collect();
-                                let mut runlist: BTreeSet<&Ident<Canonical>> =
+                                let mut runlist: HashSet<&Ident<Canonical>> =
                                     needed.iter().flat_map(|id| &deps[*id]).collect();
                                 runlist.extend(needed);
                                 let runlist = runlist.into_iter().collect();
