@@ -709,6 +709,17 @@ pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// and only re-executes when the specific SourceVariable fields that were
 /// read have changed. This means editing one variable's equation does NOT
 /// re-parse other variables.
+///
+/// Known gap: this calls `parse_var` (module_idents = None) rather than
+/// `parse_var_with_module_context`. Passing module_idents would require
+/// knowing which sibling variables are module-expanded, but that set is only
+/// computed at the model level (not per-variable). The consequence is narrow:
+/// `PREVIOUS(x)` where `x` is a user-written stdlib-call aux (e.g.
+/// `x = SMTH1(...)`) will compile to LoadPrev in the salsa-cached path
+/// instead of falling through to module expansion. The U+205A check in
+/// builtins_visitor.rs catches already-expanded composite identifiers (the
+/// common case), so the gap only affects the raw user-facing name at
+/// incremental-parse time. Tracked in docs/tech-debt.md.
 #[salsa::tracked(returns(ref))]
 pub fn parse_source_variable(
     db: &dyn Db,

@@ -106,6 +106,19 @@ impl ModelStage1 {
                 .map(|module| &module.initial_dependencies)
         })
     }
+
+    /// Collect the set of variables referenced by INIT() calls across all
+    /// equations in this model. These variables must be included in the
+    /// Initials runlist so that INIT(x) can read x's initial value even
+    /// when x is not a stock or module.
+    fn init_referenced_vars(&self) -> HashSet<Ident<Canonical>> {
+        self.variables
+            .values()
+            .filter_map(|v| v.ast())
+            .flat_map(crate::db::init_referenced_idents)
+            .map(|s| Ident::new(&s))
+            .collect()
+    }
 }
 
 fn module_deps(
@@ -787,6 +800,13 @@ fn collect_module_idents(variables: &[datamodel::Variable]) -> HashSet<Ident<Can
 }
 
 /// Check if a scalar equation's top-level expression is a stdlib function call.
+///
+/// This intentionally re-parses the equation text rather than reusing the
+/// already-parsed AST. It runs during `collect_module_idents` (called from
+/// `ModelStage0::new`), before the full per-variable parse in `parse_var`.
+/// The re-parse is cheap (single equation, top-level only) and avoids
+/// threading the parsed AST through an intermediate data structure just
+/// for this early classification step.
 fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
     let text = match eqn {
         datamodel::Equation::Scalar(s) => s.as_str(),
@@ -1076,17 +1096,7 @@ impl ModelStage1 {
                     }
                 };
 
-                // Collect variables referenced by INIT() so they are
-                // included in the Initials runlist. Without this,
-                // aux-only models using INIT(x) would not evaluate x
-                // during initials, leaving initial_values[x] at zero.
-                let init_referenced: HashSet<Ident<Canonical>> = self
-                    .variables
-                    .values()
-                    .filter_map(|v| v.ast())
-                    .flat_map(crate::db::init_referenced_idents)
-                    .map(|s| Ident::new(&s))
-                    .collect();
+                let init_referenced = self.init_referenced_vars();
 
                 let build_runlist = |deps: &HashMap<
                     Ident<Canonical>,
@@ -1376,16 +1386,7 @@ impl ModelStage1 {
                     (dt_deps, initial_deps)
                 };
 
-                // Collect variables referenced by INIT() so they are
-                // included in the Initials runlist (same as the first
-                // instantiation path above).
-                let init_referenced: HashSet<Ident<Canonical>> = self
-                    .variables
-                    .values()
-                    .filter_map(|v| v.ast())
-                    .flat_map(crate::db::init_referenced_idents)
-                    .map(|s| Ident::new(&s))
-                    .collect();
+                let init_referenced = self.init_referenced_vars();
 
                 let build_runlist = |deps: &HashMap<
                     Ident<Canonical>,
