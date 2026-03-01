@@ -542,6 +542,7 @@ impl Vm {
         self.stack.clear();
         let module_inputs: &[f64] = &[];
         let mut data = self.data.take().unwrap();
+        self.prev_values.fill(0.0);
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
         let module_stocks = &self.sliced_sim.stock_modules[&self.root];
@@ -753,6 +754,7 @@ impl Vm {
         self.next_chunk = 1;
         self.did_initials = false;
         self.step_accum = 0;
+        self.prev_values.fill(0.0);
         self.temp_storage.fill(0.0);
         self.stack.clear();
         self.view_stack.clear();
@@ -867,8 +869,8 @@ impl Vm {
             // During initials, LoadInitial falls back to curr[] (which IS the
             // initial value being computed). The snapshot hasn't been captured yet.
             initial_values: &self.initial_values,
-            // During initials, prev_values is not yet seeded; LoadPrev falls
-            // back to curr[] during the Initials phase.
+            // During initials, prev_values is zero-initialized so PREVIOUS(x)
+            // yields the 1-arg default at t=0.
             prev_values: &mut self.prev_values,
         };
 
@@ -1064,19 +1066,11 @@ impl Vm {
                     stack.push(curr[module_off + *off as usize]);
                 }
                 // LoadPrev reads from the prev_values snapshot taken after
-                // stocks but before the time advance each timestep. This
-                // ensures PREVIOUS(x) returns the value from the previous
-                // timestep, matching the stdlib module PREVIOUS behavior.
-                // During initials, prev_values is seeded from the
-                // post-initials state; we fall back to curr[].
+                // stocks but before the time advance each timestep. During
+                // initials this buffer is zero-initialized.
                 Opcode::LoadPrev { off } => {
                     let abs_off = module_off + *off as usize;
-                    let value = if part == StepPart::Initials {
-                        curr[abs_off]
-                    } else {
-                        prev_values[abs_off]
-                    };
-                    stack.push(value);
+                    stack.push(prev_values[abs_off]);
                 }
                 // LoadInitial reads from the initial-value buffer captured at t=0.
                 // During the initials phase, the snapshot hasn't been taken yet,
@@ -3227,6 +3221,48 @@ mod vm_reset_and_run_initials_tests {
                 "reset-after-partial should match fresh at step {step}: {v_ref} vs {v}"
             );
         }
+    }
+
+    #[test]
+    fn test_vm_reset_clears_previous_snapshot() {
+        let tp = TestProject::new("reset_prev_snapshot")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .aux("x", "1", None)
+            .aux("prev_x", "PREVIOUS(x)", None);
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let prev_off = *results.offsets.get(&*canonicalize("prev_x")).unwrap();
+        let t0_prev = results.data[prev_off];
+        assert!(
+            (t0_prev - 0.0).abs() < 1e-10,
+            "PREVIOUS(x) at t=0 after reset should be 0, got {t0_prev}"
+        );
+    }
+
+    #[test]
+    fn test_previous_in_initials_vm_matches_interpreter() {
+        let tp = TestProject::new("previous_in_initials")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("x", "5", None)
+            .stock("s", "PREVIOUS(x)", &[], &[], None);
+
+        let interp = tp.run_interpreter().expect("interpreter should run");
+        let vm = tp.run_vm().expect("vm should run");
+        let interp_s = interp.get("s").expect("interpreter missing s");
+        let vm_s = vm.get("s").expect("vm missing s");
+
+        assert!(
+            (interp_s[0] - vm_s[0]).abs() < 1e-10,
+            "interpreter/vm mismatch for stock initial PREVIOUS(x): interp={}, vm={}",
+            interp_s[0],
+            vm_s[0]
+        );
     }
 
     #[test]

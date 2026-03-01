@@ -757,6 +757,30 @@ pub fn parse_source_variable_with_module_context<'db>(
     parse_source_variable_impl(db, var, project, Some(&module_idents))
 }
 
+fn module_ident_context_for_model<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    extra_module_idents: &[String],
+) -> ModuleIdentContext<'db> {
+    let source_vars = model.variables(db);
+    let dm_vars: Vec<datamodel::Variable> = source_vars
+        .values()
+        .map(|source_var| reconstruct_variable(db, *source_var))
+        .collect();
+    let mut module_ident_list: Vec<String> = crate::model::collect_module_idents(&dm_vars)
+        .into_iter()
+        .map(|ident| ident.as_str().to_owned())
+        .collect();
+    module_ident_list.extend(
+        extra_module_idents
+            .iter()
+            .map(|ident| canonicalize(ident).into_owned()),
+    );
+    module_ident_list.sort();
+    module_ident_list.dedup();
+    ModuleIdentContext::new(db, module_ident_list)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ImplicitVarDeps {
     pub name: String,
@@ -1088,10 +1112,16 @@ pub fn model_implicit_var_info(
     project: SourceProject,
 ) -> HashMap<String, ImplicitVarMeta> {
     let source_vars = model.variables(db);
+    let module_ident_context = module_ident_context_for_model(db, model, &[]);
     let mut result = HashMap::new();
 
     for source_var in source_vars.values() {
-        let parsed = parse_source_variable(db, *source_var, project);
+        let parsed = parse_source_variable_with_module_context(
+            db,
+            *source_var,
+            project,
+            module_ident_context,
+        );
         for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
             let name = canonicalize(implicit_var.get_ident()).into_owned();
             let is_stock = matches!(implicit_var, datamodel::Variable::Stock(_));
@@ -2992,14 +3022,6 @@ pub fn sync_from_datamodel_incremental(
     }
 }
 
-// ── Incremental compilation pipeline ───────────────────────────────────
-//
-// Steps 3-9: per-variable compilation, layout, assembly, and entry point.
-
-/// Returns the variable's array dimensions (empty for scalars).
-/// Depends on the equation FORM (Scalar/ApplyToAll/Arrayed) and project
-/// dimensions, but NOT on the equation text content. Salsa backdates when
-/// text changes don't affect dimensionality.
 #[salsa::tracked(returns(ref))]
 pub fn variable_dimensions(
     db: &dyn Db,
@@ -3013,8 +3035,6 @@ pub fn variable_dimensions(
     }
 }
 
-/// Returns the number of memory slots this variable occupies.
-/// 1 for scalars, product of dimension sizes for arrays.
 #[salsa::tracked]
 pub fn variable_size(db: &dyn Db, var: SourceVariable, project: SourceProject) -> usize {
     let dims = variable_dimensions(db, var, project);
@@ -3025,15 +3045,6 @@ pub fn variable_size(db: &dyn Db, var: SourceVariable, project: SourceProject) -
     }
 }
 
-/// Compute a VariableLayout for a model: the concrete offset assignment.
-///
-/// Depends on:
-/// - model.variable_names (the set of variables)
-/// - variable_size for each variable (slot counts)
-/// - Sub-model layouts for module variables
-///
-/// Does NOT depend on equation text. Equation edits (same dims) do not
-/// invalidate this. Variable add/remove DOES invalidate it.
 #[salsa::tracked(returns(ref))]
 pub fn compute_layout(
     db: &dyn Db,
@@ -3359,33 +3370,6 @@ pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
 }
 
-/// Per-variable tracked compilation function. Compiles a SINGLE variable
-/// to symbolic (layout-independent) bytecodes.
-///
-/// Accumulates all variable-level diagnostics into the salsa accumulator:
-/// - Unit definition syntax errors from the parsed variable
-/// - Equation parse errors (EmptyEquation, syntax errors)
-/// - Compilation-level errors (BadTable, MismatchedDimensions, etc.)
-///
-/// Builds a minimal context containing only the compiled variable and its
-/// direct references, then compiles through the existing Module/Compiler
-/// pipeline, and symbolizes the result.
-///
-/// Dependencies (salsa tracks these):
-/// - parse_source_variable(var) -- this variable's equation
-/// - variable_direct_dependencies(var) -- this variable's dep set
-///   (or module-input-aware deps for module instantiations)
-/// - variable_dimensions(Y) -- each referenced var's dimensions
-/// - variable_size(Y) -- each referenced var's size
-/// - project.dimensions -- for array compilation
-/// - model.variables -- to look up source vars for dependencies
-/// - model_dependency_graph -- to determine runlist membership
-///
-/// Although this reads model-wide data (variable set, dep graph),
-/// salsa's backdating ensures fragments are only invalidated when the
-/// values they actually read change. Adding an unrelated variable
-/// changes model.variables but the dep graph result for this variable
-/// is unchanged, so salsa backdates and this fragment stays cached.
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment(
     db: &dyn Db,
@@ -3400,7 +3384,8 @@ pub fn compile_var_fragment(
     };
 
     let var_ident = var.ident(db).clone();
-    let parsed = parse_source_variable(db, var, project);
+    let module_ident_context = module_ident_context_for_model(db, model, &module_input_names);
+    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
 
     // Accumulate unit definition errors from the parsed variable.
     // These are syntax errors in the unit string (e.g., "bad units
@@ -3498,7 +3483,12 @@ pub fn compile_var_fragment(
                 continue;
             }
             if let Some(dep_sv) = source_vars.get(effective) {
-                let dep_parsed = parse_source_variable(db, *dep_sv, project);
+                let dep_parsed = parse_source_variable_with_module_context(
+                    db,
+                    *dep_sv,
+                    project,
+                    module_ident_context,
+                );
                 stage0_vars.insert(Ident::new(effective), dep_parsed.variable.clone());
             }
         }
@@ -4229,8 +4219,13 @@ fn compile_implicit_var_fragment(
     use crate::compiler::symbolic::{
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
     };
-
-    let parsed = parse_source_variable(db, meta.parent_source_var, project);
+    let module_ident_context = module_ident_context_for_model(db, model, module_input_names);
+    let parsed = parse_source_variable_with_module_context(
+        db,
+        meta.parent_source_var,
+        project,
+        module_ident_context,
+    );
     let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
@@ -5571,10 +5566,13 @@ fn enumerate_module_instances_inner(
                 name, sub_model_name,
             ));
         }
-
-        // Extract inputs from the parsed implicit var's module references,
-        // stripping the module ident prefix from dst (same as resolve_module_input)
-        let parsed = parse_source_variable(db, meta.parent_source_var, project);
+        let module_ident_context = module_ident_context_for_model(db, *source_model, &[]);
+        let parsed = parse_source_variable_with_module_context(
+            db,
+            meta.parent_source_var,
+            project,
+            module_ident_context,
+        );
         let input_prefix = format!("{name}\u{00B7}");
         let inputs: BTreeSet<Ident<Canonical>> =
             if let Some(datamodel::Variable::Module(dm_module)) =

@@ -779,9 +779,14 @@ where
 /// This set is needed so that `PREVIOUS(module_var)` falls through to module
 /// expansion instead of compiling to LoadPrev, because modules occupy
 /// multiple slots and LoadPrev at the base offset reads the wrong value.
-fn collect_module_idents(variables: &[datamodel::Variable]) -> HashSet<Ident<Canonical>> {
+pub(crate) fn collect_module_idents(
+    variables: &[datamodel::Variable],
+) -> HashSet<Ident<Canonical>> {
     let mut module_idents = HashSet::new();
     for v in variables {
+        if v.can_be_module_input() {
+            module_idents.insert(Ident::new(&canonicalize(v.get_ident())));
+        }
         match v {
             datamodel::Variable::Module(m) => {
                 module_idents.insert(Ident::new(&canonicalize(&m.ident)));
@@ -819,10 +824,11 @@ fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
         return false;
     };
     match &ast {
-        Expr0::App(crate::builtins::UntypedBuiltinFn(func, _), _) => {
+        Expr0::App(crate::builtins::UntypedBuiltinFn(func, args), _) => {
             let func_lower = func.to_lowercase();
             crate::stdlib::MODEL_NAMES.contains(&func_lower.as_str())
                 || matches!(func_lower.as_str(), "delay" | "delayn" | "smthn")
+                || (func_lower == "previous" && args.len() > 1)
         }
         _ => false,
     }
@@ -2050,6 +2056,66 @@ fn test_init_aux_only_array_subscript() {
             "frozen[a2] should be 3.0 at every step, got {val} at step {step}"
         );
     }
+}
+
+#[test]
+fn test_previous_module_input_var_uses_module_expansion() {
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let module_input = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "input".to_string(),
+        equation: datamodel::Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            can_be_module_input: true,
+            ..datamodel::Compat::default()
+        },
+    });
+    let model = x_model(
+        "main",
+        vec![module_input, x_aux("lagged", "PREVIOUS(input)", None)],
+    );
+    let parsed = ModelStage0::new(&model, &[], &units_ctx, false);
+    assert!(
+        parsed
+            .variables
+            .keys()
+            .any(|ident| ident.as_str().starts_with("$⁚lagged⁚0⁚previous")),
+        "PREVIOUS(module_input) should be expanded to an implicit previous module"
+    );
+}
+
+#[test]
+fn test_model_implicit_var_info_uses_module_context() {
+    let project = datamodel::Project {
+        name: "implicit_info_module_context".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("x", "TIME", None),
+                x_aux("delayed", "PREVIOUS(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let implicit_info = crate::db::model_implicit_var_info(&db, source_model, sync.project);
+    assert!(
+        implicit_info
+            .keys()
+            .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚previous")),
+        "model_implicit_var_info should include implicit vars for PREVIOUS(module-backed var)"
+    );
 }
 
 #[test]
