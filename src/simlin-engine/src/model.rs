@@ -47,10 +47,18 @@ pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, Variable>,
+    /// Deprecated: model-level errors are now also accumulated via the salsa
+    /// accumulator in `compile_var_fragment` and `check_model_units`. Retained
+    /// because `Module::new` (interpreter path) checks this field for
+    /// early-exit validation, and `collect_formatted_issues` reads it.
     pub errors: Option<Vec<Error>>,
-    /// unit_warnings contains unit-related issues that should be surfaced to users
-    /// but should NOT block simulation. Unit mismatches are common in real-world
-    /// models and shouldn't prevent running simulations.
+    /// Deprecated: unit warnings are now accumulated via the salsa accumulator
+    /// in `check_model_units`. Retained because `collect_formatted_issues`
+    /// reads this field in the monolithic compilation path.
+    ///
+    /// Contains unit-related issues that should be surfaced to users but
+    /// should NOT block simulation. Unit mismatches are common in real-world
+    /// models and should not prevent running simulations.
     pub unit_warnings: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
     pub model_deps: Option<BTreeSet<Ident<Canonical>>>,
@@ -122,6 +130,11 @@ fn module_deps(
                     }
                 }
 
+                // During initialization, modules need their stock
+                // inputs initialized first (e.g. SMOOTH3 needs its
+                // input stock's initial value).  Unlike the DT phase
+                // where stocks use their previous-timestep value, the
+                // initial phase must respect stock dependencies.
                 inputs
                     .iter()
                     .flat_map(|input| {
@@ -132,11 +145,7 @@ fn module_deps(
                                 None => src.as_str(),
                             };
 
-                            if is_stock(src) {
-                                None
-                            } else {
-                                Some(Ident::new(direct_dep))
-                            }
+                            Some(Ident::new(direct_dep))
                         } else {
                             None
                         }

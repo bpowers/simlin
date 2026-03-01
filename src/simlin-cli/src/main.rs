@@ -17,8 +17,7 @@ use simlin_engine::common::ErrorKind;
 use simlin_engine::datamodel::Project as DatamodelProject;
 use simlin_engine::prost::Message;
 use simlin_engine::{
-    Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, datamodel, project_io,
-    serde,
+    Error, ErrorCode, Project, Result, Results, Variable, Vm, datamodel, project_io, serde,
 };
 use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmile};
 
@@ -196,12 +195,19 @@ fn format_and_report_project_errors(project: &Project) -> FormattedErrors {
     formatted
 }
 
-fn run_engine_project(project: Project) -> StdResult<Results, Error> {
-    let project = Rc::new(project);
-    let sim = Simulation::new(&project, "main")?;
-    let compiled = sim.compile().unwrap();
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
+fn run_incremental(
+    datamodel: &DatamodelProject,
+    model_name: &str,
+    enable_ltm: bool,
+) -> StdResult<Results, Error> {
+    let mut db = simlin_engine::db::SimlinDb::default();
+    let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
+    if enable_ltm {
+        simlin_engine::db::set_project_ltm_enabled(&mut db, sync.project, true);
+    }
+    let compiled = simlin_engine::db::compile_project_incremental(&db, sync.project, model_name)?;
+    let mut vm = Vm::new(compiled)?;
+    vm.run_to_end()?;
     Ok(vm.into_results())
 }
 
@@ -213,24 +219,22 @@ fn handle_simulation_error(err: &Error, formatted: &FormattedErrors) {
     print_formatted_error(&formatted_error);
 }
 
-fn finish_engine_project(project: Project, formatted: &FormattedErrors) -> Results {
-    match run_engine_project(project) {
+fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
+    let engine_project = Project::from(project.clone());
+    let formatted = format_and_report_project_errors(&engine_project);
+    match run_incremental(project, "main", false) {
         Ok(results) => results,
         Err(err) => {
-            handle_simulation_error(&err, formatted);
+            handle_simulation_error(&err, &formatted);
             die!("failed to create simulation");
         }
     }
 }
 
-fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
-    let engine_project = Project::from(project.clone());
-    let formatted = format_and_report_project_errors(&engine_project);
-    finish_engine_project(engine_project, &formatted)
-}
-
 fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     if enable_ltm {
+        // Use the monolithic Project only for loop detection and error
+        // reporting; actual simulation goes through the incremental path.
         let engine_project = Project::from(project.clone());
 
         use simlin_engine::ltm;
@@ -250,21 +254,23 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
 
         let formatted = format_and_report_project_errors(&engine_project);
 
-        match engine_project.clone().with_ltm() {
-            Ok(ltm_project) => match run_engine_project(ltm_project) {
-                Ok(results) => return results,
-                Err(err) => {
-                    handle_simulation_error(&err, &formatted);
-                    eprintln!("Error creating simulation with LTM: {err}");
-                    eprintln!("falling back to regular simulation without LTM");
-                }
-            },
+        match run_incremental(project, "main", true) {
+            Ok(results) => return results,
             Err(err) => {
-                eprintln!("Warning: Failed to enable LTM: {err}");
+                handle_simulation_error(&err, &formatted);
+                eprintln!("Error creating simulation with LTM: {err}");
+                eprintln!("falling back to regular simulation without LTM");
             }
         }
 
-        return finish_engine_project(engine_project, &formatted);
+        // LTM failed, fall back to non-LTM incremental simulation.
+        match run_incremental(project, "main", false) {
+            Ok(results) => return results,
+            Err(err) => {
+                handle_simulation_error(&err, &formatted);
+                die!("failed to create simulation");
+            }
+        }
     }
 
     run_datamodel_with_errors(project)

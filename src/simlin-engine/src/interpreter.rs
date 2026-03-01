@@ -1540,6 +1540,54 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         }
                     }
+                    BuiltinFn::Previous(arg) => {
+                        // PREVIOUS(x): return the value of x from the previous
+                        // timestep, read from the snapshot taken after stocks
+                        // but before the time advance.
+                        //
+                        // Only simple PREVIOUS(var) reaches here via the
+                        // builtin path. Nested PREVIOUS, PREVIOUS(TIME), and
+                        // 2-arg forms go through module expansion in the
+                        // builtins_visitor and never produce BuiltinFn::Previous
+                        // in the lowered AST.
+                        let prev_vals = self.sim.prev_values.borrow();
+                        if prev_vals.is_empty() {
+                            // During the initials phase, no snapshot yet --
+                            // fall back to the current value.
+                            drop(prev_vals);
+                            self.eval(arg)
+                        } else {
+                            match arg.as_ref() {
+                                Expr::Var(off, _) => prev_vals[self.off + *off],
+                                _ => {
+                                    // Fallback: evaluate the expression normally.
+                                    // In practice, only Var reaches here because
+                                    // the builtins_visitor only promotes simple
+                                    // PREVIOUS(var) to the builtin path.
+                                    drop(prev_vals);
+                                    self.eval(arg)
+                                }
+                            }
+                        }
+                    }
+                    BuiltinFn::Init(arg) => {
+                        // INIT(x): return the value of x captured at t=0.
+                        let initial_vals = self.sim.initial_values.borrow();
+                        if initial_vals.is_empty() {
+                            // During the initials phase itself, INIT(x) returns
+                            // the current value (which IS the initial value).
+                            drop(initial_vals);
+                            self.eval(arg)
+                        } else {
+                            match arg.as_ref() {
+                                Expr::Var(off, _) => initial_vals[self.off + *off],
+                                _ => {
+                                    drop(initial_vals);
+                                    self.eval(arg)
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Expr::TempArray(id, view, _) => {
@@ -1835,6 +1883,14 @@ pub struct Simulation {
     offsets: HashMap<Ident<Canonical>, usize>,
     temps: std::rc::Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
     temp_offsets: Vec<usize>,              // Offset of each temporary in the temps vector
+    // Snapshot of curr[] captured after the initials phase (t=0).
+    // Used by INIT(x) to freeze a variable's initial value.
+    initial_values: std::rc::Rc<RefCell<Vec<f64>>>,
+    // Snapshot of curr[] taken after stocks but before the time advance
+    // each timestep.  PREVIOUS(x) reads from this buffer so it returns
+    // the value from the previous timestep, matching the stdlib module
+    // PREVIOUS behavior.
+    prev_values: std::rc::Rc<RefCell<Vec<f64>>>,
 }
 
 impl Simulation {
@@ -1927,9 +1983,19 @@ impl Simulation {
             offsets,
             temps,
             temp_offsets,
+            initial_values: std::rc::Rc::new(RefCell::new(Vec::new())),
+            prev_values: std::rc::Rc::new(RefCell::new(Vec::new())),
         })
     }
 
+    /// Monolithic bytecode compilation from an AST-walking `Simulation`
+    /// into a bytecode `CompiledSimulation`.
+    ///
+    /// Deprecated: production code uses `compile_project_incremental`
+    /// (in `db.rs`). This method is retained only because the incremental
+    /// path does not yet correctly propagate module input values during
+    /// VM simulation (GitHub #295). Once that is fixed, this method and
+    /// `compile_project` can be removed.
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
         let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
             .modules
@@ -2089,11 +2155,22 @@ impl Simulation {
             curr[INITIAL_TIME_OFF] = self.specs.start;
             curr[FINAL_TIME_OFF] = self.specs.stop;
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
+            // Capture a snapshot of curr[] after the initials phase for INIT(x).
+            *(*self.initial_values).borrow_mut() = curr.to_vec();
+            // Seed prev_values with the post-initials state so that
+            // PREVIOUS(x) at t=0 returns the initial value of x.
+            *(*self.prev_values).borrow_mut() = curr.to_vec();
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
                 self.calc(StepPart::Flows, module, 0, module_inputs, curr, next);
                 self.calc(StepPart::Stocks, module, 0, module_inputs, curr, next);
+                // Snapshot curr[] AFTER stocks but BEFORE the time advance.
+                // PREVIOUS(x) in the next iteration will read from this
+                // snapshot, which contains the post-stock-update values at
+                // the current time. This matches the stdlib module behavior
+                // where PREVIOUS(TIME) returns the previous timestep's time.
+                *(*self.prev_values).borrow_mut() = curr.to_vec();
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 next[DT_OFF] = dt;
                 next[INITIAL_TIME_OFF] = self.specs.start;
@@ -2128,11 +2205,13 @@ impl Simulation {
     }
 }
 
-/// Build a `CompiledSimulation` directly from a project.
+/// Monolithic bytecode compilation from an `engine::Project`.
 ///
-/// This is the primary entry point for compiling a project to bytecode.
-/// The interpreter's `Simulation` struct is a reference implementation;
-/// this function provides the compile path for the bytecode VM.
+/// Deprecated: production code uses `compile_project_incremental`
+/// (in `db.rs`). This function is retained only because the incremental
+/// path does not yet correctly propagate module input values during
+/// VM simulation (GitHub #295). Once that is fixed, this function and
+/// `Simulation::compile` can be removed.
 pub fn compile_project(
     project: &Project,
     main_model_name: &str,
@@ -2883,72 +2962,24 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
 
 #[cfg(test)]
 mod compile_project_tests {
-    use crate::common::Ident;
-    use crate::test_common::TestProject;
-    use crate::vm::Vm;
     use std::sync::Arc;
 
-    #[test]
-    fn compile_project_f64_matches_simulation_compile() {
-        let tp = TestProject::new("compile_f64")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("rate", "0.1", None)
-            .flow("inflow", "s * rate", None)
-            .stock("s", "100", &["inflow"], &[], None);
-
-        // Via Simulation::compile()
-        let sim = tp.build_sim().expect("build_sim");
-        let compiled_via_sim = sim.compile().expect("compile");
-        let mut vm1 = Vm::new(compiled_via_sim).expect("vm1");
-        vm1.run_to_end().expect("vm1 run");
-        let s1 = vm1.get_series(&Ident::new("s")).expect("s series");
-
-        // Via compile_project()
-        let datamodel = tp.build_datamodel();
-        let project = Arc::new(crate::project::Project::from(datamodel));
-        let compiled_generic = super::compile_project(&project, "main").expect("compile_project");
-        let mut vm2 = Vm::new(compiled_generic).expect("vm2");
-        vm2.run_to_end().expect("vm2 run");
-        let s2 = vm2.get_series(&Ident::new("s")).expect("s series");
-
-        assert_eq!(s1.len(), s2.len());
-        for (i, (a, b)) in s1.iter().zip(s2.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-15,
-                "step {i}: sim.compile()={a}, compile_project()={b}"
-            );
-        }
-    }
+    use crate::common::Ident;
+    use crate::test_common::TestProject;
 
     #[test]
     fn compile_project_nonexistent_model_errors() {
+        use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+
         let tp = TestProject::new("no_such_model")
             .with_sim_time(0.0, 1.0, 1.0)
             .aux("x", "1", None);
 
         let datamodel = tp.build_datamodel();
-        let project = Arc::new(crate::project::Project::from(datamodel));
-        let result = super::compile_project(&project, "nonexistent");
+        let mut salsa_db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel, None);
+        let result = compile_project_incremental(&salsa_db, sync.project, "nonexistent");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn compile_as_matches_compile_project() {
-        let tp = TestProject::new("compile_as")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .aux("x", "TIME * 2", None);
-
-        let datamodel = tp.build_datamodel();
-        let project = Arc::new(crate::project::Project::from(datamodel));
-
-        let compiled = super::compile_project(&project, "main").expect("compile_project");
-        let mut vm = Vm::new(compiled).expect("vm");
-        vm.run_to_end().expect("run");
-        let x = vm.get_series(&Ident::new("x")).expect("x series");
-
-        assert_eq!(x.len(), 6); // steps 0,1,2,3,4,5
-        assert!((x[0] - 0.0).abs() < 1e-10);
-        assert!((x[5] - 10.0).abs() < 1e-10);
     }
 
     #[test]

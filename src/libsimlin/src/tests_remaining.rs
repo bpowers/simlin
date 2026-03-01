@@ -8,7 +8,7 @@
 fn test_format_diagnostic_equation_error() {
     use crate::errors::{FormattedErrorKind, format_diagnostic};
     use engine::common::{EquationError, ErrorCode};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "test_model".to_string(),
@@ -18,6 +18,7 @@ fn test_format_diagnostic_equation_error() {
             end: 9,
             code: ErrorCode::UnknownDependency,
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -41,7 +42,7 @@ fn test_format_diagnostic_equation_error() {
 fn test_format_diagnostic_equation_error_no_variable() {
     use crate::errors::{FormattedErrorKind, format_diagnostic};
     use engine::common::{EquationError, ErrorCode};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "m".to_string(),
@@ -51,6 +52,7 @@ fn test_format_diagnostic_equation_error_no_variable() {
             end: 5,
             code: ErrorCode::EmptyEquation,
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -67,7 +69,7 @@ fn test_format_diagnostic_equation_error_no_variable() {
 fn test_format_diagnostic_model_error_non_unit() {
     use crate::errors::{FormattedErrorKind, format_diagnostic};
     use engine::common::{Error, ErrorCode, ErrorKind};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "broken_model".to_string(),
@@ -77,6 +79,7 @@ fn test_format_diagnostic_model_error_non_unit() {
             code: ErrorCode::CircularDependency,
             details: Some("a -> b -> a".to_string()),
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -92,7 +95,7 @@ fn test_format_diagnostic_model_error_non_unit() {
 fn test_format_diagnostic_model_error_unit_mismatch() {
     use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
     use engine::common::{Error, ErrorCode, ErrorKind};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "unit_model".to_string(),
@@ -102,6 +105,7 @@ fn test_format_diagnostic_model_error_unit_mismatch() {
             code: ErrorCode::UnitMismatch,
             details: None,
         }),
+        severity: DiagnosticSeverity::Error,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -118,7 +122,7 @@ fn test_format_diagnostic_model_error_unit_mismatch() {
 fn test_format_diagnostic_unit_error() {
     use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
     use engine::common::{ErrorCode, UnitError};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "unit_model".to_string(),
@@ -128,6 +132,7 @@ fn test_format_diagnostic_unit_error() {
             engine::builtins::Loc::new(2, 8),
             Some("kg vs m".to_string()),
         )),
+        severity: DiagnosticSeverity::Warning,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -149,7 +154,7 @@ fn test_format_diagnostic_unit_error() {
 fn test_format_diagnostic_unit_definition_error() {
     use crate::errors::{FormattedErrorKind, UnitErrorKind, format_diagnostic};
     use engine::common::{EquationError, ErrorCode, UnitError};
-    use engine::db::{Diagnostic, DiagnosticError};
+    use engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
 
     let diag = Diagnostic {
         model: "unit_def_model".to_string(),
@@ -162,6 +167,7 @@ fn test_format_diagnostic_unit_definition_error() {
             },
             Some("parse error".to_string()),
         )),
+        severity: DiagnosticSeverity::Warning,
     };
 
     let formatted = format_diagnostic(&diag);
@@ -222,8 +228,8 @@ fn test_project_json_roundtrip_sdai() {
         assert!(!model.is_null());
 
         // Verify variables exist
-        let project2_locked = (*proj2).project.lock().unwrap();
-        let roundtrip_datamodel = &project2_locked.datamodel;
+        let project2_locked = (*proj2).datamodel.lock().unwrap();
+        let roundtrip_datamodel = &project2_locked;
         let roundtrip_model = roundtrip_datamodel.get_model("main").unwrap();
 
         assert!(roundtrip_model.get_variable("population").is_some());
@@ -390,8 +396,8 @@ fn test_project_apply_patch_commits() {
         assert!(out_error.is_null(), "expected no error applying json patch");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(model.get_variable("json_aux").is_some());
         drop(project_locked);
 
@@ -471,8 +477,8 @@ fn test_project_apply_patch_upsert_stock() {
         assert!(out_error.is_null(), "expected no error upserting stock");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         let stock = model.get_variable("inventory");
         assert!(stock.is_some(), "stock should exist after upsert");
         drop(project_locked);
@@ -523,8 +529,8 @@ fn test_project_apply_patch_upsert_flow() {
         assert!(out_error.is_null(), "expected no error upserting flow");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         let flow = model.get_variable("production");
         assert!(flow.is_some(), "flow should exist after upsert");
         drop(project_locked);
@@ -588,8 +594,8 @@ fn test_project_apply_patch_upsert_module() {
         // Modules referencing other models may have compilation errors, which is ok
         // when allow_errors=true
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         let module = model.get_variable("submodel");
         assert!(module.is_some(), "module should exist after upsert");
         drop(project_locked);
@@ -606,8 +612,8 @@ fn test_project_apply_patch_delete_variable() {
     let proj = open_project_from_datamodel(&datamodel);
 
     unsafe {
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("to_delete").is_some(),
             "variable should exist before delete"
@@ -647,8 +653,8 @@ fn test_project_apply_patch_delete_variable() {
         assert!(out_error.is_null(), "expected no error deleting variable");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("to_delete").is_none(),
             "variable should not exist after delete"
@@ -667,8 +673,8 @@ fn test_project_apply_patch_rename_variable() {
     let proj = open_project_from_datamodel(&datamodel);
 
     unsafe {
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("old_name").is_some(),
             "old variable should exist before rename"
@@ -709,8 +715,8 @@ fn test_project_apply_patch_rename_variable() {
         assert!(out_error.is_null(), "expected no error renaming variable");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("old_name").is_none(),
             "old variable should not exist after rename"
@@ -774,8 +780,8 @@ fn test_project_apply_patch_upsert_view() {
         assert!(out_error.is_null(), "expected no error upserting view");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(!model.views.is_empty(), "view should exist after upsert");
         drop(project_locked);
 
@@ -826,8 +832,8 @@ fn test_project_apply_patch_delete_view() {
         );
         assert!(out_error.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(!model.views.is_empty(), "view should exist after upsert");
     }
 
@@ -865,8 +871,8 @@ fn test_project_apply_patch_delete_view() {
         assert!(out_error.is_null(), "expected no error deleting view");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(model.views.is_empty(), "view should not exist after delete");
         drop(project_locked);
 
@@ -879,8 +885,8 @@ fn test_project_apply_patch_set_sim_specs() {
     let datamodel = TestProject::new("json_patch_sim_specs").build_datamodel();
     let proj = open_project_from_datamodel(&datamodel);
 
-    let original_start = unsafe { (*proj).project.lock().unwrap().datamodel.sim_specs.start };
-    let original_stop = unsafe { (*proj).project.lock().unwrap().datamodel.sim_specs.stop };
+    let original_start = unsafe { (*proj).datamodel.lock().unwrap().sim_specs.start };
+    let original_stop = unsafe { (*proj).datamodel.lock().unwrap().sim_specs.stop };
 
     let patch_json = r#"{
         "projectOps": [
@@ -930,8 +936,8 @@ fn test_project_apply_patch_set_sim_specs() {
         }
         assert!(collected_errors.is_null());
 
-        let new_start = (*proj).project.lock().unwrap().datamodel.sim_specs.start;
-        let new_stop = (*proj).project.lock().unwrap().datamodel.sim_specs.stop;
+        let new_start = (*proj).datamodel.lock().unwrap().sim_specs.start;
+        let new_stop = (*proj).datamodel.lock().unwrap().sim_specs.stop;
 
         assert_ne!(
             original_start, new_start,
@@ -1016,11 +1022,11 @@ fn test_project_apply_patch_project_and_model_ops() {
         }
         assert!(collected_errors.is_null());
 
-        let new_stop = (*proj).project.lock().unwrap().datamodel.sim_specs.stop;
+        let new_stop = (*proj).datamodel.lock().unwrap().sim_specs.stop;
         assert_eq!(new_stop, 100.0, "sim specs should be updated");
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("combined_test").is_some(),
             "variable should exist"
@@ -1143,8 +1149,8 @@ fn test_apply_patch_dry_run_no_changes() {
     let proj = open_project_from_datamodel(&datamodel);
 
     unsafe {
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("dry_run_var").is_none(),
             "variable should not exist before patch"
@@ -1187,8 +1193,8 @@ fn test_apply_patch_dry_run_no_changes() {
         assert!(out_error.is_null(), "dry run should succeed");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("dry_run_var").is_none(),
             "variable should not exist after dry run"
@@ -1294,11 +1300,11 @@ fn test_apply_patch_multiple_models() {
         assert!(out_error.is_null(), "multi-model patch should succeed");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let main_model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let main_model = project_locked.get_model("main").unwrap();
         assert!(main_model.get_variable("main_var").is_some());
 
-        let second_model = project_locked.datamodel.get_model("SecondModel").unwrap();
+        let second_model = project_locked.get_model("SecondModel").unwrap();
         assert!(second_model.get_variable("second_var").is_some());
         drop(project_locked);
 
@@ -1365,8 +1371,8 @@ fn test_apply_patch_multiple_ops_per_model() {
         assert!(out_error.is_null(), "multiple ops should succeed");
         assert!(collected_errors.is_null());
 
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(model.get_variable("var1").is_some());
         assert!(model.get_variable("var2").is_some());
         assert!(model.get_variable("var3").is_some());
@@ -3522,20 +3528,24 @@ fn test_error_kind_unit_consistency_error() {
 
         let errors = simlin_error_get_details(all_errors);
         let error_slice = std::slice::from_raw_parts(errors, count);
-        let unit_error = error_slice
-            .iter()
-            .find(|e| e.kind == SimlinErrorKind::Units)
-            .expect("should have unit error");
 
-        assert_eq!(
-            unit_error.kind,
-            SimlinErrorKind::Units,
-            "unit errors should have Units kind"
+        // A unit mismatch produces both an inference-level diagnostic (from
+        // the constraint solver) and a per-variable consistency diagnostic.
+        // Verify both are present and correctly classified.
+        let has_inference = error_slice
+            .iter()
+            .any(|e| e.kind == SimlinErrorKind::Units && e.unit_error_kind == SimlinUnitErrorKind::Inference);
+        let has_consistency = error_slice
+            .iter()
+            .any(|e| e.kind == SimlinErrorKind::Units && e.unit_error_kind == SimlinUnitErrorKind::Consistency);
+
+        assert!(
+            has_consistency,
+            "unit mismatch should produce a Consistency error"
         );
-        assert_eq!(
-            unit_error.unit_error_kind,
-            SimlinUnitErrorKind::Consistency,
-            "unit mismatch should be Consistency variant"
+        assert!(
+            has_inference,
+            "unit mismatch should also produce an Inference error from the constraint solver"
         );
 
         simlin_error_free(all_errors);
@@ -3981,15 +3991,26 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
 
     let proj = open_project_from_datamodel(&datamodel);
 
-    // Verify the project has unit warnings
+    // Verify the project has unit warnings via salsa diagnostics.
+    // Unit mismatch can surface as either a DiagnosticError::Unit (from
+    // units_check) or DiagnosticError::Model with UnitMismatch code (from
+    // units_infer). Both indicate unit-related problems.
     {
-        let project_locked = unsafe { (*proj).project.lock().unwrap() };
-        let model = project_locked
-            .models
-            .get(&*engine::canonicalize("main"))
-            .unwrap();
+        let db = unsafe { (*proj).db.lock().unwrap() };
+        let sync_state = unsafe { (*proj).sync_state.lock().unwrap() };
+        let sync = sync_state.as_ref().unwrap().to_sync_result();
+        let diags = engine::db::collect_all_diagnostics(&db, &sync);
+        let has_unit_diags = diags.iter().any(|d| {
+            d.severity == engine::db::DiagnosticSeverity::Warning
+                && (matches!(d.error, engine::db::DiagnosticError::Unit(_))
+                    || matches!(
+                        &d.error,
+                        engine::db::DiagnosticError::Model(e)
+                        if e.code == engine::common::ErrorCode::UnitMismatch
+                    ))
+        });
         assert!(
-            model.unit_warnings.is_some(),
+            has_unit_diags,
             "expected unit warnings in the model"
         );
     }
@@ -4044,8 +4065,8 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
         }
 
         // Verify the patch was applied
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(model.get_variable("d").is_some(), "patch should be applied");
         drop(project_locked);
 
@@ -4065,15 +4086,18 @@ fn test_patch_introducing_new_unit_warning_rejected() {
 
     let proj = open_project_from_datamodel(&datamodel);
 
-    // Verify no unit warnings initially
+    // Verify no unit warnings initially via salsa diagnostics
     {
-        let project_locked = unsafe { (*proj).project.lock().unwrap() };
-        let model = project_locked
-            .models
-            .get(&*engine::canonicalize("main"))
-            .unwrap();
+        let db = unsafe { (*proj).db.lock().unwrap() };
+        let sync_state = unsafe { (*proj).sync_state.lock().unwrap() };
+        let sync = sync_state.as_ref().unwrap().to_sync_result();
+        let diags = engine::db::collect_all_diagnostics(&db, &sync);
+        let has_unit_diags = diags.iter().any(|d| {
+            matches!(d.error, engine::db::DiagnosticError::Unit(_))
+                && d.severity == engine::db::DiagnosticSeverity::Warning
+        });
         assert!(
-            model.unit_warnings.is_none(),
+            !has_unit_diags,
             "should not have unit warnings initially"
         );
     }
@@ -4129,8 +4153,8 @@ fn test_patch_introducing_new_unit_warning_rejected() {
         }
 
         // Verify the patch was NOT applied
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("bad_sum").is_none(),
             "patch should NOT be applied"
@@ -4197,8 +4221,8 @@ fn test_patch_introducing_new_unit_warning_allowed_with_flag() {
         }
 
         // Verify the patch WAS applied
-        let project_locked = (*proj).project.lock().unwrap();
-        let model = project_locked.datamodel.get_model("main").unwrap();
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
         assert!(
             model.get_variable("bad_sum").is_some(),
             "patch should be applied"

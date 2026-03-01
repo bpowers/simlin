@@ -3038,32 +3038,6 @@ fn test_compile_var_fragment_caching() {
 }
 
 #[test]
-fn test_incremental_bytecode_equivalence() {
-    // AC4.3: Build a model, compile incrementally via salsa, then
-    // compile monolithically. Both should produce valid simulations
-    // that generate identical numerical output.
-    let db = SimlinDb::default();
-    let project = two_var_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let model = sync.models["main"].source;
-
-    // Incremental: assemble via tracked functions
-    let incremental_result = assemble_module(&db, model, sync.project, true, &BTreeSet::new());
-
-    // Monolithic: compile via Project::from + compile_project
-    let engine_project = crate::project::Project::from(project);
-    let monolithic_result = crate::interpreter::compile_project(&engine_project, "main");
-
-    // If the incremental path produces a result, verify equivalence
-    // by running both through the VM
-    if let (Ok(incr_module), Ok(mono_compiled)) = (&incremental_result, &monolithic_result) {
-        // Both should have the same number of slots
-        assert_eq!(incr_module.n_slots, mono_compiled.n_slots());
-    }
-}
-
-#[test]
 fn test_assemble_simulation_simple() {
     let db = SimlinDb::default();
     let project = two_var_project();
@@ -3096,182 +3070,6 @@ fn test_assemble_simulation_simple() {
             .get_offset(&crate::common::Ident::new("time"))
             .is_some()
     );
-}
-
-#[test]
-fn test_incremental_vs_monolithic_output() {
-    use crate::vm::Vm;
-
-    let db = SimlinDb::default();
-    let project = two_var_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    // Incremental path: assemble_simulation
-    let incr_result = assemble_simulation(&db, sync.project, "main");
-    assert!(
-        incr_result.is_ok(),
-        "incremental assemble_simulation failed: {:?}",
-        incr_result.err()
-    );
-    let incr_compiled = incr_result.unwrap();
-
-    // Monolithic path: compile_project
-    let engine_project = crate::project::Project::from(project);
-    let mono_result = crate::interpreter::compile_project(&engine_project, "main");
-    assert!(mono_result.is_ok(), "monolithic compile_project failed");
-    let mono_compiled = mono_result.unwrap();
-
-    // Both should have same n_slots
-    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
-
-    // Run both through the VM
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    // Verify identical output dimensions
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-    assert_eq!(incr_results.step_size, mono_results.step_size);
-
-    // Compare numerical output for each variable at each timestep
-    let alpha_ident = crate::common::Ident::new("alpha");
-    let beta_ident = crate::common::Ident::new("beta");
-
-    let incr_alpha_off = incr_results.offsets[&alpha_ident];
-    let mono_alpha_off = mono_results.offsets[&alpha_ident];
-    let incr_beta_off = incr_results.offsets[&beta_ident];
-    let mono_beta_off = mono_results.offsets[&beta_ident];
-
-    for step in 0..incr_results.step_count {
-        let incr_base = step * incr_results.step_size;
-        let mono_base = step * mono_results.step_size;
-
-        let incr_alpha = incr_results.data[incr_base + incr_alpha_off];
-        let mono_alpha = mono_results.data[mono_base + mono_alpha_off];
-        assert!(
-            (incr_alpha - mono_alpha).abs() < 1e-10,
-            "alpha mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_alpha,
-            mono_alpha
-        );
-
-        let incr_beta = incr_results.data[incr_base + incr_beta_off];
-        let mono_beta = mono_results.data[mono_base + mono_beta_off];
-        assert!(
-            (incr_beta - mono_beta).abs() < 1e-10,
-            "beta mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_beta,
-            mono_beta
-        );
-    }
-}
-
-/// Stock-and-flow model: stock integrates a flow over time.
-fn stock_flow_project() -> datamodel::Project {
-    datamodel::Project {
-        name: "stock_flow_test".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["births".to_string()],
-                    outflows: vec![],
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "births".to_string(),
-                    equation: datamodel::Equation::Scalar("population * 0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-            ],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }],
-        source: None,
-        ai_information: None,
-    }
-}
-
-#[test]
-fn test_assemble_simulation_stock_flow() {
-    use crate::vm::Vm;
-
-    let db = SimlinDb::default();
-    let project = stock_flow_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    // Incremental path
-    let incr_result = assemble_simulation(&db, sync.project, "main");
-    assert!(
-        incr_result.is_ok(),
-        "assemble_simulation failed for stock-flow model: {:?}",
-        incr_result.err()
-    );
-    let incr_compiled = incr_result.unwrap();
-
-    // Monolithic path
-    let engine_project = crate::project::Project::from(project);
-    let mono_result = crate::interpreter::compile_project(&engine_project, "main");
-    assert!(mono_result.is_ok());
-    let mono_compiled = mono_result.unwrap();
-
-    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
-
-    // Run both and compare
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-
-    let pop_ident = crate::common::Ident::new("population");
-    let incr_pop_off = incr_results.offsets[&pop_ident];
-    let mono_pop_off = mono_results.offsets[&pop_ident];
-
-    for step in 0..incr_results.step_count {
-        let incr_val = incr_results.data[step * incr_results.step_size + incr_pop_off];
-        let mono_val = mono_results.data[step * mono_results.step_size + mono_pop_off];
-        assert!(
-            (incr_val - mono_val).abs() < 1e-10,
-            "population mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_val,
-            mono_val
-        );
-    }
 }
 
 /// Teacup model: stock with flow, two constants. Matches the teacup.stmx
@@ -3349,91 +3147,6 @@ fn teacup_project() -> datamodel::Project {
                 }),
             ],
         }],
-    }
-}
-
-#[test]
-fn test_incremental_teacup_constant_detection() {
-    let db = SimlinDb::default();
-    let project = teacup_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
-    let mono_compiled =
-        crate::interpreter::compile_project(&crate::project::Project::from(project), "main")
-            .expect("monolithic compilation failed");
-
-    // room_temperature should be detected as a constant in both paths
-    let room_temp_ident = crate::common::Ident::new("room_temperature");
-    let incr_off = incr_compiled
-        .get_offset(&room_temp_ident)
-        .expect("no offset for room_temperature in incremental");
-    let mono_off = mono_compiled
-        .get_offset(&room_temp_ident)
-        .expect("no offset for room_temperature in monolithic");
-
-    assert!(
-        mono_compiled.is_constant_offset(mono_off),
-        "monolithic should detect room_temperature as constant"
-    );
-    assert!(
-        incr_compiled.is_constant_offset(incr_off),
-        "incremental should detect room_temperature as constant"
-    );
-}
-
-#[test]
-fn test_incremental_teacup_simulation() {
-    use crate::vm::Vm;
-
-    let db = SimlinDb::default();
-    let project = teacup_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
-
-    let mono_compiled =
-        crate::interpreter::compile_project(&crate::project::Project::from(project), "main")
-            .expect("monolithic compilation failed");
-
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    // Temperature should decrease over time (not stay at 0)
-    let temp_ident = crate::common::Ident::new("teacup_temperature");
-    let incr_temp_off = incr_results.offsets[&temp_ident];
-    let first_temp = incr_results.data[incr_temp_off];
-    assert!(
-        first_temp > 0.0,
-        "temperature should not be zero, got {}",
-        first_temp
-    );
-    assert!(
-        (first_temp - 180.0).abs() < 1e-10,
-        "initial temperature should be 180, got {}",
-        first_temp
-    );
-
-    // Compare all values
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-    for step in 0..incr_results.step_count {
-        let incr_val = incr_results.data[step * incr_results.step_size + incr_temp_off];
-        let mono_temp_off = mono_results.offsets[&temp_ident];
-        let mono_val = mono_results.data[step * mono_results.step_size + mono_temp_off];
-        assert!(
-            (incr_val - mono_val).abs() < 1e-10,
-            "temperature mismatch at step {}: incr={}, mono={}",
-            step,
-            incr_val,
-            mono_val
-        );
     }
 }
 
@@ -3918,135 +3631,6 @@ fn test_ac2_4_stdlib_composite_scores_cached() {
         result1, result2,
         "AC2.4: module_ltm_synthetic_variables should be cached on unchanged inputs"
     );
-}
-
-/// AC4.3 (strengthened): Compile a model with stocks, flows, and lookups
-/// both incrementally and monolithically, run both through the VM, and
-/// assert identical time-series output for all variables.
-#[test]
-fn test_ac4_3_full_bytecode_equivalence_stock_flow_lookup() {
-    use crate::vm::Vm;
-
-    let project = datamodel::Project {
-        name: "sfg".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(0.5),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "level".to_string(),
-                    equation: datamodel::Equation::Scalar("50".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["inflow".to_string()],
-                    outflows: vec!["outflow".to_string()],
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "inflow".to_string(),
-                    equation: datamodel::Equation::Scalar("effect * 10".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "outflow".to_string(),
-                    equation: datamodel::Equation::Scalar("level * 0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "effect".to_string(),
-                    equation: datamodel::Equation::Scalar("time".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: Some(datamodel::GraphicalFunction {
-                        kind: datamodel::GraphicalFunctionKind::Continuous,
-                        x_points: Some(vec![0.0, 5.0, 10.0]),
-                        y_points: vec![1.0, 0.5, 0.2],
-                        x_scale: datamodel::GraphicalFunctionScale {
-                            min: 0.0,
-                            max: 10.0,
-                        },
-                        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
-                    }),
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-            ],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }],
-        source: None,
-        ai_information: None,
-    };
-
-    // Incremental path
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, &project);
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
-
-    // Monolithic path
-    let engine_project = crate::project::Project::from(project.clone());
-    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
-        .expect("monolithic compilation failed");
-
-    assert_eq!(incr_compiled.n_slots(), mono_compiled.n_slots());
-
-    // Run both
-    let mut incr_sim = Vm::new(incr_compiled).unwrap();
-    incr_sim.run_to_end().unwrap();
-    let incr_results = incr_sim.into_results();
-
-    let mut mono_sim = Vm::new(mono_compiled).unwrap();
-    mono_sim.run_to_end().unwrap();
-    let mono_results = mono_sim.into_results();
-
-    assert_eq!(incr_results.step_count, mono_results.step_count);
-    assert_eq!(incr_results.step_size, mono_results.step_size);
-
-    // Compare every variable at every timestep
-    for (ident, &incr_off) in &incr_results.offsets {
-        let mono_off = mono_results
-            .offsets
-            .get(ident)
-            .unwrap_or_else(|| panic!("variable {:?} not found in monolithic results", ident));
-
-        for step in 0..incr_results.step_count {
-            let incr_val = incr_results.data[step * incr_results.step_size + incr_off];
-            let mono_val = mono_results.data[step * mono_results.step_size + mono_off];
-            assert!(
-                (incr_val - mono_val).abs() < 1e-10,
-                "{:?} mismatch at step {}: incr={}, mono={}",
-                ident,
-                step,
-                incr_val,
-                mono_val
-            );
-        }
-    }
 }
 
 /// Test loading teacup.stmx via open_xmile and running through the
@@ -4924,11 +4508,13 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
         "baseline series should be finite before lookup rewrite"
     );
 
+    // Fresh incremental compile as reference
     let project = implicit_lookup_smth1_project();
-    let engine_project = crate::project::Project::from(project.clone());
-    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
-        .expect("monolithic compile should succeed");
-    let mono_series = run_smoothed_series(mono_compiled);
+    let ref_db = SimlinDb::default();
+    let ref_sync = sync_from_datamodel(&ref_db, &project);
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+        .expect("reference incremental compile should succeed");
+    let ref_series = run_smoothed_series(ref_compiled);
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
     let incr_compiled = compile_project_incremental(&db, state2.project, "main")
@@ -4937,22 +4523,22 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
 
     assert_eq!(
         incr_series.len(),
-        mono_series.len(),
-        "incremental and monolithic should have same number of timesteps"
+        ref_series.len(),
+        "incremental and reference should have same number of timesteps"
     );
 
-    for (step, (mono, incr)) in mono_series.iter().zip(incr_series.iter()).enumerate() {
+    for (step, (reference, incr)) in ref_series.iter().zip(incr_series.iter()).enumerate() {
         assert!(
-            mono.is_finite(),
-            "monolithic produced non-finite value at step {step}: {mono}"
+            reference.is_finite(),
+            "reference produced non-finite value at step {step}: {reference}"
         );
         assert!(
             incr.is_finite(),
             "incremental produced non-finite value at step {step}: {incr}"
         );
         assert!(
-            (incr - mono).abs() < 1e-10,
-            "incremental mismatch at step {step}: incr={incr}, mono={mono}"
+            (incr - reference).abs() < 1e-10,
+            "incremental mismatch at step {step}: incr={incr}, reference={reference}"
         );
     }
 }
@@ -4961,13 +4547,15 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
 fn test_incremental_compile_implicit_lookup_dep_tables() {
     let project = implicit_lookup_smth1_project();
 
-    let engine_project = crate::project::Project::from(project.clone());
-    let mono_compiled = crate::interpreter::compile_project(&engine_project, "main")
-        .expect("monolithic compile should succeed");
-    let mono_series = run_smoothed_series(mono_compiled);
+    // Fresh incremental compile as reference
+    let ref_db = SimlinDb::default();
+    let ref_sync = sync_from_datamodel(&ref_db, &project);
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+        .expect("reference incremental compile should succeed");
+    let ref_series = run_smoothed_series(ref_compiled);
     assert!(
-        !mono_series.is_empty(),
-        "monolithic smoothed series should not be empty"
+        !ref_series.is_empty(),
+        "reference smoothed series should not be empty"
     );
 
     let mut db = SimlinDb::default();
@@ -4984,38 +4572,38 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
 
     assert_eq!(
         incr_series1.len(),
-        mono_series.len(),
-        "incremental (fresh state) should have same number of timesteps as monolithic"
+        ref_series.len(),
+        "incremental (fresh state) should have same number of timesteps as reference"
     );
     assert_eq!(
         incr_series2.len(),
-        mono_series.len(),
-        "incremental (reused state) should have same number of timesteps as monolithic"
+        ref_series.len(),
+        "incremental (reused state) should have same number of timesteps as reference"
     );
 
-    for (step, (mono, incr)) in mono_series.iter().zip(incr_series1.iter()).enumerate() {
+    for (step, (reference, incr)) in ref_series.iter().zip(incr_series1.iter()).enumerate() {
         assert!(
-            mono.is_finite(),
-            "monolithic produced non-finite value at step {step}: {mono}"
+            reference.is_finite(),
+            "reference produced non-finite value at step {step}: {reference}"
         );
         assert!(
             incr.is_finite(),
             "incremental produced non-finite value at step {step}: {incr}"
         );
         assert!(
-            (incr - mono).abs() < 1e-10,
-            "incremental mismatch at step {step}: incr={incr}, mono={mono}"
+            (incr - reference).abs() < 1e-10,
+            "incremental mismatch at step {step}: incr={incr}, reference={reference}"
         );
     }
 
-    for (step, (mono, incr)) in mono_series.iter().zip(incr_series2.iter()).enumerate() {
+    for (step, (reference, incr)) in ref_series.iter().zip(incr_series2.iter()).enumerate() {
         assert!(
             incr.is_finite(),
             "incremental (reused state) produced non-finite value at step {step}: {incr}"
         );
         assert!(
-            (incr - mono).abs() < 1e-10,
-            "incremental (reused state) mismatch at step {step}: incr={incr}, mono={mono}"
+            (incr - reference).abs() < 1e-10,
+            "incremental (reused state) mismatch at step {step}: incr={incr}, reference={reference}"
         );
     }
 }
@@ -5232,4 +4820,902 @@ fn test_initial_sync_marks_stdlib_models() {
             "stdlib model {stdlib_name} should have is_stdlib=true after initial sync"
         );
     }
+}
+
+// ── Phase 1 scaffolding verification tests ──────────────────────────
+
+/// AC5.4 (partial): PREVIOUS(stock) via module expansion produces identical
+/// results in interpreter and VM. The stock increases by a constant flow
+/// each timestep; PREVIOUS(stock) should lag by one dt.
+///
+/// This test exercises the module-expansion path that PREVIOUS currently
+/// uses. When PREVIOUS is promoted to a builtin opcode (LoadPrev), this
+/// test remains valid -- it just verifies the new codepath instead.
+///
+/// The 1-arg PREVIOUS(x) form uses initial_value=0 at t=0 (stdlib module
+/// default). At subsequent timesteps it returns x's value from the prior
+/// timestep.
+#[test]
+fn test_previous_module_expansion_interpreter_vm_parity() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("previous_parity")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "10", None)
+        .aux("prev_level", "PREVIOUS(level)", None);
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    let interp_vals = interp
+        .get("prev_level")
+        .expect("prev_level not in interpreter results");
+    let vm_vals = vm.get("prev_level").expect("prev_level not in VM results");
+
+    assert_eq!(
+        interp_vals.len(),
+        vm_vals.len(),
+        "step count mismatch between interpreter ({}) and VM ({})",
+        interp_vals.len(),
+        vm_vals.len()
+    );
+
+    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_level mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // The stdlib PREVIOUS module uses initial_value=0 for the 1-arg form,
+    // so at t=0, PREVIOUS(level) returns 0 (not level's initial value).
+    let level_vals = interp
+        .get("level")
+        .expect("level not in interpreter results");
+    assert!(
+        (interp_vals[0] - 0.0).abs() < 1e-10,
+        "prev_level at t=0 should be 0 (stdlib default initial_value), got {}",
+        interp_vals[0]
+    );
+    // At subsequent steps, prev_level[t] == level[t-1]
+    for step in 1..interp_vals.len() {
+        assert!(
+            (interp_vals[step] - level_vals[step - 1]).abs() < 1e-10,
+            "prev_level at step {step} should equal level at step {}: expected {}, got {}",
+            step - 1,
+            level_vals[step - 1],
+            interp_vals[step]
+        );
+    }
+}
+
+/// AC5.4 (partial): INIT(aux) via module expansion freezes the t=0
+/// value and returns it at every timestep. Interpreter and VM must agree.
+///
+/// Uses INIT on an aux variable (matching the existing XMILE test model
+/// pattern in test/builtin_init/). The INIT stdlib module captures the
+/// module input's value at t=0 and holds it constant via a stock with no
+/// flows.
+#[test]
+fn test_init_module_expansion_interpreter_vm_parity() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("init_parity")
+        .with_sim_time(1.0, 5.0, 1.0)
+        .aux("rate", "TIME", None)
+        .aux("init_rate", "INIT(rate)", None);
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    let interp_vals = interp
+        .get("init_rate")
+        .expect("init_rate not in interpreter results");
+    let vm_vals = vm.get("init_rate").expect("init_rate not in VM results");
+
+    assert_eq!(
+        interp_vals.len(),
+        vm_vals.len(),
+        "step count mismatch between interpreter and VM"
+    );
+
+    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "init_rate mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // INIT(rate) should freeze rate's t=0 value (rate=TIME, TIME starts
+    // at 1.0) and return 1.0 at every timestep even as TIME advances.
+    for (step, val) in interp_vals.iter().enumerate() {
+        assert!(
+            (val - 1.0).abs() < 1e-10,
+            "init_rate should be 1.0 at every step, got {val} at step {step}"
+        );
+    }
+}
+
+/// AC6.4 status check: "previous" and "init" are still in MODEL_NAMES
+/// because PREVIOUS activation was deferred (see builtins_visitor.rs
+/// comment). This test documents the current state; when PREVIOUS and
+/// INIT are promoted to builtins, update this assertion.
+#[test]
+fn test_previous_and_init_still_in_stdlib_model_names() {
+    let names = crate::stdlib::MODEL_NAMES;
+    assert!(
+        names.contains(&"previous"),
+        "expected 'previous' in MODEL_NAMES (still module-expanded)"
+    );
+    assert!(
+        names.contains(&"init"),
+        "expected 'init' in MODEL_NAMES (still module-expanded)"
+    );
+}
+
+/// AC5.4: PREVIOUS of a flow (not just a stock) works correctly. The flow
+/// is recomputed each timestep; PREVIOUS(flow) should return the prior
+/// timestep's computed flow value.
+///
+/// Like stocks, the 1-arg PREVIOUS(flow) form returns 0 at t=0
+/// (stdlib module default initial_value).
+#[test]
+fn test_previous_of_flow_interpreter_vm_parity() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("previous_flow")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "100", &["growth"], &[], None)
+        .flow("growth", "level * 0.1", None)
+        .aux("prev_growth", "PREVIOUS(growth)", None);
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    let interp_vals = interp
+        .get("prev_growth")
+        .expect("prev_growth not in interpreter results");
+    let vm_vals = vm
+        .get("prev_growth")
+        .expect("prev_growth not in VM results");
+
+    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_growth mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // The stdlib PREVIOUS module defaults initial_value=0 for the 1-arg
+    // form. At t=0, PREVIOUS(growth) returns 0. At subsequent steps it
+    // returns growth's value from the prior timestep.
+    let growth_vals = interp
+        .get("growth")
+        .expect("growth not in interpreter results");
+    assert!(
+        (interp_vals[0] - 0.0).abs() < 1e-10,
+        "prev_growth at t=0 should be 0 (stdlib default), got {}",
+        interp_vals[0]
+    );
+    for step in 1..interp_vals.len() {
+        assert!(
+            (interp_vals[step] - growth_vals[step - 1]).abs() < 1e-10,
+            "prev_growth at step {step} should equal growth at step {}: expected {}, got {}",
+            step - 1,
+            growth_vals[step - 1],
+            interp_vals[step]
+        );
+    }
+}
+
+// --- LTM incremental compilation verification tests (Phase 2 Task 6) ---
+
+/// A linear chain model with no feedback loops: aux -> flow -> stock.
+/// Used to verify AC1.4 (no feedback loops = zero LTM overhead).
+fn no_loop_project() -> datamodel::Project {
+    datamodel::Project {
+        name: "no_loop".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "growth_rate".to_string(),
+                    equation: datamodel::Equation::Scalar("0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: datamodel::Equation::Scalar("growth_rate".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC1.4: Models with no feedback loops incur zero LTM overhead when
+/// ltm_enabled=true. The layout should have no LTM variable slots and
+/// no LTM fragments should be compiled.
+#[test]
+fn test_ltm_no_loops_zero_overhead() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = no_loop_project();
+    // Extract Copy types from sync before needing &mut db.
+    // Salsa tracked return values borrow &db, so we extract scalar
+    // data (n_slots, len()) before each mutation point.
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+
+    // Layout slot count with LTM enabled
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let n_slots_with_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    // Layout slot count without LTM
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let n_slots_without_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    // Both layouts should have the same number of slots because there
+    // are no feedback loops and thus no LTM synthetic variables
+    assert_eq!(
+        n_slots_with_ltm, n_slots_without_ltm,
+        "no-loop model should have identical slot count with/without LTM: ltm={}, no_ltm={}",
+        n_slots_with_ltm, n_slots_without_ltm
+    );
+
+    // Verify LTM synthetic variables are empty for this model
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let ltm_var_count = model_ltm_synthetic_variables(&db, source_model, source_project)
+        .vars
+        .len();
+    assert_eq!(
+        ltm_var_count, 0,
+        "no-loop model should have zero LTM synthetic variables"
+    );
+
+    // Compilation should succeed with identical results
+    let compiled_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM compilation should succeed for no-loop model");
+    let ltm_root_slots = compiled_ltm.modules[&compiled_ltm.root].n_slots;
+
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let compiled_no_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("non-LTM compilation should succeed for no-loop model");
+    let no_ltm_root_slots = compiled_no_ltm.modules[&compiled_no_ltm.root].n_slots;
+
+    assert_eq!(
+        ltm_root_slots, no_ltm_root_slots,
+        "root module slot count should be identical for no-loop model with/without LTM"
+    );
+}
+
+/// AC1.5: ltm_enabled=false skips all LTM layout and assembly work;
+/// compilation produces identical bytecode to a compilation that never
+/// had LTM enabled.
+#[test]
+fn test_ltm_disabled_identical_bytecode() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let source_project = {
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project
+    };
+
+    // Compile with LTM disabled (the default)
+    let compiled_never_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("compilation without LTM should succeed");
+
+    // Enable then disable LTM -- should return to the same state.
+    // compile_project_incremental returns an owned CompiledSimulation,
+    // so it does not borrow db.
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let _compiled_ltm = compile_project_incremental(&db, source_project, "main")
+        .expect("compilation with LTM should succeed");
+
+    // Disable LTM again
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let compiled_after_disable = compile_project_incremental(&db, source_project, "main")
+        .expect("compilation after disabling LTM should succeed");
+
+    // The root module's slot count should be identical
+    let root_never = &compiled_never_ltm.modules[&compiled_never_ltm.root];
+    let root_after = &compiled_after_disable.modules[&compiled_after_disable.root];
+
+    assert_eq!(
+        root_never.n_slots, root_after.n_slots,
+        "slot count should be identical when LTM is disabled"
+    );
+
+    // The module count should be identical (no extra LTM modules)
+    assert_eq!(
+        compiled_never_ltm.modules.len(),
+        compiled_after_disable.modules.len(),
+        "module count should be identical when LTM is disabled"
+    );
+
+    // The offset map should be identical (no extra LTM variables)
+    assert_eq!(
+        compiled_never_ltm.offsets.len(),
+        compiled_after_disable.offsets.len(),
+        "offset count should be identical when LTM is disabled"
+    );
+    for (name, &off) in &compiled_never_ltm.offsets {
+        assert_eq!(
+            compiled_after_disable.offsets.get(name),
+            Some(&off),
+            "offset for '{}' should be identical when LTM is disabled",
+            name.as_str()
+        );
+    }
+}
+
+/// AC1.1: LTM synthetic variables appear in compiled output with correct
+/// offsets when compiling through the incremental path.
+#[test]
+fn test_ltm_incremental_produces_synthetic_variables() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed");
+
+    // The feedback loop project has: population -> births -> population
+    // LTM should produce at least one loop score and one relative loop score
+    let has_ltm_offset = compiled.offsets.keys().any(|k| k.as_str().starts_with('$'));
+    assert!(
+        has_ltm_offset,
+        "compiled output should contain LTM variable offsets (starting with '$')"
+    );
+
+    // Verify LTM increases the layout slot count. Extract n_slots
+    // before toggling ltm_enabled to avoid holding a salsa ref across
+    // a &mut db call.
+    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    source_project.set_ltm_enabled(&mut db).to(false);
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+
+    assert!(
+        n_slots_ltm > n_slots_no_ltm,
+        "layout with LTM should have more slots than without: ltm={}, no_ltm={}",
+        n_slots_ltm,
+        n_slots_no_ltm
+    );
+}
+
+/// AC1.6: Discovery mode compiles through the same incremental path.
+/// model_ltm_all_link_synthetic_variables produces score variables for
+/// ALL causal links, not just those in feedback loops.
+#[test]
+fn test_ltm_discovery_mode_all_links() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    // Discovery mode produces per-link score variables for ALL causal
+    // edges (not just those in feedback loops). Normal mode produces
+    // per-link + loop-level + relative loop scores, but only for links
+    // in detected loops. Both should produce non-zero var counts for a
+    // model with feedback.
+    let discovery_var_count =
+        model_ltm_all_link_synthetic_variables(&db, source_model, source_project)
+            .vars
+            .len();
+    assert!(
+        discovery_var_count > 0,
+        "discovery mode should produce at least one link score variable"
+    );
+
+    let normal_var_count = model_ltm_synthetic_variables(&db, source_model, source_project)
+        .vars
+        .len();
+    assert!(
+        normal_var_count > 0,
+        "normal mode should produce at least one synthetic variable for a feedback model"
+    );
+
+    // Compilation should succeed in discovery mode
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM discovery mode compilation should succeed");
+
+    // Verify the compiled output has LTM offsets
+    let has_ltm_offset = compiled.offsets.keys().any(|k| k.as_str().starts_with('$'));
+    assert!(
+        has_ltm_offset,
+        "discovery mode should produce LTM offsets in compiled output"
+    );
+}
+
+/// AC1.1 runtime verification: Run a simulation through the incremental
+/// LTM path and verify loop scores are non-trivial (not all zero).
+#[test]
+fn test_ltm_incremental_simulation_produces_scores() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let source_project = {
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project
+    };
+
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main")
+        .expect("LTM incremental compilation should succeed");
+
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+
+    // Find a relative loop score variable in the offsets
+    let rel_score_entry = compiled
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str().contains("rel_loop_score"));
+
+    assert!(
+        rel_score_entry.is_some(),
+        "should have at least one relative loop score variable"
+    );
+
+    let (_, &offset) = rel_score_entry.unwrap();
+
+    // Read the score values from the simulation data
+    let results = vm.into_results();
+    let mut has_nonzero = false;
+    for row in results.iter() {
+        let val = row[offset];
+        assert!(val.is_finite(), "loop score should be finite, got {val}");
+        if val != 0.0 {
+            has_nonzero = true;
+        }
+    }
+    assert!(
+        has_nonzero,
+        "loop scores should have at least one non-zero value for a feedback model"
+    );
+}
+
+#[test]
+fn compute_link_polarities_stock_flow_model() {
+    // A stock-flow model where "births" feeds into "population" (positive)
+    // and "population" drives "deaths" (positive dependency).
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec!["deaths".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar("population * 0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "deaths".to_string(),
+                    equation: datamodel::Equation::Scalar("population * 0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models.get("main").unwrap().source;
+
+    let polarities = compute_link_polarities(&db, source_model, sync.project);
+
+    // births -> population: positive (inflow)
+    let births_to_pop = polarities.get(&("births".to_string(), "population".to_string()));
+    assert_eq!(
+        births_to_pop,
+        Some(&crate::ltm::LinkPolarity::Positive),
+        "inflow should have positive polarity"
+    );
+
+    // deaths -> population: negative (outflow)
+    let deaths_to_pop = polarities.get(&("deaths".to_string(), "population".to_string()));
+    assert_eq!(
+        deaths_to_pop,
+        Some(&crate::ltm::LinkPolarity::Negative),
+        "outflow should have negative polarity"
+    );
+
+    // population -> births: positive (appears positively in births equation)
+    let pop_to_births = polarities.get(&("population".to_string(), "births".to_string()));
+    assert_eq!(
+        pop_to_births,
+        Some(&crate::ltm::LinkPolarity::Positive),
+        "population appears positively in births equation"
+    );
+
+    // population -> deaths: positive (appears positively in deaths equation)
+    let pop_to_deaths = polarities.get(&("population".to_string(), "deaths".to_string()));
+    assert_eq!(
+        pop_to_deaths,
+        Some(&crate::ltm::LinkPolarity::Positive),
+        "population appears positively in deaths equation"
+    );
+}
+
+#[test]
+fn compute_link_polarities_negative_dependency() {
+    // "effect" = 100 - "cause", so cause has a negative effect on effect.
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "cause".to_string(),
+                    equation: datamodel::Equation::Scalar("50".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "effect".to_string(),
+                    equation: datamodel::Equation::Scalar("100 - cause".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models.get("main").unwrap().source;
+
+    let polarities = compute_link_polarities(&db, source_model, sync.project);
+
+    let cause_to_effect = polarities.get(&("cause".to_string(), "effect".to_string()));
+    assert_eq!(
+        cause_to_effect,
+        Some(&crate::ltm::LinkPolarity::Negative),
+        "subtracted variable should have negative polarity"
+    );
+}
+
+/// Regression test: PREVIOUS(SELF, expr) where expr depends on another
+/// variable. The initials runlist must include transitive deps of implicit
+/// variables so the stdlib module's stock is initialized correctly.
+#[test]
+fn test_previous_self_initial_value() {
+    // F = IF Time = 5 THEN 2 ELSE PREVIOUS(SELF, IF switch = 1 THEN 1 ELSE 0)
+    // At step 0, PREVIOUS(SELF, 1) should return 1, not 0.
+    let project = datamodel::Project {
+        name: "test_previous".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: Some("months".to_string()),
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "switch".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "f".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "IF Time = 5 THEN 2 ELSE PREVIOUS(SELF, IF switch = 1 THEN 1 ELSE 0)"
+                            .to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    // Verify the initials runlist includes switch (transitive dep of the
+    // implicit intermediate variable $:f:0:arg1).
+    let source_model = sync.models.get("main").unwrap().source_model;
+    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+    assert!(
+        dep_graph.runlist_initials.contains(&"switch".to_string()),
+        "switch must be in the initials runlist so the PREVIOUS module's \
+         stock is initialized after switch is computed"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let f_off = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_ref() == "f")
+        .map(|(_, v)| *v)
+        .expect("f should be in results");
+
+    assert_eq!(
+        results.data[f_off], 1.0,
+        "f at step 0 should be 1 (PREVIOUS initial value from IF switch=1 THEN 1 ELSE 0)"
+    );
+
+    // At step 5, F = 2 (the IF Time = 5 branch)
+    let stride = results.offsets.len();
+    assert_eq!(
+        results.data[5 * stride + f_off],
+        2.0,
+        "f at step 5 should be 2 (IF Time = 5 THEN 2 branch)"
+    );
+}
+
+/// Regression test: SMOOTH3 with a stock input must initialize to
+/// the stock's initial value.  Previously, `module_deps` filtered
+/// out stock inputs during the initial phase, breaking the
+/// dependency graph.  Combined with non-deterministic HashSet
+/// iteration in `build_runlist`, this caused the SMOOTH3 module to
+/// sometimes be initialized before its stock input, reading 0
+/// instead of the correct initial value.
+///
+/// Exercises both interpreter and incremental-VM paths and compares
+/// their step-0 results to catch ordering mismatches.
+#[test]
+fn test_smooth3_stock_input_initialization() {
+    use crate::interpreter::Simulation;
+    use crate::vm::Vm;
+    use std::rc::Rc;
+
+    // Build a minimal model: a stock with initial value 42 and a
+    // SMOOTH3 whose input is that stock.  At t=0 the SMOOTH3 must
+    // equal 42.
+    let project = datamodel::Project {
+        name: "smooth3_stock_init".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "my_stock".to_string(),
+                    equation: datamodel::Equation::Scalar("42".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["drain".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "drain".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "delay_time".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "smoothed".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "SMTH3(my_stock, delay_time)".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    // Interpreter path
+    let engine_project = Rc::new(crate::Project::from(project.clone()));
+    let sim = Simulation::new(&engine_project, "main").expect("interpreter should compile");
+    let interp_results = sim.run_to_end().expect("interpreter should run");
+
+    let smoothed_ident = crate::common::Ident::new("smoothed");
+    let interp_off = interp_results.offsets[&smoothed_ident];
+    let interp_step0 = interp_results.data[interp_off];
+    assert_eq!(
+        interp_step0, 42.0,
+        "interpreter: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
+    );
+
+    // Incremental VM path
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("incremental compile should succeed");
+    let mut vm = Vm::new(compiled).expect("VM should build");
+    vm.run_to_end().expect("VM should run");
+    let vm_results = vm.into_results();
+
+    let vm_off = vm_results.offsets[&smoothed_ident];
+    let vm_step0 = vm_results.data[vm_off];
+    assert_eq!(
+        vm_step0, 42.0,
+        "VM: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
+    );
+
+    // Both paths must agree
+    assert_eq!(
+        interp_step0, vm_step0,
+        "interpreter and VM must agree on SMOOTH3 initial value"
+    );
 }

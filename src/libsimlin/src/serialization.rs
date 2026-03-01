@@ -65,8 +65,8 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
         }
     };
 
-    let project_locked = proj.project.lock().unwrap();
-    let pb_project = match engine_serde::serialize(&project_locked.datamodel) {
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    let pb_project = match engine_serde::serialize(&datamodel_locked) {
         Ok(pb) => pb,
         Err(err) => {
             store_error(
@@ -171,10 +171,10 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
         }
     };
 
-    let project_locked = project_ref.project.lock().unwrap();
+    let datamodel_locked = project_ref.datamodel.lock().unwrap();
     let bytes = match format {
         ffi::SimlinJsonFormat::Native => {
-            let json_project: engine::json::Project = project_locked.datamodel.clone().into();
+            let json_project: engine::json::Project = datamodel_locked.clone().into();
             match serde_json::to_vec(&json_project) {
                 Ok(data) => data,
                 Err(err) => {
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
             }
         }
         ffi::SimlinJsonFormat::Sdai => {
-            let sdai_model: engine::json_sdai::SdaiModel = project_locked.datamodel.clone().into();
+            let sdai_model: engine::json_sdai::SdaiModel = datamodel_locked.clone().into();
             match serde_json::to_vec(&sdai_model) {
                 Ok(data) => data,
                 Err(err) => {
@@ -261,8 +261,8 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
         }
     };
 
-    let project_locked = proj.project.lock().unwrap();
-    match simlin_engine::to_xmile(&project_locked.datamodel) {
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    match simlin_engine::to_xmile(&datamodel_locked) {
         Ok(xmile_str) => {
             let bytes = xmile_str.into_bytes();
             let len = bytes.len();
@@ -357,8 +357,8 @@ pub unsafe extern "C" fn simlin_project_render_svg(
         }
     };
 
-    let project_locked = proj.project.lock().unwrap();
-    match simlin_engine::diagram::render_svg(&project_locked.datamodel, model_name_str) {
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    match simlin_engine::diagram::render_svg(&datamodel_locked, model_name_str) {
         Ok(svg_str) => {
             let bytes = svg_str.into_bytes();
             let len = bytes.len();
@@ -463,8 +463,8 @@ pub unsafe extern "C" fn simlin_project_render_png(
         height: if height > 0 { Some(height) } else { None },
     };
 
-    let project_locked = proj.project.lock().unwrap();
-    match simlin_engine::diagram::render_png(&project_locked.datamodel, model_name_str, &opts) {
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    match simlin_engine::diagram::render_png(&datamodel_locked, model_name_str, &opts) {
         Ok(png_bytes) => {
             let len = png_bytes.len();
 

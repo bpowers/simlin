@@ -110,6 +110,53 @@ impl IndexExpr0 {
 }
 
 impl Expr0 {
+    /// Returns the source location of the first reference to the given
+    /// canonical identifier, or None if the identifier is not referenced.
+    pub(crate) fn get_var_loc(&self, canonical_ident: &str) -> Option<Loc> {
+        match self {
+            Expr0::Const(..) => None,
+            Expr0::Var(raw, loc) => {
+                if crate::common::canonicalize(raw.as_str()).as_ref() == canonical_ident {
+                    Some(*loc)
+                } else {
+                    None
+                }
+            }
+            Expr0::App(UntypedBuiltinFn(_, args), _) => {
+                for arg in args {
+                    if let Some(loc) = arg.get_var_loc(canonical_ident) {
+                        return Some(loc);
+                    }
+                }
+                None
+            }
+            Expr0::Subscript(raw, indices, loc) => {
+                if crate::common::canonicalize(raw.as_str()).as_ref() == canonical_ident {
+                    return Some(*loc);
+                }
+                for idx in indices {
+                    if let IndexExpr0::Range(l, r, _) = idx {
+                        if let Some(loc) = l.get_var_loc(canonical_ident) {
+                            return Some(loc);
+                        }
+                        if let Some(loc) = r.get_var_loc(canonical_ident) {
+                            return Some(loc);
+                        }
+                    }
+                }
+                None
+            }
+            Expr0::Op1(_, inner, _) => inner.get_var_loc(canonical_ident),
+            Expr0::Op2(_, l, r, _) => l
+                .get_var_loc(canonical_ident)
+                .or_else(|| r.get_var_loc(canonical_ident)),
+            Expr0::If(cond, t, f, _) => cond
+                .get_var_loc(canonical_ident)
+                .or_else(|| t.get_var_loc(canonical_ident))
+                .or_else(|| f.get_var_loc(canonical_ident)),
+        }
+    }
+
     /// new returns a new Expression AST if one can be constructed, or a list of
     /// source/equation errors if one couldn't be constructed.
     pub fn new(eqn: &str, lexer_type: LexerType) -> StdResult<Option<Expr0>, Vec<EquationError>> {

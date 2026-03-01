@@ -560,6 +560,20 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
+    /// Load the previous-timestep value of a variable from the prev_values
+    /// snapshot. Pushes `prev_values[module_off + off]` (or falls back to
+    /// `curr[]` during initials). Only simple PREVIOUS(var) compiles to
+    /// this opcode; nested PREVIOUS, PREVIOUS(TIME), and 2-arg forms use
+    /// module expansion instead.
+    LoadPrev {
+        off: VariableOffset,
+    },
+    /// Load the initial (t=0) value of a variable from the initial-value buffer.
+    /// Pushes `initial_values[module_off + off]` onto the stack.
+    LoadInitial {
+        off: VariableOffset,
+    },
+
     // === LEGACY SUBSCRIPT (dynamic, for backward compatibility) ===
     PushSubscriptIndex {
         bounds: VariableOffset,
@@ -857,6 +871,8 @@ impl Opcode {
             // Constants/variables: push 1
             Opcode::LoadConstant { .. }
             | Opcode::LoadVar { .. }
+            | Opcode::LoadPrev { .. }
+            | Opcode::LoadInitial { .. }
             | Opcode::LoadGlobalVar { .. }
             | Opcode::LoadModuleInput { .. } => (0, 1),
 

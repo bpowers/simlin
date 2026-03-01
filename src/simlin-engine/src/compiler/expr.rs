@@ -219,6 +219,8 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         Box::new(c.strip_loc()),
                     ),
+                    BuiltinFn::Previous(a) => BuiltinFn::Previous(Box::new(a.strip_loc())),
+                    BuiltinFn::Init(a) => BuiltinFn::Init(Box::new(a.strip_loc())),
                 };
                 Expr::App(builtin, loc)
             }

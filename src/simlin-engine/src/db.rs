@@ -11,6 +11,20 @@ use crate::canonicalize;
 use crate::common::{Canonical, EquationError, Error, Ident, UnitError};
 use crate::datamodel;
 
+#[path = "db_ltm.rs"]
+mod db_ltm;
+use db_ltm::*;
+pub use db_ltm::{LtmImplicitVarMeta, compile_ltm_var_fragment, model_ltm_implicit_var_info};
+
+#[path = "db_analysis.rs"]
+mod db_analysis;
+use db_analysis::*;
+pub use db_analysis::{
+    CausalEdgesResult, CyclePartitionsResult, DetectedLoop, DetectedLoopPolarity,
+    DetectedLoopsResult, LoopCircuitsResult, compute_link_polarities, model_causal_edges,
+    model_cycle_partitions, model_detected_loops, model_loop_circuits,
+};
+
 // ── Database ───────────────────────────────────────────────────────────
 
 #[salsa::db]
@@ -36,11 +50,18 @@ pub struct CompilationDiagnostic(pub Diagnostic);
 /// A single compilation diagnostic emitted by tracked functions.
 /// Carries enough context (model name, optional variable name) for
 /// downstream formatting without re-walking the model tree.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
     pub model: String,
     pub variable: Option<String>,
     pub error: DiagnosticError,
+    pub severity: DiagnosticSeverity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -48,6 +69,42 @@ pub enum DiagnosticError {
     Equation(EquationError),
     Model(Error),
     Unit(UnitError),
+    Assembly(String),
+}
+
+// Thread-local flag tracking whether we are inside a salsa tracked
+// function context. Used by `try_accumulate_diagnostic` to avoid calling
+// `accumulate` outside a tracked context (which would panic). The
+// previous `catch_unwind` approach does not work in WASM where
+// `panic = "abort"` is set in the release profile.
+thread_local! {
+    static IN_TRACKED_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Attempt to push a diagnostic into the salsa accumulator. When called
+/// inside a tracked function (indicated by the `IN_TRACKED_CONTEXT`
+/// thread-local flag) the diagnostic is recorded normally. When called
+/// outside any tracked context (e.g. from `compile_project_incremental`
+/// which is a plain function) the push is silently skipped. This lets
+/// `assemble_module` / `assemble_simulation` accumulate diagnostics when
+/// invoked from tracked code while remaining safe to call from
+/// non-tracked entry points (including WASM where `panic = "abort"`
+/// makes `catch_unwind` ineffective).
+///
+/// Currently the flag is never set to `true`, so all calls are no-ops.
+/// Assembly errors are returned via `Result::Err` from
+/// `compile_project_incremental` and surfaced through
+/// `gather_error_details_with_db` in the patch pipeline. The flag
+/// exists as scaffolding for a future change where assembly functions
+/// may be called from within a tracked context.
+fn try_accumulate_diagnostic(db: &dyn Db, diag: Diagnostic) {
+    let in_context = IN_TRACKED_CONTEXT.with(|flag| flag.get());
+    if in_context {
+        CompilationDiagnostic(diag).accumulate(db);
+    }
+    // Outside a tracked context the diagnostic is silently discarded.
+    // The error is still returned as the function's Result::Err value
+    // and handled by the caller.
 }
 
 // ── Interned identifiers ───────────────────────────────────────────────
@@ -112,6 +169,14 @@ pub struct SourceProject {
     pub model_names: Vec<String>,
     #[returns(ref)]
     pub models: HashMap<String, SourceModel>,
+    /// Whether LTM (Loops That Matter) synthetic variable compilation is
+    /// enabled. When true, `compute_layout` allocates slots and
+    /// `assemble_module` compiles fragments for LTM variables.
+    pub ltm_enabled: bool,
+    /// When true, use discovery mode (`model_ltm_all_link_synthetic_variables`)
+    /// which generates scores for every causal edge, not just edges in detected
+    /// loops.
+    pub ltm_discovery_mode: bool,
 }
 
 #[salsa::input]
@@ -602,11 +667,36 @@ impl std::fmt::Debug for ParsedVariableResult {
 /// Cached units context -- computed once per project, reused across all variables.
 /// Subsumes the per-variable source_units_to_datamodel + source_sim_specs_to_datamodel +
 /// Context::new_with_builtins calls.
+///
+/// Unit definition parsing errors are accumulated as diagnostics so they
+/// appear in `collect_all_diagnostics`. Previously these were stored in
+/// `engine::Project.errors` and walked by `collect_formatted_issues`.
 #[salsa::tracked(returns(ref))]
 pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
     let dm_units = source_units_to_datamodel(project.units(db));
     let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
-    crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs).unwrap_or_default()
+    match crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs) {
+        Ok(ctx) => ctx,
+        Err(unit_parse_errors) => {
+            // Accumulate each unit definition parsing error as a
+            // project-level diagnostic (no model / variable).
+            for (_unit_name, eq_errors) in &unit_parse_errors {
+                for eq_err in eq_errors {
+                    CompilationDiagnostic(Diagnostic {
+                        model: String::new(),
+                        variable: None,
+                        error: DiagnosticError::Unit(crate::common::UnitError::DefinitionError(
+                            eq_err.clone(),
+                            None,
+                        )),
+                        severity: DiagnosticSeverity::Error,
+                    })
+                    .accumulate(db);
+                }
+            }
+            Default::default()
+        }
+    }
 }
 
 /// Cached datamodel dimensions -- computed once per project.
@@ -1043,6 +1133,8 @@ fn model_dependency_graph_impl(
         deps.iter().map(|d| normalize_dep(d)).collect()
     };
 
+    let project_models = project.models(db);
+
     for (name, source_var) in source_vars.iter() {
         let deps = if module_input_names.is_empty() {
             variable_direct_dependencies(db, *source_var, project)
@@ -1059,12 +1151,45 @@ fn model_dependency_graph_impl(
         // changes when equation text changes even if deps don't).
         let kind = source_var.kind(db);
 
+        // For module variables, the dt_deps may contain composite
+        // references like "submodel\u{00B7}stock_var". In the dt phase, stocks
+        // break the dependency chain (they use their value from the
+        // previous timestep). The monolithic path's module_deps filters
+        // out inputs that reference stocks; we must do the same here to
+        // avoid spurious dependency cycles that produce incorrect
+        // topological orderings.
+        let dt_deps = if kind == SourceVariableKind::Module {
+            deps.dt_deps
+                .iter()
+                .filter(|dep| {
+                    let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+                    if let Some(dot_pos) = effective.find('\u{00B7}') {
+                        let module_name = &effective[..dot_pos];
+                        let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
+                        let sub_canonical = canonicalize(module_name);
+                        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                            let sub_vars = sub_model.variables(db);
+                            if let Some(sub_var) = sub_vars.get(var_name) {
+                                return sub_var.kind(db) != SourceVariableKind::Stock;
+                            }
+                        }
+                        true
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect()
+        } else {
+            deps.dt_deps.clone()
+        };
+
         var_info.insert(
             name.clone(),
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
-                dt_deps: normalize_deps(&deps.dt_deps),
+                dt_deps: normalize_deps(&dt_deps),
                 initial_deps: normalize_deps(&deps.initial_deps),
             },
         );
@@ -1193,6 +1318,7 @@ fn model_dependency_graph_impl(
                 code: crate::common::ErrorCode::CircularDependency,
                 details: None,
             }),
+            severity: DiagnosticSeverity::Error,
         })
         .accumulate(db);
         HashMap::new()
@@ -1207,6 +1333,7 @@ fn model_dependency_graph_impl(
                 code: crate::common::ErrorCode::CircularDependency,
                 details: None,
             }),
+            severity: DiagnosticSeverity::Error,
         })
         .accumulate(db);
         HashMap::new()
@@ -1222,11 +1349,16 @@ fn model_dependency_graph_impl(
     let topo_sort_str =
         |names: Vec<&String>, deps: &HashMap<String, BTreeSet<String>>| -> Vec<String> {
             use std::collections::HashSet;
+            // Build the allowed set: only variables in the filtered input list
+            // should appear in the output. Dependencies are used solely for
+            // ordering, not for expanding the set.
+            let allowed: HashSet<&str> = names.iter().map(|n| n.as_str()).collect();
             let mut result: Vec<String> = Vec::new();
             let mut used: HashSet<String> = HashSet::new();
 
             fn add(
                 deps: &HashMap<String, BTreeSet<String>>,
+                allowed: &HashSet<&str>,
                 result: &mut Vec<String>,
                 used: &mut HashSet<String>,
                 name: &str,
@@ -1237,19 +1369,30 @@ fn model_dependency_graph_impl(
                 used.insert(name.to_string());
                 if let Some(d) = deps.get(name) {
                     for dep in d.iter() {
-                        add(deps, result, used, dep);
+                        add(deps, allowed, result, used, dep);
                     }
                 }
-                result.push(name.to_string());
+                // Only include variables that were in the original filtered list
+                if allowed.contains(name) {
+                    result.push(name.to_string());
+                }
             }
 
             for name in names {
-                add(deps, &mut result, &mut used, name);
+                add(deps, &allowed, &mut result, &mut used, name);
             }
             result
         };
 
-    // Initials runlist: stocks, modules, and their deps
+    // Initials runlist: stocks, modules, and their transitive deps.
+    //
+    // Module variables have their transitive deps short-circuited in
+    // compute_transitive (only direct deps are stored). The deps of those
+    // direct deps (e.g. an implicit intermediate variable depending on a
+    // regular model variable) ARE fully expanded in initial_dependencies.
+    // We must transitively close init_set so that every variable needed
+    // during the initials phase is included in the allowed set for
+    // topo_sort_str.
     let runlist_initials = {
         use std::collections::HashSet;
         let needed: HashSet<&String> = var_names
@@ -1271,19 +1414,45 @@ fn model_dependency_graph_impl(
             })
             .collect();
         init_set.extend(needed);
+        // Transitively close: each item added to init_set may itself
+        // have deps that also need to be in the initials runlist.
+        loop {
+            let additional: HashSet<&String> = init_set
+                .iter()
+                .flat_map(|n| {
+                    initial_dependencies
+                        .get(n.as_str())
+                        .into_iter()
+                        .flat_map(|deps| deps.iter())
+                })
+                .filter(|d| !init_set.contains(d))
+                .collect();
+            if additional.is_empty() {
+                break;
+            }
+            init_set.extend(additional);
+        }
         let init_list: Vec<&String> = init_set.into_iter().collect();
         topo_sort_str(init_list, &initial_dependencies)
     };
 
-    // Flows runlist: non-stock, non-module variables (modules are evaluated
-    // in the stocks phase, matching the monolithic compiler behavior)
+    // Flows runlist: non-stock variables, modules, AND stock-typed module inputs.
+    // The monolithic path uses `instantiation.contains(id) || !var.is_stock()`
+    // which includes stock-typed module inputs (e.g., a stock declared with
+    // access="input" in XMILE). These need LoadModuleInput -> AssignCurr in
+    // the flows phase to propagate the parent-provided value each timestep.
+    let module_input_set: BTreeSet<String> = module_input_names
+        .iter()
+        .map(|s| canonicalize(s).into_owned())
+        .collect();
     let runlist_flows = {
         let flow_names: Vec<&String> = var_names
             .iter()
             .filter(|n| {
+                let is_input = module_input_set.contains(canonicalize(n).as_ref());
                 var_info
                     .get(n.as_str())
-                    .map(|i| !i.is_stock && !i.is_module)
+                    .map(|i| is_input || !i.is_stock)
                     .unwrap_or(false)
             })
             .collect();
@@ -1338,72 +1507,199 @@ pub fn model_dependency_graph(
 
 // ── Diagnostic collection ──────────────────────────────────────────────
 
-/// Per-model tracked function that collects compilation diagnostics from
-/// already-cached tracked functions and pushes them to the accumulator.
+/// Per-model tracked function that performs unit inference and checking,
+/// accumulating unit warnings/errors through the salsa accumulator.
 ///
-/// This runs PARALLEL to the existing error-field path: tracked functions
-/// still populate struct fields for backward compatibility, but this
-/// function also pushes the same errors into the salsa accumulator so
-/// callers can eventually read diagnostics purely from the DB.
+/// Builds temporary ModelStage0/ModelStage1 representations from the
+/// salsa-cached parsed variables, then runs the same unit inference and
+/// checking pipeline as the old `run_default_model_checks` callback.
+/// Unit mismatches are accumulated as DiagnosticSeverity::Warning to
+/// match the old-path behavior where unit issues don't block simulation.
+///
+/// Stdlib (implicit) models are skipped because they are generic
+/// templates that only make sense when instantiated with specific inputs.
 #[salsa::tracked]
-pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    use crate::common::{Canonical, ErrorCode, ErrorKind, Ident};
+    use crate::dimensions::DimensionsContext;
+    use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
+
+    // Skip stdlib models -- they are generic and unit checking doesn't
+    // apply until instantiated with concrete inputs. Stdlib model names
+    // start with the "stdlib\u{205A}" prefix (two-dot punctuation separator).
+    if model.name(db).starts_with("stdlib\u{205A}") {
+        return;
+    }
+
     let model_name = model.name(db).clone();
-    let source_vars = model.variables(db);
+    let units_ctx = project_units_context(db, project);
+    let dm_dims = project_datamodel_dims(db, project);
+    let dim_context = DimensionsContext::from(dm_dims.as_slice());
 
-    for (var_name, source_var) in source_vars.iter() {
-        let parsed = parse_source_variable(db, *source_var, project);
-        let variable = &parsed.variable;
+    // Helper: build a ModelStage0 from a SourceModel's parsed variables.
+    let build_model_s0 = |src_model: &SourceModel, is_stdlib: bool| -> ModelStage0 {
+        let src_vars = src_model.variables(db);
+        let mut var_list: Vec<VariableStage0> = Vec::new();
+        let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
+        for (_name, svar) in src_vars.iter() {
+            let parsed = parse_source_variable(db, *svar, project);
+            var_list.push(parsed.variable.clone());
+            implicit_dm.extend(parsed.implicit_vars.iter().cloned());
+        }
+        // Parse implicit vars (SMOOTH/DELAY expansion).
+        let mut dummy: Vec<datamodel::Variable> = Vec::new();
+        var_list.extend(implicit_dm.into_iter().map(|dm_var| {
+            crate::variable::parse_var(dm_dims, &dm_var, &mut dummy, units_ctx, |mi| {
+                Ok(Some(mi.clone()))
+            })
+        }));
+        let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
+            .into_iter()
+            .map(|v| (Ident::new(v.ident()), v))
+            .collect();
+        ModelStage0 {
+            ident: Ident::new(src_model.name(db)),
+            display_name: src_model.name(db).clone(),
+            variables,
+            errors: None,
+            implicit: is_stdlib,
+        }
+    };
 
-        if let Some(errors) = variable.equation_errors() {
-            for err in errors {
+    // Build ModelStage0 for all project models so that cross-module unit
+    // inference constraints (module inputs/outputs) can resolve submodel
+    // variable types. Stdlib models are included in the map because user
+    // models may reference them as modules.
+    let project_models = project.models(db);
+    let mut all_s0: Vec<ModelStage0> = Vec::new();
+    for (name, src_model) in project_models.iter() {
+        let is_stdlib = name.starts_with("stdlib\u{205A}");
+        all_s0.push(build_model_s0(src_model, is_stdlib));
+    }
+
+    let models_s0: HashMap<Ident<Canonical>, &ModelStage0> =
+        all_s0.iter().map(|m| (m.ident.clone(), m)).collect();
+
+    // Lower all ModelStage0 -> ModelStage1.
+    let all_s1: Vec<ModelStage1> = all_s0
+        .iter()
+        .map(|ms0| {
+            let scope = ScopeStage0 {
+                models: &models_s0,
+                dimensions: &dim_context,
+                model_name: ms0.ident.as_str(),
+            };
+            ModelStage1::new(&scope, ms0)
+        })
+        .collect();
+
+    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> =
+        all_s1.iter().map(|m| (m.name.clone(), m)).collect();
+
+    // Find the target model in the lowered map.
+    let target_ident = Ident::<Canonical>::new(&model_name);
+    let target_model = match models_s1.get(&target_ident) {
+        Some(m) => *m,
+        None => return,
+    };
+
+    // Check whether the model declares units on any variable. If not,
+    // skip surfacing inference errors (the model wasn't designed with
+    // dimensional analysis in mind).
+    let has_declared_units = target_model
+        .variables
+        .values()
+        .any(|var| var.units().is_some());
+
+    // Run unit inference.
+    let inferred_units = crate::units_infer::infer(&models_s1, units_ctx, target_model)
+        .unwrap_or_else(|err| {
+            if has_declared_units
+                && let crate::common::UnitError::InferenceError { code, .. } = &err
+                && *code == ErrorCode::UnitMismatch
+            {
                 CompilationDiagnostic(Diagnostic {
                     model: model_name.clone(),
-                    variable: Some(var_name.clone()),
-                    error: DiagnosticError::Equation(err),
+                    variable: None,
+                    error: DiagnosticError::Model(crate::common::Error {
+                        kind: ErrorKind::Model,
+                        code: *code,
+                        details: Some(format!("{}", err)),
+                    }),
+                    severity: DiagnosticSeverity::Warning,
+                })
+                .accumulate(db);
+            }
+            Default::default()
+        });
+
+    // Run unit checking.
+    match crate::units_check::check(units_ctx, &inferred_units, target_model) {
+        Ok(Ok(())) => {}
+        Ok(Err(errors)) => {
+            for (ident, err) in errors.into_iter() {
+                CompilationDiagnostic(Diagnostic {
+                    model: model_name.clone(),
+                    variable: Some(ident.to_string()),
+                    error: DiagnosticError::Unit(err),
+                    severity: DiagnosticSeverity::Warning,
                 })
                 .accumulate(db);
             }
         }
-
-        if let Some(errors) = variable.unit_errors() {
-            for err in errors {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(var_name.clone()),
-                    error: DiagnosticError::Unit(err),
-                })
-                .accumulate(db);
-            }
+        Err(err) => {
+            CompilationDiagnostic(Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Model(crate::common::Error {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::Generic,
+                    details: Some(format!("unit checking failed: {}", err)),
+                }),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
         }
     }
 }
 
+/// Per-model tracked function that triggers diagnostic accumulation from
+/// all compilation stages. The salsa accumulator is the sole error source
+/// for diagnostic reporting -- this function does not read struct fields.
+///
+/// Triggers two diagnostic sources:
+/// 1. `compile_var_fragment` for each variable -- accumulates parse-level
+///    equation errors (EmptyEquation, syntax errors), unit definition
+///    syntax errors (bad unit strings), and compilation-level errors
+///    (BadTable, MismatchedDimensions, etc.)
+/// 2. `check_model_units` -- accumulates unit inference/checking warnings
+#[salsa::tracked]
+pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    let source_vars = model.variables(db);
+
+    // Trigger compile_var_fragment for each variable. This is a superset
+    // of parse_source_variable: it first accumulates unit definition
+    // syntax errors from the parsed variable, then checks for equation
+    // parse errors, then proceeds with compilation which can surface
+    // additional errors like BadTable, MismatchedDimensions, etc.
+    //
+    // We use is_root: true and empty module_input_names for diagnostic
+    // purposes. The is_root flag only affects offset layout (whether
+    // implicit time/dt vars are included); using true ensures variables
+    // referencing TIME or DT don't produce false-positive missing-ref
+    // errors. The module_input_names are empty because we are not in an
+    // assembly context -- this is purely for error detection.
+    for (_var_name, source_var) in source_vars.iter() {
+        let _fragment = compile_var_fragment(db, *source_var, model, project, true, vec![]);
+    }
+
+    // Trigger unit checking. This is a separate tracked function so
+    // that unit inference results are individually cached and
+    // invalidated only when unit-relevant inputs change.
+    check_model_units(db, model, project);
+}
+
 // ── LTM tracked functions ──────────────────────────────────────────────
-
-/// Causal edge structure for a model, built from variable dependency sets
-/// and structural info (stock inflows/outflows, module refs).
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
-pub struct CausalEdgesResult {
-    /// Adjacency list: from_var -> {to_var1, to_var2, ...}
-    pub edges: HashMap<String, BTreeSet<String>>,
-    /// Stock variables in the model
-    pub stocks: BTreeSet<String>,
-    /// Module var_name -> model_name for dynamic modules
-    pub dynamic_modules: HashMap<String, String>,
-}
-
-/// Deduplicated loop circuits as node name lists.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
-pub struct LoopCircuitsResult {
-    pub circuits: Vec<Vec<String>>,
-}
-
-/// Stock-to-stock cycle partitions.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
-pub struct CyclePartitionsResult {
-    pub partitions: Vec<Vec<String>>,
-    pub stock_partition: HashMap<String, usize>,
-}
 
 /// A single LTM synthetic variable definition (name + equation text).
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
@@ -1416,318 +1712,6 @@ pub struct LtmSyntheticVar {
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
-}
-
-/// Normalize a dependency/reference name by stripping a leading middot
-/// (XMILE parent-scope refs like `.area` canonicalize to `·area`) and then
-/// truncating at the first remaining middot to collapse `module·output`
-/// qualifiers down to the module variable name.
-fn normalize_module_ref_str(s: &str) -> String {
-    let effective = s.strip_prefix('\u{00B7}').unwrap_or(s);
-    if let Some(pos) = effective.find('\u{00B7}') {
-        effective[..pos].to_string()
-    } else {
-        effective.to_string()
-    }
-}
-
-/// Construct a lightweight CausalGraph from a CausalEdgesResult.
-/// Variables and module_graphs are empty -- suitable for graph algorithms
-/// (circuit finding, SCC computation) but not for polarity analysis.
-fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
-    use crate::common::{Canonical, Ident};
-    use std::collections::HashSet;
-
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
-        .edges
-        .iter()
-        .map(|(from, tos)| {
-            (
-                Ident::new(from),
-                tos.iter().map(|t| Ident::new(t)).collect(),
-            )
-        })
-        .collect();
-    let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables: HashMap::new(),
-        module_graphs: HashMap::new(),
-    }
-}
-
-/// Build the causal edge structure for a model from salsa-tracked
-/// dependency sets and structural variable info.
-///
-/// Reads `variable_direct_dependencies` (establishing salsa dep on dep
-/// sets) and `parse_source_variable` (for implicit variable details like
-/// module input refs). Salsa backdating ensures that when equation text
-/// changes without changing the resulting edge structure, the cached
-/// result is reused and downstream graph algorithms are skipped.
-#[salsa::tracked(returns(ref))]
-pub fn model_causal_edges(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> CausalEdgesResult {
-    let source_vars = model.variables(db);
-    let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let mut stocks = BTreeSet::new();
-    let mut dynamic_modules = HashMap::new();
-
-    for (name, source_var) in source_vars.iter() {
-        let kind = source_var.kind(db);
-
-        match kind {
-            SourceVariableKind::Stock => {
-                stocks.insert(name.clone());
-                for flow in source_var
-                    .inflows(db)
-                    .iter()
-                    .chain(source_var.outflows(db).iter())
-                {
-                    let canonical_flow = canonicalize(flow).into_owned();
-                    edges
-                        .entry(canonical_flow)
-                        .or_default()
-                        .insert(name.clone());
-                }
-            }
-            SourceVariableKind::Module => {
-                let self_prefix = format!("{name}\u{00B7}");
-                for mr in source_var.module_refs(db).iter() {
-                    let canonical_src = canonicalize(&mr.src).into_owned();
-                    // Skip output refs where src is within the module's own
-                    // namespace (Stella imports include these); normalizing
-                    // them would create false self-loops.
-                    if canonical_src.starts_with(&self_prefix) {
-                        continue;
-                    }
-                    let normalized = normalize_module_ref_str(&canonical_src);
-                    edges.entry(normalized).or_default().insert(name.clone());
-                }
-                let model_name = source_var.model_name(db);
-                if !model_name.is_empty() {
-                    dynamic_modules.insert(name.clone(), model_name.clone());
-                }
-            }
-            _ => {
-                let deps = variable_direct_dependencies(db, *source_var, project);
-                for dep in &deps.dt_deps {
-                    let normalized = normalize_module_ref_str(dep);
-                    edges.entry(normalized).or_default().insert(name.clone());
-                }
-            }
-        }
-
-        // Include implicit variables (module instances from SMOOTH/DELAY expansion)
-        let parsed = parse_source_variable(db, *source_var, project);
-        for implicit_dm_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-
-            match implicit_dm_var {
-                datamodel::Variable::Stock(s) => {
-                    stocks.insert(imp_name.clone());
-                    for flow in s.inflows.iter().chain(s.outflows.iter()) {
-                        let canonical_flow = canonicalize(flow).into_owned();
-                        edges
-                            .entry(canonical_flow)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
-                }
-                datamodel::Variable::Module(m) => {
-                    let self_prefix = format!("{imp_name}\u{00B7}");
-                    for mr in &m.references {
-                        let canonical_src = canonicalize(&mr.src).into_owned();
-                        if canonical_src.starts_with(&self_prefix) {
-                            continue;
-                        }
-                        let normalized = normalize_module_ref_str(&canonical_src);
-                        edges
-                            .entry(normalized)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
-                    dynamic_modules.insert(imp_name.clone(), m.model_name.clone());
-                }
-                _ => {
-                    // For implicit flows/auxes, get deps from the parent's
-                    // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(db, *source_var, project);
-                    if let Some(implicit_dep) =
-                        deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
-                    {
-                        for dep in &implicit_dep.dt_deps {
-                            let normalized = normalize_module_ref_str(dep);
-                            edges
-                                .entry(normalized)
-                                .or_default()
-                                .insert(imp_name.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    CausalEdgesResult {
-        edges,
-        stocks,
-        dynamic_modules,
-    }
-}
-
-/// Find all elementary loop circuits in a model's causal graph.
-///
-/// Depends on `model_causal_edges`, so loop detection is cached when
-/// the edge structure hasn't changed (even if equation text changed).
-#[salsa::tracked(returns(ref))]
-pub fn model_loop_circuits(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> LoopCircuitsResult {
-    let edges_result = model_causal_edges(db, model, project);
-    let graph = causal_graph_from_edges(edges_result);
-    let circuits = graph.find_circuit_node_lists();
-    LoopCircuitsResult {
-        circuits: circuits
-            .into_iter()
-            .map(|c| c.into_iter().map(|n| n.to_string()).collect())
-            .collect(),
-    }
-}
-
-/// Compute stock-to-stock cycle partitions (SCCs) for a model.
-///
-/// Depends on `model_causal_edges`, so partition computation is cached
-/// when the edge structure hasn't changed.
-#[salsa::tracked(returns(ref))]
-pub fn model_cycle_partitions(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> CyclePartitionsResult {
-    let edges_result = model_causal_edges(db, model, project);
-    let graph = causal_graph_from_edges(edges_result);
-    let cp = graph.compute_cycle_partitions();
-    CyclePartitionsResult {
-        partitions: cp
-            .partitions
-            .into_iter()
-            .map(|p| p.into_iter().map(|s| s.to_string()).collect())
-            .collect(),
-        stock_partition: cp
-            .stock_partition
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    }
-}
-
-/// Reconstruct `Variable` objects from salsa-tracked parse results for
-/// all variables in a model (including implicit variables).
-fn reconstruct_model_variables(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable> {
-    use crate::common::{Canonical, Ident};
-
-    let source_vars = model.variables(db);
-    let dims = source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_context,
-        model_name: "",
-    };
-
-    let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
-
-    for (name, source_var) in source_vars.iter() {
-        let parsed = parse_source_variable(db, *source_var, project);
-        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
-        variables.insert(Ident::new(name), lowered);
-
-        // Add implicit variables (module instances from SMOOTH/DELAY expansion)
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
-        for implicit_dm_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            let mut dummy_implicits = Vec::new();
-            let parsed_imp = crate::variable::parse_var(
-                &dims,
-                implicit_dm_var,
-                &mut dummy_implicits,
-                &units_ctx,
-                |mi| Ok(Some(mi.clone())),
-            );
-            let lowered_imp = crate::model::lower_variable(&scope, &parsed_imp);
-            variables.insert(Ident::new(&imp_name), lowered_imp);
-        }
-    }
-
-    variables
-}
-
-/// Reconstruct a single `Variable` by name from a model's parse results.
-///
-/// Checks explicit source variables first, then searches implicit variables
-/// (from SMOOTH/DELAY module expansion) if the name isn't found.
-/// Returns None if the name doesn't match any variable in the model.
-fn reconstruct_single_variable(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    var_name: &str,
-) -> Option<crate::variable::Variable> {
-    use crate::common::{Canonical, Ident};
-
-    let source_vars = model.variables(db);
-    let dims = source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_context,
-        model_name: "",
-    };
-
-    // Check explicit variables first
-    if let Some(source_var) = source_vars.get(var_name) {
-        let parsed = parse_source_variable(db, *source_var, project);
-        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
-        return Some(lowered);
-    }
-
-    // Search implicit variables from all source variables
-    let canonical_target: Ident<Canonical> = Ident::new(var_name);
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
-
-    for (_name, source_var) in source_vars.iter() {
-        let parsed = parse_source_variable(db, *source_var, project);
-        for implicit_dm_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            if Ident::<Canonical>::new(&imp_name) == canonical_target {
-                let mut dummy_implicits = Vec::new();
-                let parsed_imp = crate::variable::parse_var(
-                    &dims,
-                    implicit_dm_var,
-                    &mut dummy_implicits,
-                    &units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                );
-                let lowered_imp = crate::model::lower_variable(&scope, &parsed_imp);
-                return Some(lowered_imp);
-            }
-        }
-    }
-
-    None
 }
 
 /// Compute the link score equation text for a single causal link.
@@ -2464,6 +2448,8 @@ pub fn sync_from_datamodel<'db>(
         project.units.iter().map(SourceUnit::from).collect(),
         model_names,
         source_model_map,
+        false,
+        false,
     );
 
     SyncResult {
@@ -3015,6 +3001,50 @@ pub fn compute_layout(
         offset += size;
     }
 
+    // Section 3: LTM synthetic variables (only when ltm_enabled).
+    // LTM vars are always scalar aux equations occupying 1 slot each.
+    // When ltm_enabled is false, this section is skipped entirely (zero
+    // overhead). When the model has no feedback loops,
+    // model_ltm_synthetic_variables returns an empty list (also zero
+    // overhead).
+    //
+    // LTM variables only exist in the root model. Stdlib sub-models
+    // (previous, init, smth1, etc.) have no feedback loops of their own
+    // and must not enter LTM resolution, which would cause a salsa
+    // dependency cycle (compute_layout -> model_ltm_implicit_var_info
+    // -> compute_layout for the stdlib model).
+    if is_root && project.ltm_enabled(db) {
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, model, project)
+        } else {
+            model_ltm_synthetic_variables(db, model, project)
+        };
+        let mut ltm_names: Vec<&str> = ltm_vars.vars.iter().map(|v| v.name.as_str()).collect();
+        ltm_names.sort_unstable();
+        for name in ltm_names {
+            entries.insert(name.to_string(), LayoutEntry { offset, size: 1 });
+            offset += 1;
+        }
+
+        // Section 3b: Implicit variables generated by LTM equation
+        // parsing (PREVIOUS module instances). These stdlib modules
+        // need their own slots in the parent model's layout.
+        let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+        let mut ltm_im_names: Vec<&String> = ltm_implicit.keys().collect();
+        ltm_im_names.sort_unstable();
+        for name in ltm_im_names {
+            let meta = &ltm_implicit[name];
+            entries.insert(
+                name.clone(),
+                LayoutEntry {
+                    offset,
+                    size: meta.size,
+                },
+            );
+            offset += meta.size;
+        }
+    }
+
     VariableLayout::new(entries, offset)
 }
 
@@ -3221,6 +3251,11 @@ pub(crate) struct VarFragmentResult {
 /// Per-variable tracked compilation function. Compiles a SINGLE variable
 /// to symbolic (layout-independent) bytecodes.
 ///
+/// Accumulates all variable-level diagnostics into the salsa accumulator:
+/// - Unit definition syntax errors from the parsed variable
+/// - Equation parse errors (EmptyEquation, syntax errors)
+/// - Compilation-level errors (BadTable, MismatchedDimensions, etc.)
+///
 /// Builds a minimal context containing only the compiled variable and its
 /// direct references, then compiles through the existing Module/Compiler
 /// pipeline, and symbolizes the result.
@@ -3256,12 +3291,36 @@ pub fn compile_var_fragment(
     let var_ident = var.ident(db).clone();
     let parsed = parse_source_variable(db, var, project);
 
-    // Check for parse errors
-    if parsed
-        .variable
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
+    // Accumulate unit definition errors from the parsed variable.
+    // These are syntax errors in the unit string (e.g., "bad units
+    // here!!!") that are stored in the variable's unit_errors field
+    // during parsing but not checked during compilation.
+    if let Some(unit_errs) = parsed.variable.unit_errors() {
+        let model_name = model.name(db).clone();
+        for err in unit_errs {
+            CompilationDiagnostic(Diagnostic {
+                model: model_name.clone(),
+                variable: Some(var_ident.clone()),
+                error: DiagnosticError::Unit(err),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
+    }
+
+    // Check for parse errors -- accumulate each one before bailing out
+    if let Some(errors) = parsed.variable.equation_errors()
+        && !errors.is_empty()
     {
+        for err in &errors {
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: Some(var.ident(db).clone()),
+                error: DiagnosticError::Equation(err.clone()),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
         return None;
     }
 
@@ -3351,6 +3410,25 @@ pub fn compile_var_fragment(
         };
         crate::model::lower_variable(&scope, &parsed.variable)
     };
+
+    // Check for errors introduced during AST lowering (e.g.,
+    // MismatchedDimensions from expr2/expr3 lowering). These are stored
+    // in the lowered variable's errors field but not in the parsed
+    // variable's errors, so we check them separately.
+    if let Some(errors) = lowered.equation_errors()
+        && !errors.is_empty()
+    {
+        for err in &errors {
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: Some(var.ident(db).clone()),
+                error: DiagnosticError::Equation(err.clone()),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+        }
+        return None;
+    }
 
     // Build minimal metadata: only {self} + deps
     let model_name_ident = Ident::new(model.name(db));
@@ -3607,6 +3685,27 @@ pub fn compile_var_fragment(
             let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
 
             dep_variables.push((dep_ident, dep_var, dep_size));
+        } else if !implicit_var_info.contains_key(effective_name) {
+            // Dependency is not a source variable or implicit variable --
+            // this is an unknown dependency. Look up the source location
+            // from the AST so the error points to the reference site.
+            let loc = parsed
+                .variable
+                .ast()
+                .and_then(|ast| ast.get_var_loc(effective_name))
+                .unwrap_or_default();
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: Some(var.ident(db).clone()),
+                error: DiagnosticError::Equation(crate::common::EquationError {
+                    start: loc.start,
+                    end: loc.end,
+                    code: crate::common::ErrorCode::UnknownDependency,
+                }),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
+            return None;
         }
     }
 
@@ -3725,7 +3824,16 @@ pub fn compile_var_fragment(
                 Ok(ts) if !ts.is_empty() => {
                     tables.insert(var_ident_canonical.clone(), ts);
                 }
-                Err(_) => return None,
+                Err(table_err) => {
+                    CompilationDiagnostic(Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: Some(var.ident(db).clone()),
+                        error: DiagnosticError::Model(table_err),
+                        severity: DiagnosticSeverity::Error,
+                    })
+                    .accumulate(db);
+                    return None;
+                }
                 _ => {}
             }
         }
@@ -3767,6 +3875,7 @@ pub fn compile_var_fragment(
     };
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
+    let is_module_input = inputs.contains(&var_ident_canonical);
 
     // We need module_refs for module variables (explicit or implicit)
     let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
@@ -3922,32 +4031,63 @@ pub fn compile_var_fragment(
     // Runlists use canonical names, so compare with the canonical form.
     let var_ident_str = var_ident_canonical.as_str().to_string();
 
+    // Accumulate a diagnostic when per-variable compilation (Var::new)
+    // fails. Without this, errors like DoesNotExist (unknown dependency)
+    // are silently dropped and never appear in collect_all_diagnostics.
+    let accumulate_var_compile_error = |err: &crate::Error| {
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(var.ident(db).clone()),
+            error: DiagnosticError::Equation(crate::common::EquationError {
+                start: 0,
+                end: 0,
+                code: err.code,
+            }),
+            severity: DiagnosticSeverity::Error,
+        })
+        .accumulate(db);
+    };
+
     // Initial phase: stocks and their deps get compiled with is_initial=true
     let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
         match build_var(true) {
             Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
+            Err(ref err) => {
+                accumulate_var_compile_error(err);
+                None
+            }
         }
     } else {
         None
     };
 
-    // Flow phase: non-stock vars get compiled with is_initial=false
-    let flow_bytecodes = if !is_stock && dep_graph.runlist_flows.contains(&var_ident_str) {
-        match build_var(false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+    // Flow phase: non-stock vars AND stock-typed module inputs get compiled
+    // with is_initial=false. Stock-typed module inputs need LoadModuleInput ->
+    // AssignCurr in the flows phase to propagate the parent-provided value
+    // each timestep (matching the monolithic path's `instantiation.contains(id)
+    // || !var.is_stock()` filter).
+    let flow_bytecodes =
+        if (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str) {
+            match build_var(false) {
+                Ok(var_result) => compile_phase(&var_result.ast),
+                Err(ref err) => {
+                    accumulate_var_compile_error(err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     // Stock phase: stocks and modules get compiled with is_initial=false
     let stock_bytecodes =
         if (is_stock || is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
             match build_var(false) {
                 Ok(var_result) => compile_phase(&var_result.ast),
-                Err(_) => None,
+                Err(ref err) => {
+                    accumulate_var_compile_error(err);
+                    None
+                }
             }
         } else {
             None
@@ -4664,10 +4804,17 @@ pub fn assemble_module(
         model_dependency_graph_with_inputs(db, model, project, module_input_names.clone())
     };
     if dep_graph.has_cycle {
-        return Err(format!(
-            "model '{}' has circular dependencies",
-            model.name(db)
-        ));
+        let msg = format!("model '{}' has circular dependencies", model.name(db));
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model.name(db).clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+        return Err(msg);
     }
     let layout = compute_layout(db, model, project, is_root);
     let source_vars = model.variables(db);
@@ -4704,9 +4851,119 @@ pub fn assemble_module(
         }
     }
 
-    // Module input variables are provided by the parent model, so they
-    // must be excluded from runlists (matching the monolithic path which
-    // filters with `!instantiation.contains(id)`).
+    // Pass 3: LTM synthetic variables (only when ltm_enabled).
+    //
+    // LTM link-score, loop-score, and relative-score equations are
+    // compiled here and appended to the flows runlist. When ltm_enabled
+    // is false this pass is skipped entirely (AC1.5). When the model
+    // has no feedback loops the LTM variable list is empty (AC1.4).
+    //
+    // LTM vars have no dt-phase ordering constraints with regular
+    // variables because PREVIOUS reads from the previous timestep's
+    // committed values. They can be appended to the end of the flows
+    // runlist.
+    //
+    // LTM variables only exist in the root model -- stdlib sub-models
+    // never have LTM instrumentation.
+    let mut ltm_flow_names: Vec<String> = Vec::new();
+    if is_root && project.ltm_enabled(db) {
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, model, project)
+        } else {
+            model_ltm_synthetic_variables(db, model, project)
+        };
+
+        let dims = project_datamodel_dims(db, project);
+        let units_ctx = project_units_context(db, project);
+
+        for ltm_var in &ltm_vars.vars {
+            let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
+
+            // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId)
+            let fragment_result = if ltm_var.name.contains("\u{205A}link_score\u{205A}")
+                || ltm_var.name.contains("\u{205A}ilink\u{205A}")
+            {
+                // Extract from/to from the link score name
+                // Format: $:ltm:link_score:from->to or $:ltm:ilink:from->to
+                let arrow_pos = ltm_var.name.find('\u{2192}');
+                if let Some(arrow) = arrow_pos {
+                    // Find the last separator before the arrow to locate the
+                    // end of the prefix (e.g. "$:ltm:link_score:").  Using
+                    // rfind on the full string would match separators inside
+                    // the `to` name that appear after the arrow.
+                    let prefix_end = ltm_var.name[..arrow]
+                        .rfind('\u{205A}')
+                        .map(|p| p + '\u{205A}'.len_utf8())
+                        .unwrap_or(0);
+                    let from_name = &ltm_var.name[prefix_end..arrow];
+                    let to_name = &ltm_var.name[arrow + '\u{2192}'.len_utf8()..];
+                    let link_id = LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
+                    compile_ltm_var_fragment(db, link_id, model, project)
+                        .as_ref()
+                        .cloned()
+                } else {
+                    compile_ltm_equation_fragment(
+                        db,
+                        &ltm_var.name,
+                        &ltm_var.equation,
+                        model,
+                        project,
+                    )
+                }
+            } else {
+                // Loop scores and relative loop scores: compile directly
+                compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project)
+            };
+
+            if let Some(result) = fragment_result {
+                all_fragments.insert(ltm_var_canonical.clone(), result);
+                ltm_flow_names.push(ltm_var_canonical);
+            }
+        }
+
+        // Also compile the implicit modules (PREVIOUS instances) from LTM
+        // equations. These are module-type variables that need initial and
+        // stock phase compilation like regular implicit modules.
+        let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+        for ltm_var in &ltm_vars.vars {
+            let parsed = parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+            for (idx, implicit_dm_var) in parsed.implicit_vars.iter().enumerate() {
+                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+                if all_fragments.contains_key(&im_name) {
+                    continue;
+                }
+                if let Some(meta) = ltm_implicit.get(&im_name) {
+                    // Build an ImplicitVarMeta-compatible structure. Since LTM
+                    // implicit vars don't have a parent SourceVariable, we
+                    // compile them directly using the parsed LTM equation data.
+                    let im_fragment = compile_ltm_implicit_var_fragment(
+                        db,
+                        &parsed,
+                        idx,
+                        meta,
+                        model,
+                        project,
+                        dep_graph,
+                        &module_input_names,
+                    );
+                    if let Some(result) = im_fragment {
+                        all_fragments.insert(im_name.clone(), result);
+                        // Implicit modules participate in initials and stocks
+                        // runlists. Their names are added to the dependency
+                        // graph's runlists below.
+                    }
+                }
+            }
+        }
+    }
+
+    // Module input variables have their values provided by the parent
+    // model via EvalModule/LoadModuleInput. Their compiled bytecodes
+    // consist of LoadModuleInput -> AssignCurr, which copies the
+    // parent-provided value into the sub-model's local slot. This must
+    // happen during initials and flows phases. Only the stocks phase
+    // excludes module inputs (matching the monolithic path which uses
+    // `!instantiation.contains(id) && (is_stock || is_module)` for stocks).
     let is_module_input =
         |var_name: &str| -> bool { module_inputs.contains(&*canonicalize(var_name)) };
 
@@ -4717,27 +4974,21 @@ pub fn assemble_module(
     let mut missing_vars: Vec<String> = Vec::new();
 
     for var_name in &dep_graph.runlist_initials {
-        if is_module_input(var_name) {
-            continue;
-        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.initial_bytecodes
         {
             initial_frags.push((var_name.clone(), bc));
-        } else {
+        } else if !is_module_input(var_name) {
             missing_vars.push(var_name.clone());
         }
     }
 
     for var_name in &dep_graph.runlist_flows {
-        if is_module_input(var_name) {
-            continue;
-        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
             flow_frags.push(bc);
-        } else {
+        } else if !is_module_input(var_name) {
             missing_vars.push(var_name.clone());
         }
     }
@@ -4755,11 +5006,54 @@ pub fn assemble_module(
         }
     }
 
+    // Append LTM flow fragments (link scores, loop scores, relative
+    // loop scores). These go at the end of the flows runlist since
+    // they have no ordering constraints with regular variables.
+    for ltm_name in &ltm_flow_names {
+        if let Some(result) = all_fragments.get(ltm_name)
+            && let Some(ref bc) = result.fragment.flow_bytecodes
+        {
+            flow_frags.push(bc);
+        }
+    }
+
+    // Append LTM implicit module fragments to initials and stocks
+    // runlists. PREVIOUS module instances contain stocks that need
+    // initialization and stock update phases.
+    if is_root && project.ltm_enabled(db) {
+        let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+        let mut ltm_im_names: Vec<&String> = ltm_implicit.keys().collect();
+        ltm_im_names.sort_unstable();
+        for im_name in ltm_im_names {
+            if let Some(result) = all_fragments.get(im_name) {
+                if let Some(ref bc) = result.fragment.initial_bytecodes {
+                    initial_frags.push((im_name.clone(), bc));
+                }
+                if let Some(ref bc) = result.fragment.flow_bytecodes {
+                    flow_frags.push(bc);
+                }
+                if let Some(ref bc) = result.fragment.stock_bytecodes {
+                    stock_frags.push(bc);
+                }
+            }
+        }
+    }
+
     if !missing_vars.is_empty() {
-        return Err(format!(
+        let msg = format!(
             "failed to compile fragments for variables: {}",
             missing_vars.join(", ")
-        ));
+        );
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+        return Err(msg);
     }
 
     // Compute context resource base offsets for each phase so that flows
@@ -4780,8 +5074,28 @@ pub fn assemble_module(
         dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
     };
 
-    let flows_concat = concatenate_fragments(&flow_frags, &flow_base)?;
-    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base)?;
+    let flows_concat = concatenate_fragments(&flow_frags, &flow_base).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })?;
+    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })?;
 
     // Build SymbolicCompiledInitial for each initial variable, renumbered
     // so context resource IDs (GFs, modules, views, temps, dim_lists) match
@@ -4809,7 +5123,18 @@ pub fn assemble_module(
                     init_dl_off,
                 )
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .inspect_err(|msg| {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model_name.clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            })?;
         compiled_initials.push(SymbolicCompiledInitial {
             ident: Ident::new(name),
             bytecode: crate::compiler::symbolic::SymbolicByteCode {
@@ -4837,7 +5162,17 @@ pub fn assemble_module(
         .chain(flow_frags.iter().copied())
         .chain(stock_frags.iter().copied())
         .collect();
-    let merged = concatenate_fragments(&all_frags, &no_base)?;
+    let merged = concatenate_fragments(&all_frags, &no_base).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })?;
 
     // Build dimension metadata from project dimensions (mirrors Compiler::populate_dimension_metadata)
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
@@ -4902,7 +5237,17 @@ pub fn assemble_module(
     };
 
     // Resolve symbolic -> concrete offsets
-    resolve_module(&sym_module, layout)
+    resolve_module(&sym_module, layout).inspect_err(|msg| {
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: model_name.clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+    })
 }
 
 /// Assemble a full CompiledSimulation from assembled modules.
@@ -4920,12 +5265,33 @@ pub fn assemble_simulation(
     let main_model_canonical = canonicalize(main_model_name);
 
     if !project_models.contains_key(main_model_canonical.as_ref()) {
-        return Err(format!("no model named '{}' to simulate", main_model_name));
+        let msg = format!("no model named '{}' to simulate", main_model_name);
+        try_accumulate_diagnostic(
+            db,
+            Diagnostic {
+                model: main_model_name.to_string(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg.clone()),
+                severity: DiagnosticSeverity::Error,
+            },
+        );
+        return Err(msg);
     }
 
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
-    let module_instances = enumerate_module_instances(db, project, main_model_name)?;
+    let module_instances =
+        enumerate_module_instances(db, project, main_model_name).inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: main_model_name.to_string(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
 
     // Sort module names: main first, then all others alphabetically
     let main_ident = Ident::<Canonical>::new(main_model_name);
@@ -4950,10 +5316,20 @@ pub fn assemble_simulation(
             let model_name_str = name.as_str();
             let canonical_name = canonicalize(model_name_str);
             let source_model = project_models.get(canonical_name.as_ref()).ok_or_else(|| {
-                format!(
+                let msg = format!(
                     "model '{}' referenced as module but not found in project",
                     model_name_str,
-                )
+                );
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: main_model_name.to_string(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+                msg
             })?;
 
             let is_root = canonicalize(name.as_str()) == main_model_canonical;
@@ -5116,6 +5492,69 @@ fn enumerate_module_instances_inner(
         }
     }
 
+    // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
+    // feedback loop instrumentation). These are only present when LTM is
+    // enabled and exist only in the root model.
+    if project.ltm_enabled(db) {
+        let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
+        let dims = project_datamodel_dims(db, project);
+        let units_ctx = project_units_context(db, project);
+
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, *source_model, project)
+        } else {
+            model_ltm_synthetic_variables(db, *source_model, project)
+        };
+
+        for ltm_var in &ltm_vars.vars {
+            let parsed =
+                db_ltm::parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+
+            for implicit_dm_var in &parsed.implicit_vars {
+                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+                if let Some(im_meta) = ltm_implicit.get(&im_name) {
+                    if !im_meta.is_module {
+                        continue;
+                    }
+                    let sub_model_name = match &im_meta.model_name {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let sub_canonical = canonicalize(sub_model_name);
+                    if !project_models.contains_key(sub_canonical.as_ref()) {
+                        continue;
+                    }
+
+                    // Extract input set from the implicit module's references
+                    let input_prefix = format!("{im_name}\u{00B7}");
+                    let inputs: BTreeSet<Ident<Canonical>> =
+                        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+                            dm_module
+                                .references
+                                .iter()
+                                .filter_map(|mr| {
+                                    let dst_canonical = canonicalize(&mr.dst);
+                                    let bare = dst_canonical.strip_prefix(&input_prefix)?;
+                                    Some(Ident::new(bare))
+                                })
+                                .collect()
+                        } else {
+                            BTreeSet::new()
+                        };
+
+                    let key = Ident::<Canonical>::new(sub_model_name);
+                    let is_new = !modules.contains_key(&key);
+
+                    modules.entry(key).or_default().insert(inputs);
+
+                    if is_new {
+                        enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -5259,7 +5698,97 @@ fn calc_flattened_offsets_incremental(
         }
     }
 
+    // Include LTM variables (loop scores, relative loop scores, and their
+    // implicit PREVIOUS module instances) when LTM is enabled and this is
+    // the root model. These occupy slots after the implicit variables,
+    // matching compute_layout's Section 3 ordering.
+    if is_root && project.ltm_enabled(db) {
+        let layout = compute_layout(db, *source_model, project, true);
+
+        // Enumerate all LTM variable names from the synthetic variables list
+        // and their implicit PREVIOUS module variables.
+        let ltm_vars = if project.ltm_discovery_mode(db) {
+            model_ltm_all_link_synthetic_variables(db, *source_model, project)
+        } else {
+            model_ltm_synthetic_variables(db, *source_model, project)
+        };
+
+        let dims = project_datamodel_dims(db, project);
+        let units_ctx = project_units_context(db, project);
+        let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
+
+        // Add explicit LTM variables (loop scores, relative loop scores)
+        for ltm_var in &ltm_vars.vars {
+            let canonical_name = canonicalize(&ltm_var.name);
+            if let Some(entry) = layout.get(&canonical_name) {
+                offsets.insert(
+                    Ident::<Canonical>::from_unchecked(
+                        Ident::<Canonical>::new(&canonical_name).to_source_repr(),
+                    ),
+                    (entry.offset, entry.size),
+                );
+            }
+
+            // Add implicit PREVIOUS module variables from this LTM equation
+            let parsed =
+                db_ltm::parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+            for implicit_dm_var in &parsed.implicit_vars {
+                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+                if let Some(im_meta) = ltm_implicit.get(&im_name)
+                    && let Some(entry) = layout.get(&im_name)
+                {
+                    if im_meta.is_module {
+                        // Module-type: include sub-model variable offsets
+                        if let Some(sub_model_name) = &im_meta.model_name {
+                            let sub_offsets = calc_flattened_offsets_incremental(
+                                db,
+                                project,
+                                sub_model_name,
+                                false,
+                            );
+                            let mut sub_var_names: Vec<&Ident<Canonical>> =
+                                sub_offsets.keys().collect();
+                            sub_var_names.sort_unstable();
+                            let im_ident = Ident::new(im_name.as_str());
+                            for sub_name in &sub_var_names {
+                                let (sub_off, sub_size) = sub_offsets[*sub_name];
+                                let sub_canonical = Ident::new(sub_name.as_str());
+                                offsets.insert(
+                                    Ident::<Canonical>::from_unchecked(format!(
+                                        "{}.{}",
+                                        im_ident.to_source_repr(),
+                                        sub_canonical.to_source_repr()
+                                    )),
+                                    (entry.offset + sub_off, sub_size),
+                                );
+                            }
+                        }
+                    } else {
+                        offsets.insert(
+                            Ident::<Canonical>::from_unchecked(
+                                Ident::<Canonical>::new(&im_name).to_source_repr(),
+                            ),
+                            (entry.offset, entry.size),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     offsets
+}
+
+/// Set the `ltm_enabled` flag on a `SourceProject` salsa input.
+///
+/// This is a thin wrapper around the salsa-generated setter so that
+/// downstream crates (e.g. libsimlin) can toggle LTM without taking
+/// a direct dependency on the salsa crate.
+pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enabled: bool) {
+    use salsa::Setter;
+    if project.ltm_enabled(db) != enabled {
+        project.set_ltm_enabled(db).to(enabled);
+    }
 }
 
 /// Compile a project incrementally using salsa.
@@ -5354,3 +5883,7 @@ mod conversion_tests {
 #[cfg(test)]
 #[path = "db_tests.rs"]
 mod db_tests;
+
+#[cfg(test)]
+#[path = "db_diagnostic_tests.rs"]
+mod db_diagnostic_tests;

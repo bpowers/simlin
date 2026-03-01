@@ -684,6 +684,60 @@ impl<'module> Compiler<'module> {
                     return Ok(Some(()));
                 };
 
+                // PREVIOUS(x) and INIT(x) compile to dedicated opcodes that
+                // read from curr[] (previous timestep) or the initial-value
+                // buffer, respectively.  Handle them before the general
+                // builtin dispatch because they do not use CallBuiltin.
+                match builtin {
+                    BuiltinFn::Previous(arg) => {
+                        // Only simple PREVIOUS(var) reaches the builtin path;
+                        // the builtins_visitor routes nested PREVIOUS,
+                        // PREVIOUS(TIME), and 2-arg forms through module
+                        // expansion.
+                        //
+                        // At Expr0 level, the arg was a plain Var, but during
+                        // lowering inside a submodule context (e.g. LTM-augmented
+                        // SMOOTH), the variable may resolve to a ModuleInput
+                        // instead of a Var. Module inputs don't have slots in
+                        // the flat curr[] buffer, so we can't use LoadPrev. We
+                        // fall back to LoadModuleInput which reads the current
+                        // value -- the PREVIOUS delay is already applied at the
+                        // call site by the parent module.
+                        match arg.as_ref() {
+                            Expr::Var(off, _) => {
+                                self.push(Opcode::LoadPrev {
+                                    off: *off as VariableOffset,
+                                });
+                            }
+                            Expr::ModuleInput(off, _) => {
+                                self.push(Opcode::LoadModuleInput {
+                                    input: *off as ModuleInputOffset,
+                                });
+                            }
+                            _ => {
+                                // Unexpected argument type -- emit the
+                                // expression normally as a fallback.
+                                self.walk_expr(arg)?;
+                            }
+                        }
+                        return Ok(Some(()));
+                    }
+                    BuiltinFn::Init(arg) => {
+                        let off = match arg.as_ref() {
+                            Expr::Var(off, _) => *off as VariableOffset,
+                            _ => {
+                                return sim_err!(
+                                    NotSimulatable,
+                                    "INIT requires a variable reference argument".to_string()
+                                );
+                            }
+                        };
+                        self.push(Opcode::LoadInitial { off });
+                        return Ok(Some(()));
+                    }
+                    _ => {}
+                }
+
                 match builtin {
                     BuiltinFn::Time
                     | BuiltinFn::TimeStep
@@ -874,6 +928,13 @@ impl<'module> Compiler<'module> {
                             "array builtins not yet supported in VM".to_owned()
                         );
                     }
+                    // Previous/Init are handled in a separate early-return path
+                    // added in Task 4. Until then, nothing emits these variants.
+                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                        unreachable!(
+                            "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
+                        );
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _)
@@ -918,6 +979,14 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::VectorSortOrder(_, _)
                     | BuiltinFn::AllocateAvailable(_, _, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
+                    // Previous/Init are handled in a separate early-return path
+                    // (Task 4 of phase 1 adds that path). Until then, nothing
+                    // emits these variants, so reaching here is a logic error.
+                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                        unreachable!(
+                            "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
+                        );
                     }
                 };
 
@@ -1255,6 +1324,10 @@ impl<'module> Compiler<'module> {
                 self.collect_iter_source_views_impl(a, views, seen);
                 self.collect_iter_source_views_impl(b, views, seen);
                 self.collect_iter_source_views_impl(c, views, seen);
+            }
+            // Single expression argument (non-array)
+            Previous(a) | Init(a) => {
+                self.collect_iter_source_views_impl(a, views, seen);
             }
             // Constants/no-arg builtins
             Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}

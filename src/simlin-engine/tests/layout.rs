@@ -8,6 +8,7 @@ use std::io::BufReader;
 
 use simlin_engine::common::canonicalize;
 use simlin_engine::datamodel::ViewElement;
+use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::{generate_best_layout, generate_layout, generate_layout_with_config};
 use simlin_engine::open_xmile;
@@ -197,7 +198,8 @@ fn verify_layout(
 fn test_layout_sir() {
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let model = project.get_model(MAIN_MODEL).unwrap();
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
     verify_layout(&view, model, "SIR");
 
     // SIR should have 3 stocks, 2 flows, 3 auxes = 8 variables minimum
@@ -219,7 +221,8 @@ fn test_layout_sir() {
 fn test_layout_teacup() {
     let project = load_project("test/test-models/samples/teacup/teacup.stmx");
     let model = project.get_model(MAIN_MODEL).unwrap();
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
     verify_layout(&view, model, "teacup");
 
     let stock_count = view
@@ -234,7 +237,8 @@ fn test_layout_teacup() {
 fn test_layout_logistic_growth() {
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
     let model = project.get_model(MAIN_MODEL).unwrap();
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
     verify_layout(&view, model, "logistic_growth");
 }
 
@@ -242,7 +246,8 @@ fn test_layout_logistic_growth() {
 fn test_layout_arms_race() {
     let project = load_project("test/arms_race_3party/arms_race.stmx");
     let model = project.get_model(MAIN_MODEL).unwrap();
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
     verify_layout(&view, model, "arms_race");
 
     // Should have 3 stocks and 3 flows
@@ -264,7 +269,8 @@ fn test_layout_arms_race() {
 fn test_layout_decoupled_stocks() {
     let project = load_project("test/decoupled_stocks/decoupled.stmx");
     let model = project.get_model(MAIN_MODEL).unwrap();
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
     verify_layout(&view, model, "decoupled");
 
     // Should have 2 stocks in separate chains
@@ -279,8 +285,8 @@ fn test_layout_decoupled_stocks() {
 #[test]
 fn test_layout_structural_consistency() {
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let view1 = generate_layout(&project, MAIN_MODEL).expect("first layout should succeed");
-    let view2 = generate_layout(&project, MAIN_MODEL).expect("second layout should succeed");
+    let view1 = generate_layout(&project, MAIN_MODEL, None).expect("first layout should succeed");
+    let view2 = generate_layout(&project, MAIN_MODEL, None).expect("second layout should succeed");
 
     assert_eq!(
         view1.elements.len(),
@@ -319,7 +325,8 @@ fn test_layout_structural_consistency() {
 #[test]
 fn test_layout_flow_points_have_cloud_attachment() {
     let project = load_project("test/test-models/samples/teacup/teacup.stmx");
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
 
     // Teacup has 1 flow with 1 stock attached. The other end should have a cloud.
     let clouds: Vec<_> = view
@@ -348,7 +355,8 @@ fn test_layout_flow_points_have_cloud_attachment() {
 #[test]
 fn test_layout_connectors_present() {
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
 
     let link_count = view
         .elements
@@ -365,15 +373,16 @@ fn test_layout_connectors_present() {
 fn test_best_layout_sir() {
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let model = project.get_model(MAIN_MODEL).unwrap();
-    let view =
-        generate_best_layout(&project, MAIN_MODEL).expect("best layout generation should succeed");
+    let view = generate_best_layout(&project, MAIN_MODEL, None)
+        .expect("best layout generation should succeed");
     verify_layout(&view, model, "SIR_best");
 }
 
 #[test]
 fn test_layout_link_uids_reference_existing_elements() {
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let view = generate_layout(&project, MAIN_MODEL).expect("layout generation should succeed");
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
 
     let all_uids: HashSet<i32> = view.elements.iter().map(|e| e.get_uid()).collect();
 
@@ -404,7 +413,7 @@ fn test_generate_layout_with_zero_reheat_does_not_panic() {
         annealing_max_rounds: 0,
         ..LayoutConfig::default()
     };
-    let view = generate_layout_with_config(&project, MAIN_MODEL, config)
+    let view = generate_layout_with_config(&project, MAIN_MODEL, config, None)
         .expect("layout should succeed with zero config");
     verify_layout(&view, model, "zero_reheat");
 }
@@ -416,7 +425,7 @@ fn test_ltm_populates_loop_importance() {
     // The logistic growth model has known feedback loops; LTM should
     // populate importance_series for at least one.
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
 
     assert!(
         !metadata.feedback_loops.is_empty(),
@@ -439,7 +448,7 @@ fn test_ltm_detects_polarity() {
     use simlin_engine::layout::metadata::LoopPolarity;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
 
     // The logistic growth model should have both reinforcing and balancing loops.
     let has_reinforcing = metadata
@@ -461,7 +470,7 @@ fn test_loops_sorted_by_average_importance() {
     use simlin_engine::layout::compute_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
 
     // Verify descending sort by average importance.
     for pair in metadata.feedback_loops.windows(2) {
@@ -479,7 +488,7 @@ fn test_compute_layout_metadata_has_dominant_periods() {
     use simlin_engine::layout::compute_layout_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
 
     assert!(
         !metadata.feedback_loops.is_empty(),
@@ -514,7 +523,7 @@ fn test_compute_layout_metadata_chains_sorted() {
     use simlin_engine::layout::compute_layout_metadata;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
 
     assert!(
         !metadata.chains.is_empty(),
@@ -537,7 +546,7 @@ fn test_compute_layout_metadata_dep_graph() {
     use simlin_engine::layout::compute_layout_metadata;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
 
     assert!(
         !metadata.dep_graph.is_empty(),
@@ -583,7 +592,7 @@ fn test_dominant_period_timestamps_respect_effective_save_cadence() {
 
     let mut reader = std::io::BufReader::new(xmile.as_bytes());
     let project = simlin_engine::open_xmile(&mut reader).unwrap();
-    let metadata = compute_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
 
     let sim_stop = 10.0_f64;
     for period in &metadata.dominant_periods {
@@ -627,7 +636,7 @@ fn test_dep_graph_excludes_self_references() {
 
     let mut reader = BufReader::new(xmile.as_bytes());
     let project = simlin_engine::open_xmile(&mut reader).unwrap();
-    let metadata = compute_layout_metadata(&project, MAIN_MODEL).unwrap();
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
 
     for (var, deps) in &metadata.dep_graph {
         assert!(
@@ -648,5 +657,31 @@ fn test_dep_graph_excludes_self_references() {
     assert!(
         pop_deps.contains("births"),
         "population should depend on its inflow 'births'"
+    );
+}
+
+/// Verify that ltm_enabled is reset to false after compute_metadata
+/// completes, even when the incremental LTM path encounters failures
+/// (e.g., compilation or simulation errors).
+#[test]
+fn test_ltm_enabled_reset_after_incremental_metadata() {
+    use simlin_engine::layout::compute_metadata;
+
+    let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+    let source_project = state.to_sync_result().project;
+
+    // Call compute_metadata with the incremental salsa path.
+    let metadata = compute_metadata(&project, MAIN_MODEL, Some((&mut db, source_project)));
+    assert!(
+        metadata.is_some(),
+        "metadata should be returned for valid project"
+    );
+
+    // ltm_enabled should be reset to false after the call.
+    assert!(
+        !source_project.ltm_enabled(&db),
+        "ltm_enabled should be false after compute_metadata completes"
     );
 }

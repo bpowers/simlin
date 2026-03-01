@@ -618,3 +618,280 @@ fn test_incremental_compile_error_preserved_in_sim() {
         simlin_project_unref(proj);
     }
 }
+
+// ── AC2 verification tests ─────────────────────────────────────────────
+//
+// These tests verify salsa-consolidation.AC2: the patch error checking
+// path uses only incremental compilation (no compile_simulation calls).
+
+/// AC2.1: Patch with a syntax error is rejected with a specific
+/// equation error code, and the model state is unchanged.
+#[test]
+fn test_ac2_1_patch_syntax_error_rejected() {
+    let datamodel = TestProject::new("ac2_syntax")
+        .aux("x", "10", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    // Apply a patch with a syntax error in the equation.
+    // "3 * )" has a mismatched closing paren that the parser rejects.
+    let patch_json = r#"{
+        "models": [{
+            "name": "main",
+            "ops": [{
+                "type": "upsertAux",
+                "payload": { "aux": { "name": "x", "equation": "3 * )" } }
+            }]
+        }]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            false, // allow_errors = false
+            &mut collected,
+            &mut out_error,
+        );
+
+        // Patch should be rejected
+        assert!(
+            !out_error.is_null(),
+            "patch with syntax error should be rejected when allow_errors=false"
+        );
+        let code = simlin_error_get_code(out_error);
+        // Syntax errors produce equation-level error codes (e.g.
+        // UnrecognizedToken, InvalidToken, etc.)
+        assert!(
+            matches!(
+                code,
+                SimlinErrorCode::UnrecognizedToken
+                    | SimlinErrorCode::InvalidToken
+                    | SimlinErrorCode::ExtraToken
+                    | SimlinErrorCode::UnrecognizedEof
+            ),
+            "expected a parse/syntax error code, got {:?}",
+            code
+        );
+        simlin_error_free(out_error);
+        out_error = ptr::null_mut();
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Verify model state is unchanged (x should still be "10")
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null(), "sim should succeed with original model");
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        let name = std::ffi::CString::new("x").unwrap();
+        let mut value: f64 = 0.0;
+        simlin_sim_get_value(sim, name.as_ptr(), &mut value, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(
+            (value - 10.0).abs() < 1e-10,
+            "x should still be 10 after rejected patch, got {}",
+            value
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// AC2.1: Patch introducing a circular dependency is rejected with an
+/// assembly-level error, and the model state is unchanged.
+#[test]
+fn test_ac2_1_patch_circular_dependency_rejected() {
+    let datamodel = TestProject::new("ac2_circular")
+        .aux("a", "10", None)
+        .aux("b", "20", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    // Create a circular dependency: a depends on b, b depends on a
+    let patch_json = r#"{
+        "models": [{
+            "name": "main",
+            "ops": [
+                {
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "a", "equation": "b + 1" } }
+                },
+                {
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "b", "equation": "a + 1" } }
+                }
+            ]
+        }]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            false, // allow_errors = false
+            &mut collected,
+            &mut out_error,
+        );
+
+        // Patch should be rejected due to circular dependency
+        assert!(
+            !out_error.is_null(),
+            "patch with circular dependency should be rejected"
+        );
+        let code = simlin_error_get_code(out_error);
+        // Circular dependency can surface as CircularDependency or
+        // NotSimulatable (assembly error), depending on where in the
+        // pipeline the cycle is detected.
+        assert!(
+            matches!(
+                code,
+                SimlinErrorCode::CircularDependency | SimlinErrorCode::NotSimulatable
+            ),
+            "expected CircularDependency or NotSimulatable error, got {:?}",
+            code
+        );
+        simlin_error_free(out_error);
+        out_error = ptr::null_mut();
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Verify model state is unchanged: simulation with original
+        // equations should still work.
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null(), "sim should succeed with original model");
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        let name_a = std::ffi::CString::new("a").unwrap();
+        let mut value_a: f64 = 0.0;
+        simlin_sim_get_value(sim, name_a.as_ptr(), &mut value_a, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(
+            (value_a - 10.0).abs() < 1e-10,
+            "a should still be 10 after rejected circular dep patch, got {}",
+            value_a
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// AC2.6: Verify at the code level that compile_simulation is not called
+/// in the patch path. This test scans patch.rs for any reference to
+/// compile_simulation. If the function were re-introduced, this test
+/// would catch it.
+///
+/// Source scanning is more durable than runtime detection because it
+/// catches all code paths, not just the ones exercised by tests.
+#[test]
+fn test_ac2_6_compile_simulation_not_in_patch_path() {
+    let patch_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/patch.rs");
+    let source = std::fs::read_to_string(&patch_rs)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", patch_rs.display(), e));
+
+    assert!(
+        !source.contains("compile_simulation"),
+        "patch.rs must not reference compile_simulation; \
+         the monolithic compilation path has been replaced by \
+         compile_project_incremental (salsa-consolidation.AC2.6)"
+    );
+}
+
+/// AC2.1: Valid equation patch is accepted and produces correct simulation
+/// results using the incremental compilation path. Verifies that the
+/// value change flows through the incremental pipeline to affect
+/// simulation output.
+#[test]
+fn test_ac2_1_valid_patch_accepted_and_simulatable() {
+    let datamodel = TestProject::new("ac2_valid")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "rate", None)
+        .aux("rate", "5", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    // Change rate from 5 to 10
+    let patch_json = r#"{
+        "models": [{
+            "name": "main",
+            "ops": [{
+                "type": "upsertAux",
+                "payload": { "aux": { "name": "rate", "equation": "10" } }
+            }]
+        }]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        assert!(out_error.is_null(), "valid patch should succeed");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Simulate and verify the patched value affects results
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null());
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+
+        // With rate=10 and dt=1.0 over 5 time units (Euler method),
+        // level should be 100 + 10*5 = 150
+        let name = std::ffi::CString::new("level").unwrap();
+        let mut value: f64 = 0.0;
+        simlin_sim_get_value(sim, name.as_ptr(), &mut value, &mut out_error);
+        assert!(out_error.is_null());
+        assert!(
+            (value - 150.0).abs() < 1e-10,
+            "level should be 150 (100 + 10*5) with patched rate=10, got {}",
+            value
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

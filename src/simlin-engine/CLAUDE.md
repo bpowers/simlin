@@ -11,7 +11,7 @@ Equation text flows through these stages in order:
 1. **`src/lexer/`** - Tokenizer for equation syntax
 2. **`src/parser/`** - Recursive descent parser producing `Expr0` AST
 3. **`src/ast/`** - AST type system with progressive lowering: `Expr0` (parsed) -> `Expr1` (modules expanded) -> `Expr2` (dimensions resolved) -> `Expr3` (subscripts expanded). `array_view.rs` tracks array dimensions and sparsity.
-4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`). `builtins_visitor.rs` handles implicit module instantiation from `MODULE()` calls.
+4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`, `PREVIOUS`, `INIT`). `builtins_visitor.rs` handles implicit module instantiation from `MODULE()` calls.
 5. **`src/compiler/`** - Multi-pass compilation to bytecode:
    - `mod.rs` - Orchestration
    - `context.rs` - Symbol tables and variable metadata
@@ -20,9 +20,9 @@ Equation text flows through these stages in order:
    - `dimensions.rs` - Dimension checking/inference
    - `subscript.rs` - Array subscript expansion and iteration
    - `pretty.rs` - Debug pretty-printing
-6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.)
-7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`.
-8. **`src/interpreter.rs`** - AST-walking interpreter serving as a reference "spec" to verify VM correctness.
+6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.). Includes `LoadPrev` and `LoadInitial` opcodes for `PREVIOUS()`/`INIT()` intrinsics.
+7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`. Maintains `prev_values` and `initial_values` snapshot buffers for `LoadPrev`/`LoadInitial` opcodes.
+8. **`src/interpreter.rs`** - AST-walking interpreter. Deprecated for production use; retained as a reference spec for VM correctness verification. `compile()` is test-only; production compilation uses `db::compile_project_incremental`.
 
 ## Data model and project structure
 
@@ -31,9 +31,19 @@ Equation text flows through these stages in order:
 - **`src/variable.rs`** - Variable variants (`Stock`, `Flow`, `Aux`, `Module`), `ModuleInput`, `Table` (graphical functions)
 - **`src/dimensions.rs`** - Dimension context and dimension matching for arrays
 - **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort
-- **`src/project.rs`** - `Project` struct aggregating models. `with_ltm()` for loop analysis.
+- **`src/project.rs`** - `Project` struct aggregating models. `with_ltm()` and `with_ltm_all_links()` are deprecated; prefer `db::compile_project_incremental` with `ltm_enabled`/`ltm_discovery_mode` on `SourceProject`.
 - **`src/results.rs`** - `Results` (variable offsets + timeseries data), `Specs` (time/integration config)
 - **`src/patch.rs`** - `ModelPatch`/`ProjectPatch` for representing and applying model changes
+
+## Incremental compilation (salsa)
+
+The primary compilation path uses salsa tracked functions for fine-grained incrementality. Key modules:
+
+- **`src/db.rs`** - `SimlinDb`, `SourceProject`/`SourceModel`/`SourceVariable` salsa inputs, `compile_project_incremental()` entry point, dependency graph computation, diagnostic accumulation via `CompilationDiagnostic` accumulator. `SourceProject` carries `ltm_enabled` and `ltm_discovery_mode` flags for LTM compilation. `Diagnostic` includes a `severity` field (`Error`/`Warning`) and `DiagnosticError` variants: `Equation`, `Model`, `Unit`, `Assembly`.
+- **`src/db_analysis.rs`** - Salsa-tracked causal graph analysis: `model_causal_edges`, `model_loop_circuits`, `model_cycle_partitions`, `model_detected_loops`. Produces `DetectedLoop` structs with polarity.
+- **`src/db_ltm.rs`** - LTM (Loops That Matter) equation parsing and compilation as salsa tracked functions. Handles link scores, loop scores, relative loop scores, and PREVIOUS module expansion for LTM synthetic variables.
+- **`src/db_diagnostic_tests.rs`** - Verification tests for diagnostic accumulation paths.
+- **`src/db_tests.rs`** - Core salsa pipeline tests.
 
 ## Format import/export
 
@@ -60,7 +70,7 @@ Equation text flows through these stages in order:
 
 ## Special features
 
-- **`src/analysis.rs`** - High-level model analysis API: `analyze_model()` bundles compilation, LTM loop discovery, and dominant-period calculation into a single `ModelAnalysis` result. Returns gracefully on simulation failure (empty loop fields, model snapshot intact).
+- **`src/analysis.rs`** - High-level model analysis API: `analyze_model()` bundles compilation, LTM loop discovery, and dominant-period calculation into a single `ModelAnalysis` result. Uses the incremental salsa path (`SimlinDb` + `compile_project_incremental`) for LTM compilation and simulation. Returns gracefully on simulation failure (empty loop fields, model snapshot intact).
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`

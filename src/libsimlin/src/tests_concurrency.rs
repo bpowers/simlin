@@ -437,3 +437,179 @@ fn test_issue_298_sim_new_blocks_until_patch_decision() {
         simlin_project_unref(proj);
     }
 }
+
+/// Regression test: two concurrent patches to disjoint variables must
+/// both be visible in the final state. Without proper serialization,
+/// the second writer can snapshot a stale datamodel and overwrite the
+/// first writer's changes (lost update).
+#[test]
+fn test_concurrent_patches_no_lost_update() {
+    use crate::patch::{install_patch_test_hook, PatchHookPoint};
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    let datamodel = TestProject::new("lost_update")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .aux("a", "1", None)
+        .aux("b", "10", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+    let proj_addr = proj as usize;
+
+    // Hook: pause only the FIRST patch call at StagedSyncWhileDbLocked.
+    // This gives Thread B a window to start its own patch.
+    let (hook_enter_tx, hook_enter_rx) = mpsc::channel::<()>();
+    let release = Arc::new(AtomicBool::new(false));
+    let release_for_hook = Arc::clone(&release);
+    let hook_count = Arc::new(AtomicU32::new(0));
+    let hook = Arc::new(move |point: PatchHookPoint, project_ref: &SimlinProject| {
+        if point == PatchHookPoint::StagedSyncWhileDbLocked
+            && (project_ref as *const SimlinProject as usize) == proj_addr
+            && hook_count.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            let _ = hook_enter_tx.send(());
+            while !release_for_hook.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    });
+    let _hook_guard = install_patch_test_hook(hook);
+
+    // Extra refs for the two threads.
+    unsafe {
+        simlin_project_ref(proj);
+        simlin_project_ref(proj);
+    }
+
+    // Thread A: patch a → 2
+    let patch_a = String::from(
+        r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "a", "equation": "2" } }
+                }]
+            }]
+        }"#,
+    );
+    let thread_a = thread::spawn(move || unsafe {
+        let proj = proj_addr as *mut SimlinProject;
+        let mut out_error: *mut SimlinError = std::ptr::null_mut();
+        let mut collected: *mut SimlinError = std::ptr::null_mut();
+        let bytes = patch_a.as_bytes();
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        assert!(out_error.is_null(), "Thread A patch should succeed");
+        simlin_project_unref(proj);
+    });
+
+    // Wait for Thread A to enter validation (holding db lock).
+    hook_enter_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("Thread A should reach the hook");
+
+    // Thread B: patch b → 20. With the fix, this blocks on the
+    // datamodel lock until Thread A commits. Without the fix, Thread B
+    // would snapshot the stale datamodel (before Thread A's change).
+    let patch_b = String::from(
+        r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "b", "equation": "20" } }
+                }]
+            }]
+        }"#,
+    );
+    let (b_done_tx, b_done_rx) = mpsc::channel::<()>();
+    let thread_b = thread::spawn(move || unsafe {
+        let proj = proj_addr as *mut SimlinProject;
+        let mut out_error: *mut SimlinError = std::ptr::null_mut();
+        let mut collected: *mut SimlinError = std::ptr::null_mut();
+        let bytes = patch_b.as_bytes();
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        assert!(out_error.is_null(), "Thread B patch should succeed");
+        let _ = b_done_tx.send(());
+        simlin_project_unref(proj);
+    });
+
+    // Thread B should be blocked on the datamodel lock while Thread A
+    // is paused in validation.
+    assert!(
+        b_done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "Thread B should block while Thread A holds the datamodel lock"
+    );
+
+    // Release Thread A so it commits and drops the datamodel lock.
+    release.store(true, Ordering::Release);
+
+    // Both threads should complete.
+    thread_a.join().expect("Thread A should not panic");
+    b_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("Thread B should complete after Thread A releases");
+    thread_b.join().expect("Thread B should not panic");
+
+    // Verify BOTH changes are present by simulating and reading values.
+    unsafe {
+        let mut out_error: *mut SimlinError = std::ptr::null_mut();
+        let model = simlin_project_get_model(proj, std::ptr::null(), &mut out_error);
+        assert!(!model.is_null(), "model lookup should succeed");
+        let sim = simlin_sim_new(model, false, &mut out_error);
+        assert!(!sim.is_null(), "sim creation should succeed");
+        assert!(out_error.is_null());
+
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null(), "simulation should run");
+
+        let a_name = CString::new("a").unwrap();
+        let b_name = CString::new("b").unwrap();
+        let mut a_val = 0.0_f64;
+        let mut b_val = 0.0_f64;
+        simlin_sim_get_value(sim, a_name.as_ptr(), &mut a_val, &mut out_error);
+        assert!(out_error.is_null());
+        simlin_sim_get_value(sim, b_name.as_ptr(), &mut b_val, &mut out_error);
+        assert!(out_error.is_null());
+
+        assert!(
+            (a_val - 2.0).abs() < 1e-10,
+            "variable 'a' should be 2 (Thread A's patch), got {}",
+            a_val
+        );
+        assert!(
+            (b_val - 20.0).abs() < 1e-10,
+            "variable 'b' should be 20 (Thread B's patch), got {}",
+            b_val
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

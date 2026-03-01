@@ -325,7 +325,22 @@ impl<'a> BuiltinVisitor<'a> {
                     let rhs = it.next().unwrap();
                     return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
                 }
-                if is_builtin_fn(&func) {
+                // PREVIOUS and INIT always go through module expansion.
+                //
+                // PREVIOUS: The LoadPrev opcode and prev_values snapshot buffer
+                // exist as scaffolding, but activating them changes the model's
+                // dependency graph. LTM link-score equations depend on the
+                // PREVIOUS module instances for correct evaluation ordering.
+                // Promoting PREVIOUS to a builtin requires reworking how
+                // evaluation order is determined for LTM-augmented models.
+                //
+                // INIT: The stdlib module contains a stock that pulls the
+                // variable into the Initials runlist. Without this, aux-only
+                // models (no stocks) would have an empty Initials runlist and
+                // the initial_values snapshot would be all zeros.
+                if func == "previous" || func == "init" {
+                    // Fall through to module expansion.
+                } else if is_builtin_fn(&func) {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 

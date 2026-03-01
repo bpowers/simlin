@@ -275,7 +275,7 @@ pub struct SimlinErrorDetail {
 
 /// Opaque project structure
 pub struct SimlinProject {
-    pub(crate) project: Mutex<engine::Project>,
+    pub(crate) datamodel: Mutex<engine::datamodel::Project>,
     pub(crate) db: Mutex<engine::db::SimlinDb>,
     /// Salsa input handles from the last sync, enabling incremental updates.
     pub(crate) sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
@@ -314,10 +314,10 @@ pub struct SimlinSim {
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
 
 pub(crate) fn new_synced_db(
-    project: &engine::Project,
+    datamodel: &engine::datamodel::Project,
 ) -> (engine::db::SimlinDb, engine::db::PersistentSyncState) {
     let mut db = engine::db::SimlinDb::default();
-    let state = engine::db::sync_from_datamodel_incremental(&mut db, &project.datamodel, None);
+    let state = engine::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
     (db, state)
 }
 
@@ -550,17 +550,6 @@ pub(crate) unsafe fn sim_unref(sim: *mut SimlinSim) {
     }
 }
 
-/// Compile a project + model name into a `CompiledSimulation`.
-///
-/// Pure helper with no FFI state -- shared by `project`, `patch`, and `simulation`.
-pub(crate) fn compile_simulation(
-    project: &engine::Project,
-    model_name: &str,
-) -> std::result::Result<engine::CompiledSimulation, engine::Error> {
-    let compiler = engine::Simulation::new(project, model_name)?;
-    compiler.compile()
-}
-
 // ── tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -722,8 +711,8 @@ mod tests {
 
             // Verify we can access the project data through the mutex
             {
-                let project_locked = (*proj).project.lock().unwrap();
-                let dm = &project_locked.datamodel;
+                let datamodel_locked = (*proj).datamodel.lock().unwrap();
+                let dm = &*datamodel_locked;
                 assert_eq!(dm.models.len(), 1);
                 let model = &dm.models[0];
                 assert_eq!(model.variables.len(), 4); // population, births, deaths, birth_rate
@@ -1917,8 +1906,8 @@ mod tests {
 
                 if from == "input" && to == "output" {
                     found_link = true;
-                    // Non-loop links will have Unknown polarity since we don't analyze them
-                    assert_eq!(link.polarity, SimlinLinkPolarity::Unknown);
+                    // input appears positively in "input * 2", so polarity is Positive
+                    assert_eq!(link.polarity, SimlinLinkPolarity::Positive);
                 }
             }
             assert!(found_link, "Should find input -> output link");
@@ -2895,8 +2884,8 @@ mod tests {
             assert!(err.is_null(), "diagram_sync should succeed for SIR model");
 
             // Verify the model now has a view with elements
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
+            let datamodel_locked = (*proj).datamodel.lock().unwrap();
+            let model = datamodel_locked.get_model("main").unwrap();
             assert_eq!(model.views.len(), 1);
             match &model.views[0] {
                 engine::datamodel::View::StockFlow(sf) => {
@@ -2906,7 +2895,7 @@ mod tests {
                     );
                 }
             }
-            drop(project_locked);
+            drop(datamodel_locked);
 
             simlin_project_unref(proj);
         }
@@ -2930,8 +2919,8 @@ mod tests {
             simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
             assert!(err.is_null(), "diagram_sync should succeed");
 
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
+            let datamodel_locked = (*proj).datamodel.lock().unwrap();
+            let model = datamodel_locked.get_model("main").unwrap();
             assert_eq!(model.views.len(), 1);
             match &model.views[0] {
                 engine::datamodel::View::StockFlow(sf) => {
@@ -2945,7 +2934,7 @@ mod tests {
                     );
                 }
             }
-            drop(project_locked);
+            drop(datamodel_locked);
 
             simlin_project_unref(proj);
         }
@@ -2970,8 +2959,8 @@ mod tests {
 
             // Manually set zoom to 2.0
             {
-                let mut project_locked = (*proj).project.lock().unwrap();
-                let model = project_locked.datamodel.get_model_mut("main").unwrap();
+                let mut datamodel_locked = (*proj).datamodel.lock().unwrap();
+                let model = datamodel_locked.get_model_mut("main").unwrap();
                 if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
                     sf.zoom = 2.0;
                 }
@@ -2982,8 +2971,8 @@ mod tests {
             simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
             assert!(err.is_null());
 
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
+            let datamodel_locked = (*proj).datamodel.lock().unwrap();
+            let model = datamodel_locked.get_model("main").unwrap();
             match &model.views[0] {
                 engine::datamodel::View::StockFlow(sf) => {
                     assert!(
@@ -2993,7 +2982,7 @@ mod tests {
                     );
                 }
             }
-            drop(project_locked);
+            drop(datamodel_locked);
 
             simlin_project_unref(proj);
         }
@@ -3020,10 +3009,10 @@ mod tests {
             simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
             assert!(err.is_null());
 
-            let project_locked = (*proj).project.lock().unwrap();
-            let model = project_locked.datamodel.get_model("main").unwrap();
+            let datamodel_locked = (*proj).datamodel.lock().unwrap();
+            let model = datamodel_locked.get_model("main").unwrap();
             assert_eq!(model.views.len(), 1);
-            drop(project_locked);
+            drop(datamodel_locked);
 
             simlin_project_unref(proj);
         }
@@ -3111,4 +3100,5 @@ mod tests {
     include!("tests_remaining.rs");
     include!("tests_incremental.rs");
     include!("tests_concurrency.rs");
+    include!("tests_patch.rs");
 }

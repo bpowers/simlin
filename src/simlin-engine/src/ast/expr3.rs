@@ -188,7 +188,9 @@ impl Expr3 {
                     | Tan(e)
                     | Size(e)
                     | Stddev(e)
-                    | Sum(e) => e.references_a2a_dimension(),
+                    | Sum(e)
+                    | Previous(e)
+                    | Init(e) => e.references_a2a_dimension(),
                     Max(a, b) | Min(a, b) => {
                         a.references_a2a_dimension()
                             || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
@@ -962,6 +964,14 @@ impl<'a> Pass1Context<'a> {
                     AllocateAvailable(Box::new(new_req), Box::new(new_pp), Box::new(new_avail)),
                     req_a2a || pp_a2a || avail_a2a,
                 )
+            }
+            Previous(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Previous(Box::new(new_e)), has_a2a)
+            }
+            Init(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Init(Box::new(new_e)), has_a2a)
             }
 
             // 0-arity builtins - no A2A refs

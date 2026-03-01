@@ -85,14 +85,13 @@ unsafe fn write_bytes_to_ffi_output(
     true
 }
 
-/// Find a model by name in a locked project.
-pub(crate) fn find_model_in_project<'a>(
-    project: &'a MutexGuard<'_, engine::Project>,
+/// Find a model by name in a locked datamodel.
+pub(crate) fn find_model_in_datamodel<'a>(
+    datamodel: &'a MutexGuard<'_, datamodel::Project>,
     model_name: &str,
 ) -> Option<&'a datamodel::Model> {
     let canonical = canonicalize(model_name);
-    project
-        .datamodel
+    datamodel
         .models
         .iter()
         .find(|m| *canonicalize(&m.name) == *canonical)
@@ -184,9 +183,9 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
     };
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    let datamodel_locked = (*model_ref.project).datamodel.lock().unwrap();
 
-    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+    let dm_model = match find_model_in_datamodel(&datamodel_locked, &model_ref.model_name) {
         Some(m) => m,
         None => {
             store_error(
@@ -251,9 +250,9 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
     };
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    let datamodel_locked = (*model_ref.project).datamodel.lock().unwrap();
 
-    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+    let dm_model = match find_model_in_datamodel(&datamodel_locked, &model_ref.model_name) {
         Some(m) => m,
         None => {
             store_error(
@@ -360,7 +359,6 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
     }
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project_locked = (*model_ref.project).project.lock().unwrap();
 
     let var_name = match CStr::from_ptr(var_name).to_str() {
         Ok(s) => canonicalize(s),
@@ -374,10 +372,22 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let eng_model = match project_locked
-        .models
-        .get(&*canonicalize(&model_ref.model_name))
-    {
+    // Use salsa db for dependency lookup
+    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return;
+        }
+    };
+
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
         Some(m) => m,
         None => {
             store_error(
@@ -389,9 +399,8 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let var_ident = engine::common::Ident::<engine::common::Canonical>::new(&var_name);
-    let deps_set = match engine::get_incoming_links(eng_model, &var_ident) {
-        Some(deps) => deps,
+    let source_var = match synced_model.variables.get(var_name.as_ref()) {
+        Some(sv) => sv.source,
         None => {
             store_error(
                 out_error,
@@ -403,9 +412,29 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
             return;
         }
     };
-    let mut deps: Vec<String> = deps_set
+
+    let var_deps = engine::db::variable_direct_dependencies(&*db_locked, source_var, sync.project);
+    // Combine dt and initial deps from the variable itself plus any
+    // implicit variables. Implicit vars arise from SMOOTH/DELAY expansion
+    // and carry the transitive public deps we need.
+    let source_vars = synced_model.source.variables(&*db_locked);
+    let mut all_deps = std::collections::BTreeSet::new();
+    for dep in var_deps.dt_deps.iter().chain(var_deps.initial_deps.iter()) {
+        all_deps.insert(dep.clone());
+    }
+    // For implicit module variables, also include their dependencies
+    // (these are the public inputs to SMOOTH/DELAY modules).
+    for implicit in &var_deps.implicit_vars {
+        for dep in implicit.dt_deps.iter().chain(implicit.initial_deps.iter()) {
+            all_deps.insert(dep.clone());
+        }
+    }
+    // Filter to only include public variables -- those that exist
+    // as source variables in the model. This excludes private/synthetic
+    // names from SMOOTH/DELAY expansion.
+    let mut deps: Vec<String> = all_deps
         .into_iter()
-        .map(|ident| ident.to_string())
+        .filter(|name| source_vars.contains_key(name.as_str()))
         .collect();
     deps.sort();
 
@@ -481,12 +510,22 @@ pub unsafe extern "C" fn simlin_model_get_links(
             return ptr::null_mut();
         }
     };
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    // Use salsa db for causal edge extraction
+    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return ptr::null_mut();
+        }
+    };
 
-    let eng_model = match project_locked
-        .models
-        .get(&*canonicalize(&model_ref.model_name))
-    {
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
         Some(m) => m,
         None => {
             store_error(
@@ -498,37 +537,16 @@ pub unsafe extern "C" fn simlin_model_get_links(
         }
     };
 
-    // Collect all unique links (de-duplicate based on from-to pairs)
-    let mut unique_links = std::collections::HashMap::new();
-    for (var_name, var) in &eng_model.variables {
-        let deps = match var {
-            engine::Variable::Stock {
-                inflows, outflows, ..
-            } => {
-                let mut deps = Vec::new();
-                for flow in inflows.iter().chain(outflows.iter()) {
-                    deps.push((flow.clone(), var_name.clone()));
-                }
-                deps
-            }
-            engine::Variable::Var { ast, .. } if ast.is_some() => {
-                let deps = engine::identifier_set(ast.as_ref().unwrap(), &[], None);
-                deps.into_iter()
-                    .map(|dep| (dep, var_name.clone()))
-                    .collect()
-            }
-            engine::Variable::Module { inputs, .. } => inputs
-                .iter()
-                .map(|input| (input.src.clone(), var_name.clone()))
-                .collect(),
-            _ => Vec::new(),
-        };
+    let causal = engine::db::model_causal_edges(&*db_locked, synced_model.source, sync.project);
 
-        for (from, to) in deps {
-            let key = (from.clone(), to.clone());
+    // Convert edges HashMap<from, Set<to>> into de-duplicated links
+    let mut unique_links = std::collections::HashMap::new();
+    for (from_name, to_set) in &causal.edges {
+        for to_name in to_set {
+            let key = (from_name.clone(), to_name.clone());
             unique_links.entry(key).or_insert(engine::ltm::Link {
-                from,
-                to,
+                from: engine::common::Ident::new(from_name),
+                to: engine::common::Ident::new(to_name),
                 polarity: engine::ltm::LinkPolarity::Unknown,
             });
         }
@@ -635,30 +653,29 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         }
     };
 
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    // Use salsa db for LaTeX rendering from parsed AST
+    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => return ptr::null_mut(),
+    };
 
-    let eng_model = match project_locked
-        .models
-        .get(&*canonicalize(&model_ref.model_name))
-    {
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
         Some(m) => m,
-        None => {
-            return ptr::null_mut();
-        }
+        None => return ptr::null_mut(),
     };
 
-    let var = match eng_model.variables.get(&*ident_str) {
-        Some(v) => v,
-        None => {
-            return ptr::null_mut();
-        }
+    let source_var = match synced_model.variables.get(ident_str.as_ref()) {
+        Some(sv) => sv.source,
+        None => return ptr::null_mut(),
     };
 
-    let ast = match var.ast() {
+    let parsed = engine::db::parse_source_variable(&*db_locked, source_var, sync.project);
+    let ast = match parsed.variable.ast() {
         Some(a) => a,
-        None => {
-            return ptr::null_mut();
-        }
+        None => return ptr::null_mut(),
     };
 
     let latex = ast.to_latex();
@@ -708,7 +725,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
     }
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    let datamodel_locked = (*model_ref.project).datamodel.lock().unwrap();
 
     let name_str = match CStr::from_ptr(var_name).to_str() {
         Ok(s) => s,
@@ -723,7 +740,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
     };
     let canonical_name = canonicalize(name_str);
 
-    let dm_model = match find_model_in_project(&project_locked, &model_ref.model_name) {
+    let dm_model = match find_model_in_datamodel(&datamodel_locked, &model_ref.model_name) {
         Some(m) => m,
         None => {
             store_error(
@@ -799,15 +816,15 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
     *out_len = 0;
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project_locked = (*model_ref.project).project.lock().unwrap();
+    let datamodel_locked = (*model_ref.project).datamodel.lock().unwrap();
 
-    let dm_model = find_model_in_project(&project_locked, &model_ref.model_name);
+    let dm_model = find_model_in_datamodel(&datamodel_locked, &model_ref.model_name);
 
     // Sim specs are project-global with optional per-model overrides, so a
     // missing model name is not an error here (unlike get_var_json).
     let dm_sim_specs = dm_model
         .and_then(|m| m.sim_specs.as_ref())
-        .unwrap_or(&project_locked.datamodel.sim_specs);
+        .unwrap_or(&datamodel_locked.sim_specs);
 
     let json_sim_specs: engine::json::SimSpecs = dm_sim_specs.clone().into();
 
