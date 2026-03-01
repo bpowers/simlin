@@ -4824,7 +4824,6 @@ fn test_initial_sync_marks_stdlib_models() {
 
 // ── Phase 1 scaffolding verification tests ──────────────────────────
 
-/// AC5.4 (partial): PREVIOUS(stock) via module expansion produces identical
 /// 1-arg PREVIOUS(x) compiles to the LoadPrev opcode. Verify that
 /// interpreter and VM produce identical results, and that PREVIOUS
 /// returns 0 at the first timestep (matching the old module behavior
