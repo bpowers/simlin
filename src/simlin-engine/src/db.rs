@@ -91,8 +91,12 @@ thread_local! {
 /// non-tracked entry points (including WASM where `panic = "abort"`
 /// makes `catch_unwind` ineffective).
 ///
-/// The flag is managed by `model_all_diagnostics` via the
-/// `IN_TRACKED_CONTEXT` thread-local before calling into assembly code.
+/// Currently the flag is never set to `true`, so all calls are no-ops.
+/// Assembly errors are returned via `Result::Err` from
+/// `compile_project_incremental` and surfaced through
+/// `gather_error_details_with_db` in the patch pipeline. The flag
+/// exists as scaffolding for a future change where assembly functions
+/// may be called from within a tracked context.
 fn try_accumulate_diagnostic(db: &dyn Db, diag: Diagnostic) {
     let in_context = IN_TRACKED_CONTEXT.with(|flag| flag.get());
     if in_context {
