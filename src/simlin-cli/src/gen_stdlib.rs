@@ -435,13 +435,19 @@ fn gen_rect(r: &Rect) -> String {
 
 fn gen_stock_flow(sf: &StockFlow) -> String {
     let elems: Vec<String> = sf.elements.iter().map(gen_view_element).collect();
+    let name_str = match &sf.name {
+        Some(n) => format!("Some(\"{}\".to_string())", n),
+        None => "None".to_string(),
+    };
     format!(
         "StockFlow {{
+            name: {},
             elements: vec![{}],
             view_box: {},
             zoom: {}_f64,
             use_lettered_polarity: {},
         }}",
+        name_str,
         elems.join(",\n                "),
         gen_rect(&sf.view_box),
         sf.zoom,

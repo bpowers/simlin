@@ -104,8 +104,8 @@ fn test_sync_simple_project() {
             .model_names(&db)
             .contains(&"main".to_string())
     );
-    // 1 user model + 8 stdlib models
-    assert_eq!(result.project.model_names(&db).len(), 9);
+    // 1 user model + 7 stdlib models (init stdlib removed)
+    assert_eq!(result.project.model_names(&db).len(), 8);
 
     let sim_specs = result.project.sim_specs(&db);
     assert_eq!(sim_specs.start, 0.0);
@@ -4941,20 +4941,19 @@ fn test_init_module_expansion_interpreter_vm_parity() {
     }
 }
 
-/// AC6.4 status check: "previous" and "init" are still in MODEL_NAMES
-/// because PREVIOUS activation was deferred (see builtins_visitor.rs
-/// comment). This test documents the current state; when PREVIOUS and
-/// INIT are promoted to builtins, update this assertion.
+/// "previous" is still in MODEL_NAMES because 2-arg PREVIOUS(x, init_val)
+/// still uses module expansion. "init" was removed -- 1-arg INIT now
+/// compiles directly to LoadInitial.
 #[test]
-fn test_previous_and_init_still_in_stdlib_model_names() {
+fn test_previous_still_in_stdlib_model_names() {
     let names = crate::stdlib::MODEL_NAMES;
     assert!(
         names.contains(&"previous"),
-        "expected 'previous' in MODEL_NAMES (still module-expanded)"
+        "expected 'previous' in MODEL_NAMES (2-arg form still module-expanded)"
     );
     assert!(
-        names.contains(&"init"),
-        "expected 'init' in MODEL_NAMES (still module-expanded)"
+        !names.contains(&"init"),
+        "'init' should no longer be in MODEL_NAMES"
     );
 }
 

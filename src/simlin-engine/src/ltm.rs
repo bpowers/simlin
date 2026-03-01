@@ -129,7 +129,7 @@ impl LoopPolarity {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModuleLtmRole {
-    /// PREVIOUS, INIT -- LTM infrastructure modules, never analyze
+    /// PREVIOUS -- LTM infrastructure module, never analyze
     Infrastructure,
     /// Has internal stocks (SMOOTH, DELAY, TREND, user-defined modules with stocks)
     DynamicModule,
@@ -139,7 +139,7 @@ pub(crate) enum ModuleLtmRole {
 
 /// Classify a module model for LTM analysis.
 ///
-/// Infrastructure modules (PREVIOUS, INIT) are used BY link score equations
+/// The PREVIOUS infrastructure module is used BY link score equations
 /// and must never be analyzed to avoid infinite recursion. Dynamic modules
 /// contain stocks and need composite link scores. Stateless modules are
 /// passthroughs.
@@ -148,7 +148,7 @@ pub(crate) fn classify_module_for_ltm(
     module_model: &ModelStage1,
 ) -> ModuleLtmRole {
     let name = model_name.as_str();
-    if name == "stdlib⁚previous" || name == "stdlib⁚init" {
+    if name == "stdlib⁚previous" {
         return ModuleLtmRole::Infrastructure;
     }
     if module_model
@@ -3276,30 +3276,6 @@ mod tests {
 
         assert_eq!(
             classify_module_for_ltm(&prev_ident, prev_model),
-            ModuleLtmRole::Infrastructure
-        );
-    }
-
-    #[test]
-    fn test_classify_init_as_infrastructure() {
-        use crate::test_common::TestProject;
-
-        let project = TestProject::new("test_classify_init")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .stock("level", "50", &["adj"], &[], None)
-            .flow("adj", "(100 - level) / 5", None)
-            .compile()
-            .expect("should compile");
-
-        let ltm_project = project.with_ltm().expect("should augment with LTM");
-        let init_ident = Ident::new("stdlib⁚init");
-        let init_model = ltm_project
-            .models
-            .get(&init_ident)
-            .expect("should have stdlib⁚init model");
-
-        assert_eq!(
-            classify_module_for_ltm(&init_ident, init_model),
             ModuleLtmRole::Infrastructure
         );
     }

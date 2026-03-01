@@ -20,7 +20,6 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
         }
         "npv" => &["stream", "discount_rate", "initial_value", "factor"],
         "previous" => &["input", "initial_value"],
-        "init" => &["input"],
         _ => {
             return None;
         }
@@ -36,7 +35,7 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
             if crate::stdlib::MODEL_NAMES.contains(&func.as_str())
-                || matches!(func.as_str(), "delay" | "delayn" | "smthn")
+                || matches!(func.as_str(), "delay" | "delayn" | "smthn" | "init")
             {
                 return true;
             }
