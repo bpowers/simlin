@@ -4980,9 +4980,6 @@ pub fn assemble_module(
             model_ltm_synthetic_variables(db, model, project)
         };
 
-        let dims = project_datamodel_dims(db, project);
-        let units_ctx = project_units_context(db, project);
-
         for ltm_var in &ltm_vars.vars {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
@@ -5032,8 +5029,9 @@ pub fn assemble_module(
         // equations. These are module-type variables that need initial and
         // stock phase compilation like regular implicit modules.
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+        let ltm_module_idents = db_ltm::ltm_module_idents(db, model, project);
         for ltm_var in &ltm_vars.vars {
-            let parsed = parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+            let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
             for (idx, implicit_dm_var) in parsed.implicit_vars.iter().enumerate() {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
                 if all_fragments.contains_key(&im_name) {
@@ -5607,8 +5605,7 @@ fn enumerate_module_instances_inner(
     // enabled and exist only in the root model.
     if project.ltm_enabled(db) {
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let dims = project_datamodel_dims(db, project);
-        let units_ctx = project_units_context(db, project);
+        let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
 
         let ltm_vars = if project.ltm_discovery_mode(db) {
             model_ltm_all_link_synthetic_variables(db, *source_model, project)
@@ -5617,8 +5614,7 @@ fn enumerate_module_instances_inner(
         };
 
         for ltm_var in &ltm_vars.vars {
-            let parsed =
-                db_ltm::parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+            let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
 
             for implicit_dm_var in &parsed.implicit_vars {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
@@ -5823,9 +5819,8 @@ fn calc_flattened_offsets_incremental(
             model_ltm_synthetic_variables(db, *source_model, project)
         };
 
-        let dims = project_datamodel_dims(db, project);
-        let units_ctx = project_units_context(db, project);
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
+        let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
 
         // Add explicit LTM variables (loop scores, relative loop scores)
         for ltm_var in &ltm_vars.vars {
@@ -5840,8 +5835,7 @@ fn calc_flattened_offsets_incremental(
             }
 
             // Add implicit PREVIOUS module variables from this LTM equation
-            let parsed =
-                db_ltm::parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dims, units_ctx);
+            let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
             for implicit_dm_var in &parsed.implicit_vars {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
                 if let Some(im_meta) = ltm_implicit.get(&im_name)
