@@ -4825,18 +4825,12 @@ fn test_initial_sync_marks_stdlib_models() {
 // ── Phase 1 scaffolding verification tests ──────────────────────────
 
 /// AC5.4 (partial): PREVIOUS(stock) via module expansion produces identical
-/// results in interpreter and VM. The stock increases by a constant flow
-/// each timestep; PREVIOUS(stock) should lag by one dt.
-///
-/// This test exercises the module-expansion path that PREVIOUS currently
-/// uses. When PREVIOUS is promoted to a builtin opcode (LoadPrev), this
-/// test remains valid -- it just verifies the new codepath instead.
-///
-/// The 1-arg PREVIOUS(x) form uses initial_value=0 at t=0 (stdlib module
-/// default). At subsequent timesteps it returns x's value from the prior
-/// timestep.
+/// 1-arg PREVIOUS(x) compiles to the LoadPrev opcode. Verify that
+/// interpreter and VM produce identical results, and that PREVIOUS
+/// returns 0 at the first timestep (matching the old module behavior
+/// where initial_value defaults to 0).
 #[test]
-fn test_previous_module_expansion_interpreter_vm_parity() {
+fn test_previous_opcode_interpreter_vm_parity() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("previous_parity")
@@ -4870,14 +4864,14 @@ fn test_previous_module_expansion_interpreter_vm_parity() {
         );
     }
 
-    // The stdlib PREVIOUS module uses initial_value=0 for the 1-arg form,
+    // LoadPrev reads from prev_values which is initialized to zeros,
     // so at t=0, PREVIOUS(level) returns 0 (not level's initial value).
     let level_vals = interp
         .get("level")
         .expect("level not in interpreter results");
     assert!(
         (interp_vals[0] - 0.0).abs() < 1e-10,
-        "prev_level at t=0 should be 0 (stdlib default initial_value), got {}",
+        "prev_level at t=0 should be 0 (prev_values initialized to zeros), got {}",
         interp_vals[0]
     );
     // At subsequent steps, prev_level[t] == level[t-1]
@@ -4892,15 +4886,11 @@ fn test_previous_module_expansion_interpreter_vm_parity() {
     }
 }
 
-/// AC5.4 (partial): INIT(aux) via module expansion freezes the t=0
-/// value and returns it at every timestep. Interpreter and VM must agree.
-///
-/// Uses INIT on an aux variable (matching the existing XMILE test model
-/// pattern in test/builtin_init/). The INIT stdlib module captures the
-/// module input's value at t=0 and holds it constant via a stock with no
-/// flows.
+/// INIT(x) compiles to the LoadInitial opcode. Verify that interpreter
+/// and VM produce identical results, and that INIT freezes the t=0
+/// value correctly even in an aux-only model (no stocks).
 #[test]
-fn test_init_module_expansion_interpreter_vm_parity() {
+fn test_init_opcode_interpreter_vm_parity() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("init_parity")
@@ -5717,4 +5707,89 @@ fn test_smooth3_stock_input_initialization() {
         interp_step0, vm_step0,
         "interpreter and VM must agree on SMOOTH3 initial value"
     );
+}
+
+/// prev-init-opcodes.AC1.3: PREVIOUS(x) at the first timestep returns 0
+/// (not x's initial value). This is correct for the LoadPrev opcode path
+/// because prev_values is initialized to zeros and not seeded with
+/// post-initials state.
+#[test]
+fn test_previous_returns_zero_at_first_timestep() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("prev_zero_first_step")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("x", "42", None)
+        .aux("prev_x", "PREVIOUS(x)", None);
+
+    let vm = tp.run_vm().expect("VM should run");
+    let prev_vals = vm.get("prev_x").expect("prev_x not in results");
+
+    // At t=0, PREVIOUS(x) returns 0 (not 42)
+    assert!(
+        (prev_vals[0] - 0.0).abs() < 1e-10,
+        "PREVIOUS at t=0 should be 0, got {}",
+        prev_vals[0]
+    );
+    // At t=1+, PREVIOUS(x) returns 42 (x is constant)
+    for (step, val) in prev_vals.iter().enumerate().skip(1) {
+        assert!(
+            (val - 42.0).abs() < 1e-10,
+            "PREVIOUS at step {step} should be 42, got {val}",
+        );
+    }
+}
+
+/// prev-init-opcodes.AC3.1: 2-arg PREVIOUS(x, init_val) still uses module
+/// expansion. Verify the init_val is returned at the first timestep
+/// instead of 0 (confirming module path, not opcode path).
+#[test]
+fn test_2arg_previous_uses_module_expansion() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("prev_2arg")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "10", None)
+        .aux("prev_level", "PREVIOUS(level, 99)", None);
+
+    let vm = tp.run_vm().expect("VM should run");
+    let prev_vals = vm.get("prev_level").expect("prev_level not in results");
+
+    // At t=0, 2-arg PREVIOUS returns init_val=99 (not 0)
+    assert!(
+        (prev_vals[0] - 99.0).abs() < 1e-10,
+        "2-arg PREVIOUS at t=0 should be 99, got {}",
+        prev_vals[0]
+    );
+    // At t=1, returns level at t=0 = 100
+    assert!(
+        (prev_vals[1] - 100.0).abs() < 1e-10,
+        "2-arg PREVIOUS at t=1 should be 100, got {}",
+        prev_vals[1]
+    );
+}
+
+/// Verify INIT works in a model with no stocks or modules, where the
+/// Initials runlist extension is the only thing that ensures the
+/// referenced variable is evaluated at t=0.
+#[test]
+fn test_init_aux_only_model() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("init_aux_only")
+        .with_sim_time(1.0, 5.0, 1.0)
+        .aux("growing", "TIME * 2", None)
+        .aux("frozen", "INIT(growing)", None);
+
+    let vm = tp.run_vm().expect("VM should run");
+    let frozen_vals = vm.get("frozen").expect("frozen not in results");
+
+    // INIT(growing) should freeze growing's t=0 value: TIME*2 = 1.0*2 = 2.0
+    for (step, val) in frozen_vals.iter().enumerate() {
+        assert!(
+            (val - 2.0).abs() < 1e-10,
+            "frozen should be 2.0 at every step, got {val} at step {step}"
+        );
+    }
 }
