@@ -5003,6 +5003,194 @@ fn test_previous_of_flow_interpreter_vm_parity() {
     }
 }
 
+/// AC1.2: PREVIOUS(x[DimA]) in an arrayed equation emits per-element
+/// LoadPrev with correct offsets. Each array element should track the
+/// previous value of its own slot independently.
+///
+/// Model: DimA = {a1, a2}
+///   base_val[DimA] = apply-to-all with different values per element:
+///     a1 = 10, a2 = 20
+///   prev_val[DimA] = PREVIOUS(base_val[DimA])
+///
+/// At t=0: prev_val[a1] = 0, prev_val[a2] = 0  (LoadPrev reads zeros)
+/// At t=1: prev_val[a1] = 10, prev_val[a2] = 20 (prior step values)
+#[test]
+fn test_arrayed_1arg_previous_loadprev_per_element() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("arrayed_prev_1arg")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2"])
+        .array_with_ranges("base_val[DimA]", vec![("a1", "10"), ("a2", "20")])
+        .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA])");
+
+    // Verify compilation and simulation both succeed
+    tp.assert_compiles();
+    tp.assert_sim_builds();
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    // Access per-element time series using bracket notation.
+    // The output map contains individual element entries (e.g. "prev_val[a1]")
+    // with the full time series alongside the combined "prev_val" entry with
+    // only the last timestep.
+    let interp_a1 = interp
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in interpreter results");
+    let interp_a2 = interp
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in interpreter results");
+    let vm_a1 = vm
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in VM results");
+    let vm_a2 = vm
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in VM results");
+
+    // Interpreter and VM must agree on every step for each element.
+    for (step, (iv, vv)) in interp_a1.iter().zip(vm_a1.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a1] mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+    for (step, (iv, vv)) in interp_a2.iter().zip(vm_a2.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a2] mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // At t=0, LoadPrev reads from prev_values which is initialized to zeros.
+    assert!(
+        (interp_a1[0] - 0.0).abs() < 1e-10,
+        "prev_val[a1] at t=0 should be 0 (LoadPrev zeros), got {}",
+        interp_a1[0]
+    );
+    assert!(
+        (interp_a2[0] - 0.0).abs() < 1e-10,
+        "prev_val[a2] at t=0 should be 0 (LoadPrev zeros), got {}",
+        interp_a2[0]
+    );
+
+    // At t=1+, each element returns its own prior value (10 and 20 respectively).
+    // base_val is constant so prev_val converges to the constant value after step 1.
+    for step in 1..interp_a1.len() {
+        assert!(
+            (interp_a1[step] - 10.0).abs() < 1e-10,
+            "prev_val[a1] at step {step} should be 10, got {}",
+            interp_a1[step]
+        );
+        assert!(
+            (interp_a2[step] - 20.0).abs() < 1e-10,
+            "prev_val[a2] at step {step} should be 20, got {}",
+            interp_a2[step]
+        );
+    }
+}
+
+/// AC3.2: PREVIOUS(arrayed_var, init_val) (2-arg) creates per-element
+/// module instances for an arrayed variable. Each element's module uses the
+/// shared init_val at t=0 and tracks that element's previous value thereafter.
+///
+/// Model: DimA = {a1, a2}
+///   base_val[DimA]: a1 = 10, a2 = 20
+///   prev_val[DimA] = PREVIOUS(base_val[DimA], 99)
+///
+/// At t=0: prev_val[a1] = 99, prev_val[a2] = 99  (init_val from module)
+/// At t=1: prev_val[a1] = 10, prev_val[a2] = 20  (prior step values)
+#[test]
+fn test_arrayed_2arg_previous_per_element_modules() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("arrayed_prev_2arg")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2"])
+        .array_with_ranges("base_val[DimA]", vec![("a1", "10"), ("a2", "20")])
+        .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA], 99)");
+
+    // Verify compilation and simulation both succeed
+    tp.assert_compiles();
+    tp.assert_sim_builds();
+
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    // Access per-element time series using bracket notation.
+    let vm_a1 = vm
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in VM results");
+    let vm_a2 = vm
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in VM results");
+
+    // 2-arg PREVIOUS uses module expansion, so init_val=99 is returned at t=0
+    // (not 0 as with the LoadPrev opcode path).
+    assert!(
+        (vm_a1[0] - 99.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a1] at t=0 should be init_val=99, got {}",
+        vm_a1[0]
+    );
+    assert!(
+        (vm_a2[0] - 99.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a2] at t=0 should be init_val=99, got {}",
+        vm_a2[0]
+    );
+
+    // At t=1, each element returns its corresponding base_val from t=0.
+    // base_val[a1]=10, base_val[a2]=20, so previous values are 10 and 20.
+    assert!(
+        (vm_a1[1] - 10.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a1] at t=1 should be base_val[a1] from t=0 = 10, got {}",
+        vm_a1[1]
+    );
+    assert!(
+        (vm_a2[1] - 20.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a2] at t=1 should be base_val[a2] from t=0 = 20, got {}",
+        vm_a2[1]
+    );
+
+    // At t=2+, base_val is constant so previous values remain 10 and 20.
+    for step in 2..vm_a1.len() {
+        assert!(
+            (vm_a1[step] - 10.0).abs() < 1e-10,
+            "2-arg PREVIOUS[a1] at step {step} should be 10, got {}",
+            vm_a1[step]
+        );
+        assert!(
+            (vm_a2[step] - 20.0).abs() < 1e-10,
+            "2-arg PREVIOUS[a2] at step {step} should be 20, got {}",
+            vm_a2[step]
+        );
+    }
+
+    // Also verify that the interpreter agrees with the VM for each element.
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let interp_a1 = interp
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in interpreter results");
+    let interp_a2 = interp
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in interpreter results");
+
+    for (step, (iv, vv)) in interp_a1.iter().zip(vm_a1.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a1] interpreter/VM mismatch at step {step}: interp={iv}, vm={vv}"
+        );
+    }
+    for (step, (iv, vv)) in interp_a2.iter().zip(vm_a2.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a2] interpreter/VM mismatch at step {step}: interp={iv}, vm={vv}"
+        );
+    }
+}
+
 // --- LTM incremental compilation verification tests (Phase 2 Task 6) ---
 
 /// A linear chain model with no feedback loops: aux -> flow -> stock.
