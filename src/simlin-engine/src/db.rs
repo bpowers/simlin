@@ -1959,7 +1959,7 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
 
             let mut models = Vec::new();
             for name in &[
-                "smooth", "delay1", "delay3", "trend", "init", "previous",
+                "smooth", "delay1", "delay3", "trend", "previous",
             ] {
                 if let Some(mut dm_model) = crate::stdlib::get(name) {
                     dm_model.name = format!("stdlib\u{205A}{name}");
