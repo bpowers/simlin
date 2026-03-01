@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+use crate::alloc::allocate_available;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode,
     ModuleId, Op2, Opcode, RuntimeView, STACK_CAPACITY, TempId,
@@ -2113,8 +2114,102 @@ impl Vm {
                     }
                 }
 
-                Opcode::AllocateAvailable { .. } => {
-                    unimplemented!("AllocateAvailable opcode not yet dispatched");
+                Opcode::AllocateAvailable { write_temp_id } => {
+                    let avail = stack.pop();
+
+                    let profile_view = &view_stack[view_stack.len() - 1];
+                    let requests_view = &view_stack[view_stack.len() - 2];
+
+                    // Collect request values
+                    let req_size = requests_view.size();
+                    let req_n_dims = requests_view.dims.len();
+                    let mut requests: SmallVec<[f64; 32]> = SmallVec::with_capacity(req_size);
+                    let mut req_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; req_n_dims];
+                    for _ in 0..req_size {
+                        let flat_off = requests_view.flat_offset(&req_indices);
+                        let val = Self::read_view_element(
+                            requests_view,
+                            flat_off,
+                            curr,
+                            temp_storage,
+                            context,
+                        );
+                        requests.push(val);
+                        for d in (0..req_n_dims).rev() {
+                            req_indices[d] += 1;
+                            if req_indices[d] < requests_view.dims[d] {
+                                break;
+                            }
+                            req_indices[d] = 0;
+                        }
+                    }
+
+                    let n = requests.len();
+
+                    // Collect profile values (flat 2D array: n requesters x pp_cols)
+                    let pp_size = profile_view.size();
+                    let pp_n_dims = profile_view.dims.len();
+                    let mut pp_values: SmallVec<[f64; 32]> = SmallVec::with_capacity(pp_size);
+                    let mut pp_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; pp_n_dims];
+                    for _ in 0..pp_size {
+                        let flat_off = profile_view.flat_offset(&pp_indices);
+                        let val = Self::read_view_element(
+                            profile_view,
+                            flat_off,
+                            curr,
+                            temp_storage,
+                            context,
+                        );
+                        pp_values.push(val);
+                        for d in (0..pp_n_dims).rev() {
+                            pp_indices[d] += 1;
+                            if pp_indices[d] < profile_view.dims[d] {
+                                break;
+                            }
+                            pp_indices[d] = 0;
+                        }
+                    }
+
+                    // Build profile tuples from flat array
+                    let pp_cols = if !pp_values.is_empty() && n > 0 && pp_size.is_multiple_of(n) {
+                        pp_size / n
+                    } else {
+                        4
+                    };
+
+                    let mut profiles: SmallVec<[(f64, f64, f64, f64); 32]> =
+                        SmallVec::with_capacity(n);
+                    for i in 0..n {
+                        let base = i * pp_cols;
+                        let ptype = if base < pp_values.len() {
+                            pp_values[base]
+                        } else {
+                            0.0
+                        };
+                        let ppriority = if base + 1 < pp_values.len() {
+                            pp_values[base + 1]
+                        } else {
+                            0.0
+                        };
+                        let pwidth = if base + 2 < pp_values.len() {
+                            pp_values[base + 2]
+                        } else {
+                            1.0
+                        };
+                        let pextra = if base + 3 < pp_values.len() {
+                            pp_values[base + 3]
+                        } else {
+                            0.0
+                        };
+                        profiles.push((ptype, ppriority, pwidth, pextra));
+                    }
+
+                    let result = allocate_available(&requests, &profiles, avail);
+
+                    let temp_off = context.temp_offsets[*write_temp_id as usize];
+                    for (i, &val) in result.iter().enumerate() {
+                        temp_storage[temp_off + i] = val;
+                    }
                 }
             }
 
