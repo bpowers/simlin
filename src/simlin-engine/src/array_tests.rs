@@ -3973,3 +3973,69 @@ mod toplevel_default_nested_override_tests {
         );
     }
 }
+
+/// When the default uses one array-producing builtin and an override uses a
+/// completely different one (e.g., VEM vs VSO), each must get its own AssignTemp
+/// blocks with independent temp IDs.
+mod different_builtin_override_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            // Override element 3: vector_sort_order(source[*], 1) -> [1, 2, 3]
+            // Element 3 should be VSO[2] = 3
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("3", "vector_sort_order(source[*], 1)")],
+            )
+    }
+
+    #[test]
+    fn different_builtin_override_interpreter() {
+        let project = make_project("diff_builtin_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 3.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 3, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn different_builtin_override_vm() {
+        let project = make_project("diff_builtin_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 3.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 3, got {}",
+            vals[2]
+        );
+    }
+}

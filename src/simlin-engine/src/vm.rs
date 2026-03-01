@@ -1947,7 +1947,8 @@ impl Vm {
                     let expr_view = &view_stack[view_stack.len() - 1];
                     let sel_view = &view_stack[view_stack.len() - 2];
 
-                    let size = sel_view.size();
+                    // Match interpreter's zip semantics: stop at the shorter array
+                    let size = sel_view.size().min(expr_view.size());
                     let n_dims = sel_view.dims.len();
 
                     let mut selected: SmallVec<[f64; 32]> = SmallVec::new();

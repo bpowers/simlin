@@ -1285,9 +1285,7 @@ fn expand_arrayed_hoisted(
     if contains_array_producing_builtin(&main_expr) {
         let base_temp_id = next_available_temp_id(&first_exprs);
 
-        // Build AssignTemp blocks from the hoisting expression. This lowering
-        // discovers and creates the temp assignments; per-element AssignCurr
-        // is handled in the loop below (including element 0).
+        // Build AssignTemp blocks from the hoisting expression.
         // replace_nested_builtins_for_element handles both top-level builtins
         // (the entire expression IS a builtin) and nested builtins (a builtin
         // wrapped in arithmetic), so we don't need separate branches.
@@ -1304,6 +1302,12 @@ fn expand_arrayed_hoisted(
 
         let mut result = first_exprs;
         result.extend(hoisted);
+
+        // Track which ASTs have had their temps emitted, keyed by pointer.
+        // All elements using the default equation share one set of temps;
+        // each distinct override gets its own AssignTemp blocks.
+        let mut ast_temp_bases: HashMap<*const crate::ast::Expr2, u32> = HashMap::new();
+        ast_temp_bases.insert(hoisting_ast as *const _, base_temp_id);
 
         for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
             let key = CanonicalElementName::from_raw(&subscripts.join(","));
@@ -1323,15 +1327,37 @@ fn expand_arrayed_hoisted(
             };
 
             if uses_hoisted {
-                // Use each element's OWN AST so that override-specific
-                // wrapping (e.g. different constants around the same builtin)
-                // is preserved. The unwrap is safe: uses_hoisted is only true
-                // when elem_ast is Some.
                 let ast = elem_ast.unwrap();
+                let ast_ptr = ast as *const crate::ast::Expr2;
+
+                // If this AST hasn't been seen before (different override),
+                // emit its own AssignTemp blocks with fresh temp IDs.
+                let elem_base_tid = if let Some(&tid) = ast_temp_bases.get(&ast_ptr) {
+                    tid
+                } else {
+                    let disc_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+                    let mut disc_exprs = disc_ctx.lower_preserving_dimensions(ast)?;
+                    let disc_main = disc_exprs.pop().unwrap();
+                    let new_base = temp_id;
+                    result.extend(disc_exprs);
+                    let mut new_hoisted = Vec::new();
+                    let _ = replace_nested_builtins_for_element(
+                        disc_main,
+                        i,
+                        &var_view,
+                        &mut temp_id,
+                        &mut new_hoisted,
+                        true,
+                    );
+                    result.extend(new_hoisted);
+                    ast_temp_bases.insert(ast_ptr, new_base);
+                    new_base
+                };
+
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                 let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
                 let elem_main = elem_exprs.pop().unwrap();
-                let mut tid = base_temp_id;
+                let mut tid = elem_base_tid;
                 let mut unused = Vec::new();
                 let elem_rewritten = replace_nested_builtins_for_element(
                     elem_main,
