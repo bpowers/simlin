@@ -4093,3 +4093,62 @@ mod vector_op_invalid_view_tests {
         );
     }
 }
+
+/// When a vector builtin's scalar argument depends on the active A2A dimension,
+/// each element must be hoisted with its own AssignTemp (per-element hoisting).
+/// Without this, the first element's scalar value is reused for all elements.
+#[cfg(test)]
+mod dimension_dependent_scalar_arg_tests {
+    use crate::test_common::TestProject;
+
+    fn make_vso_dim_dep_project(name: &str) -> TestProject {
+        // vals = [10, 30, 20], dir = [-1, 1, 1]
+        // result[D] = vector_sort_order(vals[*], dir[D])
+        //
+        // Element 0 (dir=-1, descending): sort_order = [2, 3, 1] -> result[0] = 2
+        // Element 1 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[1] = 3
+        // Element 2 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[2] = 2
+        //
+        // Without fix (all use dir[0]=-1): sort_order = [2, 3, 1] -> result[2] = 1
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
+            .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
+            .array_aux("result[D]", "vector_sort_order(vals[*], dir[D])")
+    }
+
+    fn assert_vso_dim_dep_results(vals: &[f64]) {
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 2.0).abs() < 1e-9,
+            "result[0] (desc): expected 2, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 3.0).abs() < 1e-9,
+            "result[1] (asc): expected 3, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 2.0).abs() < 1e-9,
+            "result[2] (asc): expected 2, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn vso_direction_varies_by_dimension_vm() {
+        let project = make_vso_dim_dep_project("vso_dim_dep_vm");
+        project.assert_compiles();
+        project.assert_sim_builds();
+        assert_vso_dim_dep_results(&project.vm_result("result"));
+    }
+
+    #[test]
+    fn vso_direction_varies_by_dimension_interpreter() {
+        let project = make_vso_dim_dep_project("vso_dim_dep_interp");
+        project.assert_compiles();
+        project.assert_sim_builds();
+        assert_vso_dim_dep_results(&project.interpreter_result("result"));
+    }
+}

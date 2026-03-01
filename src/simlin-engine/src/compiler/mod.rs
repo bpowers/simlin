@@ -1219,10 +1219,38 @@ fn expand_a2a_hoisted(
     main_expr: Expr,
 ) -> Result<Vec<Expr>> {
     if is_array_producing_builtin(&main_expr) {
+        let total_elements: usize = dims.iter().map(|d| d.len()).product();
+
+        // Check whether scalar arguments depend on the active dimension by
+        // comparing lowered expressions for element 0 vs element 1.  When they
+        // differ (e.g. direction arg varies per element), each element needs
+        // its own AssignTemp so the builtin is re-evaluated with correct args.
+        let needs_per_element = if total_elements >= 2 {
+            let second_subscripts: Vec<String> =
+                SubscriptIterator::new(dims).nth(1).unwrap_or_default();
+            let second_ctx = ctx.with_active_subscripts(active_dims.clone(), &second_subscripts);
+            let mut second_exprs = second_ctx.lower_preserving_dimensions(ast)?;
+            let second_main = second_exprs.pop().unwrap();
+            main_expr != second_main
+        } else {
+            false
+        };
+
+        if needs_per_element {
+            return expand_a2a_per_element_hoisted(
+                ctx,
+                dims,
+                ast,
+                off,
+                active_dims,
+                first_exprs,
+                main_expr,
+            );
+        }
+
         let temp_id = next_available_temp_id(&first_exprs);
         let var_view = array_view_from_dims(dims);
         let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
-        let total_elements: usize = dims.iter().map(|d| d.len()).product();
         let loc = main_expr.get_loc();
 
         let mut result = first_exprs;
@@ -1293,6 +1321,58 @@ fn expand_a2a_hoisted(
     } else {
         unreachable!("expand_a2a_hoisted called without array-producing builtin")
     }
+}
+
+/// Per-element hoisting for array-producing builtins whose scalar arguments
+/// depend on the active dimension (e.g. `vector_sort_order(vals[*], dir[D])`).
+/// Each element gets its own AssignTemp so the builtin is re-evaluated with
+/// the correct scalar argument value for that element.
+#[allow(clippy::too_many_arguments)]
+fn expand_a2a_per_element_hoisted(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    off: usize,
+    active_dims: &Arc<[Dimension]>,
+    first_exprs: Vec<Expr>,
+    first_main_expr: Expr,
+) -> Result<Vec<Expr>> {
+    let var_view = array_view_from_dims(dims);
+    let total_elements: usize = dims.iter().map(|d| d.len()).product();
+    let base_temp_id = next_available_temp_id(&first_exprs);
+
+    let mut result = first_exprs;
+
+    for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
+        let main_expr = if i == 0 {
+            first_main_expr.clone()
+        } else {
+            let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+            let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+            elem_exprs.pop().unwrap()
+        };
+
+        let temp_id = base_temp_id + i as u32;
+        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
+        let loc = main_expr.get_loc();
+        let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
+
+        result.push(Expr::AssignTemp(
+            temp_id,
+            Box::new(main_expr),
+            builtin_view.clone(),
+        ));
+        result.push(Expr::AssignCurr(
+            off + i,
+            Box::new(Expr::TempArrayElement(temp_id, builtin_view, temp_idx, loc)),
+        ));
+    }
+
+    // Ensure temp IDs don't collide: reserve total_elements temp slots.
+    // The next_available_temp_id callers after this will see base_temp_id + total_elements.
+    let _ = total_elements;
+
+    Ok(result)
 }
 
 /// Handle Arrayed equations where the hoisting equation coexists with
