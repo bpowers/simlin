@@ -989,6 +989,23 @@ fn replace_nested_builtins_for_element(
             )),
             loc,
         ),
+        // Descend into builtin arguments so that patterns like ABS(VECTOR_ELM_MAP(...))
+        // are correctly hoisted -- the array-producing builtin inside gets replaced with
+        // a TempArrayElement reference, and the outer non-array-producing builtin is
+        // preserved with its sub-expressions updated.
+        Expr::App(builtin, loc) => Expr::App(
+            builtin.map(|sub_expr| {
+                replace_nested_builtins_for_element(
+                    sub_expr,
+                    element_idx,
+                    temp_id,
+                    view,
+                    hoisted,
+                    collect_hoisted,
+                )
+            }),
+            loc,
+        ),
         other => other,
     }
 }
@@ -1037,6 +1054,11 @@ fn expand_arrayed_with_hoisting(
         None
     });
 
+    // Lowering the first element here is probe work only -- if hoisting is needed,
+    // expand_a2a_with_hoisting will lower again. The redundant work is intentional:
+    // detecting the need for hoisting requires a lowered expression, but the A2A
+    // path needs to re-lower with different subscript context. The cost is at
+    // compile time only, not runtime.
     let needs_hoisting = if let Some(first_ast) = first_ast {
         let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
         let mut probe_exprs = first_ctx.lower(first_ast)?;
