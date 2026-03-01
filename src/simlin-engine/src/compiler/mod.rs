@@ -1313,6 +1313,25 @@ fn expand_a2a_hoisted(
                 let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
                 let elem_main = elem_exprs.pop().unwrap();
 
+                // Preserve pre-expressions; remap with a consistent base.
+                let remap_base = temp_id;
+                if !elem_exprs.is_empty() {
+                    let remapped: Vec<_> = elem_exprs
+                        .into_iter()
+                        .map(|e| remap_temp_ids(e, remap_base))
+                        .collect();
+                    for e in &remapped {
+                        if let Some(max) = find_max_temp_id(e) {
+                            temp_id = temp_id.max(max + 1);
+                        }
+                    }
+                    result.extend(remapped);
+                }
+                let elem_main = remap_temp_ids(elem_main, remap_base);
+                if let Some(max) = find_max_temp_id(&elem_main) {
+                    temp_id = temp_id.max(max + 1);
+                }
+
                 let mut hoisted = Vec::new();
                 let elem_rewritten = replace_nested_builtins_for_element(
                     elem_main,
@@ -1384,16 +1403,40 @@ fn expand_a2a_per_element_hoisted(
 
     let mut result = first_exprs;
 
+    let mut next_tid = base_temp_id;
+
     for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
         let main_expr = if i == 0 {
             first_main_expr.clone()
         } else {
             let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
             let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
-            elem_exprs.pop().unwrap()
+            let main = elem_exprs.pop().unwrap();
+            // Preserve pre-expressions (e.g. intermediate temps from complex
+            // subexpressions). Remap with a consistent base so temp refs in
+            // the main expression stay aligned with pre-expression definitions.
+            let remap_base = next_tid;
+            if !elem_exprs.is_empty() {
+                let remapped: Vec<_> = elem_exprs
+                    .into_iter()
+                    .map(|e| remap_temp_ids(e, remap_base))
+                    .collect();
+                for e in &remapped {
+                    if let Some(max) = find_max_temp_id(e) {
+                        next_tid = next_tid.max(max + 1);
+                    }
+                }
+                result.extend(remapped);
+            }
+            let main = remap_temp_ids(main, remap_base);
+            if let Some(max) = find_max_temp_id(&main) {
+                next_tid = next_tid.max(max + 1);
+            }
+            main
         };
 
-        let temp_id = base_temp_id + i as u32;
+        let temp_id = next_tid;
+        next_tid = temp_id + 1;
         let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
         let loc = main_expr.get_loc();
         let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
@@ -1511,6 +1554,25 @@ fn expand_arrayed_hoisted(
                     let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                     let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
                     let elem_main = elem_exprs.pop().unwrap();
+
+                    // Preserve pre-expressions; remap with a consistent base.
+                    let remap_base = temp_id;
+                    if !elem_exprs.is_empty() {
+                        let remapped: Vec<_> = elem_exprs
+                            .into_iter()
+                            .map(|e| remap_temp_ids(e, remap_base))
+                            .collect();
+                        for e in &remapped {
+                            if let Some(max) = find_max_temp_id(e) {
+                                temp_id = temp_id.max(max + 1);
+                            }
+                        }
+                        result.extend(remapped);
+                    }
+                    let elem_main = remap_temp_ids(elem_main, remap_base);
+                    if let Some(max) = find_max_temp_id(&elem_main) {
+                        temp_id = temp_id.max(max + 1);
+                    }
 
                     let mut hoisted = Vec::new();
                     let elem_rewritten = replace_nested_builtins_for_element(
