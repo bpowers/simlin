@@ -844,6 +844,72 @@ fn project_var_index_to_temp(var_idx: usize, var_view: &ArrayView, temp_view: &A
     temp_idx
 }
 
+/// Offset all temp-related IDs (AssignTemp, TempArray, TempArrayElement) in an
+/// expression by `offset` so they don't collide with previously emitted temps.
+fn remap_temp_ids(expr: Expr, offset: u32) -> Expr {
+    if offset == 0 {
+        return expr;
+    }
+    match expr {
+        Expr::AssignTemp(id, inner, view) => {
+            Expr::AssignTemp(id + offset, Box::new(remap_temp_ids(*inner, offset)), view)
+        }
+        Expr::TempArray(id, view, loc) => Expr::TempArray(id + offset, view, loc),
+        Expr::TempArrayElement(id, view, idx, loc) => {
+            Expr::TempArrayElement(id + offset, view, idx, loc)
+        }
+        Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
+            op,
+            Box::new(remap_temp_ids(*lhs, offset)),
+            Box::new(remap_temp_ids(*rhs, offset)),
+            loc,
+        ),
+        Expr::Op1(op, inner, loc) => Expr::Op1(op, Box::new(remap_temp_ids(*inner, offset)), loc),
+        Expr::If(cond, t, f, loc) => Expr::If(
+            Box::new(remap_temp_ids(*cond, offset)),
+            Box::new(remap_temp_ids(*t, offset)),
+            Box::new(remap_temp_ids(*f, offset)),
+            loc,
+        ),
+        Expr::App(builtin, loc) => Expr::App(builtin.map(|e| remap_temp_ids(e, offset)), loc),
+        Expr::AssignCurr(off, inner) => {
+            Expr::AssignCurr(off, Box::new(remap_temp_ids(*inner, offset)))
+        }
+        other => other,
+    }
+}
+
+/// Find the highest temp ID referenced in an expression, if any.
+fn find_max_temp_id(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::AssignTemp(id, inner, _) => Some((*id).max(find_max_temp_id(inner).unwrap_or(*id))),
+        Expr::TempArray(id, _, _) | Expr::TempArrayElement(id, _, _, _) => Some(*id),
+        Expr::Op2(_, lhs, rhs, _) => match (find_max_temp_id(lhs), find_max_temp_id(rhs)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, None) | (None, a) => a,
+        },
+        Expr::Op1(_, inner, _) | Expr::AssignCurr(_, inner) => find_max_temp_id(inner),
+        Expr::If(cond, t, f, _) => [
+            find_max_temp_id(cond),
+            find_max_temp_id(t),
+            find_max_temp_id(f),
+        ]
+        .into_iter()
+        .flatten()
+        .max(),
+        Expr::App(builtin, _) => {
+            let mut max_id = None;
+            builtin.for_each_expr_ref(|e| {
+                if let Some(id) = find_max_temp_id(e) {
+                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
+                }
+            });
+            max_id
+        }
+        _ => None,
+    }
+}
+
 /// Recursively check whether any subexpression is an array-producing builtin.
 fn contains_array_producing_builtin(expr: &Expr) -> bool {
     if is_array_producing_builtin(expr) {
@@ -865,47 +931,13 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
 }
 
 fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
-    match builtin {
-        BuiltinFn::Abs(e)
-        | BuiltinFn::Arccos(e)
-        | BuiltinFn::Arcsin(e)
-        | BuiltinFn::Arctan(e)
-        | BuiltinFn::Cos(e)
-        | BuiltinFn::Exp(e)
-        | BuiltinFn::Int(e)
-        | BuiltinFn::Ln(e)
-        | BuiltinFn::Log10(e)
-        | BuiltinFn::Sign(e)
-        | BuiltinFn::Sin(e)
-        | BuiltinFn::Sqrt(e)
-        | BuiltinFn::Tan(e) => contains_array_producing_builtin(e),
-        BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-            contains_array_producing_builtin(a)
-                || b.as_ref()
-                    .is_some_and(|b| contains_array_producing_builtin(b))
+    let mut found = false;
+    builtin.for_each_expr_ref(|e| {
+        if !found && contains_array_producing_builtin(e) {
+            found = true;
         }
-        BuiltinFn::SafeDiv(a, b, c) => {
-            contains_array_producing_builtin(a)
-                || contains_array_producing_builtin(b)
-                || c.as_ref()
-                    .is_some_and(|c| contains_array_producing_builtin(c))
-        }
-        BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) => {
-            contains_array_producing_builtin(a)
-                || contains_array_producing_builtin(b)
-                || c.as_ref()
-                    .is_some_and(|c| contains_array_producing_builtin(c))
-        }
-        BuiltinFn::Sshape(a, b, c) => {
-            contains_array_producing_builtin(a)
-                || contains_array_producing_builtin(b)
-                || contains_array_producing_builtin(c)
-        }
-        BuiltinFn::Quantum(a, b) | BuiltinFn::Step(a, b) => {
-            contains_array_producing_builtin(a) || contains_array_producing_builtin(b)
-        }
-        _ => false,
-    }
+    });
+    found
 }
 
 /// Replace array-producing builtins in an expression tree with
@@ -1372,6 +1404,23 @@ fn expand_arrayed_hoisted(
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                 let mut elem_exprs = elem_ctx.lower(ast)?;
                 let elem_main = elem_exprs.pop().unwrap();
+                // lower() restarts temp IDs at 0 for each call. Remap any
+                // temp IDs produced here so they don't collide with the
+                // hoisted temps that occupy IDs [0, temp_id).
+                let elem_exprs: Vec<_> = elem_exprs
+                    .into_iter()
+                    .map(|e| remap_temp_ids(e, temp_id))
+                    .collect();
+                let elem_main = remap_temp_ids(elem_main, temp_id);
+                // Advance temp_id past any remapped IDs
+                for e in &elem_exprs {
+                    if let Some(max) = find_max_temp_id(e) {
+                        temp_id = temp_id.max(max + 1);
+                    }
+                }
+                if let Some(max) = find_max_temp_id(&elem_main) {
+                    temp_id = temp_id.max(max + 1);
+                }
                 result.extend(elem_exprs);
                 result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
             } else {
