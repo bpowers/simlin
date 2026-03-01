@@ -127,6 +127,23 @@ fn nested_vector_elm_map_inside_max_vm() {
 }
 
 #[test]
+fn scalar_max_with_vector_elm_map_returns_structured_vm_compile_error() {
+    let project = TestProject::new("vem_scalar_max_vm_error")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .scalar_aux("result", "max(vector_elm_map(source[*], offsets[*]), 15)");
+
+    let err = project
+        .run_vm()
+        .expect_err("scalar max(vector_elm_map(...), 15) should fail with a compile error");
+    assert!(
+        err.contains("array-producing builtin outside AssignTemp context"),
+        "expected structured compile error, got: {err}"
+    );
+}
+
+#[test]
 fn nested_vector_elm_map_inside_sum_interpreter() {
     // source = [10, 20, 30], offsets = [2, 0, 1] => VEM = [30, 10, 20]
     // SUM(VEM) = 60

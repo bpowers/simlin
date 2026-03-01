@@ -752,10 +752,10 @@ impl Var {
     }
 }
 
-/// For scalar equations, rewrite nested array-producing builtins into
-/// AssignTemp + TempArray so reducers (SUM/MEAN/etc.) consume full arrays.
-/// This mirrors A2A nested hoisting semantics without introducing element
-/// projection in non-A2A contexts.
+/// For scalar equations, hoist nested array-producing builtins only where the
+/// parent expects an array value (reducers/vector array args). Scalar-argument
+/// positions are left unchanged so existing structured compile errors are
+/// preserved instead of forcing scalar-element rewrites.
 fn hoist_nested_array_builtins_in_scalar(main_expr: Expr, exprs: &mut Vec<Expr>) -> Expr {
     if is_array_producing_builtin(&main_expr) || !contains_array_producing_builtin(&main_expr) {
         return main_expr;
@@ -771,7 +771,7 @@ fn hoist_nested_array_builtins_in_scalar(main_expr: Expr, exprs: &mut Vec<Expr>)
         &mut temp_id,
         &mut hoisted,
         true,
-        NestedBuiltinArgMode::ArrayValue,
+        NestedBuiltinArgMode::ScalarContext,
     );
     exprs.extend(hoisted);
     rewritten
@@ -1028,9 +1028,23 @@ fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
 enum NestedBuiltinArgMode {
     /// Expression is consumed as a scalar for the current A2A element.
     ScalarElement,
+    /// Expression is consumed as a scalar in non-A2A context; nested
+    /// array-producing builtins should remain untouched in this position.
+    ScalarContext,
     /// Expression is consumed as an array value (e.g., SUM arg) and must keep
     /// full-array semantics.
     ArrayValue,
+}
+
+impl NestedBuiltinArgMode {
+    fn scalar_child_mode(self) -> Self {
+        match self {
+            NestedBuiltinArgMode::ScalarElement | NestedBuiltinArgMode::ArrayValue => {
+                NestedBuiltinArgMode::ScalarElement
+            }
+            NestedBuiltinArgMode::ScalarContext => NestedBuiltinArgMode::ScalarContext,
+        }
+    }
 }
 
 fn replace_nested_builtins_for_element(
@@ -1043,6 +1057,9 @@ fn replace_nested_builtins_for_element(
     arg_mode: NestedBuiltinArgMode,
 ) -> Expr {
     if is_array_producing_builtin(&expr) {
+        if matches!(arg_mode, NestedBuiltinArgMode::ScalarContext) {
+            return expr;
+        }
         let id = *temp_id;
         *temp_id += 1;
         let loc = expr.get_loc();
@@ -1056,6 +1073,9 @@ fn replace_nested_builtins_for_element(
                 Expr::TempArrayElement(id, builtin_view, element_idx, loc)
             }
             NestedBuiltinArgMode::ArrayValue => Expr::TempArray(id, builtin_view, loc),
+            NestedBuiltinArgMode::ScalarContext => {
+                unreachable!("ScalarContext array builtins should return without rewriting")
+            }
         };
     }
     match expr {
@@ -1127,6 +1147,7 @@ fn replace_nested_builtins_for_element(
         // Descend into builtin arguments while preserving whether each argument
         // expects a scalar element or a full array value.
         Expr::App(builtin, loc) => {
+            let scalar_child_mode = arg_mode.scalar_child_mode();
             let rewritten = match builtin {
                 BuiltinFn::Sum(arg) => {
                     BuiltinFn::Sum(Box::new(replace_nested_builtins_for_element(
@@ -1217,7 +1238,7 @@ fn replace_nested_builtins_for_element(
                                 temp_id,
                                 hoisted,
                                 collect_hoisted,
-                                NestedBuiltinArgMode::ScalarElement,
+                                scalar_child_mode,
                             )),
                             b.map(|c| {
                                 Box::new(replace_nested_builtins_for_element(
@@ -1227,7 +1248,7 @@ fn replace_nested_builtins_for_element(
                                     temp_id,
                                     hoisted,
                                     collect_hoisted,
-                                    NestedBuiltinArgMode::ScalarElement,
+                                    scalar_child_mode,
                                 ))
                             }),
                         )
@@ -1260,7 +1281,7 @@ fn replace_nested_builtins_for_element(
                             temp_id,
                             hoisted,
                             collect_hoisted,
-                            NestedBuiltinArgMode::ScalarElement,
+                            scalar_child_mode,
                         )),
                         Box::new(replace_nested_builtins_for_element(
                             *action,
@@ -1269,7 +1290,7 @@ fn replace_nested_builtins_for_element(
                             temp_id,
                             hoisted,
                             collect_hoisted,
-                            NestedBuiltinArgMode::ScalarElement,
+                            scalar_child_mode,
                         )),
                         Box::new(replace_nested_builtins_for_element(
                             *error_handling,
@@ -1278,7 +1299,7 @@ fn replace_nested_builtins_for_element(
                             temp_id,
                             hoisted,
                             collect_hoisted,
-                            NestedBuiltinArgMode::ScalarElement,
+                            scalar_child_mode,
                         )),
                     )
                 }
@@ -1320,7 +1341,7 @@ fn replace_nested_builtins_for_element(
                             temp_id,
                             hoisted,
                             collect_hoisted,
-                            NestedBuiltinArgMode::ScalarElement,
+                            scalar_child_mode,
                         )),
                     )
                 }
@@ -1351,7 +1372,7 @@ fn replace_nested_builtins_for_element(
                             temp_id,
                             hoisted,
                             collect_hoisted,
-                            NestedBuiltinArgMode::ScalarElement,
+                            scalar_child_mode,
                         )),
                     )
                 }
