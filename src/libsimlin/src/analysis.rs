@@ -215,6 +215,10 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 
     let causal = engine::db::model_causal_edges(&*db_locked, synced_model.source, sync.project);
 
+    // Compute per-link polarity from variable ASTs before dropping locks.
+    let polarities =
+        engine::db::compute_link_polarities(&*db_locked, synced_model.source, sync.project);
+
     // Build unique links from causal edges (from_var -> {to_var, ...})
     let mut unique_links = std::collections::HashMap::new();
     for (from_name, to_set) in &causal.edges {
@@ -300,10 +304,16 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
             (ptr::null_mut(), 0)
         };
 
+        let polarity = match polarities.get(&(from_name.clone(), to_name.clone())) {
+            Some(engine::ltm::LinkPolarity::Positive) => SimlinLinkPolarity::Positive,
+            Some(engine::ltm::LinkPolarity::Negative) => SimlinLinkPolarity::Negative,
+            _ => SimlinLinkPolarity::Unknown,
+        };
+
         c_links.push(SimlinLink {
             from,
             to,
-            polarity: SimlinLinkPolarity::Unknown,
+            polarity,
             score: score_ptr,
             score_len,
         });

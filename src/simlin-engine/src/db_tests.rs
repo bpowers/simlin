@@ -5341,3 +5341,258 @@ fn test_ltm_incremental_simulation_produces_scores() {
         "loop scores should have at least one non-zero value for a feedback model"
     );
 }
+
+#[test]
+fn compute_link_polarities_stock_flow_model() {
+    // A stock-flow model where "births" feeds into "population" (positive)
+    // and "population" drives "deaths" (positive dependency).
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec!["deaths".to_string()],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar("population * 0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "deaths".to_string(),
+                    equation: datamodel::Equation::Scalar("population * 0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models.get("main").unwrap().source;
+
+    let polarities = compute_link_polarities(&db, source_model, sync.project);
+
+    // births -> population: positive (inflow)
+    let births_to_pop = polarities.get(&("births".to_string(), "population".to_string()));
+    assert_eq!(
+        births_to_pop,
+        Some(&crate::ltm::LinkPolarity::Positive),
+        "inflow should have positive polarity"
+    );
+
+    // deaths -> population: negative (outflow)
+    let deaths_to_pop = polarities.get(&("deaths".to_string(), "population".to_string()));
+    assert_eq!(
+        deaths_to_pop,
+        Some(&crate::ltm::LinkPolarity::Negative),
+        "outflow should have negative polarity"
+    );
+
+    // population -> births: positive (appears positively in births equation)
+    let pop_to_births = polarities.get(&("population".to_string(), "births".to_string()));
+    assert_eq!(
+        pop_to_births,
+        Some(&crate::ltm::LinkPolarity::Positive),
+        "population appears positively in births equation"
+    );
+
+    // population -> deaths: positive (appears positively in deaths equation)
+    let pop_to_deaths = polarities.get(&("population".to_string(), "deaths".to_string()));
+    assert_eq!(
+        pop_to_deaths,
+        Some(&crate::ltm::LinkPolarity::Positive),
+        "population appears positively in deaths equation"
+    );
+}
+
+#[test]
+fn compute_link_polarities_negative_dependency() {
+    // "effect" = 100 - "cause", so cause has a negative effect on effect.
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "cause".to_string(),
+                    equation: datamodel::Equation::Scalar("50".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "effect".to_string(),
+                    equation: datamodel::Equation::Scalar("100 - cause".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models.get("main").unwrap().source;
+
+    let polarities = compute_link_polarities(&db, source_model, sync.project);
+
+    let cause_to_effect = polarities.get(&("cause".to_string(), "effect".to_string()));
+    assert_eq!(
+        cause_to_effect,
+        Some(&crate::ltm::LinkPolarity::Negative),
+        "subtracted variable should have negative polarity"
+    );
+}
+
+/// Regression test: PREVIOUS(SELF, expr) where expr depends on another
+/// variable. The initials runlist must include transitive deps of implicit
+/// variables so the stdlib module's stock is initialized correctly.
+#[test]
+fn test_previous_self_initial_value() {
+    // F = IF Time = 5 THEN 2 ELSE PREVIOUS(SELF, IF switch = 1 THEN 1 ELSE 0)
+    // At step 0, PREVIOUS(SELF, 1) should return 1, not 0.
+    let project = datamodel::Project {
+        name: "test_previous".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: Some("months".to_string()),
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "switch".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "f".to_string(),
+                    equation: datamodel::Equation::Scalar(
+                        "IF Time = 5 THEN 2 ELSE PREVIOUS(SELF, IF switch = 1 THEN 1 ELSE 0)"
+                            .to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    // Verify the initials runlist includes switch (transitive dep of the
+    // implicit intermediate variable $:f:0:arg1).
+    let source_model = sync.models.get("main").unwrap().source_model;
+    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+    assert!(
+        dep_graph.runlist_initials.contains(&"switch".to_string()),
+        "switch must be in the initials runlist so the PREVIOUS module's \
+         stock is initialized after switch is computed"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let f_off = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_ref() == "f")
+        .map(|(_, v)| *v)
+        .expect("f should be in results");
+
+    assert_eq!(
+        results.data[f_off], 1.0,
+        "f at step 0 should be 1 (PREVIOUS initial value from IF switch=1 THEN 1 ELSE 0)"
+    );
+
+    // At step 5, F = 2 (the IF Time = 5 branch)
+    let stride = results.offsets.len();
+    assert_eq!(
+        results.data[5 * stride + f_off],
+        2.0,
+        "f at step 5 should be 2 (IF Time = 5 THEN 2 branch)"
+    );
+}

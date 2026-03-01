@@ -21,8 +21,8 @@ mod db_analysis;
 use db_analysis::*;
 pub use db_analysis::{
     CausalEdgesResult, CyclePartitionsResult, DetectedLoop, DetectedLoopPolarity,
-    DetectedLoopsResult, LoopCircuitsResult, model_causal_edges, model_cycle_partitions,
-    model_detected_loops, model_loop_circuits,
+    DetectedLoopsResult, LoopCircuitsResult, compute_link_polarities, model_causal_edges,
+    model_cycle_partitions, model_detected_loops, model_loop_circuits,
 };
 
 // ── Database ───────────────────────────────────────────────────────────
@@ -91,8 +91,8 @@ thread_local! {
 /// non-tracked entry points (including WASM where `panic = "abort"`
 /// makes `catch_unwind` ineffective).
 ///
-/// The flag is set by `model_all_diagnostics` (via
-/// `set_tracked_context_flag`) before calling into assembly code.
+/// The flag is managed by `model_all_diagnostics` via the
+/// `IN_TRACKED_CONTEXT` thread-local before calling into assembly code.
 fn try_accumulate_diagnostic(db: &dyn Db, diag: Diagnostic) {
     let in_context = IN_TRACKED_CONTEXT.with(|flag| flag.get());
     if in_context {
@@ -1380,7 +1380,15 @@ fn model_dependency_graph_impl(
             result
         };
 
-    // Initials runlist: stocks, modules, and their deps
+    // Initials runlist: stocks, modules, and their transitive deps.
+    //
+    // Module variables have their transitive deps short-circuited in
+    // compute_transitive (only direct deps are stored). The deps of those
+    // direct deps (e.g. an implicit intermediate variable depending on a
+    // regular model variable) ARE fully expanded in initial_dependencies.
+    // We must transitively close init_set so that every variable needed
+    // during the initials phase is included in the allowed set for
+    // topo_sort_str.
     let runlist_initials = {
         use std::collections::HashSet;
         let needed: HashSet<&String> = var_names
@@ -1402,6 +1410,24 @@ fn model_dependency_graph_impl(
             })
             .collect();
         init_set.extend(needed);
+        // Transitively close: each item added to init_set may itself
+        // have deps that also need to be in the initials runlist.
+        loop {
+            let additional: HashSet<&String> = init_set
+                .iter()
+                .flat_map(|n| {
+                    initial_dependencies
+                        .get(n.as_str())
+                        .into_iter()
+                        .flat_map(|deps| deps.iter())
+                })
+                .filter(|d| !init_set.contains(d))
+                .collect();
+            if additional.is_empty() {
+                break;
+            }
+            init_set.extend(additional);
+        }
         let init_list: Vec<&String> = init_set.into_iter().collect();
         topo_sort_str(init_list, &initial_dependencies)
     };

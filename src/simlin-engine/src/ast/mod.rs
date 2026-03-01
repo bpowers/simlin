@@ -46,7 +46,7 @@ impl Ast<Expr0> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(canonical_ident),
             Ast::ApplyToAll(_, expr) => expr.get_var_loc(canonical_ident),
-            Ast::Arrayed(_, subscripts) => {
+            Ast::Arrayed(_, subscripts, ..) => {
                 for (_, expr) in subscripts.iter() {
                     if let Some(loc) = expr.get_var_loc(canonical_ident) {
                         return Some(loc);
@@ -62,7 +62,7 @@ impl Ast<Expr0> {
         match self {
             Ast::Scalar(expr) => latex_eqn_expr0(expr),
             Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
-            Ast::Arrayed(_, _) => "TODO(array)".to_owned(),
+            Ast::Arrayed(..) => "TODO(array)".to_owned(),
         }
     }
 }

@@ -633,10 +633,9 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
 
     match result {
         Ok(datamodel_project) => {
-            let project: engine::Project = datamodel_project.into();
-            let (db, sync_state) = new_synced_db(&project);
+            let (db, sync_state) = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
-                project: Mutex::new(project),
+                datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),

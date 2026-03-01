@@ -1906,8 +1906,8 @@ mod tests {
 
                 if from == "input" && to == "output" {
                     found_link = true;
-                    // Non-loop links will have Unknown polarity since we don't analyze them
-                    assert_eq!(link.polarity, SimlinLinkPolarity::Unknown);
+                    // input appears positively in "input * 2", so polarity is Positive
+                    assert_eq!(link.polarity, SimlinLinkPolarity::Positive);
                 }
             }
             assert!(found_link, "Should find input -> output link");

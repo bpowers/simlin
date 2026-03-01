@@ -839,6 +839,21 @@ impl CausalGraph {
         LinkPolarity::Unknown
     }
 
+    /// Compute per-link polarity for all edges in the causal graph.
+    ///
+    /// Requires `variables` to be populated for accurate results;
+    /// returns `Unknown` for links whose target variable is missing.
+    pub fn all_link_polarities(&self) -> HashMap<(String, String), LinkPolarity> {
+        let mut result = HashMap::new();
+        for (from, tos) in &self.edges {
+            for to in tos {
+                let polarity = self.get_link_polarity(from, to);
+                result.insert((from.to_string(), to.to_string()), polarity);
+            }
+        }
+        result
+    }
+
     /// Calculate loop polarity based on link polarities
     pub fn calculate_polarity(&self, links: &[Link]) -> LoopPolarity {
         // If ANY link has unknown polarity, the loop is Undetermined

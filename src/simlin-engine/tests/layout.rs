@@ -8,6 +8,7 @@ use std::io::BufReader;
 
 use simlin_engine::common::canonicalize;
 use simlin_engine::datamodel::ViewElement;
+use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::{generate_best_layout, generate_layout, generate_layout_with_config};
 use simlin_engine::open_xmile;
@@ -656,5 +657,31 @@ fn test_dep_graph_excludes_self_references() {
     assert!(
         pop_deps.contains("births"),
         "population should depend on its inflow 'births'"
+    );
+}
+
+/// Verify that ltm_enabled is reset to false after compute_metadata
+/// completes, even when the incremental LTM path encounters failures
+/// (e.g., compilation or simulation errors).
+#[test]
+fn test_ltm_enabled_reset_after_incremental_metadata() {
+    use simlin_engine::layout::compute_metadata;
+
+    let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+    let source_project = state.to_sync_result().project;
+
+    // Call compute_metadata with the incremental salsa path.
+    let metadata = compute_metadata(&project, MAIN_MODEL, Some((&mut db, source_project)));
+    assert!(
+        metadata.is_some(),
+        "metadata should be returned for valid project"
+    );
+
+    // ltm_enabled should be reset to false after the call.
+    assert!(
+        !source_project.ltm_enabled(&db),
+        "ltm_enabled should be false after compute_metadata completes"
     );
 }

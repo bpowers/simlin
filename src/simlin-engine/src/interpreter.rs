@@ -2962,6 +2962,9 @@ fn simulation_defaults_to_project_sim_specs_without_model_override() {
 
 #[cfg(test)]
 mod compile_project_tests {
+    use std::sync::Arc;
+
+    use crate::common::Ident;
     use crate::test_common::TestProject;
 
     #[test]

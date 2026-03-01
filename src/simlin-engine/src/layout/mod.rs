@@ -2041,7 +2041,10 @@ fn try_detect_ltm_loops_incremental(
     // partially-mutated state on panic -- we simply return None.
     let actual_name_owned = actual_name.to_string();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let source_model = *source_project.models(db).get(&actual_name_owned)?;
+        // Canonicalize the model name for SourceProject lookup, since the
+        // models map is keyed by canonical names.
+        let canonical_name = crate::canonicalize(&actual_name_owned);
+        let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
 
         // Detect loops via the salsa-tracked analysis path.
         let detected = crate::db::model_detected_loops(db, source_model, source_project);
@@ -2049,13 +2052,21 @@ fn try_detect_ltm_loops_incremental(
             return Some(Vec::new());
         }
 
-        // Enable LTM, compile, simulate, then disable LTM.
+        // Enable LTM, compile, simulate, then always disable LTM --
+        // even if compilation or simulation fails. Using `and_then`
+        // instead of `?` ensures the cleanup line always executes.
         source_project.set_ltm_enabled(db).to(true);
-        let compiled_sim =
-            crate::db::compile_project_incremental(db, source_project, &actual_name_owned).ok()?;
-        let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
-        vm.run_to_end().ok()?;
+        let vm_result =
+            crate::db::compile_project_incremental(db, source_project, &actual_name_owned)
+                .ok()
+                .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
+                .and_then(|mut vm| {
+                    vm.run_to_end().ok()?;
+                    Some(vm)
+                });
         source_project.set_ltm_enabled(db).to(false);
+
+        let vm = vm_result?;
 
         let mut feedback_loops = Vec::new();
         for dl in &detected.loops {

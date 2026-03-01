@@ -308,6 +308,21 @@ pub fn model_detected_loops(
     }
 }
 
+/// Compute per-link polarity for all causal edges in a model by
+/// reconstructing variable ASTs from the salsa-tracked parse results
+/// and analyzing how each source variable appears in the target's
+/// equation.
+pub fn compute_link_polarities(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> HashMap<(String, String), crate::ltm::LinkPolarity> {
+    let edges_result = model_causal_edges(db, model, project);
+    let mut graph = causal_graph_from_edges(edges_result);
+    graph.variables = reconstruct_model_variables(db, model, project);
+    graph.all_link_polarities()
+}
+
 /// Compute stock-to-stock cycle partitions (SCCs) for a model.
 ///
 /// Depends on `model_causal_edges`, so partition computation is cached
