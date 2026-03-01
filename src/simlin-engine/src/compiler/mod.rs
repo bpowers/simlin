@@ -1282,69 +1282,15 @@ fn expand_arrayed_hoisted(
     let main_expr = first_exprs.pop().unwrap();
     let var_view = array_view_from_dims(dims);
 
-    if is_array_producing_builtin(&main_expr) {
-        let temp_id = next_available_temp_id(&first_exprs);
-        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
-        let loc = main_expr.get_loc();
-
-        let mut result = first_exprs;
-        result.push(Expr::AssignTemp(
-            temp_id,
-            Box::new(main_expr),
-            builtin_view.clone(),
-        ));
-
-        for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
-            let key = CanonicalElementName::from_raw(&subscripts.join(","));
-            let elem_ast = elements.get(&key).or(if apply_default_for_missing {
-                default_ast
-            } else {
-                None
-            });
-
-            // Only top-level builtins match this branch. Elements with
-            // nested builtins (e.g., `vector_elm_map(...)+5`) have different
-            // expression structure and must not get a bare TempArrayElement.
-            let uses_hoisted = if let Some(ast) = elem_ast {
-                let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut probe_exprs = probe_ctx.lower(ast)?;
-                let probe_main = probe_exprs.pop().unwrap();
-                is_array_producing_builtin(&probe_main)
-            } else {
-                false
-            };
-
-            if uses_hoisted {
-                let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
-                result.push(Expr::AssignCurr(
-                    off + i,
-                    Box::new(Expr::TempArrayElement(
-                        temp_id,
-                        builtin_view.clone(),
-                        temp_idx,
-                        loc,
-                    )),
-                ));
-            } else if let Some(ast) = elem_ast {
-                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut elem_exprs = elem_ctx.lower(ast)?;
-                let elem_main = elem_exprs.pop().unwrap();
-                result.extend(elem_exprs);
-                result.push(Expr::AssignCurr(off + i, Box::new(elem_main)));
-            } else {
-                result.push(Expr::AssignCurr(
-                    off + i,
-                    Box::new(Expr::Const(0.0, Loc::default())),
-                ));
-            }
-        }
-        Ok(result)
-    } else if contains_array_producing_builtin(&main_expr) {
+    if contains_array_producing_builtin(&main_expr) {
         let base_temp_id = next_available_temp_id(&first_exprs);
 
         // Build AssignTemp blocks from the hoisting expression. This lowering
         // discovers and creates the temp assignments; per-element AssignCurr
         // is handled in the loop below (including element 0).
+        // replace_nested_builtins_for_element handles both top-level builtins
+        // (the entire expression IS a builtin) and nested builtins (a builtin
+        // wrapped in arithmetic), so we don't need separate branches.
         let mut hoisted = Vec::new();
         let mut temp_id = base_temp_id;
         let _ = replace_nested_builtins_for_element(
@@ -1377,8 +1323,13 @@ fn expand_arrayed_hoisted(
             };
 
             if uses_hoisted {
+                // Use each element's OWN AST so that override-specific
+                // wrapping (e.g. different constants around the same builtin)
+                // is preserved. The unwrap is safe: uses_hoisted is only true
+                // when elem_ast is Some.
+                let ast = elem_ast.unwrap();
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(hoisting_ast)?;
+                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
                 let elem_main = elem_exprs.pop().unwrap();
                 let mut tid = base_temp_id;
                 let mut unused = Vec::new();

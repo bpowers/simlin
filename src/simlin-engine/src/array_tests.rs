@@ -3841,3 +3841,135 @@ mod nested_hoisting_first_override_tests {
         );
     }
 }
+
+/// When an override element wraps the SAME nested builtin with different
+/// arithmetic (e.g., default = `10 + vem(...)`, override = `100 + vem(...)`),
+/// each element must use its OWN AST, not the first hoisting expression.
+mod nested_override_different_wrapping_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: 10 + vector_elm_map(source[*], offsets[*])
+            // VEM = [30, 10, 20], so default = [40, 20, 30]
+            // Override element 1: 100 + vector_elm_map(source[*], offsets[*])
+            // Element 1 should be 100 + 30 = 130
+            .array_with_default_and_overrides(
+                "result[D]",
+                "10 + vector_elm_map(source[*], offsets[*])",
+                vec![("1", "100 + vector_elm_map(source[*], offsets[*])")],
+            )
+    }
+
+    #[test]
+    fn nested_different_wrapping_interpreter() {
+        let project = make_project("nested_diff_wrap_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 130.0).abs() < 1e-9,
+            "element 0 (override, 100+VEM[0]): expected 130, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn nested_different_wrapping_vm() {
+        let project = make_project("nested_diff_wrap_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 130.0).abs() < 1e-9,
+            "element 0 (override, 100+VEM[0]): expected 130, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+}
+
+/// When the default is a top-level builtin but an override wraps it (nested),
+/// the override must be handled via nested hoisting instead of failing codegen.
+mod toplevel_default_nested_override_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
+            // Override element 3: vector_elm_map(source[*], offsets[*]) + 100
+            // Element 3 should be 20 + 100 = 120
+            .array_with_default_and_overrides(
+                "result[D]",
+                "vector_elm_map(source[*], offsets[*])",
+                vec![("3", "vector_elm_map(source[*], offsets[*]) + 100")],
+            )
+    }
+
+    #[test]
+    fn toplevel_default_nested_override_interpreter() {
+        let project = make_project("toplevel_nested_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 120.0).abs() < 1e-9,
+            "element 2 (override VEM[2]+100): expected 120, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn toplevel_default_nested_override_vm() {
+        let project = make_project("toplevel_nested_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 30.0).abs() < 1e-9,
+            "element 0 (default VEM[0]): expected 30, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 10.0).abs() < 1e-9,
+            "element 1 (default VEM[1]): expected 10, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 120.0).abs() < 1e-9,
+            "element 2 (override VEM[2]+100): expected 120, got {}",
+            vals[2]
+        );
+    }
+}
