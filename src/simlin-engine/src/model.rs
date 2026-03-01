@@ -938,11 +938,22 @@ impl ModelStage0 {
         // For user models, only explicit Module variables and stdlib-call
         // Aux/Flow variables need module expansion.
         let module_idents: HashSet<Ident<Canonical>> = collect_module_idents(&x_model.variables);
+        let mut module_ident_list: Vec<String> = module_idents
+            .iter()
+            .map(|ident| ident.as_str().to_owned())
+            .collect();
+        module_ident_list.sort();
+        let module_ident_context = db::ModuleIdentContext::new(salsa_db, module_ident_list);
 
         for dm_var in &x_model.variables {
             let canonical_name = canonicalize(dm_var.get_ident());
             if let Some(source_var) = source_vars.get(canonical_name.as_ref()) {
-                let result = db::parse_source_variable(salsa_db, *source_var, source_project);
+                let result = db::parse_source_variable_with_module_context(
+                    salsa_db,
+                    *source_var,
+                    source_project,
+                    module_ident_context,
+                );
                 variable_list.push(result.variable.clone());
                 implicit_vars.extend(result.implicit_vars.iter().cloned());
             } else {
@@ -1950,6 +1961,95 @@ fn test_cached_dependencies_preserve_expected_module_errors() {
             .any(|err| err.code == ErrorCode::ExpectedModule),
         "cached dependency path should preserve ExpectedModule errors"
     );
+}
+
+#[test]
+fn test_new_cached_preserves_previous_module_expansion() {
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let main_model = x_model(
+        "main",
+        vec![
+            x_module("sub", &[], None),
+            x_aux("prev_sub", "PREVIOUS(sub)", None),
+        ],
+    );
+    // Multiple vars so `sub` is clearly multi-slot when flattened.
+    let sub_model = x_model(
+        "sub",
+        vec![x_aux("internal", "42", None), x_aux("output", "TIME", None)],
+    );
+    let project_datamodel = datamodel::Project {
+        name: "cached_prev_module".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone(), sub_model],
+        source: None,
+        ai_information: None,
+    };
+
+    let direct = ModelStage0::new(&main_model, &[], &units_ctx, false);
+
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let source_model = sync.models["main"].source;
+    let cached = ModelStage0::new_cached(
+        &db,
+        source_model,
+        sync.project,
+        &main_model,
+        &[],
+        &units_ctx,
+        false,
+    );
+
+    let has_previous_module = |model: &ModelStage0| {
+        model
+            .variables
+            .keys()
+            .any(|ident| ident.as_str().starts_with("$⁚prev_sub⁚0⁚previous"))
+    };
+
+    assert!(
+        has_previous_module(&direct),
+        "direct parse should expand PREVIOUS(sub) into an implicit module"
+    );
+    assert_eq!(
+        has_previous_module(&direct),
+        has_previous_module(&cached),
+        "cached parse should preserve PREVIOUS(module_var) module expansion"
+    );
+}
+
+#[test]
+fn test_init_aux_only_array_subscript() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("init_aux_only_array_subscript")
+        .with_sim_time(1.0, 5.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2"])
+        .array_with_ranges(
+            "growing[DimA]",
+            vec![("a1", "TIME * 2"), ("a2", "TIME * 3")],
+        )
+        .array_aux("frozen[DimA]", "INIT(growing[DimA])");
+
+    let vm = tp.run_vm().expect("VM should run");
+    let frozen_a1 = vm.get("frozen[a1]").expect("frozen[a1] not in results");
+    let frozen_a2 = vm.get("frozen[a2]").expect("frozen[a2] not in results");
+
+    for (step, val) in frozen_a1.iter().enumerate() {
+        assert!(
+            (val - 2.0).abs() < 1e-10,
+            "frozen[a1] should be 2.0 at every step, got {val} at step {step}"
+        );
+    }
+    for (step, val) in frozen_a2.iter().enumerate() {
+        assert!(
+            (val - 3.0).abs() < 1e-10,
+            "frozen[a2] should be 3.0 at every step, got {val} at step {step}"
+        );
+    }
 }
 
 #[test]

@@ -4651,7 +4651,7 @@ fn test_implicit_module_offsets_in_flattened_map() {
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "smoothed".to_string(),
-                    equation: datamodel::Equation::Scalar("SMTH1(input, delay_time)".to_string()),
+                    equation: datamodel::Equation::Scalar("SMTH3(input, delay_time)".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
