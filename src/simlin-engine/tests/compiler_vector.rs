@@ -140,6 +140,17 @@ fn nested_vector_elm_map_inside_sum_interpreter() {
 }
 
 #[test]
+fn nested_vector_elm_map_inside_sum_vm() {
+    let project = TestProject::new("vem_nested_sum_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .scalar_aux("result", "sum(vector_elm_map(source[*], offsets[*]))");
+
+    project.assert_vm_result("result", &[60.0, 60.0]);
+}
+
+#[test]
 fn nested_vector_elm_map_inside_sum_in_array_context_interpreter() {
     // In array context, SUM(VEM(...)) should still evaluate VEM as an array,
     // not as an element-local scalar.
@@ -153,6 +164,17 @@ fn nested_vector_elm_map_inside_sum_in_array_context_interpreter() {
 }
 
 #[test]
+fn nested_vector_elm_map_inside_sum_in_array_context_vm() {
+    let project = TestProject::new("vem_nested_sum_array_context_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+        .array_aux("result[D]", "sum(vector_elm_map(source[*], offsets[*]))");
+
+    project.assert_vm_result("result", &[60.0, 60.0, 60.0]);
+}
+
+#[test]
 fn nested_vector_sort_order_inside_sum_in_array_context_interpreter() {
     // vals = [30, 10, 20], vector_sort_order(vals, 1) = [2, 3, 1], SUM = 6
     let project = TestProject::new("vso_nested_sum_array_context_interp")
@@ -161,6 +183,16 @@ fn nested_vector_sort_order_inside_sum_in_array_context_interpreter() {
         .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
 
     project.assert_interpreter_result("result", &[6.0, 6.0, 6.0]);
+}
+
+#[test]
+fn nested_vector_sort_order_inside_sum_in_array_context_vm() {
+    let project = TestProject::new("vso_nested_sum_array_context_vm")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+        .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
+
+    project.assert_vm_result("result", &[6.0, 6.0, 6.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,4 +298,36 @@ fn nested_allocate_available_inside_sum_in_array_context_interpreter() {
         );
 
     project.assert_interpreter_result("result", &[40.0, 40.0, 40.0]);
+}
+
+#[test]
+fn nested_allocate_available_inside_sum_in_array_context_vm() {
+    let project = TestProject::new("alloc_nested_sum_array_context_vm")
+        .indexed_dimension("D", 3)
+        .indexed_dimension("XP", 4)
+        .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .scalar_const("supply", 40.0)
+        .array_with_ranges(
+            "pp[D,XP]",
+            vec![
+                ("1,1", "3"),
+                ("1,2", "1"),
+                ("1,3", "1"),
+                ("1,4", "0"),
+                ("2,1", "3"),
+                ("2,2", "1"),
+                ("2,3", "1"),
+                ("2,4", "0"),
+                ("3,1", "3"),
+                ("3,2", "1"),
+                ("3,3", "1"),
+                ("3,4", "0"),
+            ],
+        )
+        .array_aux(
+            "result[D]",
+            "sum(allocate_available(request[*], pp[*,1], supply))",
+        );
+
+    project.assert_vm_result("result", &[40.0, 40.0, 40.0]);
 }

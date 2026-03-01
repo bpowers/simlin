@@ -644,6 +644,8 @@ impl Var {
                             Ast::Scalar(ast) => {
                                 let mut exprs = ctx.lower(ast)?;
                                 let main_expr = exprs.pop().unwrap();
+                                let main_expr =
+                                    hoist_nested_array_builtins_in_scalar(main_expr, &mut exprs);
                                 exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
                                 exprs
                             }
@@ -708,6 +710,8 @@ impl Var {
                         Ast::Scalar(ast) => {
                             let mut exprs = ctx.lower(ast)?;
                             let main_expr = exprs.pop().unwrap();
+                            let main_expr =
+                                hoist_nested_array_builtins_in_scalar(main_expr, &mut exprs);
                             let main_expr = if !tables.is_empty() {
                                 let loc = main_expr.get_loc();
                                 Expr::App(
@@ -746,6 +750,31 @@ impl Var {
             ast,
         })
     }
+}
+
+/// For scalar equations, rewrite nested array-producing builtins into
+/// AssignTemp + TempArray so reducers (SUM/MEAN/etc.) consume full arrays.
+/// This mirrors A2A nested hoisting semantics without introducing element
+/// projection in non-A2A contexts.
+fn hoist_nested_array_builtins_in_scalar(main_expr: Expr, exprs: &mut Vec<Expr>) -> Expr {
+    if is_array_producing_builtin(&main_expr) || !contains_array_producing_builtin(&main_expr) {
+        return main_expr;
+    }
+
+    let mut temp_id = next_available_temp_id(exprs);
+    let mut hoisted = Vec::new();
+    let placeholder_view = ArrayView::contiguous(vec![1]);
+    let rewritten = replace_nested_builtins_for_element(
+        main_expr,
+        0,
+        &placeholder_view,
+        &mut temp_id,
+        &mut hoisted,
+        true,
+        NestedBuiltinArgMode::ArrayValue,
+    );
+    exprs.extend(hoisted);
+    rewritten
 }
 
 /// Check if an expression is an array-producing builtin that needs whole-array
