@@ -436,6 +436,19 @@ fn collect_constant_info(
     result
 }
 
+/// Advance a multi-dimensional index in row-major order. Shared by all
+/// vector operation opcodes to iterate over array elements.
+#[inline]
+fn increment_indices(indices: &mut [u16], dims: &[u16]) {
+    for d in (0..indices.len()).rev() {
+        indices[d] += 1;
+        if indices[d] < dims[d] {
+            break;
+        }
+        indices[d] = 0;
+    }
+}
+
 impl Vm {
     pub fn new(sim: CompiledSimulation) -> Result<Vm> {
         if sim.specs.stop < sim.specs.start {
@@ -1408,15 +1421,7 @@ impl Vm {
 
                         for _ in 0..size {
                             offsets.push(view.flat_offset(&indices));
-
-                            // Increment indices (row-major order)
-                            for d in (0..n_dims).rev() {
-                                indices[d] += 1;
-                                if indices[d] < dims[d] {
-                                    break;
-                                }
-                                indices[d] = 0;
-                            }
+                            increment_indices(&mut indices, dims);
                         }
                         Some(offsets)
                     };
@@ -1919,15 +1924,7 @@ impl Vm {
                     bc_state.current += 1;
 
                     if bc_state.current < bc_state.size {
-                        // Increment result indices (row-major order)
-                        let n_dims = bc_state.result_dims.len();
-                        for d in (0..n_dims).rev() {
-                            bc_state.result_indices[d] += 1;
-                            if bc_state.result_indices[d] < bc_state.result_dims[d] {
-                                break;
-                            }
-                            bc_state.result_indices[d] = 0;
-                        }
+                        increment_indices(&mut bc_state.result_indices, &bc_state.result_dims);
 
                         // Jump backward to loop start
                         pc = (pc as isize + *jump_back as isize) as usize;
@@ -1975,23 +1972,8 @@ impl Vm {
                             selected.push(expr_val);
                         }
 
-                        // Increment selection indices
-                        for d in (0..n_dims).rev() {
-                            sel_indices[d] += 1;
-                            if sel_indices[d] < sel_view.dims[d] {
-                                break;
-                            }
-                            sel_indices[d] = 0;
-                        }
-
-                        // Increment expression indices
-                        for d in (0..expr_view.dims.len()).rev() {
-                            expr_indices[d] += 1;
-                            if expr_indices[d] < expr_view.dims[d] {
-                                break;
-                            }
-                            expr_indices[d] = 0;
-                        }
+                        increment_indices(&mut sel_indices, &sel_view.dims);
+                        increment_indices(&mut expr_indices, &expr_view.dims);
                     }
 
                     let result = if selected.is_empty() {
@@ -2028,13 +2010,7 @@ impl Vm {
                             context,
                         );
                         source_values.push(val);
-                        for d in (0..source_n_dims).rev() {
-                            src_indices[d] += 1;
-                            if src_indices[d] < source_view.dims[d] {
-                                break;
-                            }
-                            src_indices[d] = 0;
-                        }
+                        increment_indices(&mut src_indices, &source_view.dims);
                     }
 
                     // Write mapped results to temp_storage
@@ -2058,13 +2034,7 @@ impl Vm {
                             } else {
                                 source_values[idx as usize]
                             };
-                        for d in (0..offset_n_dims).rev() {
-                            off_indices[d] += 1;
-                            if off_indices[d] < offset_view.dims[d] {
-                                break;
-                            }
-                            off_indices[d] = 0;
-                        }
+                        increment_indices(&mut off_indices, &offset_view.dims);
                     }
                 }
 
@@ -2089,13 +2059,7 @@ impl Vm {
                             context,
                         );
                         indexed.push((val, (i + 1) as u16));
-                        for d in (0..n_dims).rev() {
-                            indices[d] += 1;
-                            if indices[d] < input_view.dims[d] {
-                                break;
-                            }
-                            indices[d] = 0;
-                        }
+                        increment_indices(&mut indices, &input_view.dims);
                     }
 
                     if direction == 1 {
@@ -2135,13 +2099,7 @@ impl Vm {
                             context,
                         );
                         requests.push(val);
-                        for d in (0..req_n_dims).rev() {
-                            req_indices[d] += 1;
-                            if req_indices[d] < requests_view.dims[d] {
-                                break;
-                            }
-                            req_indices[d] = 0;
-                        }
+                        increment_indices(&mut req_indices, &requests_view.dims);
                     }
 
                     let n = requests.len();
@@ -2161,13 +2119,7 @@ impl Vm {
                             context,
                         );
                         pp_values.push(val);
-                        for d in (0..pp_n_dims).rev() {
-                            pp_indices[d] += 1;
-                            if pp_indices[d] < profile_view.dims[d] {
-                                break;
-                            }
-                            pp_indices[d] = 0;
-                        }
+                        increment_indices(&mut pp_indices, &profile_view.dims);
                     }
 
                     // Build profile tuples from flat array
@@ -2252,15 +2204,7 @@ impl Vm {
             };
 
             acc = f(acc, value);
-
-            // Increment indices (row-major order)
-            for d in (0..n_dims).rev() {
-                indices[d] += 1;
-                if indices[d] < dims[d] {
-                    break;
-                }
-                indices[d] = 0;
-            }
+            increment_indices(&mut indices, dims);
         }
 
         acc
@@ -2272,6 +2216,7 @@ impl Vm {
     /// NOT a sequential iteration index. For contiguous views, flat_off equals the
     /// iteration index. For non-contiguous or sparse views, the caller must compute
     /// flat_off via `view.flat_offset(&indices)` or `view.offset_for_iter_index(iter_idx)`.
+    #[inline]
     fn read_view_element(
         view: &RuntimeView,
         flat_off: usize,

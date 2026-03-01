@@ -1302,12 +1302,14 @@ fn expand_arrayed_hoisted(
                 None
             });
 
+            // Only top-level builtins match this branch. Elements with
+            // nested builtins (e.g., `vector_elm_map(...)+5`) have different
+            // expression structure and must not get a bare TempArrayElement.
             let uses_hoisted = if let Some(ast) = elem_ast {
                 let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                 let mut probe_exprs = probe_ctx.lower(ast)?;
                 let probe_main = probe_exprs.pop().unwrap();
                 is_array_producing_builtin(&probe_main)
-                    || contains_array_producing_builtin(&probe_main)
             } else {
                 false
             };
@@ -1340,9 +1342,12 @@ fn expand_arrayed_hoisted(
     } else if contains_array_producing_builtin(&main_expr) {
         let base_temp_id = next_available_temp_id(&first_exprs);
 
+        // Build AssignTemp blocks from the hoisting expression. This lowering
+        // discovers and creates the temp assignments; per-element AssignCurr
+        // is handled in the loop below (including element 0).
         let mut hoisted = Vec::new();
         let mut temp_id = base_temp_id;
-        let rewritten = replace_nested_builtins_for_element(
+        let _ = replace_nested_builtins_for_element(
             main_expr,
             0,
             &var_view,
@@ -1353,9 +1358,8 @@ fn expand_arrayed_hoisted(
 
         let mut result = first_exprs;
         result.extend(hoisted);
-        result.push(Expr::AssignCurr(off, Box::new(rewritten)));
 
-        for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
+        for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
             let key = CanonicalElementName::from_raw(&subscripts.join(","));
             let elem_ast = elements.get(&key).or(if apply_default_for_missing {
                 default_ast
@@ -1367,8 +1371,7 @@ fn expand_arrayed_hoisted(
                 let probe_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
                 let mut probe_exprs = probe_ctx.lower(ast)?;
                 let probe_main = probe_exprs.pop().unwrap();
-                is_array_producing_builtin(&probe_main)
-                    || contains_array_producing_builtin(&probe_main)
+                contains_array_producing_builtin(&probe_main)
             } else {
                 false
             };

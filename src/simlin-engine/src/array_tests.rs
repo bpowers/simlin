@@ -3774,3 +3774,70 @@ mod mixed_element_hoisting_tests {
         );
     }
 }
+
+/// When the default equation has a NESTED array-producing builtin (e.g.,
+/// `10 + vector_elm_map(...)`) and element 1 is overridden, element 0 must
+/// use the override value, not the hoisting expression. The nested hoisting
+/// path must probe each element individually, including element 0.
+mod nested_hoisting_first_override_tests {
+    use crate::test_common::TestProject;
+
+    fn make_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
+            // Default: 10 + vector_elm_map(source[*], offsets[*])
+            // VEM = [30, 10, 20], so 10 + VEM = [40, 20, 30]
+            // Override element 1 = 99
+            .array_with_default_and_overrides(
+                "result[D]",
+                "10 + vector_elm_map(source[*], offsets[*])",
+                vec![("1", "99")],
+            )
+    }
+
+    #[test]
+    fn nested_first_override_interpreter() {
+        let project = make_project("nested_first_override_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn nested_first_override_vm() {
+        let project = make_project("nested_first_override_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3);
+        assert!(
+            (vals[0] - 99.0).abs() < 1e-9,
+            "element 0 (override): expected 99, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 20.0).abs() < 1e-9,
+            "element 1 (default, 10+VEM[1]): expected 20, got {}",
+            vals[1]
+        );
+        assert!(
+            (vals[2] - 30.0).abs() < 1e-9,
+            "element 2 (default, 10+VEM[2]): expected 30, got {}",
+            vals[2]
+        );
+    }
+}

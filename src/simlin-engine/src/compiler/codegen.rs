@@ -934,10 +934,17 @@ impl<'module> Compiler<'module> {
                             "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
                         );
                     }
-                    // routed through AssignTemp by A2A hoisting
+                    // Normally routed through AssignTemp by A2A hoisting.
+                    // Reached here when the equation wasn't hoisted (e.g.,
+                    // mixed builtin types in an Arrayed equation).
                     BuiltinFn::VectorElmMap(_, _)
                     | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _) => unreachable!(),
+                    | BuiltinFn::AllocateAvailable(_, _, _) => {
+                        return sim_err!(
+                            TodoArrayBuiltin,
+                            "array-producing builtin outside AssignTemp context".to_owned()
+                        );
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _)
@@ -986,10 +993,14 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Stddev(_)
                     | BuiltinFn::Sum(_)
                     | BuiltinFn::VectorSelect(_, _, _, _, _) => unreachable!(),
-                    // routed through AssignTemp by A2A hoisting
                     BuiltinFn::VectorElmMap(_, _)
                     | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _) => unreachable!(),
+                    | BuiltinFn::AllocateAvailable(_, _, _) => {
+                        return sim_err!(
+                            TodoArrayBuiltin,
+                            "array-producing builtin outside AssignTemp context".to_owned()
+                        );
+                    }
                 };
 
                 self.push(Opcode::Apply { func });
