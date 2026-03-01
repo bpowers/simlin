@@ -62,7 +62,15 @@ pub unsafe extern "C" fn simlin_sim_new(
         if let Some(ref state) = *sync_state {
             let source_project = state.to_sync_result().project;
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
-            engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name)
+            let result =
+                engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
+            // Always reset ltm_enabled to avoid leaking the flag to
+            // subsequent operations (e.g. patch validation) that share
+            // the same SourceProject.
+            if enable_ltm {
+                engine::db::set_project_ltm_enabled(&mut db, source_project, false);
+            }
+            result
         } else {
             Err(engine::Error {
                 kind: engine::ErrorKind::Simulation,

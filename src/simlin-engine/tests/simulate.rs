@@ -311,7 +311,6 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
     let results2 = {
         let compiled_sim = compile(&datamodel_project);
         let mut vm = Vm::new(compiled_sim).unwrap();
-        // vm.debug_print_bytecode("main");
         vm.run_to_end().unwrap();
         vm.into_results()
     };

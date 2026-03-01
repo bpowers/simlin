@@ -167,3 +167,74 @@ fn test_apply_patch_xmile_empty_equation_reject() {
         simlin_project_unref(proj);
     }
 }
+
+/// Regression test: simlin_sim_new with enable_ltm=true must not leave
+/// the SourceProject's ltm_enabled flag set, otherwise subsequent patch
+/// validation compiles in stale LTM mode.
+#[test]
+fn test_ltm_sim_then_patch_does_not_inherit_ltm_mode() {
+    let datamodel = TestProject::new("ltm_sim_patch_ordering")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * 0.01", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        // First, create an LTM simulation (sets ltm_enabled=true internally)
+        let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, true, &mut out_error);
+        assert!(!sim.is_null(), "LTM simulation creation should succeed");
+        assert!(out_error.is_null());
+        simlin_sim_run_to_end(sim, &mut out_error);
+        assert!(out_error.is_null());
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+
+        // Now apply a patch. If ltm_enabled leaked from simlin_sim_new,
+        // the patch validation compilation would run in LTM mode, which
+        // could cause spurious failures or different error behavior.
+        let patch_json = r#"{
+            "models": [{ "name": "main", "ops": [
+                { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
+            ]}]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        assert!(
+            out_error.is_null(),
+            "patch after LTM sim should not fail due to stale LTM mode"
+        );
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Verify normal simulation still works after the patch
+        let model2 = simlin_project_get_model(proj, ptr::null(), &mut out_error);
+        assert!(!model2.is_null());
+        let sim2 = simlin_sim_new(model2, false, &mut out_error);
+        assert!(!sim2.is_null(), "non-LTM simulation should work after patch");
+        assert!(out_error.is_null());
+        simlin_sim_run_to_end(sim2, &mut out_error);
+        assert!(out_error.is_null());
+        simlin_sim_unref(sim2);
+        simlin_model_unref(model2);
+
+        simlin_project_unref(proj);
+    }
+}
