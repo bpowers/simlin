@@ -475,6 +475,31 @@ where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
+    parse_var_with_module_context(
+        dimensions,
+        v,
+        implicit_vars,
+        units_ctx,
+        module_input_mapper,
+        None,
+    )
+}
+
+/// Like `parse_var` but accepts a set of module variable identifiers from
+/// the parent model. When provided, `PREVIOUS(module_var)` in equations will
+/// fall through to module expansion instead of compiling to LoadPrev.
+pub fn parse_var_with_module_context<MI, F>(
+    dimensions: &[datamodel::Dimension],
+    v: &datamodel::Variable,
+    implicit_vars: &mut Vec<datamodel::Variable>,
+    units_ctx: &units::Context,
+    module_input_mapper: F,
+    module_idents: Option<&HashSet<Ident<Canonical>>>,
+) -> Variable<MI, Expr0>
+where
+    MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
+    F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
+{
     // Create DimensionsContext for dimension mapping lookups in builtin expansion
     let dimensions_ctx = DimensionsContext::from(dimensions);
 
@@ -485,16 +510,19 @@ where
      -> (Option<Ast<Expr0>>, Vec<EquationError>) {
         let (ast, mut errors) = parse_equation(eqn, dimensions, is_initial, active_initial);
         let ast = match ast {
-            Some(ast) => match instantiate_implicit_modules(ident, ast, Some(&dimensions_ctx)) {
-                Ok((ast, mut new_vars)) => {
-                    implicit_vars.append(&mut new_vars);
-                    Some(ast)
+            Some(ast) => {
+                match instantiate_implicit_modules(ident, ast, Some(&dimensions_ctx), module_idents)
+                {
+                    Ok((ast, mut new_vars)) => {
+                        implicit_vars.append(&mut new_vars);
+                        Some(ast)
+                    }
+                    Err(err) => {
+                        errors.push(err);
+                        None
+                    }
                 }
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
-            },
+            }
             None => {
                 if errors.is_empty() && !is_initial && !v.can_be_module_input() {
                     errors.push(EquationError {

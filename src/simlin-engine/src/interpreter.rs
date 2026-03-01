@@ -1371,16 +1371,15 @@ impl ModuleEvaluator<'_> {
                         // but before the time advance.
                         //
                         // Only simple PREVIOUS(var) reaches here via the
-                        // builtin path. Nested PREVIOUS, PREVIOUS(TIME), and
-                        // 2-arg forms go through module expansion in the
-                        // builtins_visitor and never produce BuiltinFn::Previous
-                        // in the lowered AST.
+                        // builtin path. Nested PREVIOUS and 2-arg forms go
+                        // through module expansion in the builtins_visitor.
                         let prev_vals = self.sim.prev_values.borrow();
                         if prev_vals.is_empty() {
-                            // During the initials phase, no snapshot yet --
-                            // fall back to the current value.
-                            drop(prev_vals);
-                            self.eval(arg)
+                            // Before the first timestep snapshot, prev_values
+                            // is empty. Return 0.0 to match the 1-arg stdlib
+                            // PREVIOUS default (initial_value=0) and the VM's
+                            // zero-initialized prev_values buffer.
+                            0.0
                         } else {
                             match arg.as_ref() {
                                 Expr::Var(off, _) => prev_vals[self.off + *off],
@@ -2045,9 +2044,6 @@ impl Simulation {
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
             // Capture a snapshot of curr[] after the initials phase for INIT(x).
             *(*self.initial_values).borrow_mut() = curr.to_vec();
-            // Seed prev_values with the post-initials state so that
-            // PREVIOUS(x) at t=0 returns the initial value of x.
-            *(*self.prev_values).borrow_mut() = curr.to_vec();
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {

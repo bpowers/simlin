@@ -898,10 +898,6 @@ impl Vm {
         let curr_start = self.curr_chunk * self.n_slots;
         self.initial_values
             .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
-        // Seed prev_values with the post-initials state so that
-        // PREVIOUS(x) at t=0 returns the initial value of x.
-        self.prev_values
-            .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
 
         self.did_initials = true;
         self.step_accum = 0;

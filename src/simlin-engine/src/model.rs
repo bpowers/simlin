@@ -17,7 +17,9 @@ use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
 use crate::units::Context;
-use crate::variable::{ModuleInput, Variable, identifier_set, parse_var};
+use crate::variable::{
+    ModuleInput, Variable, identifier_set, parse_var, parse_var_with_module_context,
+};
 use crate::vm::StepPart;
 use crate::{datamodel, eqn_err, model_err, units_check, var_eqn_err};
 
@@ -749,6 +751,60 @@ where
     Ok(())
 }
 
+/// Scan a model's datamodel variables and return the set of identifiers
+/// that will become module variables during compilation.
+///
+/// This includes:
+/// - Explicit `datamodel::Variable::Module` variables
+/// - `datamodel::Variable::Aux` and `datamodel::Variable::Flow` variables
+///   whose equations parse to a top-level stdlib function call (e.g. SMTH1,
+///   DELAY, etc.)
+///
+/// This set is needed so that `PREVIOUS(module_var)` falls through to module
+/// expansion instead of compiling to LoadPrev, because modules occupy
+/// multiple slots and LoadPrev at the base offset reads the wrong value.
+fn collect_module_idents(variables: &[datamodel::Variable]) -> HashSet<Ident<Canonical>> {
+    let mut module_idents = HashSet::new();
+    for v in variables {
+        match v {
+            datamodel::Variable::Module(m) => {
+                module_idents.insert(Ident::new(&canonicalize(&m.ident)));
+            }
+            datamodel::Variable::Aux(a) => {
+                if equation_is_stdlib_call(&a.equation) {
+                    module_idents.insert(Ident::new(&canonicalize(&a.ident)));
+                }
+            }
+            datamodel::Variable::Flow(f) => {
+                if equation_is_stdlib_call(&f.equation) {
+                    module_idents.insert(Ident::new(&canonicalize(&f.ident)));
+                }
+            }
+            datamodel::Variable::Stock(_) => {}
+        }
+    }
+    module_idents
+}
+
+/// Check if a scalar equation's top-level expression is a stdlib function call.
+fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
+    let text = match eqn {
+        datamodel::Equation::Scalar(s) => s.as_str(),
+        _ => return false,
+    };
+    let Ok(Some(ast)) = Expr0::new(text, crate::lexer::LexerType::Equation) else {
+        return false;
+    };
+    match &ast {
+        Expr0::App(crate::builtins::UntypedBuiltinFn(func, _), _) => {
+            let func_lower = func.to_lowercase();
+            crate::stdlib::MODEL_NAMES.contains(&func_lower.as_str())
+                || matches!(func_lower.as_str(), "delay" | "delayn" | "smthn")
+        }
+        _ => false,
+    }
+}
+
 impl ModelStage0 {
     pub fn new(
         x_model: &datamodel::Model,
@@ -758,13 +814,43 @@ impl ModelStage0 {
     ) -> Self {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
 
+        // Determine which variable names should force PREVIOUS to module
+        // expansion (rather than the LoadPrev opcode).
+        //
+        // For user models, only explicit Module variables and stdlib-call
+        // Aux/Flow variables need module expansion because they occupy
+        // multiple slots and LoadPrev at the base offset reads the wrong
+        // sub-variable.
+        //
+        // For implicit (stdlib) models, ALL variable names are included.
+        // Inside a submodule, some variables are module inputs whose values
+        // are passed from the parent via a transient array -- they have no
+        // persistent slot in prev_values. PREVIOUS(module_input) compiled
+        // as LoadPrev/LoadModuleInput returns the CURRENT value, not the
+        // previous one. Module expansion creates a stock that correctly
+        // tracks the one-step delay.
+        let module_idents: HashSet<Ident<Canonical>> = if implicit {
+            x_model
+                .variables
+                .iter()
+                .map(|v| Ident::new(&canonicalize(v.get_ident())))
+                .collect()
+        } else {
+            collect_module_idents(&x_model.variables)
+        };
+
         let mut variable_list: Vec<VariableStage0> = x_model
             .variables
             .iter()
             .map(|v| {
-                parse_var(dimensions, v, &mut implicit_vars, units_ctx, |mi| {
-                    Ok(Some(mi.clone()))
-                })
+                parse_var_with_module_context(
+                    dimensions,
+                    v,
+                    &mut implicit_vars,
+                    units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                    Some(&module_idents),
+                )
             })
             .collect();
 
@@ -809,10 +895,26 @@ impl ModelStage0 {
         units_ctx: &Context,
         implicit: bool,
     ) -> Self {
+        // For implicit (stdlib) models, bypass the salsa cache and use
+        // the direct path with module_idents awareness. This ensures
+        // PREVIOUS calls inside submodules always expand to modules
+        // rather than compiling to LoadPrev/LoadModuleInput, which
+        // returns the current value instead of the previous value for
+        // module inputs. The performance impact is negligible since
+        // stdlib models have very few variables.
+        if implicit {
+            return Self::new(x_model, dimensions, units_ctx, implicit);
+        }
+
         let source_vars = source_model.variables(salsa_db);
 
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
         let mut variable_list: Vec<VariableStage0> = Vec::new();
+
+        // Collect module identifiers for the PREVIOUS gate.
+        // For user models, only explicit Module variables and stdlib-call
+        // Aux/Flow variables need module expansion.
+        let module_idents: HashSet<Ident<Canonical>> = collect_module_idents(&x_model.variables);
 
         for dm_var in &x_model.variables {
             let canonical_name = canonicalize(dm_var.get_ident());
@@ -821,12 +923,13 @@ impl ModelStage0 {
                 variable_list.push(result.variable.clone());
                 implicit_vars.extend(result.implicit_vars.iter().cloned());
             } else {
-                variable_list.push(parse_var(
+                variable_list.push(parse_var_with_module_context(
                     dimensions,
                     dm_var,
                     &mut implicit_vars,
                     units_ctx,
                     |mi| Ok(Some(mi.clone())),
+                    Some(&module_idents),
                 ));
             }
         }
@@ -973,48 +1076,55 @@ impl ModelStage1 {
                     }
                 };
 
-                let build_runlist =
-                    |deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-                     part: StepPart,
-                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
-                     -> Vec<Ident<Canonical>> {
-                        let canonical_var_names: Vec<Ident<Canonical>> = var_names
-                            .iter()
-                            .filter(|id| predicate(id))
-                            .map(|id| (*id).clone())
-                            .collect();
-                        let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
-                        let runlist = match part {
-                            StepPart::Initials => {
-                                let needed: HashSet<&Ident<Canonical>> = runlist
-                                    .iter()
-                                    .cloned()
-                                    .filter(|id| {
-                                        let v = &self.variables[*id];
-                                        v.is_stock() || v.is_module()
-                                    })
-                                    .collect();
-                                let mut runlist: HashSet<&Ident<Canonical>> =
-                                    needed.iter().flat_map(|id| &deps[*id]).collect();
-                                runlist.extend(needed);
-                                let runlist = runlist.into_iter().collect();
-                                topo_sort(runlist, deps)
-                            }
-                            StepPart::Flows => topo_sort(runlist, deps),
-                            StepPart::Stocks => runlist,
-                        };
-                        // eprintln!("runlist {}", model_name);
-                        // for (i, name) in runlist.iter().enumerate() {
-                        //     eprintln!("  {}: {}", i, name);
-                        // }
-                        let runlist: Vec<Ident<Canonical>> = runlist.into_iter().cloned().collect();
-                        // for v in runlist.clone().unwrap().iter() {
-                        //     eprintln!("{}", pretty(&v.ast));
-                        // }
-                        // eprintln!("");
+                // Collect variables referenced by INIT() so they are
+                // included in the Initials runlist. Without this,
+                // aux-only models using INIT(x) would not evaluate x
+                // during initials, leaving initial_values[x] at zero.
+                let init_referenced: HashSet<Ident<Canonical>> = self
+                    .variables
+                    .values()
+                    .filter_map(|v| v.ast())
+                    .flat_map(crate::db::init_referenced_idents)
+                    .map(|s| Ident::new(&s))
+                    .collect();
 
-                        runlist
+                let build_runlist = |deps: &HashMap<
+                    Ident<Canonical>,
+                    BTreeSet<Ident<Canonical>>,
+                >,
+                                     part: StepPart,
+                                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
+                 -> Vec<Ident<Canonical>> {
+                    let canonical_var_names: Vec<Ident<Canonical>> = var_names
+                        .iter()
+                        .filter(|id| predicate(id))
+                        .map(|id| (*id).clone())
+                        .collect();
+                    let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
+                    let runlist = match part {
+                        StepPart::Initials => {
+                            let needed: HashSet<&Ident<Canonical>> = runlist
+                                .iter()
+                                .cloned()
+                                .filter(|id| {
+                                    let v = &self.variables[*id];
+                                    v.is_stock() || v.is_module() || init_referenced.contains(*id)
+                                })
+                                .collect();
+                            let mut runlist: HashSet<&Ident<Canonical>> =
+                                needed.iter().flat_map(|id| &deps[*id]).collect();
+                            runlist.extend(needed);
+                            let runlist = runlist.into_iter().collect();
+                            topo_sort(runlist, deps)
+                        }
+                        StepPart::Flows => topo_sort(runlist, deps),
+                        StepPart::Stocks => runlist,
                     };
+
+                    let runlist: Vec<Ident<Canonical>> = runlist.into_iter().cloned().collect();
+
+                    runlist
+                };
 
                 let runlist_initials = if let Some(deps) = initial_deps.as_ref() {
                     build_runlist(deps, StepPart::Initials, &|_| true)
@@ -1266,38 +1376,51 @@ impl ModelStage1 {
                     (dt_deps, initial_deps)
                 };
 
-                let build_runlist =
-                    |deps: &HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-                     part: StepPart,
-                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
-                     -> Vec<Ident<Canonical>> {
-                        let canonical_var_names: Vec<Ident<Canonical>> = var_names
-                            .iter()
-                            .filter(|id| predicate(id))
-                            .map(|id| (*id).clone())
-                            .collect();
-                        let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
-                        let runlist = match part {
-                            StepPart::Initials => {
-                                let needed: HashSet<&Ident<Canonical>> = runlist
-                                    .iter()
-                                    .cloned()
-                                    .filter(|id| {
-                                        let v = &self.variables[*id];
-                                        v.is_stock() || v.is_module()
-                                    })
-                                    .collect();
-                                let mut runlist: HashSet<&Ident<Canonical>> =
-                                    needed.iter().flat_map(|id| &deps[*id]).collect();
-                                runlist.extend(needed);
-                                let runlist = runlist.into_iter().collect();
-                                topo_sort(runlist, deps)
-                            }
-                            StepPart::Flows => topo_sort(runlist, deps),
-                            StepPart::Stocks => runlist,
-                        };
-                        runlist.into_iter().cloned().collect()
+                // Collect variables referenced by INIT() so they are
+                // included in the Initials runlist (same as the first
+                // instantiation path above).
+                let init_referenced: HashSet<Ident<Canonical>> = self
+                    .variables
+                    .values()
+                    .filter_map(|v| v.ast())
+                    .flat_map(crate::db::init_referenced_idents)
+                    .map(|s| Ident::new(&s))
+                    .collect();
+
+                let build_runlist = |deps: &HashMap<
+                    Ident<Canonical>,
+                    BTreeSet<Ident<Canonical>>,
+                >,
+                                     part: StepPart,
+                                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
+                 -> Vec<Ident<Canonical>> {
+                    let canonical_var_names: Vec<Ident<Canonical>> = var_names
+                        .iter()
+                        .filter(|id| predicate(id))
+                        .map(|id| (*id).clone())
+                        .collect();
+                    let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
+                    let runlist = match part {
+                        StepPart::Initials => {
+                            let needed: HashSet<&Ident<Canonical>> = runlist
+                                .iter()
+                                .cloned()
+                                .filter(|id| {
+                                    let v = &self.variables[*id];
+                                    v.is_stock() || v.is_module() || init_referenced.contains(*id)
+                                })
+                                .collect();
+                            let mut runlist: HashSet<&Ident<Canonical>> =
+                                needed.iter().flat_map(|id| &deps[*id]).collect();
+                            runlist.extend(needed);
+                            let runlist = runlist.into_iter().collect();
+                            topo_sort(runlist, deps)
+                        }
+                        StepPart::Flows => topo_sort(runlist, deps),
+                        StepPart::Stocks => runlist,
                     };
+                    runlist.into_iter().cloned().collect()
+                };
 
                 let runlist_initials = if let Some(deps) = initial_deps.as_ref() {
                     build_runlist(deps, StepPart::Initials, &|_| true)

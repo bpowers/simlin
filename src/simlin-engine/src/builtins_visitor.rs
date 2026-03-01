@@ -2,12 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
+    canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::{datamodel, eqn_err};
@@ -132,6 +133,11 @@ pub struct BuiltinVisitor<'a> {
     active_subscript: Option<Vec<String>>,
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
+    /// Identifiers of Module variables in the parent model.
+    /// PREVIOUS(module_var) must fall through to module expansion
+    /// because modules occupy multiple slots and LoadPrev at the
+    /// base offset reads an internal sub-variable, not the output.
+    module_idents: Option<&'a HashSet<Ident<Canonical>>>,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -145,6 +151,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: Vec::new(),
             active_subscript: None,
             dimensions_ctx: None,
+            module_idents: None,
         }
     }
 
@@ -164,7 +171,14 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: get_dimension_names(dimensions),
             active_subscript: Some(subscript.to_vec()),
             dimensions_ctx,
+            module_idents: None,
         }
+    }
+
+    /// Set the module identifiers for PREVIOUS routing.
+    fn with_module_idents(mut self, module_idents: Option<&'a HashSet<Ident<Canonical>>>) -> Self {
+        self.module_idents = module_idents;
+        self
     }
 
     /// Substitute dimension references in the expression with concrete element names.
@@ -325,21 +339,39 @@ impl<'a> BuiltinVisitor<'a> {
                     let rhs = it.next().unwrap();
                     return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
                 }
-                // PREVIOUS and INIT always go through module expansion.
+                // PREVIOUS and INIT opcode routing:
                 //
-                // PREVIOUS: The LoadPrev opcode and prev_values snapshot buffer
-                // exist as scaffolding, but activating them changes the model's
-                // dependency graph. LTM link-score equations depend on the
-                // PREVIOUS module instances for correct evaluation ordering.
-                // Promoting PREVIOUS to a builtin requires reworking how
-                // evaluation order is determined for LTM-augmented models.
+                // 1-arg PREVIOUS(var) where var is a simple scalar variable
+                // reference compiles to the LoadPrev opcode. All other
+                // PREVIOUS forms fall through to module expansion:
+                //   - 2-arg PREVIOUS(x, init_val)
+                //   - nested PREVIOUS(PREVIOUS(x))
+                //   - PREVIOUS(expr)
+                //   - PREVIOUS(module_var) -- modules occupy multiple slots,
+                //     so LoadPrev at the base offset reads the wrong value
                 //
-                // INIT: The stdlib module contains a stock that pulls the
-                // variable into the Initials runlist. Without this, aux-only
-                // models (no stocks) would have an empty Initials runlist and
-                // the initial_values snapshot would be all zeros.
-                if func == "previous" || func == "init" {
-                    // Fall through to module expansion.
+                // INIT(x) always passes through as a builtin -- it compiles
+                // to the LoadInitial opcode.
+                if func == "previous"
+                    && (args.len() > 1
+                        || args.first().is_none_or(|a| match a {
+                            Var(ident, _) => {
+                                // Module variables occupy multiple slots;
+                                // LoadPrev at the module base offset reads
+                                // an internal sub-variable, not the output.
+                                // Check both the explicit module_idents set
+                                // and the implicit module naming convention
+                                // (ratio separator U+205A).
+                                let canonical = Ident::new(&canonicalize(ident.as_str()));
+                                self.module_idents
+                                    .is_some_and(|ids| ids.contains(&canonical))
+                                    || ident.as_str().contains('\u{205A}')
+                            }
+                            _ => true,
+                        }))
+                {
+                    // Fall through to module expansion for 2-arg form,
+                    // complex-argument forms, and module variable arguments.
                 } else if is_builtin_fn(&func) {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
@@ -455,14 +487,23 @@ impl<'a> BuiltinVisitor<'a> {
     }
 }
 
+/// Expand stdlib function calls (SMTH1, DELAY, etc.) and PREVIOUS/INIT
+/// builtins into implicit module instances and opcode-backed builtins.
+///
+/// When `module_idents` is provided, `PREVIOUS(module_var)` falls through
+/// to module expansion instead of compiling to LoadPrev, because modules
+/// occupy multiple slots and LoadPrev at the base offset reads an internal
+/// sub-variable rather than the output.
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
+    module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
-            let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+            let mut builtin_visitor =
+                BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
             let transformed = builtin_visitor.walk(ast)?;
             let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
             Ok((Ast::Scalar(transformed), vars))
@@ -483,7 +524,8 @@ pub fn instantiate_implicit_modules(
                         &dimensions,
                         &subscript,
                         dimensions_ctx,
-                    );
+                    )
+                    .with_module_idents(module_idents);
                     let transformed_ast = visitor.walk(ast_clone)?;
 
                     elements.insert(subscript_key, transformed_ast);
@@ -493,7 +535,8 @@ pub fn instantiate_implicit_modules(
                 Ok((Ast::Arrayed(dimensions, elements, None, false), all_vars))
             } else {
                 // No stdlib calls - original behavior
-                let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+                let mut builtin_visitor =
+                    BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
                 let transformed = builtin_visitor.walk(ast)?;
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
@@ -516,13 +559,15 @@ pub fn instantiate_implicit_modules(
                         &dimensions,
                         &subscript_parts,
                         dimensions_ctx,
-                    );
+                    )
+                    .with_module_idents(module_idents);
                     let transformed = visitor.walk(equation)?;
                     new_elements.insert(subscript_key, transformed);
                     all_vars.extend(visitor.vars.values().cloned());
                 }
                 let transformed_default = if let Some(default_expr) = default_expr {
-                    let mut default_visitor = BuiltinVisitor::new(variable_name);
+                    let mut default_visitor =
+                        BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
                     let transformed = default_visitor.walk(default_expr)?;
                     all_vars.extend(default_visitor.vars.values().cloned());
                     Some(transformed)
@@ -539,7 +584,8 @@ pub fn instantiate_implicit_modules(
                     all_vars,
                 ))
             } else {
-                let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+                let mut builtin_visitor =
+                    BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
                 let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
                     .into_iter()
                     .map(|(subscript, equation)| {
