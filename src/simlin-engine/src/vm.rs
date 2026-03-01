@@ -542,7 +542,6 @@ impl Vm {
         self.stack.clear();
         let module_inputs: &[f64] = &[];
         let mut data = self.data.take().unwrap();
-        self.prev_values.fill(0.0);
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
         let module_stocks = &self.sliced_sim.stock_modules[&self.root];
@@ -5248,6 +5247,32 @@ mod vm_reset_run_to_and_constants_tests {
             assert!(
                 (a - b).abs() < 1e-10,
                 "step {step}: full={a} vs segmented={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_to_segments_preserve_previous_state() {
+        let tp = TestProject::new("run_to_prev_segments")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("x", "TIME", None)
+            .aux("prev_x", "PREVIOUS(x)", None);
+        let compiled = build_compiled(&tp);
+
+        let mut vm_full = Vm::new(compiled.clone()).unwrap();
+        vm_full.run_to_end().unwrap();
+        let full_prev = vm_full.get_series(&Ident::new("prev_x")).unwrap();
+
+        let mut vm_seg = Vm::new(compiled).unwrap();
+        vm_seg.run_to(2.0).unwrap();
+        vm_seg.run_to_end().unwrap();
+        let seg_prev = vm_seg.get_series(&Ident::new("prev_x")).unwrap();
+
+        assert_eq!(full_prev.len(), seg_prev.len());
+        for (step, (full, seg)) in full_prev.iter().zip(seg_prev.iter()).enumerate() {
+            assert!(
+                (full - seg).abs() < 1e-10,
+                "step {step}: full={full} vs segmented={seg}"
             );
         }
     }

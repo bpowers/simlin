@@ -5860,7 +5860,6 @@ fn test_smooth3_stock_input_initialization() {
         ai_information: None,
     };
 
-    // Interpreter path
     let engine_project = Rc::new(crate::Project::from(project.clone()));
     let sim = Simulation::new(&engine_project, "main").expect("interpreter should compile");
     let interp_results = sim.run_to_end().expect("interpreter should run");
@@ -5873,7 +5872,6 @@ fn test_smooth3_stock_input_initialization() {
         "interpreter: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
     );
 
-    // Incremental VM path
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let compiled = compile_project_incremental(&db, sync.project, "main")
@@ -5889,17 +5887,12 @@ fn test_smooth3_stock_input_initialization() {
         "VM: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
     );
 
-    // Both paths must agree
     assert_eq!(
         interp_step0, vm_step0,
         "interpreter and VM must agree on SMOOTH3 initial value"
     );
 }
 
-/// prev-init-opcodes.AC1.3: PREVIOUS(x) at the first timestep returns 0
-/// (not x's initial value). This is correct for the LoadPrev opcode path
-/// because prev_values is initialized to zeros and not seeded with
-/// post-initials state.
 #[test]
 fn test_previous_returns_zero_at_first_timestep() {
     use crate::test_common::TestProject;
@@ -5912,13 +5905,11 @@ fn test_previous_returns_zero_at_first_timestep() {
     let vm = tp.run_vm().expect("VM should run");
     let prev_vals = vm.get("prev_x").expect("prev_x not in results");
 
-    // At t=0, PREVIOUS(x) returns 0 (not 42)
     assert!(
         (prev_vals[0] - 0.0).abs() < 1e-10,
         "PREVIOUS at t=0 should be 0, got {}",
         prev_vals[0]
     );
-    // At t=1+, PREVIOUS(x) returns 42 (x is constant)
     for (step, val) in prev_vals.iter().enumerate().skip(1) {
         assert!(
             (val - 42.0).abs() < 1e-10,
@@ -5926,10 +5917,6 @@ fn test_previous_returns_zero_at_first_timestep() {
         );
     }
 }
-
-/// prev-init-opcodes.AC3.1: 2-arg PREVIOUS(x, init_val) still uses module
-/// expansion. Verify the init_val is returned at the first timestep
-/// instead of 0 (confirming module path, not opcode path).
 #[test]
 fn test_2arg_previous_uses_module_expansion() {
     use crate::test_common::TestProject;
@@ -5943,23 +5930,54 @@ fn test_2arg_previous_uses_module_expansion() {
     let vm = tp.run_vm().expect("VM should run");
     let prev_vals = vm.get("prev_level").expect("prev_level not in results");
 
-    // At t=0, 2-arg PREVIOUS returns init_val=99 (not 0)
     assert!(
         (prev_vals[0] - 99.0).abs() < 1e-10,
         "2-arg PREVIOUS at t=0 should be 99, got {}",
         prev_vals[0]
     );
-    // At t=1, returns level at t=0 = 100
     assert!(
         (prev_vals[1] - 100.0).abs() < 1e-10,
         "2-arg PREVIOUS at t=1 should be 100, got {}",
         prev_vals[1]
     );
 }
+#[test]
+fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
+    use crate::testutils::{x_aux, x_model};
 
-/// Verify INIT works in a model with no stocks or modules, where the
-/// Initials runlist extension is the only thing that ensures the
-/// referenced variable is evaluated at t=0.
+    let project = datamodel::Project {
+        name: "dep_graph_prev_module".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("x", "TIME", None),
+                x_aux("delayed", "PREVIOUS(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+
+    let has_previous_module = dep_graph
+        .runlist_initials
+        .iter()
+        .chain(dep_graph.runlist_flows.iter())
+        .chain(dep_graph.runlist_stocks.iter())
+        .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚previous"));
+    assert!(
+        has_previous_module,
+        "dependency graph runlists should include the implicit PREVIOUS module for PREVIOUS(module-backed var)"
+    );
+}
 #[test]
 fn test_init_aux_only_model() {
     use crate::test_common::TestProject;
@@ -5972,7 +5990,6 @@ fn test_init_aux_only_model() {
     let vm = tp.run_vm().expect("VM should run");
     let frozen_vals = vm.get("frozen").expect("frozen not in results");
 
-    // INIT(growing) should freeze growing's t=0 value: TIME*2 = 1.0*2 = 2.0
     for (step, val) in frozen_vals.iter().enumerate() {
         assert!(
             (val - 2.0).abs() < 1e-10,

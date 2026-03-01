@@ -781,6 +781,15 @@ fn module_ident_context_for_model<'db>(
     ModuleIdentContext::new(db, module_ident_list)
 }
 
+#[salsa::tracked]
+fn model_module_ident_context<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    extra_module_idents: Vec<String>,
+) -> ModuleIdentContext<'db> {
+    module_ident_context_for_model(db, model, &extra_module_idents)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ImplicitVarDeps {
     pub name: String,
@@ -889,6 +898,7 @@ fn variable_direct_dependencies_impl(
     var: SourceVariable,
     project: SourceProject,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+    module_ident_context: Option<ModuleIdentContext>,
 ) -> VariableDeps {
     match var.kind(db) {
         SourceVariableKind::Module => {
@@ -905,15 +915,13 @@ fn variable_direct_dependencies_impl(
             }
         }
         _ => {
-            let parsed = parse_source_variable(db, var, project);
+            let parsed = if let Some(module_ident_context) = module_ident_context {
+                parse_source_variable_with_module_context(db, var, project, module_ident_context)
+            } else {
+                parse_source_variable(db, var, project)
+            };
             let dims = source_dims_to_datamodel(project.dimensions(db));
             let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
-
-            // Non-module variables don't need the models map for lowering --
-            // lower_ast only uses scope.dimensions for constify_dimensions and
-            // scope.model_name for array context. get_variable returning None
-            // is safe (arrays treated as scalar, which doesn't affect the
-            // identifier set).
             let models = HashMap::new();
             let scope = crate::model::ScopeStage0 {
                 models: &models,
@@ -942,13 +950,8 @@ fn variable_direct_dependencies_impl(
                     .collect(),
                 None => BTreeSet::new(),
             };
-
-            // Extract deps for implicit variables (SMOOTH, DELAY create internal stocks)
             let implicit_vars =
                 extract_implicit_var_deps(parsed, &dims, &dim_context, module_inputs);
-
-            // Also used in model.rs ModelStage1::init_referenced_vars() for the
-            // monolithic (non-salsa) compilation path.
             let init_referenced_vars = match lowered.ast() {
                 Some(ast) => init_referenced_idents(ast),
                 None => BTreeSet::new(),
@@ -964,17 +967,13 @@ fn variable_direct_dependencies_impl(
     }
 }
 
-/// Per-variable tracked function for dependency extraction. Salsa memoizes the
-/// result and only re-executes when the parsed variable changes. This means
-/// editing an equation to `a * b` from `a + b` (same deps) produces the same
-/// VariableDeps, so downstream dependency graph computation is skipped.
 #[salsa::tracked(returns(ref))]
 pub fn variable_direct_dependencies(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> VariableDeps {
-    variable_direct_dependencies_impl(db, var, project, None)
+    variable_direct_dependencies_impl(db, var, project, None, None)
 }
 
 /// Per-variable dependency extraction for a specific module input set.
@@ -990,7 +989,35 @@ pub fn variable_direct_dependencies_with_inputs(
     module_input_names: Vec<String>,
 ) -> VariableDeps {
     let module_inputs = canonical_module_input_set(&module_input_names);
-    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs))
+    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs), None)
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn variable_direct_dependencies_with_context<'db>(
+    db: &'db dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+    module_ident_context: ModuleIdentContext<'db>,
+) -> VariableDeps {
+    variable_direct_dependencies_impl(db, var, project, None, Some(module_ident_context))
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn variable_direct_dependencies_with_context_and_inputs<'db>(
+    db: &'db dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+    module_ident_context: ModuleIdentContext<'db>,
+    module_input_names: Vec<String>,
+) -> VariableDeps {
+    let module_inputs = canonical_module_input_set(&module_input_names);
+    variable_direct_dependencies_impl(
+        db,
+        var,
+        project,
+        Some(&module_inputs),
+        Some(module_ident_context),
+    )
 }
 
 fn extract_implicit_var_deps(
@@ -1147,12 +1174,6 @@ pub fn model_implicit_var_info(
     result
 }
 
-/// Compute the module_models map for a model: which variable names refer to
-/// which sub-model names. Mirrors `calc_module_model_map` from compiler/mod.rs
-/// but works with salsa inputs.
-///
-/// Returns: outer map keyed by model name, inner map keyed by module variable
-/// name, value is the referenced sub-model name.
 #[salsa::tracked(returns(ref))]
 pub fn model_module_map(
     db: &dyn Db,
@@ -1178,7 +1199,6 @@ pub fn model_module_map(
             let var_ident: Ident<Canonical> = Ident::new(name);
             current_mapping.insert(var_ident, sub_model_ident.clone());
 
-            // Recurse into sub-model
             let sub_canonical = canonicalize(sub_model_name_str);
             if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
                 let sub_map = model_module_map(db, *sub_model, project);
@@ -1187,8 +1207,6 @@ pub fn model_module_map(
         }
     }
 
-    // Include implicit MODULE variables (created by builtin expansion for
-    // SMOOTH, DELAY, etc.) in the module map.
     let implicit_vars = model_implicit_var_info(db, model, project);
     for (name, meta) in implicit_vars.iter() {
         if meta.is_module
@@ -1210,9 +1228,6 @@ pub fn model_module_map(
     all_models
 }
 
-/// Result of computing a model's dependency graph. Contains the transitive
-/// dependency maps and topologically sorted runlists for one instantiation
-/// (the default, no-module-inputs case).
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ModelDepGraphResult {
     pub dt_dependencies: HashMap<String, BTreeSet<String>>,
@@ -1223,14 +1238,6 @@ pub struct ModelDepGraphResult {
     pub has_cycle: bool,
 }
 
-/// Per-model tracked function for dependency graph computation. Salsa traces
-/// that this function reads each variable's direct dependencies (via
-/// `variable_direct_dependencies`). If none of those dep sets change, this
-/// function's result is returned from cache.
-///
-/// This handles models without cross-model module dependencies. Models with
-/// module references use `set_dependencies_cached` which combines this
-/// function's per-variable caching with the existing cross-model analysis.
 fn model_dependency_graph_impl(
     db: &dyn Db,
     model: SourceModel,
@@ -1239,8 +1246,8 @@ fn model_dependency_graph_impl(
 ) -> ModelDepGraphResult {
     let source_vars = model.variables(db);
     let module_input_names = module_input_names.to_vec();
+    let module_ident_context = model_module_ident_context(db, model, module_input_names.clone());
 
-    // Collect per-variable info: kind and direct deps
     struct VarInfo {
         is_stock: bool,
         is_module: bool,
@@ -1251,9 +1258,6 @@ fn model_dependency_graph_impl(
     let mut var_info: HashMap<String, VarInfo> = HashMap::new();
     let mut all_init_referenced: HashSet<String> = HashSet::new();
 
-    // Normalize dep names: composite module output references (e.g.
-    // "hares\u{00B7}hare_density") become the module variable name ("hares"),
-    // and leading middle-dot (XMILE parent model refs) is stripped.
     let normalize_dep = |dep: &str| -> String {
         let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
         if let Some(dot_pos) = effective.find('\u{00B7}') {
@@ -1270,27 +1274,22 @@ fn model_dependency_graph_impl(
 
     for (name, source_var) in source_vars.iter() {
         let deps = if module_input_names.is_empty() {
-            variable_direct_dependencies(db, *source_var, project)
-        } else {
-            variable_direct_dependencies_with_inputs(
+            variable_direct_dependencies_with_context(
                 db,
                 *source_var,
                 project,
+                module_ident_context,
+            )
+        } else {
+            variable_direct_dependencies_with_context_and_inputs(
+                db,
+                *source_var,
+                project,
+                module_ident_context,
                 module_input_names.clone(),
             )
         };
-        // Use SourceVariableKind from the salsa input directly -- this avoids
-        // creating a dependency on parse_source_variable's result (which
-        // changes when equation text changes even if deps don't).
         let kind = source_var.kind(db);
-
-        // For module variables, the dt_deps may contain composite
-        // references like "submodel\u{00B7}stock_var". In the dt phase, stocks
-        // break the dependency chain (they use their value from the
-        // previous timestep). The monolithic path's module_deps filters
-        // out inputs that reference stocks; we must do the same here to
-        // avoid spurious dependency cycles that produce incorrect
-        // topological orderings.
         let dt_deps = if kind == SourceVariableKind::Module {
             deps.dt_deps
                 .iter()
