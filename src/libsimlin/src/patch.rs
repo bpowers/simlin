@@ -400,6 +400,10 @@ fn collect_models_with_unit_warnings(
 /// This is the core patch application logic. It handles datamodel cloning,
 /// patch application, error gathering, validation, and committing changes
 /// (unless dry_run is true).
+///
+/// The datamodel lock is held for the entire operation to prevent
+/// concurrent patchers from snapshotting a stale datamodel between
+/// validation and commit (lost-update).
 pub(crate) unsafe fn apply_project_patch_internal(
     project_ref: &SimlinProject,
     patch: engine::ProjectPatch,
@@ -408,26 +412,29 @@ pub(crate) unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
-    // Snapshot the pre-patch warning baseline and datamodel atomically.
-    // The db lock is acquired to collect diagnostics for the existing state.
-    let (models_with_existing_warnings, mut staged_datamodel, original_datamodel) = {
-        let datamodel_locked = project_ref.datamodel.lock().unwrap();
+    // Hold the datamodel lock for the entire operation. This prevents
+    // concurrent patchers from snapshotting a stale datamodel between
+    // our validation and commit phases.
+    let mut datamodel_locked = project_ref.datamodel.lock().unwrap();
+
+    // Snapshot the pre-patch warning baseline atomically under
+    // db + sync_state locks.
+    let models_with_existing_warnings = {
         let db_locked = project_ref.db.lock().unwrap();
         let sync_state = project_ref.sync_state.lock().unwrap();
-        let warnings = if let Some(ref state) = *sync_state {
+        if let Some(ref state) = *sync_state {
             let sync = state.to_sync_result();
             let diags = engine::db::collect_all_diagnostics(&db_locked, &sync);
             collect_models_with_unit_warnings(&diags)
         } else {
             std::collections::HashSet::new()
-        };
-        drop(sync_state);
-        drop(db_locked);
-        let dm = datamodel_locked.clone();
-        #[cfg(test)]
-        invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
-        (warnings, dm.clone(), dm)
+        }
     };
+
+    let original_datamodel = datamodel_locked.clone();
+    let mut staged_datamodel = original_datamodel.clone();
+    #[cfg(test)]
+    invoke_patch_test_hook(PatchHookPoint::SnapshotWhileProjectLocked, project_ref);
 
     if let Err(err) = engine::apply_patch(&mut staged_datamodel, patch) {
         store_error(
@@ -524,28 +531,12 @@ pub(crate) unsafe fn apply_project_patch_internal(
             prev_state.as_ref(),
         );
         *project_ref.sync_state.lock().unwrap() = Some(restored);
-        drop(db);
         return;
     }
 
-    // Commit: restore db to original state before releasing the db lock
-    // so no concurrent reader sees staged state during the gap.
-    let restored = engine::db::sync_from_datamodel_incremental(
-        &mut db,
-        &original_datamodel,
-        prev_state.as_ref(),
-    );
-    *project_ref.sync_state.lock().unwrap() = Some(restored.clone());
-    drop(db);
-
-    // Re-acquire all three locks in documented order (datamodel -> db ->
-    // sync_state) for an atomic commit. The extra sync call is cheap
-    // because salsa caching makes re-applying the same inputs free.
-    let mut datamodel_locked = project_ref.datamodel.lock().unwrap();
-    let mut db = project_ref.db.lock().unwrap();
-    let final_sync =
-        engine::db::sync_from_datamodel_incremental(&mut db, &staged_datamodel, Some(&restored));
-    *project_ref.sync_state.lock().unwrap() = Some(final_sync);
+    // Commit: the db already has the staged state from validation.
+    // Update sync_state and datamodel while holding both locks.
+    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
     *datamodel_locked = staged_datamodel;
 }
 

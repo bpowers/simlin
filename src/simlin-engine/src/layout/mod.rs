@@ -2032,80 +2032,82 @@ fn try_detect_ltm_loops_incremental(
 ) -> Option<Vec<metadata::FeedbackLoop>> {
     use salsa::Setter;
 
-    // Run inside catch_unwind since compilation can panic on malformed
-    // models (e.g., missing module references).
-    //
-    // catch_unwind requires the closure to be UnwindSafe, which &mut
-    // references are not. We move the db/source_project into the closure
-    // via AssertUnwindSafe, which is safe because we do not observe
-    // partially-mutated state on panic -- we simply return None.
     let actual_name_owned = actual_name.to_string();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        // Canonicalize the model name for SourceProject lookup, since the
-        // models map is keyed by canonical names.
-        let canonical_name = crate::canonicalize(&actual_name_owned);
-        let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
 
-        // Detect loops via the salsa-tracked analysis path.
-        let detected = crate::db::model_detected_loops(db, source_model, source_project);
-        if detected.loops.is_empty() {
-            return Some(Vec::new());
-        }
+    // Phase 1: Model lookup and loop detection.
+    // Wrapped in catch_unwind since salsa queries can panic on
+    // malformed models (e.g., missing module references).
+    let detected = {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let canonical_name = crate::canonicalize(&actual_name_owned);
+            let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
+            Some(crate::db::model_detected_loops(
+                db,
+                source_model,
+                source_project,
+            ))
+        }));
+        result.ok().flatten()?
+    };
 
-        // Enable LTM, compile, simulate, then always disable LTM --
-        // even if compilation or simulation fails. Using `and_then`
-        // instead of `?` ensures the cleanup line always executes.
-        source_project.set_ltm_enabled(db).to(true);
-        let vm_result =
-            crate::db::compile_project_incremental(db, source_project, &actual_name_owned)
-                .ok()
-                .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
-                .and_then(|mut vm| {
-                    vm.run_to_end().ok()?;
-                    Some(vm)
-                });
-        source_project.set_ltm_enabled(db).to(false);
+    if detected.loops.is_empty() {
+        return Some(Vec::new());
+    }
 
-        let vm = vm_result?;
-
-        let mut feedback_loops = Vec::new();
-        for dl in &detected.loops {
-            let polarity = match dl.polarity {
-                crate::db::DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
-                crate::db::DetectedLoopPolarity::Balancing => LoopPolarity::Balancing,
-                crate::db::DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
-            };
-
-            let variables: Vec<String> = {
-                let mut vars = dl.variables.clone();
-                if let Some(first) = vars.first().cloned() {
-                    vars.push(first);
-                }
-                vars
-            };
-
-            // Extract the relative loop score time series.
-            let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", dl.id);
-            let var_ident = Ident::new(&var_name);
-            let importance_series = vm
-                .get_series(&var_ident)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|v| if v.is_finite() { v } else { 0.0 })
-                .collect();
-
-            feedback_loops.push(metadata::FeedbackLoop {
-                name: dl.id.clone(),
-                polarity,
-                variables,
-                importance_series,
-                dominant_period: None,
-            });
-        }
-
-        Some(feedback_loops)
+    // Phase 2: LTM compile and simulate.
+    // Set ltm_enabled BEFORE catch_unwind and reset AFTER so that
+    // the flag is always cleared even if compilation panics.
+    source_project.set_ltm_enabled(db).to(true);
+    let vm_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::db::compile_project_incremental(db, source_project, &actual_name_owned)
+            .ok()
+            .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
+            .and_then(|mut vm| {
+                vm.run_to_end().ok()?;
+                Some(vm)
+            })
     }));
-    result.ok().flatten()
+    source_project.set_ltm_enabled(db).to(false);
+
+    let vm = vm_result.ok().flatten()?;
+
+    // Phase 3: Build feedback loop structs from VM results.
+    let mut feedback_loops = Vec::new();
+    for dl in &detected.loops {
+        let polarity = match dl.polarity {
+            crate::db::DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
+            crate::db::DetectedLoopPolarity::Balancing => LoopPolarity::Balancing,
+            crate::db::DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
+        };
+
+        let variables: Vec<String> = {
+            let mut vars = dl.variables.clone();
+            if let Some(first) = vars.first().cloned() {
+                vars.push(first);
+            }
+            vars
+        };
+
+        // Extract the relative loop score time series.
+        let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", dl.id);
+        let var_ident = Ident::new(&var_name);
+        let importance_series = vm
+            .get_series(&var_ident)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| if v.is_finite() { v } else { 0.0 })
+            .collect();
+
+        feedback_loops.push(metadata::FeedbackLoop {
+            name: dl.id.clone(),
+            polarity,
+            variables,
+            importance_series,
+            dominant_period: None,
+        });
+    }
+
+    Some(feedback_loops)
 }
 
 /// Monolithic fallback path for LTM loop detection (used when no db is
