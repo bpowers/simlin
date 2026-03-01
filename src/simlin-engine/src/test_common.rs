@@ -633,6 +633,29 @@ impl TestProject {
             .clone()
     }
 
+    /// Get VM results for a variable (allows checking for NaN values)
+    pub fn vm_result(&self, var_name: &str) -> Vec<f64> {
+        let results = self.run_vm().expect("VM should run successfully");
+
+        results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in VM results"))
+            .clone()
+    }
+
+    /// Returns true if the flow runlist for the compiled module contains at least one
+    /// AssignTemp node (indicating A2A hoisting occurred for array-producing builtins).
+    pub fn flow_runlist_has_assign_temp(&self) -> bool {
+        let module = match self.build_module() {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        module
+            .runlist_flows
+            .iter()
+            .any(|e| matches!(e, crate::compiler::Expr::AssignTemp(_, _, _)))
+    }
+
     /// Test that simulation creation succeeds
     pub fn assert_sim_builds(&self) {
         self.build_sim()

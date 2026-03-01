@@ -3453,3 +3453,118 @@ mod vector_select_action_tests {
         project.assert_interpreter_result("result", &[99.0, 99.0]);
     }
 }
+
+mod vector_elm_map_tests {
+    use crate::test_common::TestProject;
+
+    // source[D] = [10, 20, 30] (3 elements, valid indices 0..2)
+    // offsets[D] = [0, 2, 5]   -- index 5 exceeds source length, so third element -> NaN
+    fn make_oob_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "5")])
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])")
+    }
+
+    #[test]
+    fn in_bounds_elements_map_correctly_interpreter() {
+        let project = make_oob_project("vem_inbounds_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 10.0).abs() < 1e-9,
+            "element 0 (offset 0): expected 10, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 30.0).abs() < 1e-9,
+            "element 1 (offset 2): expected 30, got {}",
+            vals[1]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_element_returns_nan_interpreter() {
+        let project = make_oob_project("vem_oob_interp");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            vals[2].is_nan(),
+            "element 2 (offset 5, source len 3): expected NaN, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn in_bounds_elements_map_correctly_vm() {
+        let project = make_oob_project("vem_inbounds_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            (vals[0] - 10.0).abs() < 1e-9,
+            "element 0 (offset 0): expected 10, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 30.0).abs() < 1e-9,
+            "element 1 (offset 2): expected 30, got {}",
+            vals[1]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_element_returns_nan_vm() {
+        let project = make_oob_project("vem_oob_vm");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 3, "expected 3 elements");
+        assert!(
+            vals[2].is_nan(),
+            "element 2 (offset 5, source len 3): expected NaN, got {}",
+            vals[2]
+        );
+    }
+
+    #[test]
+    fn negative_offset_returns_nan_interpreter() {
+        // A negative offset value (stored as a float like -1.0) should also produce NaN.
+        let project = TestProject::new("vem_neg_interp")
+            .indexed_dimension("D", 2)
+            .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
+            .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 2, "expected 2 elements");
+        assert!(
+            vals[0].is_nan(),
+            "element 0 (offset -1): expected NaN, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 100.0).abs() < 1e-9,
+            "element 1 (offset 0): expected 100, got {}",
+            vals[1]
+        );
+    }
+
+    #[test]
+    fn negative_offset_returns_nan_vm() {
+        let project = TestProject::new("vem_neg_vm")
+            .indexed_dimension("D", 2)
+            .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
+            .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
+        let vals = project.vm_result("result");
+        assert_eq!(vals.len(), 2, "expected 2 elements");
+        assert!(
+            vals[0].is_nan(),
+            "element 0 (offset -1): expected NaN, got {}",
+            vals[0]
+        );
+        assert!(
+            (vals[1] - 100.0).abs() < 1e-9,
+            "element 1 (offset 0): expected 100, got {}",
+            vals[1]
+        );
+    }
+}

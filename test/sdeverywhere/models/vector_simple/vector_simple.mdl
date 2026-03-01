@@ -28,6 +28,13 @@ g[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], e[DimA,DimB]) ~~|
 h[DimA] = 2100, 2010, 2020 ~~|
 l[DimA] = VECTOR SORT ORDER(h[DimA], ASCENDING) ~~|
 m[DimA] = VECTOR SORT ORDER(h[DimA], 0) ~~|
+zero sel[DimA] = 0 ~~|
+vs sum = VECTOR SELECT(a[DimA!], h[DimA!], 0, VSSUM, VSERRNONE) ~~|
+vs min = VECTOR SELECT(a[DimA!], h[DimA!], 0, 1, 0) ~~|
+vs mean = VECTOR SELECT(a[DimA!], h[DimA!], 0, 2, 0) ~~|
+vs max = VECTOR SELECT(a[DimA!], h[DimA!], 0, VSMAX, VSERRNONE) ~~|
+vs prod = VECTOR SELECT(a[DimA!], h[DimA!], 0, 4, 0) ~~|
+vs empty = VECTOR SELECT(zero sel[DimA!], h[DimA!], 9999, VSSUM, VSERRNONE) ~~|
 
 INITIAL TIME  = 0 ~~|
 FINAL TIME  = 1 ~~|
