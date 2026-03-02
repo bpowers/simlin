@@ -649,6 +649,68 @@ fn test_init_plus_current_keeps_current_step_dependency() {
 }
 
 #[test]
+fn test_previous_plus_init_does_not_keep_current_step_dependency() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "prev_plus_init_dep".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "a".to_string(),
+                    equation: datamodel::Equation::Scalar("PREVIOUS(b) + INIT(b)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "b".to_string(),
+                    equation: datamodel::Equation::Scalar("a + 1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        active_initial: Some("1".to_string()),
+                        ..datamodel::Compat::default()
+                    },
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    assert!(
+        !dep_graph.has_cycle,
+        "PREVIOUS+INIT lagged/snapshot refs should not create dt cycles when initials are acyclic"
+    );
+    let a_dt = dep_graph
+        .dt_dependencies
+        .get("a")
+        .expect("missing dt deps for a");
+    assert!(
+        !a_dt.contains("b"),
+        "a = PREVIOUS(b) + INIT(b) should not keep b as a same-step dependency"
+    );
+}
+
+#[test]
 fn test_compile_fragment_init_expression_temp_arg_compiles() {
     let db = SimlinDb::default();
     let project = datamodel::Project {

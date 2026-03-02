@@ -1064,6 +1064,7 @@ pub fn init_only_referenced_idents_with_module_inputs(
             }
             Expr2::App(builtin, _, _) => match builtin {
                 BuiltinFn::Init(arg) => walk(arg, non_init, true, module_inputs),
+                BuiltinFn::Previous(arg) => walk(arg, non_init, true, module_inputs),
                 _ => walk_builtin_expr(builtin, |contents| {
                     if let BuiltinContents::Expr(expr) = contents {
                         walk(expr, non_init, in_init, module_inputs);
@@ -1193,6 +1194,7 @@ fn test_init_only_referenced_idents() {
     let cases: &[(&str, &[&str])] = &[
         ("INIT(b)", &["b"]),
         ("INIT(b) + b", &[]),
+        ("PREVIOUS(b) + INIT(b)", &["b"]),
         ("INIT(m.out1) + m.out2", &["m·out1"]),
     ];
 
