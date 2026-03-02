@@ -180,6 +180,31 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
+    /// Returns true when the identifier names a module variable in either
+    /// the parent model (`module_idents`) or modules synthesized in this pass.
+    fn is_known_module_ident(&self, ident: &Ident<Canonical>) -> bool {
+        self.module_idents.is_some_and(|ids| ids.contains(ident))
+            || self
+                .vars
+                .get(ident)
+                .is_some_and(|var| matches!(var, datamodel::Variable::Module(_)))
+    }
+
+    /// PREVIOUS/INIT opcode routing only applies to direct scalar variables.
+    /// Module variables and qualified module outputs (`module·output`) must
+    /// be treated as module-backed so they can route through module expansion.
+    fn is_module_backed_ident(&self, ident: &RawIdent) -> bool {
+        let canonical = Ident::new(&canonicalize(ident.as_str()));
+        if self.is_known_module_ident(&canonical) {
+            return true;
+        }
+
+        ident
+            .as_str()
+            .split_once('·')
+            .is_some_and(|(base, _)| self.is_known_module_ident(&Ident::new(&canonicalize(base))))
+    }
+
     /// Substitute dimension references in the expression with concrete element names.
     /// For example, if we're processing element "A2" of dimension "SubA",
     /// transform `input[SubA]` to `input[A2]`.
@@ -349,16 +374,10 @@ impl<'a> BuiltinVisitor<'a> {
                 //   - PREVIOUS(module_var) -- modules occupy multiple slots,
                 //     so LoadPrev at the base offset reads the wrong value
                 //
-                let is_module_backed_ident = |ident: &RawIdent| {
-                    let canonical = Ident::new(&canonicalize(ident.as_str()));
-                    self.module_idents
-                        .is_some_and(|ids| ids.contains(&canonical))
-                        || ident.as_str().contains('\u{205A}')
-                };
                 let previous_needs_module = func == "previous"
                     && (args.len() > 1
                         || args.first().is_none_or(|a| match a {
-                            Var(ident, _) => is_module_backed_ident(ident),
+                            Var(ident, _) => self.is_module_backed_ident(ident),
                             _ => true,
                         }));
                 // LoadInitial only supports direct variable offsets. Rewrite
@@ -368,7 +387,7 @@ impl<'a> BuiltinVisitor<'a> {
                 let init_needs_temp_arg = func == "init"
                     && args.len() == 1
                     && args.first().is_some_and(|a| match a {
-                        Var(ident, _) => is_module_backed_ident(ident),
+                        Var(ident, _) => self.is_module_backed_ident(ident),
                         _ => true,
                     });
                 if init_needs_temp_arg {
@@ -1049,6 +1068,18 @@ mod tests {
         project.assert_compiles();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[1.0, 1.0]);
+    }
+
+    /// Regression test: nested INIT must not repeatedly wrap generated arg helpers.
+    #[test]
+    fn test_nested_init_does_not_rewrite_generated_arg_helpers() {
+        let project = TestProject::new("nested_init_regression")
+            .aux("x", "1", None)
+            .aux("result", "INIT(INIT(x + 1))", None);
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 2.0]);
     }
 
     /// Test that DELAY (from DELAY FIXED mapping) works as delay1
