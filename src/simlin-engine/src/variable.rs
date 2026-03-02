@@ -809,7 +809,11 @@ pub fn identifier_set(
 pub fn init_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     fn walk_index(index: &IndexExpr2, out: &mut BTreeSet<String>) {
         match index {
-            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => walk(expr, out),
+            IndexExpr2::Expr(expr) => walk(expr, out),
+            IndexExpr2::Range(start, end, _) => {
+                walk(start, out);
+                walk(end, out);
+            }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
             | IndexExpr2::DimPosition(_, _) => {}
@@ -873,7 +877,11 @@ pub fn init_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
 pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     fn walk_index(index: &IndexExpr2, out: &mut BTreeSet<String>) {
         match index {
-            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => walk(expr, out),
+            IndexExpr2::Expr(expr) => walk(expr, out),
+            IndexExpr2::Range(start, end, _) => {
+                walk(start, out);
+                walk(end, out);
+            }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
             | IndexExpr2::DimPosition(_, _) => {}
@@ -945,8 +953,10 @@ pub fn lagged_only_previous_idents_with_module_inputs(
         module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
     ) {
         match index {
-            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => {
-                walk(expr, non_previous, in_previous, module_inputs)
+            IndexExpr2::Expr(expr) => walk(expr, non_previous, in_previous, module_inputs),
+            IndexExpr2::Range(start, end, _) => {
+                walk(start, non_previous, in_previous, module_inputs);
+                walk(end, non_previous, in_previous, module_inputs);
             }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
@@ -1040,8 +1050,10 @@ pub fn init_only_referenced_idents_with_module_inputs(
         module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
     ) {
         match index {
-            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => {
-                walk(expr, non_init, in_init, module_inputs)
+            IndexExpr2::Expr(expr) => walk(expr, non_init, in_init, module_inputs),
+            IndexExpr2::Range(start, end, _) => {
+                walk(start, non_init, in_init, module_inputs);
+                walk(end, non_init, in_init, module_inputs);
             }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
@@ -1216,6 +1228,66 @@ fn test_init_only_referenced_idents() {
         let expected: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(expected, got, "eqn={eqn}");
     }
+}
+
+#[test]
+fn test_range_end_expressions_are_walked_in_init_previous_helpers() {
+    let loc = Loc::new(0, 1);
+    let const_one = Expr2::Const("1".to_string(), 1.0, loc);
+
+    let prev_range_ast = Ast::Scalar(Expr2::Subscript(
+        Ident::new("arr"),
+        vec![IndexExpr2::Range(
+            const_one.clone(),
+            Expr2::App(
+                BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("lagged"), None, loc))),
+                None,
+                loc,
+            ),
+            loc,
+        )],
+        None,
+        loc,
+    ));
+
+    let previous_refs = previous_referenced_idents(&prev_range_ast);
+    assert!(
+        previous_refs.contains("lagged"),
+        "range end should contribute PREVIOUS references"
+    );
+
+    let lagged_only = lagged_only_previous_idents_with_module_inputs(&prev_range_ast, None);
+    assert!(
+        lagged_only.contains("lagged"),
+        "range end should contribute PREVIOUS-only references"
+    );
+
+    let init_range_ast = Ast::Scalar(Expr2::Subscript(
+        Ident::new("arr"),
+        vec![IndexExpr2::Range(
+            const_one,
+            Expr2::App(
+                BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("seed"), None, loc))),
+                None,
+                loc,
+            ),
+            loc,
+        )],
+        None,
+        loc,
+    ));
+
+    let init_refs = init_referenced_idents(&init_range_ast);
+    assert!(
+        init_refs.contains("seed"),
+        "range end should contribute INIT references"
+    );
+
+    let init_only = init_only_referenced_idents_with_module_inputs(&init_range_ast, None);
+    assert!(
+        init_only.contains("seed"),
+        "range end should contribute INIT-only references"
+    );
 }
 
 #[test]

@@ -830,7 +830,7 @@ pub(crate) fn collect_module_idents(
 /// for this early classification step.
 fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
     let text = match eqn {
-        datamodel::Equation::Scalar(s) => s.as_str(),
+        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
         _ => return false,
     };
     let Ok(Some(ast)) = Expr0::new(text, crate::lexer::LexerType::Equation) else {
@@ -2220,6 +2220,31 @@ fn test_collect_module_idents_skips_one_arg_previous() {
     assert!(
         ids.contains(&Ident::new("prev_x_init")),
         "2-arg PREVIOUS should remain module-backed",
+    );
+}
+
+#[test]
+fn test_collect_module_idents_marks_apply_to_all_stdlib_calls() {
+    let vars = vec![
+        x_aux("x", "TIME", None),
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: "prev_x_init".to_string(),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["DimA".to_string()],
+                "PREVIOUS(x, 42)".to_string(),
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    ];
+    let ids = collect_module_idents(&vars);
+    assert!(
+        ids.contains(&Ident::new("prev_x_init")),
+        "ApplyToAll equations that invoke 2-arg PREVIOUS should be marked module-backed",
     );
 }
 
