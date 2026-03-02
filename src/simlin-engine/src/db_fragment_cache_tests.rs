@@ -6,8 +6,8 @@ use salsa::plumbing::AsId;
 
 use crate::datamodel;
 use crate::db::{
-    SimlinDb, compile_var_fragment, model_dependency_graph, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    SimlinDb, compile_var_fragment, model_dependency_graph, model_dependency_graph_with_inputs,
+    sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -750,5 +750,284 @@ fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
     assert!(
         fragment.is_some(),
         "INIT(y) with active_initial override should still compile in fragment mode"
+    );
+}
+
+#[test]
+fn test_init_feedback_interpreter_path_is_acyclic() {
+    let project = datamodel::Project {
+        name: "init_lag_interp".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "a".to_string(),
+                    equation: datamodel::Equation::Scalar("INIT(b)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "b".to_string(),
+                    equation: datamodel::Equation::Scalar("a + 1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        active_initial: Some("1".to_string()),
+                        ..datamodel::Compat::default()
+                    },
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled = crate::project::Project::from(project);
+    assert!(
+        compiled.errors.is_empty(),
+        "project-level compile errors should be empty: {:?}",
+        compiled.errors
+    );
+    let model = compiled
+        .models
+        .get(&crate::common::Ident::new("main"))
+        .expect("main model missing");
+    assert!(
+        model.errors.is_none(),
+        "model-level errors should be empty: {:?}",
+        model.errors
+    );
+    assert!(
+        model.get_variable_errors().is_empty(),
+        "variable errors should be empty: {:?}",
+        model.get_variable_errors()
+    );
+}
+
+#[test]
+fn test_module_input_branch_prunes_previous_only_dt_dep() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "module_input_prev_branch".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "src".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "m".to_string(),
+                        model_name: "submodel".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "src".to_string(),
+                            dst: "m.input".to_string(),
+                        }],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "submodel".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "y".to_string(),
+                        equation: datamodel::Equation::Scalar("2".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "z".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "if isModuleInput(input) then PREVIOUS(y) else y".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let sub_model = sync.models["submodel"].source;
+
+    let active =
+        model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec!["input".to_string()]);
+    assert!(
+        !active.dt_dependencies["z"].contains("y"),
+        "active isModuleInput branch uses PREVIOUS(y), so z should not have same-step dt dep on y"
+    );
+
+    let inactive = model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec![]);
+    assert!(
+        inactive.dt_dependencies["z"].contains("y"),
+        "inactive branch falls back to y, so z should depend on y"
+    );
+}
+
+#[test]
+fn test_module_input_branch_prunes_init_only_dt_dep() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "module_input_init_branch".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "src".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "m".to_string(),
+                        model_name: "submodel".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "src".to_string(),
+                            dst: "m.input".to_string(),
+                        }],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "submodel".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "y".to_string(),
+                        equation: datamodel::Equation::Scalar("2".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "z".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "if isModuleInput(input) then INIT(y) else y".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let sub_model = sync.models["submodel"].source;
+
+    let active =
+        model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec!["input".to_string()]);
+    assert!(
+        !active.dt_dependencies["z"].contains("y"),
+        "active isModuleInput branch uses INIT(y), so z should not have same-step dt dep on y"
+    );
+
+    let inactive = model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec![]);
+    assert!(
+        inactive.dt_dependencies["z"].contains("y"),
+        "inactive branch falls back to y, so z should depend on y"
     );
 }

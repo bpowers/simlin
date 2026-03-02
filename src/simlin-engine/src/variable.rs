@@ -934,11 +934,19 @@ pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
 /// Collect identifiers referenced *only* through PREVIOUS(...) in an AST.
 ///
 /// If an identifier appears both inside and outside PREVIOUS, it is excluded.
-pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    fn walk_index(index: &IndexExpr2, non_previous: &mut BTreeSet<String>, in_previous: bool) {
+pub fn lagged_only_previous_idents_with_module_inputs(
+    ast: &Ast<Expr2>,
+    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+) -> BTreeSet<String> {
+    fn walk_index(
+        index: &IndexExpr2,
+        non_previous: &mut BTreeSet<String>,
+        in_previous: bool,
+        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+    ) {
         match index {
             IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => {
-                walk(expr, non_previous, in_previous)
+                walk(expr, non_previous, in_previous, module_inputs)
             }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
@@ -946,7 +954,12 @@ pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
         }
     }
 
-    fn walk(expr: &Expr2, non_previous: &mut BTreeSet<String>, in_previous: bool) {
+    fn walk(
+        expr: &Expr2,
+        non_previous: &mut BTreeSet<String>,
+        in_previous: bool,
+        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+    ) {
         match expr {
             Expr2::Const(_, _, _) => {}
             Expr2::Var(ident, _, _) => {
@@ -955,10 +968,10 @@ pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
                 }
             }
             Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Previous(arg) => walk(arg, non_previous, true),
+                BuiltinFn::Previous(arg) => walk(arg, non_previous, true, module_inputs),
                 _ => walk_builtin_expr(builtin, |contents| {
                     if let BuiltinContents::Expr(expr) = contents {
-                        walk(expr, non_previous, in_previous);
+                        walk(expr, non_previous, in_previous, module_inputs);
                     }
                 }),
             },
@@ -967,18 +980,29 @@ pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
                     non_previous.insert(ident.to_string());
                 }
                 for arg in args {
-                    walk_index(arg, non_previous, in_previous);
+                    walk_index(arg, non_previous, in_previous, module_inputs);
                 }
             }
             Expr2::Op2(_, lhs, rhs, _, _) => {
-                walk(lhs, non_previous, in_previous);
-                walk(rhs, non_previous, in_previous);
+                walk(lhs, non_previous, in_previous, module_inputs);
+                walk(rhs, non_previous, in_previous, module_inputs);
             }
-            Expr2::Op1(_, expr, _, _) => walk(expr, non_previous, in_previous),
+            Expr2::Op1(_, expr, _, _) => walk(expr, non_previous, in_previous, module_inputs),
             Expr2::If(cond, t, f, _, _) => {
-                walk(cond, non_previous, in_previous);
-                walk(t, non_previous, in_previous);
-                walk(f, non_previous, in_previous);
+                if let Some(module_inputs) = module_inputs
+                    && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
+                {
+                    if module_inputs.contains(&*canonicalize(ident.as_str())) {
+                        walk(t, non_previous, in_previous, Some(module_inputs));
+                    } else {
+                        walk(f, non_previous, in_previous, Some(module_inputs));
+                    }
+                    return;
+                }
+
+                walk(cond, non_previous, in_previous, module_inputs);
+                walk(t, non_previous, in_previous, module_inputs);
+                walk(f, non_previous, in_previous, module_inputs);
             }
         }
     }
@@ -986,13 +1010,15 @@ pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     let previous = previous_referenced_idents(ast);
     let mut non_previous = BTreeSet::new();
     match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut non_previous, false),
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+            walk(expr, &mut non_previous, false, module_inputs)
+        }
         Ast::Arrayed(_, elements, default_expr, _) => {
             for expr in elements.values() {
-                walk(expr, &mut non_previous, false);
+                walk(expr, &mut non_previous, false, module_inputs);
             }
             if let Some(expr) = default_expr {
-                walk(expr, &mut non_previous, false);
+                walk(expr, &mut non_previous, false, module_inputs);
             }
         }
     }
@@ -1003,17 +1029,32 @@ pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
 /// Collect identifiers referenced *only* through INIT(...) in an AST.
 ///
 /// If an identifier appears both inside and outside INIT, it is excluded.
-pub fn init_only_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    fn walk_index(index: &IndexExpr2, non_init: &mut BTreeSet<String>, in_init: bool) {
+pub fn init_only_referenced_idents_with_module_inputs(
+    ast: &Ast<Expr2>,
+    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+) -> BTreeSet<String> {
+    fn walk_index(
+        index: &IndexExpr2,
+        non_init: &mut BTreeSet<String>,
+        in_init: bool,
+        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+    ) {
         match index {
-            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => walk(expr, non_init, in_init),
+            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => {
+                walk(expr, non_init, in_init, module_inputs)
+            }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
             | IndexExpr2::DimPosition(_, _) => {}
         }
     }
 
-    fn walk(expr: &Expr2, non_init: &mut BTreeSet<String>, in_init: bool) {
+    fn walk(
+        expr: &Expr2,
+        non_init: &mut BTreeSet<String>,
+        in_init: bool,
+        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+    ) {
         match expr {
             Expr2::Const(_, _, _) => {}
             Expr2::Var(ident, _, _) => {
@@ -1022,10 +1063,10 @@ pub fn init_only_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
                 }
             }
             Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Init(arg) => walk(arg, non_init, true),
+                BuiltinFn::Init(arg) => walk(arg, non_init, true, module_inputs),
                 _ => walk_builtin_expr(builtin, |contents| {
                     if let BuiltinContents::Expr(expr) = contents {
-                        walk(expr, non_init, in_init);
+                        walk(expr, non_init, in_init, module_inputs);
                     }
                 }),
             },
@@ -1034,18 +1075,29 @@ pub fn init_only_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
                     non_init.insert(ident.to_string());
                 }
                 for arg in args {
-                    walk_index(arg, non_init, in_init);
+                    walk_index(arg, non_init, in_init, module_inputs);
                 }
             }
             Expr2::Op2(_, lhs, rhs, _, _) => {
-                walk(lhs, non_init, in_init);
-                walk(rhs, non_init, in_init);
+                walk(lhs, non_init, in_init, module_inputs);
+                walk(rhs, non_init, in_init, module_inputs);
             }
-            Expr2::Op1(_, expr, _, _) => walk(expr, non_init, in_init),
+            Expr2::Op1(_, expr, _, _) => walk(expr, non_init, in_init, module_inputs),
             Expr2::If(cond, t, f, _, _) => {
-                walk(cond, non_init, in_init);
-                walk(t, non_init, in_init);
-                walk(f, non_init, in_init);
+                if let Some(module_inputs) = module_inputs
+                    && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
+                {
+                    if module_inputs.contains(&*canonicalize(ident.as_str())) {
+                        walk(t, non_init, in_init, Some(module_inputs));
+                    } else {
+                        walk(f, non_init, in_init, Some(module_inputs));
+                    }
+                    return;
+                }
+
+                walk(cond, non_init, in_init, module_inputs);
+                walk(t, non_init, in_init, module_inputs);
+                walk(f, non_init, in_init, module_inputs);
             }
         }
     }
@@ -1053,13 +1105,15 @@ pub fn init_only_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     let init_refs = init_referenced_idents(ast);
     let mut non_init = BTreeSet::new();
     match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut non_init, false),
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+            walk(expr, &mut non_init, false, module_inputs)
+        }
         Ast::Arrayed(_, elements, default_expr, _) => {
             for expr in elements.values() {
-                walk(expr, &mut non_init, false);
+                walk(expr, &mut non_init, false, module_inputs);
             }
             if let Some(expr) = default_expr {
-                walk(expr, &mut non_init, false);
+                walk(expr, &mut non_init, false, module_inputs);
             }
         }
     }
@@ -1156,7 +1210,7 @@ fn test_init_only_referenced_idents() {
             model_name: "test_model",
         };
         let lowered = lower_ast(&scope, ast.expect("failed to parse equation")).unwrap();
-        let got = init_only_referenced_idents(&lowered);
+        let got = init_only_referenced_idents_with_module_inputs(&lowered, None);
         let expected: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(expected, got, "eqn={eqn}");
     }

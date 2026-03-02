@@ -265,7 +265,17 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident<Canonical>> {
                     .map(crate::dimensions::Dimension::from)
                     .collect();
                 let mut deps = identifier_set(ast, &converted_dims, ctx.module_inputs);
-                let lagged_only = crate::variable::lagged_only_previous_idents(ast);
+                if !ctx.is_initial {
+                    let init_only = crate::variable::init_only_referenced_idents_with_module_inputs(
+                        ast,
+                        ctx.module_inputs,
+                    );
+                    deps.retain(|dep| !init_only.contains(dep.as_str()));
+                }
+                let lagged_only = crate::variable::lagged_only_previous_idents_with_module_inputs(
+                    ast,
+                    ctx.module_inputs,
+                );
                 deps.retain(|dep| !lagged_only.contains(dep.as_str()));
                 deps
             }

@@ -813,9 +813,7 @@ pub struct VariableDeps {
     /// These must be included in the Initials runlist so their values are
     /// captured in the initial_values snapshot.
     pub init_referenced_vars: BTreeSet<String>,
-    /// Variables referenced only through INIT(...) in the normal dt AST.
-    /// These are retained in `dt_deps` for fragment compilation context, then
-    /// pruned when building timestep ordering edges.
+    /// Variables referenced only through INIT(...) in dt AST (pruned only for dt ordering).
     pub dt_init_only_referenced_vars: BTreeSet<String>,
     /// Variables referenced *only* through PREVIOUS(...) in the normal dt AST.
     pub dt_previous_referenced_vars: BTreeSet<String>,
@@ -897,15 +895,24 @@ fn variable_direct_dependencies_impl(
                 None => BTreeSet::new(),
             };
             let dt_init_only_referenced_vars = match lowered.ast() {
-                Some(ast) => crate::variable::init_only_referenced_idents(ast),
+                Some(ast) => crate::variable::init_only_referenced_idents_with_module_inputs(
+                    ast,
+                    module_inputs,
+                ),
                 None => BTreeSet::new(),
             };
             let dt_previous_referenced_vars = match lowered.ast() {
-                Some(ast) => crate::variable::lagged_only_previous_idents(ast),
+                Some(ast) => crate::variable::lagged_only_previous_idents_with_module_inputs(
+                    ast,
+                    module_inputs,
+                ),
                 None => BTreeSet::new(),
             };
             let initial_previous_referenced_vars = match lowered.init_ast() {
-                Some(ast) => crate::variable::lagged_only_previous_idents(ast),
+                Some(ast) => crate::variable::lagged_only_previous_idents_with_module_inputs(
+                    ast,
+                    module_inputs,
+                ),
                 None => BTreeSet::new(),
             };
 
