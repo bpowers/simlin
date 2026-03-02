@@ -580,14 +580,20 @@ fn test_init_feedback_does_not_create_dt_cycle() {
     let sync = sync_from_datamodel(&db, &project);
     let a_var = sync.models["main"].variables["a"].source;
     let deps = crate::db::variable_direct_dependencies(&db, a_var, sync.project);
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
 
     assert!(
-        !deps.dt_deps.contains("b"),
-        "INIT(b) should not keep b as a same-step dt dependency"
+        deps.dt_deps.contains("b"),
+        "INIT(b) should remain in direct deps for fragment compilation context"
     );
     assert!(
         deps.init_referenced_vars.contains("b"),
         "INIT(b) should still track b for initials runlist seeding"
+    );
+    assert!(
+        !dep_graph.dt_dependencies["a"].contains("b"),
+        "INIT(b) should be excluded from same-step dt ordering edges"
     );
 }
 
@@ -639,5 +645,110 @@ fn test_init_plus_current_keeps_current_step_dependency() {
     assert!(
         dep_graph.dt_dependencies["a"].contains("b"),
         "a = INIT(b) + b must keep b as a same-step dependency"
+    );
+}
+
+#[test]
+fn test_compile_fragment_init_expression_temp_arg_compiles() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "init_expr_fragment".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "frozen".to_string(),
+                    equation: datamodel::Equation::Scalar("INIT(y + 1)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let frozen_var = sync.models["main"].variables["frozen"].source;
+    let fragment = compile_var_fragment(&db, frozen_var, model, sync.project, true, vec![]);
+    assert!(
+        fragment.is_some(),
+        "INIT(expr) should compile in fragment mode with generated temp-arg metadata"
+    );
+}
+
+#[test]
+fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "init_active_initial_fragment".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("INIT(y)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        active_initial: Some("0".to_string()),
+                        ..datamodel::Compat::default()
+                    },
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let x_var = sync.models["main"].variables["x"].source;
+    let fragment = compile_var_fragment(&db, x_var, model, sync.project, true, vec![]);
+    assert!(
+        fragment.is_some(),
+        "INIT(y) with active_initial override should still compile in fragment mode"
     );
 }

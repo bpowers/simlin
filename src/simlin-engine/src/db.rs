@@ -813,6 +813,10 @@ pub struct VariableDeps {
     /// These must be included in the Initials runlist so their values are
     /// captured in the initial_values snapshot.
     pub init_referenced_vars: BTreeSet<String>,
+    /// Variables referenced only through INIT(...) in the normal dt AST.
+    /// These are retained in `dt_deps` for fragment compilation context, then
+    /// pruned when building timestep ordering edges.
+    pub dt_init_only_referenced_vars: BTreeSet<String>,
     /// Variables referenced *only* through PREVIOUS(...) in the normal dt AST.
     pub dt_previous_referenced_vars: BTreeSet<String>,
     /// Variables referenced *only* through PREVIOUS(...) in the initial AST.
@@ -845,6 +849,7 @@ fn variable_direct_dependencies_impl(
                 initial_deps: refs,
                 implicit_vars: Vec::new(),
                 init_referenced_vars: BTreeSet::new(),
+                dt_init_only_referenced_vars: BTreeSet::new(),
                 dt_previous_referenced_vars: BTreeSet::new(),
                 initial_previous_referenced_vars: BTreeSet::new(),
             }
@@ -870,7 +875,7 @@ fn variable_direct_dependencies_impl(
                 .map(crate::dimensions::Dimension::from)
                 .collect();
 
-            let mut dt_deps = match lowered.ast() {
+            let dt_deps = match lowered.ast() {
                 Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
                     .into_iter()
                     .map(|id| id.to_string())
@@ -891,11 +896,10 @@ fn variable_direct_dependencies_impl(
                 Some(ast) => crate::variable::init_referenced_idents(ast),
                 None => BTreeSet::new(),
             };
-            let init_only_referenced_vars = match lowered.ast() {
+            let dt_init_only_referenced_vars = match lowered.ast() {
                 Some(ast) => crate::variable::init_only_referenced_idents(ast),
                 None => BTreeSet::new(),
             };
-            dt_deps.retain(|dep| !init_only_referenced_vars.contains(dep));
             let dt_previous_referenced_vars = match lowered.ast() {
                 Some(ast) => crate::variable::lagged_only_previous_idents(ast),
                 None => BTreeSet::new(),
@@ -910,6 +914,7 @@ fn variable_direct_dependencies_impl(
                 initial_deps,
                 implicit_vars,
                 init_referenced_vars,
+                dt_init_only_referenced_vars,
                 dt_previous_referenced_vars,
                 initial_previous_referenced_vars,
             }
@@ -1241,6 +1246,7 @@ fn model_dependency_graph_impl(
                 module_input_names.clone(),
             )
         };
+        let init_only_dt = deps.dt_init_only_referenced_vars.clone();
         let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
         let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
         let kind = source_var.kind(db);
@@ -1269,6 +1275,7 @@ fn model_dependency_graph_impl(
         } else {
             deps.dt_deps.clone()
         };
+        dt_deps.retain(|dep| !init_only_dt.contains(dep));
         dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
         let mut initial_deps = deps.initial_deps.clone();
         initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
@@ -3742,7 +3749,38 @@ pub fn compile_var_fragment(
             let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
 
             dep_variables.push((dep_ident, dep_var, dep_size));
-        } else if !implicit_var_info.contains_key(effective_name) {
+        } else if let Some(meta) = implicit_var_info.get(effective_name) {
+            if !meta.is_module {
+                let dep_var = if meta.is_stock {
+                    crate::variable::Variable::Stock {
+                        ident: dep_ident.clone(),
+                        init_ast: None,
+                        eqn: None,
+                        units: None,
+                        inflows: vec![],
+                        outflows: vec![],
+                        non_negative: false,
+                        errors: vec![],
+                        unit_errors: vec![],
+                    }
+                } else {
+                    crate::variable::Variable::Var {
+                        ident: dep_ident.clone(),
+                        ast: None,
+                        init_ast: None,
+                        eqn: None,
+                        units: None,
+                        tables: vec![],
+                        non_negative: false,
+                        is_flow: false,
+                        is_table_only: false,
+                        errors: vec![],
+                        unit_errors: vec![],
+                    }
+                };
+                dep_variables.push((dep_ident, dep_var, meta.size));
+            }
+        } else {
             // Dependency is not a source variable or implicit variable --
             // this is an unknown dependency. Look up the source location
             // from the AST so the error points to the reference site.
