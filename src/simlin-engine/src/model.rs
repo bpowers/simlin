@@ -822,13 +822,17 @@ pub(crate) fn collect_module_idents(
 
 /// Check if a scalar equation's top-level expression is a stdlib function call.
 ///
+/// Uses `is_stdlib_module_function` as the underlying predicate for name
+/// matching, with additional PREVIOUS arg-count logic: 1-arg PREVIOUS uses
+/// the LoadPrev opcode, while 2+ args expand to a module.
+///
 /// This intentionally re-parses the equation text rather than reusing the
 /// already-parsed AST. It runs during `collect_module_idents` (called from
 /// `ModelStage0::new`), before the full per-variable parse in `parse_var`.
 /// The re-parse is cheap (single equation, top-level only) and avoids
 /// threading the parsed AST through an intermediate data structure just
 /// for this early classification step.
-fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
+pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
     let text = match eqn {
         datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
         _ => return false,
@@ -839,10 +843,11 @@ fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
     match &ast {
         Expr0::App(crate::builtins::UntypedBuiltinFn(func, args), _) => {
             let func_lower = func.to_lowercase();
-            match func_lower.as_str() {
-                "previous" => args.len() > 1,
-                "delay" | "delayn" | "smthn" => true,
-                _ => crate::stdlib::MODEL_NAMES.contains(&func_lower.as_str()),
+            // PREVIOUS(x) with 1 arg uses LoadPrev; 2+ args expand to a module.
+            if func_lower == "previous" {
+                args.len() > 1
+            } else {
+                crate::builtins::is_stdlib_module_function(&func_lower)
             }
         }
         _ => false,

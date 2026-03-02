@@ -671,21 +671,70 @@ where
     }
 }
 
-struct IdentifierSetVisitor<'a> {
-    identifiers: HashSet<Ident<Canonical>>,
-    dimensions: &'a [Dimension],
-    module_inputs: Option<&'a BTreeSet<Ident<Canonical>>>,
+/// Result of classifying all dependency categories from a single AST walk.
+///
+/// Replaces the five separate AST-walking functions that previously computed
+/// these categories independently: `identifier_set`, `init_referenced_idents`,
+/// `previous_referenced_idents`, `lagged_only_previous_idents_with_module_inputs`,
+/// and `init_only_referenced_idents_with_module_inputs`.
+#[derive(Default)]
+pub struct DepClassification {
+    /// All referenced identifiers (current + lagged + init-only).
+    /// Dimension names are filtered out. Replaces `identifier_set`.
+    pub all: HashSet<Ident<Canonical>>,
+    /// Idents appearing as direct args to INIT() calls.
+    /// Replaces `init_referenced_idents`.
+    pub init_referenced: BTreeSet<String>,
+    /// Idents appearing as direct args to PREVIOUS() calls.
+    /// Replaces `previous_referenced_idents`.
+    pub previous_referenced: BTreeSet<String>,
+    /// Idents referenced ONLY inside PREVIOUS() -- not outside it.
+    /// Replaces `lagged_only_previous_idents_with_module_inputs`.
+    pub previous_only: BTreeSet<String>,
+    /// Idents referenced ONLY inside INIT() or PREVIOUS() -- not outside either.
+    /// Replaces `init_only_referenced_idents_with_module_inputs`.
+    pub init_only: BTreeSet<String>,
 }
 
-impl IdentifierSetVisitor<'_> {
+/// Unified AST walker that computes all dependency categories in a single pass.
+///
+/// Maintains two boolean flags (`in_previous`, `in_init`) to track whether the
+/// current position is inside a PREVIOUS() or INIT() call. Accumulates identifiers
+/// into multiple sets:
+///
+/// - `all`: every referenced identifier, with dimension names filtered (same as
+///   `IdentifierSetVisitor`)
+/// - `init_referenced` / `previous_referenced`: direct Var/Subscript args of
+///   INIT() / PREVIOUS() calls
+/// - `non_previous`: idents seen outside any PREVIOUS() context
+/// - `non_init`: idents seen outside both INIT() and PREVIOUS() context
+///
+/// After walking, derived sets are computed:
+/// - `previous_only = previous_referenced - non_previous`
+/// - `init_only = init_referenced - non_init`
+///
+/// The walker preserves `IdentifierSetVisitor`'s behaviors: dimension-name
+/// filtering from index expressions, `IsModuleInput` branch selection via
+/// `module_inputs`, and `IndexExpr2::Range` endpoint walking.
+struct ClassifyVisitor<'a> {
+    all: HashSet<Ident<Canonical>>,
+    init_referenced: BTreeSet<String>,
+    previous_referenced: BTreeSet<String>,
+    non_previous: BTreeSet<String>,
+    non_init: BTreeSet<String>,
+    dimensions: &'a [Dimension],
+    module_inputs: Option<&'a BTreeSet<Ident<Canonical>>>,
+    in_previous: bool,
+    in_init: bool,
+}
+
+impl ClassifyVisitor<'_> {
     /// Check if an identifier is a dimension name or element (and should be skipped)
     fn is_dimension_or_element(&self, ident: &str) -> bool {
         for dim in self.dimensions.iter() {
-            // Check if it's the dimension name itself
             if ident == &*canonicalize(dim.name()) {
                 return true;
             }
-            // Check if it's an element of a named dimension using O(1) hash lookup
             if let Dimension::Named(_, named_dim) = dim
                 && named_dim.get_element_index(ident).is_some()
             {
@@ -711,8 +760,6 @@ impl IdentifierSetVisitor<'_> {
             IndexExpr2::Wildcard(_) => {}
             IndexExpr2::StarRange(_, _) => {}
             IndexExpr2::Range(start, end, _) => {
-                // Walk both start and end expressions to find dependencies,
-                // but filter out dimension names/elements (e.g., Boston:LA)
                 self.walk_index_expr(start);
                 self.walk_index_expr(end);
             }
@@ -723,31 +770,66 @@ impl IdentifierSetVisitor<'_> {
         }
     }
 
+    /// Record an identifier string into the flag-dependent sets.
+    fn record_ident(&mut self, ident_str: &str) {
+        if !self.in_previous {
+            self.non_previous.insert(ident_str.to_owned());
+        }
+        // PREVIOUS() context also excludes from non_init, matching the existing
+        // behavior of init_only_referenced_idents_with_module_inputs where
+        // BuiltinFn::Previous sets in_init=true.
+        if !self.in_init && !self.in_previous {
+            self.non_init.insert(ident_str.to_owned());
+        }
+    }
+
     fn walk(&mut self, e: &Expr2) {
         match e {
             Expr2::Const(_, _, _) => (),
             Expr2::Var(id, _, _) => {
-                // Check if this identifier is a dimension name
-                // If so, don't add it as a dependency since it will be resolved during compilation
                 let is_dimension = self.dimensions.iter().any(|dim| {
                     let canonicalized_dim = canonicalize(dim.name());
                     id.as_str() == &*canonicalized_dim
                 });
-
                 if !is_dimension {
-                    self.identifiers.insert(id.clone());
+                    self.all.insert(id.clone());
                 }
+                self.record_ident(id.as_str());
             }
-            Expr2::App(builtin, _, _) => {
-                walk_builtin_expr(builtin, |contents| match contents {
-                    BuiltinContents::Ident(id, _loc) => {
-                        self.identifiers.insert(Ident::new(id));
+            Expr2::App(builtin, _, _) => match builtin {
+                BuiltinFn::Previous(arg) => {
+                    if let Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) = arg.as_ref()
+                    {
+                        self.previous_referenced.insert(ident.to_string());
                     }
-                    BuiltinContents::Expr(expr) => self.walk(expr),
-                });
-            }
+
+                    let old = self.in_previous;
+                    self.in_previous = true;
+                    self.walk(arg);
+                    self.in_previous = old;
+                }
+                BuiltinFn::Init(arg) => {
+                    if let Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) = arg.as_ref()
+                    {
+                        self.init_referenced.insert(ident.to_string());
+                    }
+                    let old = self.in_init;
+                    self.in_init = true;
+                    self.walk(arg);
+                    self.in_init = old;
+                }
+                _ => {
+                    walk_builtin_expr(builtin, |contents| match contents {
+                        BuiltinContents::Ident(id, _loc) => {
+                            self.all.insert(Ident::new(id));
+                        }
+                        BuiltinContents::Expr(expr) => self.walk(expr),
+                    });
+                }
+            },
             Expr2::Subscript(id, args, _, _) => {
-                self.identifiers.insert(id.clone());
+                self.all.insert(id.clone());
+                self.record_ident(id.as_str());
                 args.iter().for_each(|arg| self.walk_index(arg));
             }
             Expr2::Op2(_, l, r, _, _) => {
@@ -777,29 +859,71 @@ impl IdentifierSetVisitor<'_> {
     }
 }
 
+/// Classify all dependency categories of an AST in a single walk.
+///
+/// Returns a `DepClassification` with five sets:
+/// - `all`: every referenced identifier (dimension names filtered)
+/// - `init_referenced` / `previous_referenced`: direct args of INIT/PREVIOUS calls
+/// - `previous_only`: idents referenced ONLY inside PREVIOUS (not outside)
+/// - `init_only`: idents referenced ONLY inside INIT or PREVIOUS (not outside either)
+///
+/// This replaces five separate functions that previously required up to 10 calls
+/// per variable. The walker applies `IsModuleInput` branch selection when
+/// `module_inputs` is provided, and filters dimension/element names from index
+/// expressions.
+pub fn classify_dependencies(
+    ast: &Ast<Expr2>,
+    dimensions: &[Dimension],
+    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+) -> DepClassification {
+    let mut visitor = ClassifyVisitor {
+        all: HashSet::new(),
+        init_referenced: BTreeSet::new(),
+        previous_referenced: BTreeSet::new(),
+        non_previous: BTreeSet::new(),
+        non_init: BTreeSet::new(),
+        dimensions,
+        module_inputs,
+        in_previous: false,
+        in_init: false,
+    };
+    match ast {
+        Ast::Scalar(expr) => visitor.walk(expr),
+        Ast::ApplyToAll(_, expr) => visitor.walk(expr),
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            for expr in elements.values() {
+                visitor.walk(expr);
+            }
+            if let Some(default_expr) = default_expr {
+                visitor.walk(default_expr);
+            }
+        }
+    }
+    let previous_only = visitor
+        .previous_referenced
+        .difference(&visitor.non_previous)
+        .cloned()
+        .collect();
+    let init_only = visitor
+        .init_referenced
+        .difference(&visitor.non_init)
+        .cloned()
+        .collect();
+    DepClassification {
+        all: visitor.all,
+        init_referenced: visitor.init_referenced,
+        previous_referenced: visitor.previous_referenced,
+        previous_only,
+        init_only,
+    }
+}
+
 pub fn identifier_set(
     ast: &Ast<Expr2>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> HashSet<Ident<Canonical>> {
-    let mut id_visitor = IdentifierSetVisitor {
-        identifiers: HashSet::new(),
-        dimensions,
-        module_inputs,
-    };
-    match ast {
-        Ast::Scalar(ast) => id_visitor.walk(ast),
-        Ast::ApplyToAll(_, ast) => id_visitor.walk(ast),
-        Ast::Arrayed(_, elements, default_expr, _) => {
-            for ast in elements.values() {
-                id_visitor.walk(ast);
-            }
-            if let Some(default_expr) = default_expr {
-                id_visitor.walk(default_expr);
-            }
-        }
-    };
-    id_visitor.identifiers
+    classify_dependencies(ast, dimensions, module_inputs).all
 }
 
 /// Collect variable identifiers referenced by `INIT(x)` calls in an AST.
@@ -807,136 +931,14 @@ pub fn identifier_set(
 /// These are not same-step dependencies, but they must be included in the
 /// initials runlist so INIT can read their captured t=0 values.
 pub fn init_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    fn walk_index(index: &IndexExpr2, out: &mut BTreeSet<String>) {
-        match index {
-            IndexExpr2::Expr(expr) => walk(expr, out),
-            IndexExpr2::Range(start, end, _) => {
-                walk(start, out);
-                walk(end, out);
-            }
-            IndexExpr2::Wildcard(_)
-            | IndexExpr2::StarRange(_, _)
-            | IndexExpr2::DimPosition(_, _) => {}
-        }
-    }
-
-    fn walk(expr: &Expr2, out: &mut BTreeSet<String>) {
-        match expr {
-            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => {}
-            Expr2::App(builtin, _, _) => {
-                if let BuiltinFn::Init(arg) = builtin {
-                    match arg.as_ref() {
-                        Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) => {
-                            out.insert(ident.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-                walk_builtin_expr(builtin, |contents| {
-                    if let BuiltinContents::Expr(expr) = contents {
-                        walk(expr, out);
-                    }
-                });
-            }
-            Expr2::Subscript(_, args, _, _) => {
-                for arg in args {
-                    walk_index(arg, out);
-                }
-            }
-            Expr2::Op2(_, lhs, rhs, _, _) => {
-                walk(lhs, out);
-                walk(rhs, out);
-            }
-            Expr2::Op1(_, expr, _, _) => walk(expr, out),
-            Expr2::If(cond, t, f, _, _) => {
-                walk(cond, out);
-                walk(t, out);
-                walk(f, out);
-            }
-        }
-    }
-
-    let mut out = BTreeSet::new();
-    match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut out),
-        Ast::Arrayed(_, elements, default_expr, _) => {
-            for expr in elements.values() {
-                walk(expr, &mut out);
-            }
-            if let Some(expr) = default_expr {
-                walk(expr, &mut out);
-            }
-        }
-    }
-    out
+    classify_dependencies(ast, &[], None).init_referenced
 }
 
 /// Collect variable identifiers referenced by `PREVIOUS(x)` calls in an AST.
 ///
 /// These identifiers are lagged dependencies (t-1), not same-step edges.
 pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    fn walk_index(index: &IndexExpr2, out: &mut BTreeSet<String>) {
-        match index {
-            IndexExpr2::Expr(expr) => walk(expr, out),
-            IndexExpr2::Range(start, end, _) => {
-                walk(start, out);
-                walk(end, out);
-            }
-            IndexExpr2::Wildcard(_)
-            | IndexExpr2::StarRange(_, _)
-            | IndexExpr2::DimPosition(_, _) => {}
-        }
-    }
-
-    fn walk(expr: &Expr2, out: &mut BTreeSet<String>) {
-        match expr {
-            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => {}
-            Expr2::App(builtin, _, _) => {
-                if let BuiltinFn::Previous(arg) = builtin {
-                    match arg.as_ref() {
-                        Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) => {
-                            out.insert(ident.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-                walk_builtin_expr(builtin, |contents| {
-                    if let BuiltinContents::Expr(expr) = contents {
-                        walk(expr, out);
-                    }
-                });
-            }
-            Expr2::Subscript(_, args, _, _) => {
-                for arg in args {
-                    walk_index(arg, out);
-                }
-            }
-            Expr2::Op2(_, lhs, rhs, _, _) => {
-                walk(lhs, out);
-                walk(rhs, out);
-            }
-            Expr2::Op1(_, expr, _, _) => walk(expr, out),
-            Expr2::If(cond, t, f, _, _) => {
-                walk(cond, out);
-                walk(t, out);
-                walk(f, out);
-            }
-        }
-    }
-
-    let mut out = BTreeSet::new();
-    match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut out),
-        Ast::Arrayed(_, elements, default_expr, _) => {
-            for expr in elements.values() {
-                walk(expr, &mut out);
-            }
-            if let Some(expr) = default_expr {
-                walk(expr, &mut out);
-            }
-        }
-    }
-    out
+    classify_dependencies(ast, &[], None).previous_referenced
 }
 
 /// Collect identifiers referenced *only* through PREVIOUS(...) in an AST.
@@ -946,94 +948,7 @@ pub fn lagged_only_previous_idents_with_module_inputs(
     ast: &Ast<Expr2>,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> BTreeSet<String> {
-    fn walk_index(
-        index: &IndexExpr2,
-        non_previous: &mut BTreeSet<String>,
-        in_previous: bool,
-        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    ) {
-        match index {
-            IndexExpr2::Expr(expr) => walk(expr, non_previous, in_previous, module_inputs),
-            IndexExpr2::Range(start, end, _) => {
-                walk(start, non_previous, in_previous, module_inputs);
-                walk(end, non_previous, in_previous, module_inputs);
-            }
-            IndexExpr2::Wildcard(_)
-            | IndexExpr2::StarRange(_, _)
-            | IndexExpr2::DimPosition(_, _) => {}
-        }
-    }
-
-    fn walk(
-        expr: &Expr2,
-        non_previous: &mut BTreeSet<String>,
-        in_previous: bool,
-        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    ) {
-        match expr {
-            Expr2::Const(_, _, _) => {}
-            Expr2::Var(ident, _, _) => {
-                if !in_previous {
-                    non_previous.insert(ident.to_string());
-                }
-            }
-            Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Previous(arg) => walk(arg, non_previous, true, module_inputs),
-                _ => walk_builtin_expr(builtin, |contents| {
-                    if let BuiltinContents::Expr(expr) = contents {
-                        walk(expr, non_previous, in_previous, module_inputs);
-                    }
-                }),
-            },
-            Expr2::Subscript(ident, args, _, _) => {
-                if !in_previous {
-                    non_previous.insert(ident.to_string());
-                }
-                for arg in args {
-                    walk_index(arg, non_previous, in_previous, module_inputs);
-                }
-            }
-            Expr2::Op2(_, lhs, rhs, _, _) => {
-                walk(lhs, non_previous, in_previous, module_inputs);
-                walk(rhs, non_previous, in_previous, module_inputs);
-            }
-            Expr2::Op1(_, expr, _, _) => walk(expr, non_previous, in_previous, module_inputs),
-            Expr2::If(cond, t, f, _, _) => {
-                if let Some(module_inputs) = module_inputs
-                    && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
-                {
-                    if module_inputs.contains(&*canonicalize(ident.as_str())) {
-                        walk(t, non_previous, in_previous, Some(module_inputs));
-                    } else {
-                        walk(f, non_previous, in_previous, Some(module_inputs));
-                    }
-                    return;
-                }
-
-                walk(cond, non_previous, in_previous, module_inputs);
-                walk(t, non_previous, in_previous, module_inputs);
-                walk(f, non_previous, in_previous, module_inputs);
-            }
-        }
-    }
-
-    let previous = previous_referenced_idents(ast);
-    let mut non_previous = BTreeSet::new();
-    match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
-            walk(expr, &mut non_previous, false, module_inputs)
-        }
-        Ast::Arrayed(_, elements, default_expr, _) => {
-            for expr in elements.values() {
-                walk(expr, &mut non_previous, false, module_inputs);
-            }
-            if let Some(expr) = default_expr {
-                walk(expr, &mut non_previous, false, module_inputs);
-            }
-        }
-    }
-
-    previous.difference(&non_previous).cloned().collect()
+    classify_dependencies(ast, &[], module_inputs).previous_only
 }
 
 /// Collect identifiers referenced *only* through INIT(...) in an AST.
@@ -1043,251 +958,649 @@ pub fn init_only_referenced_idents_with_module_inputs(
     ast: &Ast<Expr2>,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> BTreeSet<String> {
-    fn walk_index(
-        index: &IndexExpr2,
-        non_init: &mut BTreeSet<String>,
-        in_init: bool,
-        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    ) {
-        match index {
-            IndexExpr2::Expr(expr) => walk(expr, non_init, in_init, module_inputs),
-            IndexExpr2::Range(start, end, _) => {
-                walk(start, non_init, in_init, module_inputs);
-                walk(end, non_init, in_init, module_inputs);
-            }
-            IndexExpr2::Wildcard(_)
-            | IndexExpr2::StarRange(_, _)
-            | IndexExpr2::DimPosition(_, _) => {}
-        }
-    }
-
-    fn walk(
-        expr: &Expr2,
-        non_init: &mut BTreeSet<String>,
-        in_init: bool,
-        module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    ) {
-        match expr {
-            Expr2::Const(_, _, _) => {}
-            Expr2::Var(ident, _, _) => {
-                if !in_init {
-                    non_init.insert(ident.to_string());
-                }
-            }
-            Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Init(arg) => walk(arg, non_init, true, module_inputs),
-                BuiltinFn::Previous(arg) => walk(arg, non_init, true, module_inputs),
-                _ => walk_builtin_expr(builtin, |contents| {
-                    if let BuiltinContents::Expr(expr) = contents {
-                        walk(expr, non_init, in_init, module_inputs);
-                    }
-                }),
-            },
-            Expr2::Subscript(ident, args, _, _) => {
-                if !in_init {
-                    non_init.insert(ident.to_string());
-                }
-                for arg in args {
-                    walk_index(arg, non_init, in_init, module_inputs);
-                }
-            }
-            Expr2::Op2(_, lhs, rhs, _, _) => {
-                walk(lhs, non_init, in_init, module_inputs);
-                walk(rhs, non_init, in_init, module_inputs);
-            }
-            Expr2::Op1(_, expr, _, _) => walk(expr, non_init, in_init, module_inputs),
-            Expr2::If(cond, t, f, _, _) => {
-                if let Some(module_inputs) = module_inputs
-                    && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
-                {
-                    if module_inputs.contains(&*canonicalize(ident.as_str())) {
-                        walk(t, non_init, in_init, Some(module_inputs));
-                    } else {
-                        walk(f, non_init, in_init, Some(module_inputs));
-                    }
-                    return;
-                }
-
-                walk(cond, non_init, in_init, module_inputs);
-                walk(t, non_init, in_init, module_inputs);
-                walk(f, non_init, in_init, module_inputs);
-            }
-        }
-    }
-
-    let init_refs = init_referenced_idents(ast);
-    let mut non_init = BTreeSet::new();
-    match ast {
-        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
-            walk(expr, &mut non_init, false, module_inputs)
-        }
-        Ast::Arrayed(_, elements, default_expr, _) => {
-            for expr in elements.values() {
-                walk(expr, &mut non_init, false, module_inputs);
-            }
-            if let Some(expr) = default_expr {
-                walk(expr, &mut non_init, false, module_inputs);
-            }
-        }
-    }
-
-    init_refs.difference(&non_init).cloned().collect()
+    classify_dependencies(ast, &[], module_inputs).init_only
 }
 
-#[test]
-fn test_identifier_sets() {
-    let cases: &[(&str, &[&str])] = &[
-        ("if isModuleInput(input) then b else c", &["b"]),
-        ("if a then b else c", &["a", "b", "c"]),
-        ("lookup(b, c)", &["b", "c"]),
-        ("-(a)", &["a"]),
-        ("if a = 1 then -c else lookup(c,b)", &["a", "b", "c"]),
-        ("if a.d then b else c", &["a·d", "b", "c"]),
-        ("if \"a.d\" then b else c", &["a.d", "b", "c"]),
-        ("g[foo]", &["g"]),
-    ];
-
-    let dimensions: Vec<Dimension> = vec![Dimension::from(datamodel::Dimension::named(
-        "dim1".to_string(),
-        vec!["foo".to_owned()],
-    ))];
-
-    let module_inputs: &[ModuleInput] = &[ModuleInput {
-        src: Ident::new("whatever"),
-        dst: Ident::new("input"),
-    }];
-
+/// Build an `Ast<Expr2>` from a scalar equation string via parse + lower.
+///
+/// Panics on parse or lowering errors -- intended for test use only.
+#[cfg(test)]
+fn scalar_ast(eqn: &str) -> Ast<Expr2> {
     use crate::ast::lower_ast;
 
-    for (eqn, id_list) in cases.iter() {
-        let (ast, err) = parse_equation(
-            &datamodel::Equation::Scalar((*eqn).to_owned()),
-            &[],
-            false,
-            None,
-        );
-        assert_eq!(err.len(), 0);
-        assert!(ast.is_some());
-        let scope = ScopeStage0 {
-            models: &Default::default(),
-            dimensions: &Default::default(),
-            model_name: "test_model",
-        };
-        let ast = lower_ast(&scope, ast.unwrap()).unwrap();
-        let id_set_expected: HashSet<Ident<Canonical>> = id_list
-            .iter()
-            .map(|s| {
-                // If the test expectation already contains a middle dot, use it directly
-                // Otherwise canonicalize it
-                if s.contains('·') {
-                    Ident::<Canonical>::from_unchecked(s.to_string())
-                } else {
-                    // For test expectations like "a.d", we treat them as already canonical
-                    // (as they would be after parsing a quoted identifier)
-                    Ident::<Canonical>::from_unchecked(s.to_string())
-                }
-            })
-            .collect();
-        let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));
-        if id_set_expected != id_set_test {
-            eprintln!("Test case failed: {eqn}");
-            eprintln!("Expected: {id_set_expected:?}");
-            eprintln!("Got: {id_set_test:?}");
-        }
-        assert_eq!(id_set_expected, id_set_test);
-    }
+    let (ast, err) = parse_equation(
+        &datamodel::Equation::Scalar(eqn.to_owned()),
+        &[],
+        false,
+        None,
+    );
+    assert!(err.is_empty(), "parse error in test equation: {eqn}");
+    let scope = ScopeStage0 {
+        models: &Default::default(),
+        dimensions: &Default::default(),
+        model_name: "test",
+    };
+    lower_ast(&scope, ast.unwrap()).unwrap()
 }
 
+/// Table-driven matrix test for `classify_dependencies`.
+///
+/// Covers all combinations of reference form (direct, PREVIOUS, INIT, mixed,
+/// both-lagged) x context (scalar, isModuleInput, ApplyToAll, subscript range),
+/// plus all 7 prior bug-fix edge cases. Each case asserts all 5 fields of
+/// `DepClassification`.
 #[test]
-fn test_init_only_referenced_idents() {
-    use crate::ast::lower_ast;
+fn test_classify_dependencies_matrix() {
+    use crate::common::CanonicalElementName;
 
-    let cases: &[(&str, &[&str])] = &[
-        ("INIT(b)", &["b"]),
-        ("INIT(b) + b", &[]),
-        ("PREVIOUS(b) + INIT(b)", &["b"]),
-        ("INIT(m.out1) + m.out2", &["m·out1"]),
-    ];
-
-    for (eqn, expected) in cases {
-        let (ast, err) = parse_equation(
-            &datamodel::Equation::Scalar((*eqn).to_owned()),
-            &[],
-            false,
-            None,
-        );
-        assert!(err.is_empty());
-        let scope = ScopeStage0 {
-            models: &Default::default(),
-            dimensions: &Default::default(),
-            model_name: "test_model",
-        };
-        let lowered = lower_ast(&scope, ast.expect("failed to parse equation")).unwrap();
-        let got = init_only_referenced_idents_with_module_inputs(&lowered, None);
-        let expected: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
-        assert_eq!(expected, got, "eqn={eqn}");
+    struct DepTestCase {
+        /// Human-readable label for assertion messages
+        label: &'static str,
+        /// The AST to classify
+        ast: Ast<Expr2>,
+        /// Dimensions for filtering (empty for most cases)
+        dimensions: Vec<Dimension>,
+        /// Module inputs for IsModuleInput branch selection (None for most cases)
+        module_inputs: Option<BTreeSet<Ident<Canonical>>>,
+        /// Expected: all referenced identifiers (as strings)
+        expected_all: HashSet<&'static str>,
+        /// Expected: direct INIT() argument names
+        expected_init_referenced: BTreeSet<&'static str>,
+        /// Expected: direct PREVIOUS() argument names
+        expected_previous_referenced: BTreeSet<&'static str>,
+        /// Expected: idents ONLY inside PREVIOUS (not outside)
+        expected_previous_only: BTreeSet<&'static str>,
+        /// Expected: idents ONLY inside INIT/PREVIOUS (not outside either)
+        expected_init_only: BTreeSet<&'static str>,
     }
-}
 
-#[test]
-fn test_range_end_expressions_are_walked_in_init_previous_helpers() {
     let loc = Loc::new(0, 1);
     let const_one = Expr2::Const("1".to_string(), 1.0, loc);
 
-    let prev_range_ast = Ast::Scalar(Expr2::Subscript(
-        Ident::new("arr"),
-        vec![IndexExpr2::Range(
-            const_one.clone(),
-            Expr2::App(
-                BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("lagged"), None, loc))),
-                None,
-                loc,
-            ),
-            loc,
-        )],
-        None,
-        loc,
+    let module_inputs_with_input: BTreeSet<Ident<Canonical>> =
+        [Ident::new("input")].into_iter().collect();
+
+    // Dimension used for filtering tests
+    let dim1 = Dimension::from(datamodel::Dimension::named(
+        "dim1".to_string(),
+        vec!["foo".to_owned()],
     ));
 
-    let previous_refs = previous_referenced_idents(&prev_range_ast);
-    assert!(
-        previous_refs.contains("lagged"),
-        "range end should contribute PREVIOUS references"
-    );
-
-    let lagged_only = lagged_only_previous_idents_with_module_inputs(&prev_range_ast, None);
-    assert!(
-        lagged_only.contains("lagged"),
-        "range end should contribute PREVIOUS-only references"
-    );
-
-    let init_range_ast = Ast::Scalar(Expr2::Subscript(
-        Ident::new("arr"),
-        vec![IndexExpr2::Range(
-            const_one,
-            Expr2::App(
-                BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("seed"), None, loc))),
+    let cases = vec![
+        // -- Reference form: direct (no PREVIOUS/INIT) --
+        DepTestCase {
+            label: "direct_scalar",
+            ast: scalar_ast("a + b"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["a", "b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_a2a",
+            ast: Ast::ApplyToAll(vec![dim1.clone()], {
+                // a + b wrapped in ApplyToAll
+                let a = Expr2::Var(Ident::new("a"), None, loc);
+                let b = Expr2::Var(Ident::new("b"), None, loc);
+                Expr2::Op2(
+                    crate::ast::BinaryOp::Add,
+                    Box::new(a),
+                    Box::new(b),
+                    None,
+                    loc,
+                )
+            }),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["a", "b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_arrayed",
+            ast: Ast::Arrayed(
+                vec![dim1.clone()],
+                {
+                    let mut elements = HashMap::new();
+                    elements.insert(
+                        CanonicalElementName::from_raw("e1"),
+                        Expr2::Var(Ident::new("a"), None, loc),
+                    );
+                    elements
+                },
+                Some(Expr2::Var(Ident::new("b"), None, loc)),
+                false,
+            ),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["a", "b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_ismoduleinput",
+            ast: scalar_ast("if isModuleInput(input) then a else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    const_one.clone(),
+                    Expr2::Var(Ident::new("const"), None, loc),
+                    loc,
+                )],
                 None,
                 loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "const"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        // -- Reference form: PREVIOUS only --
+        DepTestCase {
+            // Edge case 1: PREVIOUS feedback
+            label: "previous_scalar",
+            ast: scalar_ast("PREVIOUS(b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: ["b"].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "previous_a2a",
+            ast: Ast::ApplyToAll(
+                vec![dim1.clone()],
+                Expr2::App(
+                    BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    None,
+                    loc,
+                ),
             ),
-            loc,
-        )],
-        None,
-        loc,
-    ));
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: ["b"].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "previous_ismoduleinput",
+            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["a"].into(),
+            expected_previous_only: ["a"].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "previous_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    const_one.clone(),
+                    Expr2::App(
+                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("lagged"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "lagged"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["lagged"].into(),
+            expected_previous_only: ["lagged"].into(),
+            expected_init_only: [].into(),
+        },
+        // -- Reference form: INIT only --
+        DepTestCase {
+            // Edge cases 4 and 5: INIT-only + fragment context (all contains b)
+            label: "init_scalar",
+            ast: scalar_ast("INIT(b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            label: "init_a2a",
+            ast: Ast::ApplyToAll(
+                vec![dim1.clone()],
+                Expr2::App(
+                    BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    None,
+                    loc,
+                ),
+            ),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            label: "init_ismoduleinput",
+            ast: scalar_ast("if isModuleInput(input) then INIT(a) else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: ["a"].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["a"].into(),
+        },
+        DepTestCase {
+            label: "init_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    const_one.clone(),
+                    Expr2::App(
+                        BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("seed"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "seed"].into(),
+            expected_init_referenced: ["seed"].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["seed"].into(),
+        },
+        // -- Reference form: mixed (current + lagged) --
+        DepTestCase {
+            // Edge case 2: mixed current+lagged -- b is NOT previous_only
+            label: "mixed_prev_current",
+            ast: scalar_ast("PREVIOUS(b) + b"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "mixed_init_current",
+            ast: scalar_ast("INIT(b) + b"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "mixed_prev_current_a2a",
+            ast: Ast::ApplyToAll(vec![dim1.clone()], {
+                let prev = Expr2::App(
+                    BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    None,
+                    loc,
+                );
+                let direct = Expr2::Var(Ident::new("b"), None, loc);
+                Expr2::Op2(
+                    crate::ast::BinaryOp::Add,
+                    Box::new(prev),
+                    Box::new(direct),
+                    None,
+                    loc,
+                )
+            }),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "mixed_prev_current_ismoduleinput",
+            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) + a else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["a"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            // mixed x range: b appears as the PREVIOUS range start and as the direct
+            // range end.  b is in previous_referenced but also in non_previous (the
+            // direct range end occurrence), so previous_only is empty.
+            label: "mixed_prev_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    Expr2::App(
+                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    Expr2::Var(Ident::new("b"), None, loc),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        // -- Reference form: both-lagged (PREVIOUS + INIT) --
+        DepTestCase {
+            // Edge case 6: PREVIOUS + INIT combined -- b is init_only
+            // (PREVIOUS context also counts as init-excluded).
+            // b is NOT previous_only because INIT(b) walks b outside PREVIOUS context.
+            label: "both_lagged_scalar",
+            ast: scalar_ast("PREVIOUS(b) + INIT(b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            label: "both_lagged_different",
+            ast: scalar_ast("PREVIOUS(a) + INIT(b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["a", "b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: ["a"].into(),
+            expected_previous_only: ["a"].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            // Same semantics as both_lagged_scalar: INIT(b) walks b outside
+            // PREVIOUS context, so b is NOT previous_only.
+            label: "both_lagged_a2a",
+            ast: Ast::ApplyToAll(vec![dim1.clone()], {
+                let prev = Expr2::App(
+                    BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    None,
+                    loc,
+                );
+                let init = Expr2::App(
+                    BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    None,
+                    loc,
+                );
+                Expr2::Op2(
+                    crate::ast::BinaryOp::Add,
+                    Box::new(prev),
+                    Box::new(init),
+                    None,
+                    loc,
+                )
+            }),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            // both-lagged x isModuleInput: the active (then) branch is
+            // PREVIOUS(a) + INIT(a).  a is in both previous_referenced and
+            // init_referenced.  INIT(a) walks a outside PREVIOUS context, so
+            // a ends up in non_previous, making previous_only empty.  a is
+            // never walked outside any lagged context, so init_only={a}.
+            label: "both_lagged_ismoduleinput",
+            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) + INIT(a) else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: ["a"].into(),
+            expected_previous_referenced: ["a"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["a"].into(),
+        },
+        DepTestCase {
+            // both-lagged x range: range start is PREVIOUS(x), range end is INIT(y).
+            // x is in previous_referenced and previous_only (never seen outside PREVIOUS).
+            // y is in init_referenced and init_only (never seen outside any lagged context).
+            label: "both_lagged_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    Expr2::App(
+                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("x"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    Expr2::App(
+                        BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("y"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "x", "y"].into(),
+            expected_init_referenced: ["y"].into(),
+            expected_previous_referenced: ["x"].into(),
+            expected_previous_only: ["x"].into(),
+            expected_init_only: ["y"].into(),
+        },
+        // -- Additional edge cases --
+        DepTestCase {
+            // Edge case 7: nested PREVIOUS
+            label: "nested_previous",
+            ast: scalar_ast("PREVIOUS(PREVIOUS(x))"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["x"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["x"].into(),
+            expected_previous_only: ["x"].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "init_with_dotted_ref",
+            ast: scalar_ast("INIT(m.out1) + m.out2"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["m\u{00b7}out1", "m\u{00b7}out2"].into(),
+            expected_init_referenced: ["m\u{00b7}out1"].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["m\u{00b7}out1"].into(),
+        },
+        DepTestCase {
+            // Edge case 6 variant: same semantics as both_lagged_scalar
+            label: "previous_plus_init_same_var",
+            ast: scalar_ast("PREVIOUS(b) + INIT(b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            // Dimension element names in subscript positions are filtered out.
+            // g[foo] with dim1={foo} -> only g appears in all.
+            label: "dim_filtering",
+            ast: scalar_ast("g[foo]"),
+            dimensions: vec![dim1.clone()],
+            module_inputs: None,
+            expected_all: ["g"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            // isModuleInput prunes the else branch when input is a module input
+            label: "ismoduleinput_else_branch",
+            ast: scalar_ast("if isModuleInput(input) then a else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            // Without module_inputs, isModuleInput is not pruned
+            label: "ismoduleinput_no_pruning",
+            ast: scalar_ast("if isModuleInput(input) then a else b"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["input", "a", "b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        // -- Edge case 3: split by phase --
+        // classify_dependencies is phase-agnostic. The same equation produces
+        // identical classifications regardless of whether the caller considers it
+        // a dt AST or init AST. The "split" behavior is in how db.rs assigns
+        // results from separate classify_dependencies calls.
+        DepTestCase {
+            label: "split_phase_dt",
+            ast: scalar_ast("PREVIOUS(b) + c"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b", "c"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: ["b"].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "split_phase_init",
+            ast: scalar_ast("PREVIOUS(b) + c"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b", "c"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: ["b"].into(),
+            expected_init_only: [].into(),
+        },
+    ];
 
-    let init_refs = init_referenced_idents(&init_range_ast);
-    assert!(
-        init_refs.contains("seed"),
-        "range end should contribute INIT references"
-    );
+    for case in &cases {
+        let result =
+            classify_dependencies(&case.ast, &case.dimensions, case.module_inputs.as_ref());
 
-    let init_only = init_only_referenced_idents_with_module_inputs(&init_range_ast, None);
-    assert!(
-        init_only.contains("seed"),
-        "range end should contribute INIT-only references"
-    );
+        // Convert all to HashSet<&str> for comparison
+        let got_all: HashSet<&str> = result.all.iter().map(|id| id.as_str()).collect();
+        assert_eq!(case.expected_all, got_all, "case '{}': all", case.label);
+
+        let got_init_ref: BTreeSet<&str> =
+            result.init_referenced.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            case.expected_init_referenced, got_init_ref,
+            "case '{}': init_referenced",
+            case.label
+        );
+
+        let got_prev_ref: BTreeSet<&str> = result
+            .previous_referenced
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            case.expected_previous_referenced, got_prev_ref,
+            "case '{}': previous_referenced",
+            case.label
+        );
+
+        let got_prev_only: BTreeSet<&str> =
+            result.previous_only.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            case.expected_previous_only, got_prev_only,
+            "case '{}': previous_only",
+            case.label
+        );
+
+        let got_init_only: BTreeSet<&str> = result.init_only.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            case.expected_init_only, got_init_only,
+            "case '{}': init_only",
+            case.label
+        );
+
+        // Structural invariant: `all` (as strings) must be a superset of
+        // init_referenced union previous_referenced.
+        // This is the fragment context invariant (edge case 5): compile_var_fragment
+        // uses `all` for dt_deps, so it must include INIT/PREVIOUS args.
+        let init_prev_union: HashSet<&str> = result
+            .init_referenced
+            .iter()
+            .chain(result.previous_referenced.iter())
+            .map(|s| s.as_str())
+            .collect();
+        assert!(
+            got_all.is_superset(&init_prev_union),
+            "case '{}': structural invariant violated -- `all` must be superset of \
+             init_referenced union previous_referenced.\n  all: {:?}\n  union: {:?}",
+            case.label,
+            got_all,
+            init_prev_union,
+        );
+    }
 }
 
 #[test]

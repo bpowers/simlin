@@ -78,7 +78,9 @@ pub use self::model::{ModelStage1, get_incoming_links, resolve_non_private_depen
 pub use self::patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch};
 pub use self::project::Project;
 pub use self::results::{Method, Results, Specs as SimSpecs};
-pub use self::variable::{Variable, identifier_set};
+pub use self::variable::{
+    DepClassification, Variable, classify_dependencies, identifier_set, previous_referenced_idents,
+};
 pub use self::vm::{CompiledSimulation, Vm};
 
 // Re-export compat functions at the crate root for convenience
