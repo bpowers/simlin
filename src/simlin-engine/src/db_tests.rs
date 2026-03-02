@@ -2979,65 +2979,6 @@ fn test_compile_var_fragment_produces_result() {
 }
 
 #[test]
-fn test_compile_var_fragment_caching() {
-    // AC1.1: Changing one variable's equation (same deps) should
-    // only recompile that variable. Other variables' fragments
-    // should be cached.
-    let mut db = SimlinDb::default();
-    let project = two_var_project();
-    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
-
-    // Clone the fragment before mutating db
-    let beta_frag1 = {
-        let sync1 = state1.to_sync_result();
-        let model = sync1.models["main"].source;
-        let alpha_var = sync1.models["main"].variables["alpha"].source;
-        let beta_var = sync1.models["main"].variables["beta"].source;
-
-        let alpha_result1 =
-            compile_var_fragment(&db, alpha_var, model, sync1.project, true, vec![]);
-        let beta_result1 = compile_var_fragment(&db, beta_var, model, sync1.project, true, vec![]);
-        assert!(alpha_result1.is_some());
-        assert!(beta_result1.is_some());
-
-        beta_result1.as_ref().unwrap().fragment.clone()
-    };
-
-    // Change alpha's equation (same deps -- it has no deps)
-    let mut project2 = project.clone();
-    project2.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "alpha".to_string(),
-        equation: datamodel::Equation::Scalar("20".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
-
-    let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
-    let sync2 = state2.to_sync_result();
-    let model2 = sync2.models["main"].source;
-
-    // Alpha should be recompiled (different equation)
-    let alpha_var2 = sync2.models["main"].variables["alpha"].source;
-    let alpha_result2 = compile_var_fragment(&db, alpha_var2, model2, sync2.project, true, vec![]);
-    assert!(alpha_result2.is_some());
-
-    // Beta's fragment should be unchanged since beta's equation
-    // and deps haven't changed
-    let beta_var2 = sync2.models["main"].variables["beta"].source;
-    let beta_result2 = compile_var_fragment(&db, beta_var2, model2, sync2.project, true, vec![]);
-    assert!(beta_result2.is_some());
-    assert_eq!(
-        beta_frag1,
-        beta_result2.as_ref().unwrap().fragment,
-        "beta fragment should be unchanged when only alpha's equation changes"
-    );
-}
-
-#[test]
 fn test_assemble_simulation_simple() {
     let db = SimlinDb::default();
     let project = two_var_project();

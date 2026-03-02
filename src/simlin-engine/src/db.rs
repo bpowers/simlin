@@ -3385,7 +3385,7 @@ pub fn compile_var_fragment(
     };
 
     let var_ident = var.ident(db).clone();
-    let module_ident_context = module_ident_context_for_model(db, model, &module_input_names);
+    let module_ident_context = model_module_ident_context(db, model, module_input_names.clone());
     let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
 
     // Accumulate unit definition errors from the parsed variable.
@@ -5990,9 +5990,11 @@ mod conversion_tests {
 }
 
 #[cfg(test)]
-#[path = "db_tests.rs"]
-mod db_tests;
-
-#[cfg(test)]
 #[path = "db_diagnostic_tests.rs"]
 mod db_diagnostic_tests;
+#[cfg(test)]
+#[path = "db_fragment_cache_tests.rs"]
+mod db_fragment_cache_tests;
+#[cfg(test)]
+#[path = "db_tests.rs"]
+mod db_tests;
