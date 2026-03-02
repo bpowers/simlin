@@ -826,9 +826,11 @@ fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
     match &ast {
         Expr0::App(crate::builtins::UntypedBuiltinFn(func, args), _) => {
             let func_lower = func.to_lowercase();
-            crate::stdlib::MODEL_NAMES.contains(&func_lower.as_str())
-                || matches!(func_lower.as_str(), "delay" | "delayn" | "smthn")
-                || (func_lower == "previous" && args.len() > 1)
+            match func_lower.as_str() {
+                "previous" => args.len() > 1,
+                "delay" | "delayn" | "smthn" => true,
+                _ => crate::stdlib::MODEL_NAMES.contains(&func_lower.as_str()),
+            }
         }
         _ => false,
     }
@@ -2159,6 +2161,52 @@ fn test_model_implicit_var_info_uses_module_context() {
             .keys()
             .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚previous")),
         "model_implicit_var_info should include implicit vars for PREVIOUS(module-backed var)"
+    );
+}
+
+#[test]
+fn test_incremental_compile_previous_of_module_backed_var() {
+    let project = datamodel::Project {
+        name: "incremental_prev_module_backed".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("x", "TIME", None),
+                x_aux("delayed", "PREVIOUS(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project);
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main");
+    assert!(
+        compiled.is_ok(),
+        "incremental compile should support PREVIOUS(module-backed var): {:?}",
+        compiled.err()
+    );
+}
+
+#[test]
+fn test_collect_module_idents_skips_one_arg_previous() {
+    let vars = vec![
+        x_aux("x", "TIME", None),
+        x_aux("prev_x", "PREVIOUS(x)", None),
+        x_aux("prev_x_init", "PREVIOUS(x, 42)", None),
+    ];
+    let ids = collect_module_idents(&vars);
+    assert!(
+        !ids.contains(&Ident::new("prev_x")),
+        "1-arg PREVIOUS should stay on the opcode path, not module-backed",
+    );
+    assert!(
+        ids.contains(&Ident::new("prev_x_init")),
+        "2-arg PREVIOUS should remain module-backed",
     );
 }
 

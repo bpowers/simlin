@@ -4435,7 +4435,12 @@ fn compile_implicit_var_fragment(
     // Implicit vars' deps are always explicit vars in the same model (or other implicit vars)
     // Keep dependency context conservative for implicit vars as well: both
     // branches of `if isModuleInput(...)` may still be compiled.
-    let deps = variable_direct_dependencies(db, meta.parent_source_var, project);
+    let deps = variable_direct_dependencies_with_context(
+        db,
+        meta.parent_source_var,
+        project,
+        module_ident_context,
+    );
     let implicit_dep = deps
         .implicit_vars
         .iter()
