@@ -888,7 +888,7 @@ fn variable_direct_dependencies_impl(
                 None => BTreeSet::new(),
             };
             let previous_referenced_vars = match lowered.ast() {
-                Some(ast) => crate::variable::previous_referenced_idents(ast),
+                Some(ast) => crate::variable::lagged_only_previous_idents(ast),
                 None => BTreeSet::new(),
             };
 

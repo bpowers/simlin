@@ -931,6 +931,75 @@ pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     out
 }
 
+/// Collect identifiers referenced *only* through PREVIOUS(...) in an AST.
+///
+/// If an identifier appears both inside and outside PREVIOUS, it is excluded.
+pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
+    fn walk_index(index: &IndexExpr2, non_previous: &mut BTreeSet<String>, in_previous: bool) {
+        match index {
+            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => {
+                walk(expr, non_previous, in_previous)
+            }
+            IndexExpr2::Wildcard(_)
+            | IndexExpr2::StarRange(_, _)
+            | IndexExpr2::DimPosition(_, _) => {}
+        }
+    }
+
+    fn walk(expr: &Expr2, non_previous: &mut BTreeSet<String>, in_previous: bool) {
+        match expr {
+            Expr2::Const(_, _, _) => {}
+            Expr2::Var(ident, _, _) => {
+                if !in_previous {
+                    non_previous.insert(ident.to_string());
+                }
+            }
+            Expr2::App(builtin, _, _) => match builtin {
+                BuiltinFn::Previous(arg) => walk(arg, non_previous, true),
+                _ => walk_builtin_expr(builtin, |contents| {
+                    if let BuiltinContents::Expr(expr) = contents {
+                        walk(expr, non_previous, in_previous);
+                    }
+                }),
+            },
+            Expr2::Subscript(ident, args, _, _) => {
+                if !in_previous {
+                    non_previous.insert(ident.to_string());
+                }
+                for arg in args {
+                    walk_index(arg, non_previous, in_previous);
+                }
+            }
+            Expr2::Op2(_, lhs, rhs, _, _) => {
+                walk(lhs, non_previous, in_previous);
+                walk(rhs, non_previous, in_previous);
+            }
+            Expr2::Op1(_, expr, _, _) => walk(expr, non_previous, in_previous),
+            Expr2::If(cond, t, f, _, _) => {
+                walk(cond, non_previous, in_previous);
+                walk(t, non_previous, in_previous);
+                walk(f, non_previous, in_previous);
+            }
+        }
+    }
+
+    let previous = previous_referenced_idents(ast);
+    let mut non_previous = BTreeSet::new();
+    match ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut non_previous, false),
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            for expr in elements.values() {
+                walk(expr, &mut non_previous, false);
+            }
+            if let Some(expr) = default_expr {
+                walk(expr, &mut non_previous, false);
+            }
+        }
+    }
+
+    previous.difference(&non_previous).cloned().collect()
+}
+
 #[test]
 fn test_identifier_sets() {
     let cases: &[(&str, &[&str])] = &[

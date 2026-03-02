@@ -9,6 +9,7 @@ use crate::db::{
     SimlinDb, compile_var_fragment, model_dependency_graph, sync_from_datamodel,
     sync_from_datamodel_incremental,
 };
+use crate::test_common::TestProject;
 
 #[test]
 fn test_compile_var_fragment_caching() {
@@ -190,4 +191,74 @@ fn test_previous_lagged_feedback_does_not_create_cycle() {
         !dep_graph.has_cycle,
         "PREVIOUS(b) should be treated as a lagged dependency, not a same-step cycle"
     );
+}
+
+#[test]
+fn test_previous_plus_current_keeps_current_step_dependency() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "prev_plus_current_dep".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "a".to_string(),
+                    equation: datamodel::Equation::Scalar("PREVIOUS(b) + b".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "b".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    assert!(
+        dep_graph.dt_dependencies["a"].contains("b"),
+        "a = PREVIOUS(b) + b must keep b as a same-step dependency"
+    );
+}
+
+#[test]
+fn test_previous_lagged_feedback_interpreter_path_is_acyclic() {
+    let tp = TestProject::new("prev_lag_interp")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("a", "PREVIOUS(b)", None)
+        .aux("b", "a + 1", None);
+
+    let results = tp
+        .run_interpreter()
+        .expect("interpreter path should compile/run lagged PREVIOUS feedback without cycles");
+    let a = results.get("a").expect("missing a results");
+    let b = results.get("b").expect("missing b results");
+
+    assert_eq!(a[0], 0.0);
+    assert_eq!(b[0], 1.0);
+    assert_eq!(a[1], 1.0);
+    assert_eq!(b[1], 2.0);
 }
