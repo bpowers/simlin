@@ -34,8 +34,9 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Const(_, _, _) => false,
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
-            if crate::stdlib::MODEL_NAMES.contains(&func.as_str())
-                || matches!(func.as_str(), "delay" | "delayn" | "smthn" | "init")
+            // INIT is included because it needs per-element temp vars in A2A
+            // context, though it doesn't create a standalone module.
+            if crate::builtins::is_stdlib_module_function(func.as_str()) || func.as_str() == "init"
             {
                 return true;
             }
@@ -121,6 +122,11 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 
 pub struct BuiltinVisitor<'a> {
     variable_name: &'a str,
+    /// Modules synthesized during the current walk (e.g., SMOOTH, DELAY,
+    /// PREVIOUS expansions). These are created using the same
+    /// `is_stdlib_module_function` classification rule, extending the base
+    /// set from `collect_module_idents()` at runtime so that nested references
+    /// (like `PREVIOUS(SMOOTH(...))`) correctly route through module expansion.
     vars: HashMap<Ident<Canonical>, datamodel::Variable>,
     n: usize,
     self_allowed: bool,
