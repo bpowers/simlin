@@ -118,7 +118,7 @@ impl ModelStage1 {
         self.variables
             .values()
             .filter_map(|v| v.ast())
-            .flat_map(crate::db::init_referenced_idents)
+            .flat_map(crate::variable::init_referenced_idents)
             .map(|s| Ident::new(&s))
             .collect()
     }

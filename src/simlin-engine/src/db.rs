@@ -813,6 +813,7 @@ pub struct VariableDeps {
     /// These must be included in the Initials runlist so their values are
     /// captured in the initial_values snapshot.
     pub init_referenced_vars: BTreeSet<String>,
+    pub previous_referenced_vars: BTreeSet<String>,
 }
 
 fn canonical_module_input_set(module_input_names: &[String]) -> BTreeSet<Ident<Canonical>> {
@@ -820,77 +821,6 @@ fn canonical_module_input_set(module_input_names: &[String]) -> BTreeSet<Ident<C
         .iter()
         .map(|name| Ident::new(canonicalize(name).as_ref()))
         .collect()
-}
-
-/// Collect variable identifiers referenced by BuiltinFn::Init calls in an AST.
-/// Used to determine which variables need to be in the Initials runlist
-/// so that INIT(x) can read their initial values.
-pub(crate) fn init_referenced_idents(ast: &crate::ast::Ast<crate::ast::Expr2>) -> BTreeSet<String> {
-    use crate::ast::Expr2;
-    use crate::ast::IndexExpr2;
-    use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
-
-    let mut result = BTreeSet::new();
-    fn walk(expr: &Expr2, result: &mut BTreeSet<String>) {
-        match expr {
-            Expr2::Const(_, _, _) => {}
-            Expr2::Var(_, _, _) => {}
-            Expr2::App(builtin, _, _) => {
-                // Check if this is Init specifically -- extract the referenced var
-                if let BuiltinFn::Init(arg) = builtin {
-                    match arg.as_ref() {
-                        Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) => {
-                            result.insert(ident.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-                // Recurse into all builtin subexpressions (handles nested Init too)
-                walk_builtin_expr(builtin, |contents| match contents {
-                    BuiltinContents::Ident(_, _) => {}
-                    BuiltinContents::Expr(expr) => walk(expr, result),
-                });
-            }
-            Expr2::Subscript(_, args, _, _) => {
-                for arg in args {
-                    match arg {
-                        IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => {
-                            walk(expr, result);
-                        }
-                        _ => {}
-                    }
-                    if let IndexExpr2::Range(_, end, _) = arg {
-                        walk(end, result);
-                    }
-                }
-            }
-            Expr2::Op2(_, l, r, _, _) => {
-                walk(l, result);
-                walk(r, result);
-            }
-            Expr2::Op1(_, l, _, _) => {
-                walk(l, result);
-            }
-            Expr2::If(cond, t, f, _, _) => {
-                walk(cond, result);
-                walk(t, result);
-                walk(f, result);
-            }
-        }
-    }
-    match ast {
-        crate::ast::Ast::Scalar(expr) => walk(expr, &mut result),
-        crate::ast::Ast::ApplyToAll(_, expr) => walk(expr, &mut result),
-        crate::ast::Ast::Arrayed(_, map, default_expr, _) => {
-            for expr in map.values() {
-                walk(expr, &mut result);
-            }
-            if let Some(expr) = default_expr {
-                walk(expr, &mut result);
-            }
-        }
-    }
-    result
 }
 
 fn variable_direct_dependencies_impl(
@@ -912,6 +842,7 @@ fn variable_direct_dependencies_impl(
                 initial_deps: refs,
                 implicit_vars: Vec::new(),
                 init_referenced_vars: BTreeSet::new(),
+                previous_referenced_vars: BTreeSet::new(),
             }
         }
         _ => {
@@ -953,7 +884,11 @@ fn variable_direct_dependencies_impl(
             let implicit_vars =
                 extract_implicit_var_deps(parsed, &dims, &dim_context, module_inputs);
             let init_referenced_vars = match lowered.ast() {
-                Some(ast) => init_referenced_idents(ast),
+                Some(ast) => crate::variable::init_referenced_idents(ast),
+                None => BTreeSet::new(),
+            };
+            let previous_referenced_vars = match lowered.ast() {
+                Some(ast) => crate::variable::previous_referenced_idents(ast),
                 None => BTreeSet::new(),
             };
 
@@ -962,6 +897,7 @@ fn variable_direct_dependencies_impl(
                 initial_deps,
                 implicit_vars,
                 init_referenced_vars,
+                previous_referenced_vars,
             }
         }
     }
@@ -1291,8 +1227,13 @@ fn model_dependency_graph_impl(
                 module_input_names.clone(),
             )
         };
+        let lagged_previous: BTreeSet<String> = deps
+            .previous_referenced_vars
+            .iter()
+            .map(|dep| normalize_dep(dep))
+            .collect();
         let kind = source_var.kind(db);
-        let dt_deps = if kind == SourceVariableKind::Module {
+        let mut dt_deps = if kind == SourceVariableKind::Module {
             deps.dt_deps
                 .iter()
                 .filter(|dep| {
@@ -1317,6 +1258,9 @@ fn model_dependency_graph_impl(
         } else {
             deps.dt_deps.clone()
         };
+        dt_deps.retain(|dep| !lagged_previous.contains(dep));
+        let mut initial_deps = deps.initial_deps.clone();
+        initial_deps.retain(|dep| !lagged_previous.contains(&normalize_dep(dep)));
 
         var_info.insert(
             name.clone(),
@@ -1324,7 +1268,7 @@ fn model_dependency_graph_impl(
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
                 dt_deps: normalize_deps(&dt_deps),
-                initial_deps: normalize_deps(&deps.initial_deps),
+                initial_deps: normalize_deps(&initial_deps),
             },
         );
         all_init_referenced.extend(deps.init_referenced_vars.iter().cloned());

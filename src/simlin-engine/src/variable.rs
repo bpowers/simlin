@@ -802,6 +802,135 @@ pub fn identifier_set(
     id_visitor.identifiers
 }
 
+/// Collect variable identifiers referenced by `INIT(x)` calls in an AST.
+///
+/// These are not same-step dependencies, but they must be included in the
+/// initials runlist so INIT can read their captured t=0 values.
+pub fn init_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
+    fn walk_index(index: &IndexExpr2, out: &mut BTreeSet<String>) {
+        match index {
+            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => walk(expr, out),
+            IndexExpr2::Wildcard(_)
+            | IndexExpr2::StarRange(_, _)
+            | IndexExpr2::DimPosition(_, _) => {}
+        }
+    }
+
+    fn walk(expr: &Expr2, out: &mut BTreeSet<String>) {
+        match expr {
+            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => {}
+            Expr2::App(builtin, _, _) => {
+                if let BuiltinFn::Init(arg) = builtin {
+                    match arg.as_ref() {
+                        Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) => {
+                            out.insert(ident.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                walk_builtin_expr(builtin, |contents| {
+                    if let BuiltinContents::Expr(expr) = contents {
+                        walk(expr, out);
+                    }
+                });
+            }
+            Expr2::Subscript(_, args, _, _) => {
+                for arg in args {
+                    walk_index(arg, out);
+                }
+            }
+            Expr2::Op2(_, lhs, rhs, _, _) => {
+                walk(lhs, out);
+                walk(rhs, out);
+            }
+            Expr2::Op1(_, expr, _, _) => walk(expr, out),
+            Expr2::If(cond, t, f, _, _) => {
+                walk(cond, out);
+                walk(t, out);
+                walk(f, out);
+            }
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    match ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut out),
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            for expr in elements.values() {
+                walk(expr, &mut out);
+            }
+            if let Some(expr) = default_expr {
+                walk(expr, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Collect variable identifiers referenced by `PREVIOUS(x)` calls in an AST.
+///
+/// These identifiers are lagged dependencies (t-1), not same-step edges.
+pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
+    fn walk_index(index: &IndexExpr2, out: &mut BTreeSet<String>) {
+        match index {
+            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => walk(expr, out),
+            IndexExpr2::Wildcard(_)
+            | IndexExpr2::StarRange(_, _)
+            | IndexExpr2::DimPosition(_, _) => {}
+        }
+    }
+
+    fn walk(expr: &Expr2, out: &mut BTreeSet<String>) {
+        match expr {
+            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => {}
+            Expr2::App(builtin, _, _) => {
+                if let BuiltinFn::Previous(arg) = builtin {
+                    match arg.as_ref() {
+                        Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) => {
+                            out.insert(ident.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                walk_builtin_expr(builtin, |contents| {
+                    if let BuiltinContents::Expr(expr) = contents {
+                        walk(expr, out);
+                    }
+                });
+            }
+            Expr2::Subscript(_, args, _, _) => {
+                for arg in args {
+                    walk_index(arg, out);
+                }
+            }
+            Expr2::Op2(_, lhs, rhs, _, _) => {
+                walk(lhs, out);
+                walk(rhs, out);
+            }
+            Expr2::Op1(_, expr, _, _) => walk(expr, out),
+            Expr2::If(cond, t, f, _, _) => {
+                walk(cond, out);
+                walk(t, out);
+                walk(f, out);
+            }
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    match ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut out),
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            for expr in elements.values() {
+                walk(expr, &mut out);
+            }
+            if let Some(expr) = default_expr {
+                walk(expr, &mut out);
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn test_identifier_sets() {
     let cases: &[(&str, &[&str])] = &[

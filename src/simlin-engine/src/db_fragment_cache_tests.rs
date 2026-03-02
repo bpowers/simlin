@@ -5,7 +5,10 @@
 use salsa::plumbing::AsId;
 
 use crate::datamodel;
-use crate::db::{SimlinDb, compile_var_fragment, sync_from_datamodel_incremental};
+use crate::db::{
+    SimlinDb, compile_var_fragment, model_dependency_graph, sync_from_datamodel,
+    sync_from_datamodel_incremental,
+};
 
 #[test]
 fn test_compile_var_fragment_caching() {
@@ -129,5 +132,62 @@ fn test_compile_var_fragment_caching() {
     assert_eq!(
         beta_ptr_before, beta_ptr_after,
         "beta fragment query should be a cache hit (pointer-equal) when only alpha changes"
+    );
+}
+
+#[test]
+fn test_previous_lagged_feedback_does_not_create_cycle() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "prev_lag_cycle".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 3.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "a".to_string(),
+                    equation: datamodel::Equation::Scalar("PREVIOUS(b)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "b".to_string(),
+                    equation: datamodel::Equation::Scalar("a + 1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "PREVIOUS(b) should be treated as a lagged dependency, not a same-step cycle"
     );
 }
