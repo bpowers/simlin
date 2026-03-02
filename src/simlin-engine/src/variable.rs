@@ -677,6 +677,7 @@ where
 /// these categories independently: `identifier_set`, `init_referenced_idents`,
 /// `previous_referenced_idents`, `lagged_only_previous_idents_with_module_inputs`,
 /// and `init_only_referenced_idents_with_module_inputs`.
+#[derive(Default)]
 pub struct DepClassification {
     /// All referenced identifiers (current + lagged + init-only).
     /// Dimension names are filtered out. Replaces `identifier_set`.
