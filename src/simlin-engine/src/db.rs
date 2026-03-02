@@ -5886,6 +5886,9 @@ mod conversion_tests {
 #[path = "db_diagnostic_tests.rs"]
 mod db_diagnostic_tests;
 #[cfg(test)]
+#[path = "db_differential_tests.rs"]
+mod db_differential_tests;
+#[cfg(test)]
 #[path = "db_fragment_cache_tests.rs"]
 mod db_fragment_cache_tests;
 #[cfg(test)]
