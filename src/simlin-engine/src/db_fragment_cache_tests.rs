@@ -262,3 +262,166 @@ fn test_previous_lagged_feedback_interpreter_path_is_acyclic() {
     assert_eq!(a[1], 1.0);
     assert_eq!(b[1], 2.0);
 }
+
+#[test]
+fn test_active_initial_previous_is_lagged_in_initial_graph() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "prev_active_initial_lag".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "a".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        active_initial: Some("PREVIOUS(b)".to_string()),
+                        ..datamodel::Compat::default()
+                    },
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "b".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        active_initial: Some("a + 1".to_string()),
+                        ..datamodel::Compat::default()
+                    },
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    assert!(
+        !dep_graph.has_cycle,
+        "active_initial PREVIOUS references should be lagged and not induce initial-step cycles"
+    );
+    assert!(
+        !dep_graph.initial_dependencies["a"].contains("b"),
+        "a.active_initial = PREVIOUS(b) must not keep b as a same-step initial dependency"
+    );
+    assert!(
+        dep_graph.initial_dependencies["b"].contains("a"),
+        "control check: b.active_initial should still depend on a in the initial graph"
+    );
+}
+
+#[test]
+fn test_previous_module_output_is_pruned_from_dt_dependencies() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "prev_module_output_lag".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "source".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "sub".to_string(),
+                        model_name: "producer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "source".to_string(),
+                            dst: "sub.input".to_string(),
+                        }],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "a".to_string(),
+                        equation: datamodel::Equation::Scalar("PREVIOUS(sub.output)".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "producer".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output".to_string(),
+                        equation: datamodel::Equation::Scalar("input".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    assert!(
+        !dep_graph.dt_dependencies["a"].contains("sub"),
+        "a = PREVIOUS(sub.output) should not keep sub as a same-step dependency"
+    );
+}

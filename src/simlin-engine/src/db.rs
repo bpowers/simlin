@@ -813,7 +813,10 @@ pub struct VariableDeps {
     /// These must be included in the Initials runlist so their values are
     /// captured in the initial_values snapshot.
     pub init_referenced_vars: BTreeSet<String>,
-    pub previous_referenced_vars: BTreeSet<String>,
+    /// Variables referenced *only* through PREVIOUS(...) in the normal dt AST.
+    pub dt_previous_referenced_vars: BTreeSet<String>,
+    /// Variables referenced *only* through PREVIOUS(...) in the initial AST.
+    pub initial_previous_referenced_vars: BTreeSet<String>,
 }
 
 fn canonical_module_input_set(module_input_names: &[String]) -> BTreeSet<Ident<Canonical>> {
@@ -842,7 +845,8 @@ fn variable_direct_dependencies_impl(
                 initial_deps: refs,
                 implicit_vars: Vec::new(),
                 init_referenced_vars: BTreeSet::new(),
-                previous_referenced_vars: BTreeSet::new(),
+                dt_previous_referenced_vars: BTreeSet::new(),
+                initial_previous_referenced_vars: BTreeSet::new(),
             }
         }
         _ => {
@@ -887,7 +891,11 @@ fn variable_direct_dependencies_impl(
                 Some(ast) => crate::variable::init_referenced_idents(ast),
                 None => BTreeSet::new(),
             };
-            let previous_referenced_vars = match lowered.ast() {
+            let dt_previous_referenced_vars = match lowered.ast() {
+                Some(ast) => crate::variable::lagged_only_previous_idents(ast),
+                None => BTreeSet::new(),
+            };
+            let initial_previous_referenced_vars = match lowered.init_ast() {
                 Some(ast) => crate::variable::lagged_only_previous_idents(ast),
                 None => BTreeSet::new(),
             };
@@ -897,7 +905,8 @@ fn variable_direct_dependencies_impl(
                 initial_deps,
                 implicit_vars,
                 init_referenced_vars,
-                previous_referenced_vars,
+                dt_previous_referenced_vars,
+                initial_previous_referenced_vars,
             }
         }
     }
@@ -1227,8 +1236,13 @@ fn model_dependency_graph_impl(
                 module_input_names.clone(),
             )
         };
-        let lagged_previous: BTreeSet<String> = deps
-            .previous_referenced_vars
+        let lagged_dt_previous: BTreeSet<String> = deps
+            .dt_previous_referenced_vars
+            .iter()
+            .map(|dep| normalize_dep(dep))
+            .collect();
+        let lagged_initial_previous: BTreeSet<String> = deps
+            .initial_previous_referenced_vars
             .iter()
             .map(|dep| normalize_dep(dep))
             .collect();
@@ -1258,9 +1272,9 @@ fn model_dependency_graph_impl(
         } else {
             deps.dt_deps.clone()
         };
-        dt_deps.retain(|dep| !lagged_previous.contains(dep));
+        dt_deps.retain(|dep| !lagged_dt_previous.contains(&normalize_dep(dep)));
         let mut initial_deps = deps.initial_deps.clone();
-        initial_deps.retain(|dep| !lagged_previous.contains(&normalize_dep(dep)));
+        initial_deps.retain(|dep| !lagged_initial_previous.contains(&normalize_dep(dep)));
 
         var_info.insert(
             name.clone(),
