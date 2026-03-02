@@ -868,57 +868,39 @@ fn variable_direct_dependencies_impl(
                 .map(crate::dimensions::Dimension::from)
                 .collect();
 
-            let dt_deps = match lowered.ast() {
-                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
-                    .into_iter()
-                    .map(|id| id.to_string())
-                    .collect(),
-                None => BTreeSet::new(),
+            // Two calls to classify_dependencies replace 7 separate walker calls.
+            let dt_classification = match lowered.ast() {
+                Some(ast) => {
+                    crate::variable::classify_dependencies(ast, &converted_dims, module_inputs)
+                }
+                None => crate::variable::DepClassification::default(),
+            };
+            let init_classification = match lowered.init_ast() {
+                Some(ast) => {
+                    crate::variable::classify_dependencies(ast, &converted_dims, module_inputs)
+                }
+                None => crate::variable::DepClassification::default(),
             };
 
-            let initial_deps = match lowered.init_ast() {
-                Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
-                    .into_iter()
-                    .map(|id| id.to_string())
-                    .collect(),
-                None => BTreeSet::new(),
-            };
             let implicit_vars =
                 extract_implicit_var_deps(parsed, &dims, &dim_context, module_inputs);
-            let init_referenced_vars = match lowered.ast() {
-                Some(ast) => crate::variable::init_referenced_idents(ast),
-                None => BTreeSet::new(),
-            };
-            let dt_init_only_referenced_vars = match lowered.ast() {
-                Some(ast) => crate::variable::init_only_referenced_idents_with_module_inputs(
-                    ast,
-                    module_inputs,
-                ),
-                None => BTreeSet::new(),
-            };
-            let dt_previous_referenced_vars = match lowered.ast() {
-                Some(ast) => crate::variable::lagged_only_previous_idents_with_module_inputs(
-                    ast,
-                    module_inputs,
-                ),
-                None => BTreeSet::new(),
-            };
-            let initial_previous_referenced_vars = match lowered.init_ast() {
-                Some(ast) => crate::variable::lagged_only_previous_idents_with_module_inputs(
-                    ast,
-                    module_inputs,
-                ),
-                None => BTreeSet::new(),
-            };
 
             VariableDeps {
-                dt_deps,
-                initial_deps,
+                dt_deps: dt_classification
+                    .all
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect(),
+                initial_deps: init_classification
+                    .all
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect(),
                 implicit_vars,
-                init_referenced_vars,
-                dt_init_only_referenced_vars,
-                dt_previous_referenced_vars,
-                initial_previous_referenced_vars,
+                init_referenced_vars: dt_classification.init_referenced,
+                dt_init_only_referenced_vars: dt_classification.init_only,
+                dt_previous_referenced_vars: dt_classification.previous_only,
+                initial_previous_referenced_vars: init_classification.previous_only,
             }
         }
     }
