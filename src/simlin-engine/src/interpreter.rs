@@ -1371,16 +1371,15 @@ impl ModuleEvaluator<'_> {
                         // but before the time advance.
                         //
                         // Only simple PREVIOUS(var) reaches here via the
-                        // builtin path. Nested PREVIOUS, PREVIOUS(TIME), and
-                        // 2-arg forms go through module expansion in the
-                        // builtins_visitor and never produce BuiltinFn::Previous
-                        // in the lowered AST.
+                        // builtin path. Nested PREVIOUS and 2-arg forms go
+                        // through module expansion in the builtins_visitor.
                         let prev_vals = self.sim.prev_values.borrow();
                         if prev_vals.is_empty() {
-                            // During the initials phase, no snapshot yet --
-                            // fall back to the current value.
-                            drop(prev_vals);
-                            self.eval(arg)
+                            // Before the first timestep snapshot, prev_values
+                            // is empty. Return 0.0 to match the 1-arg stdlib
+                            // PREVIOUS default (initial_value=0) and the VM's
+                            // zero-initialized prev_values buffer.
+                            0.0
                         } else {
                             match arg.as_ref() {
                                 Expr::Var(off, _) => prev_vals[self.off + *off],
@@ -2042,12 +2041,12 @@ impl Simulation {
             curr[DT_OFF] = dt;
             curr[INITIAL_TIME_OFF] = self.specs.start;
             curr[FINAL_TIME_OFF] = self.specs.stop;
+            // run_to_end can be called multiple times on the same Simulation;
+            // start each run from a clean PREVIOUS snapshot.
+            *(*self.prev_values).borrow_mut() = vec![0.0; n_slots];
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
             // Capture a snapshot of curr[] after the initials phase for INIT(x).
             *(*self.initial_values).borrow_mut() = curr.to_vec();
-            // Seed prev_values with the post-initials state so that
-            // PREVIOUS(x) at t=0 returns the initial value of x.
-            *(*self.prev_values).borrow_mut() = curr.to_vec();
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
@@ -2868,6 +2867,35 @@ mod compile_project_tests {
         let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel, None);
         let result = compile_project_incremental(&salsa_db, sync.project, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_to_end_resets_previous_snapshot_between_runs() {
+        let tp = TestProject::new("interp_prev_reset")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("x", "1", None)
+            .aux("prev_x", "PREVIOUS(x)", None);
+
+        let project = Arc::new(crate::project::Project::from(tp.build_datamodel()));
+        let sim = super::Simulation::new(&project, "main").expect("simulation should build");
+
+        let first = sim.run_to_end().expect("first run should succeed");
+        let second = sim.run_to_end().expect("second run should succeed");
+
+        let prev_off = *second
+            .offsets
+            .get(&Ident::new("prev_x"))
+            .expect("prev_x should have an offset");
+        assert!(
+            (first.data[prev_off] - 0.0).abs() < 1e-10,
+            "PREVIOUS(x) should be 0 at t=0 on first run, got {}",
+            first.data[prev_off]
+        );
+        assert!(
+            (second.data[prev_off] - 0.0).abs() < 1e-10,
+            "PREVIOUS(x) should be 0 at t=0 on second run, got {}",
+            second.data[prev_off]
+        );
     }
 
     #[test]

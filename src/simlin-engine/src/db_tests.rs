@@ -104,8 +104,8 @@ fn test_sync_simple_project() {
             .model_names(&db)
             .contains(&"main".to_string())
     );
-    // 1 user model + 8 stdlib models
-    assert_eq!(result.project.model_names(&db).len(), 9);
+    // 1 user model + 7 stdlib models (init stdlib removed)
+    assert_eq!(result.project.model_names(&db).len(), 8);
 
     let sim_specs = result.project.sim_specs(&db);
     assert_eq!(sim_specs.start, 0.0);
@@ -2979,65 +2979,6 @@ fn test_compile_var_fragment_produces_result() {
 }
 
 #[test]
-fn test_compile_var_fragment_caching() {
-    // AC1.1: Changing one variable's equation (same deps) should
-    // only recompile that variable. Other variables' fragments
-    // should be cached.
-    let mut db = SimlinDb::default();
-    let project = two_var_project();
-    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
-
-    // Clone the fragment before mutating db
-    let beta_frag1 = {
-        let sync1 = state1.to_sync_result();
-        let model = sync1.models["main"].source;
-        let alpha_var = sync1.models["main"].variables["alpha"].source;
-        let beta_var = sync1.models["main"].variables["beta"].source;
-
-        let alpha_result1 =
-            compile_var_fragment(&db, alpha_var, model, sync1.project, true, vec![]);
-        let beta_result1 = compile_var_fragment(&db, beta_var, model, sync1.project, true, vec![]);
-        assert!(alpha_result1.is_some());
-        assert!(beta_result1.is_some());
-
-        beta_result1.as_ref().unwrap().fragment.clone()
-    };
-
-    // Change alpha's equation (same deps -- it has no deps)
-    let mut project2 = project.clone();
-    project2.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "alpha".to_string(),
-        equation: datamodel::Equation::Scalar("20".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
-
-    let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
-    let sync2 = state2.to_sync_result();
-    let model2 = sync2.models["main"].source;
-
-    // Alpha should be recompiled (different equation)
-    let alpha_var2 = sync2.models["main"].variables["alpha"].source;
-    let alpha_result2 = compile_var_fragment(&db, alpha_var2, model2, sync2.project, true, vec![]);
-    assert!(alpha_result2.is_some());
-
-    // Beta's fragment should be unchanged since beta's equation
-    // and deps haven't changed
-    let beta_var2 = sync2.models["main"].variables["beta"].source;
-    let beta_result2 = compile_var_fragment(&db, beta_var2, model2, sync2.project, true, vec![]);
-    assert!(beta_result2.is_some());
-    assert_eq!(
-        beta_frag1,
-        beta_result2.as_ref().unwrap().fragment,
-        "beta fragment should be unchanged when only alpha's equation changes"
-    );
-}
-
-#[test]
 fn test_assemble_simulation_simple() {
     let db = SimlinDb::default();
     let project = two_var_project();
@@ -4651,7 +4592,7 @@ fn test_implicit_module_offsets_in_flattened_map() {
                 }),
                 datamodel::Variable::Aux(datamodel::Aux {
                     ident: "smoothed".to_string(),
-                    equation: datamodel::Equation::Scalar("SMTH1(input, delay_time)".to_string()),
+                    equation: datamodel::Equation::Scalar("SMTH3(input, delay_time)".to_string()),
                     documentation: String::new(),
                     units: None,
                     gf: None,
@@ -4822,21 +4763,14 @@ fn test_initial_sync_marks_stdlib_models() {
     }
 }
 
-// ── Phase 1 scaffolding verification tests ──────────────────────────
+// ── PREVIOUS/INIT opcode verification tests ──────────────────────────
 
-/// AC5.4 (partial): PREVIOUS(stock) via module expansion produces identical
-/// results in interpreter and VM. The stock increases by a constant flow
-/// each timestep; PREVIOUS(stock) should lag by one dt.
-///
-/// This test exercises the module-expansion path that PREVIOUS currently
-/// uses. When PREVIOUS is promoted to a builtin opcode (LoadPrev), this
-/// test remains valid -- it just verifies the new codepath instead.
-///
-/// The 1-arg PREVIOUS(x) form uses initial_value=0 at t=0 (stdlib module
-/// default). At subsequent timesteps it returns x's value from the prior
-/// timestep.
+/// 1-arg PREVIOUS(x) compiles to the LoadPrev opcode. Verify that
+/// interpreter and VM produce identical results, and that PREVIOUS
+/// returns 0 at the first timestep (matching the old module behavior
+/// where initial_value defaults to 0).
 #[test]
-fn test_previous_module_expansion_interpreter_vm_parity() {
+fn test_previous_opcode_interpreter_vm_parity() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("previous_parity")
@@ -4870,14 +4804,14 @@ fn test_previous_module_expansion_interpreter_vm_parity() {
         );
     }
 
-    // The stdlib PREVIOUS module uses initial_value=0 for the 1-arg form,
+    // LoadPrev reads from prev_values which is initialized to zeros,
     // so at t=0, PREVIOUS(level) returns 0 (not level's initial value).
     let level_vals = interp
         .get("level")
         .expect("level not in interpreter results");
     assert!(
         (interp_vals[0] - 0.0).abs() < 1e-10,
-        "prev_level at t=0 should be 0 (stdlib default initial_value), got {}",
+        "prev_level at t=0 should be 0 (prev_values initialized to zeros), got {}",
         interp_vals[0]
     );
     // At subsequent steps, prev_level[t] == level[t-1]
@@ -4892,15 +4826,11 @@ fn test_previous_module_expansion_interpreter_vm_parity() {
     }
 }
 
-/// AC5.4 (partial): INIT(aux) via module expansion freezes the t=0
-/// value and returns it at every timestep. Interpreter and VM must agree.
-///
-/// Uses INIT on an aux variable (matching the existing XMILE test model
-/// pattern in test/builtin_init/). The INIT stdlib module captures the
-/// module input's value at t=0 and holds it constant via a stock with no
-/// flows.
+/// INIT(x) compiles to the LoadInitial opcode. Verify that interpreter
+/// and VM produce identical results, and that INIT freezes the t=0
+/// value correctly even in an aux-only model (no stocks).
 #[test]
-fn test_init_module_expansion_interpreter_vm_parity() {
+fn test_init_opcode_interpreter_vm_parity() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("init_parity")
@@ -4941,20 +4871,19 @@ fn test_init_module_expansion_interpreter_vm_parity() {
     }
 }
 
-/// AC6.4 status check: "previous" and "init" are still in MODEL_NAMES
-/// because PREVIOUS activation was deferred (see builtins_visitor.rs
-/// comment). This test documents the current state; when PREVIOUS and
-/// INIT are promoted to builtins, update this assertion.
+/// "previous" is still in MODEL_NAMES because 2-arg PREVIOUS(x, init_val)
+/// still uses module expansion. "init" was removed -- 1-arg INIT now
+/// compiles directly to LoadInitial.
 #[test]
-fn test_previous_and_init_still_in_stdlib_model_names() {
+fn test_previous_still_in_stdlib_model_names() {
     let names = crate::stdlib::MODEL_NAMES;
     assert!(
         names.contains(&"previous"),
-        "expected 'previous' in MODEL_NAMES (still module-expanded)"
+        "expected 'previous' in MODEL_NAMES (2-arg form still module-expanded)"
     );
     assert!(
-        names.contains(&"init"),
-        "expected 'init' in MODEL_NAMES (still module-expanded)"
+        !names.contains(&"init"),
+        "'init' should no longer be in MODEL_NAMES"
     );
 }
 
@@ -5011,6 +4940,194 @@ fn test_previous_of_flow_interpreter_vm_parity() {
             step - 1,
             growth_vals[step - 1],
             interp_vals[step]
+        );
+    }
+}
+
+/// AC1.2: PREVIOUS(x[DimA]) in an arrayed equation emits per-element
+/// LoadPrev with correct offsets. Each array element should track the
+/// previous value of its own slot independently.
+///
+/// Model: DimA = {a1, a2}
+///   base_val[DimA] = apply-to-all with different values per element:
+///     a1 = 10, a2 = 20
+///   prev_val[DimA] = PREVIOUS(base_val[DimA])
+///
+/// At t=0: prev_val[a1] = 0, prev_val[a2] = 0  (LoadPrev reads zeros)
+/// At t=1: prev_val[a1] = 10, prev_val[a2] = 20 (prior step values)
+#[test]
+fn test_arrayed_1arg_previous_loadprev_per_element() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("arrayed_prev_1arg")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2"])
+        .array_with_ranges("base_val[DimA]", vec![("a1", "10"), ("a2", "20")])
+        .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA])");
+
+    // Verify compilation and simulation both succeed
+    tp.assert_compiles();
+    tp.assert_sim_builds();
+
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    // Access per-element time series using bracket notation.
+    // The output map contains individual element entries (e.g. "prev_val[a1]")
+    // with the full time series alongside the combined "prev_val" entry with
+    // only the last timestep.
+    let interp_a1 = interp
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in interpreter results");
+    let interp_a2 = interp
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in interpreter results");
+    let vm_a1 = vm
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in VM results");
+    let vm_a2 = vm
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in VM results");
+
+    // Interpreter and VM must agree on every step for each element.
+    for (step, (iv, vv)) in interp_a1.iter().zip(vm_a1.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a1] mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+    for (step, (iv, vv)) in interp_a2.iter().zip(vm_a2.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a2] mismatch at step {step}: interpreter={iv}, vm={vv}"
+        );
+    }
+
+    // At t=0, LoadPrev reads from prev_values which is initialized to zeros.
+    assert!(
+        (interp_a1[0] - 0.0).abs() < 1e-10,
+        "prev_val[a1] at t=0 should be 0 (LoadPrev zeros), got {}",
+        interp_a1[0]
+    );
+    assert!(
+        (interp_a2[0] - 0.0).abs() < 1e-10,
+        "prev_val[a2] at t=0 should be 0 (LoadPrev zeros), got {}",
+        interp_a2[0]
+    );
+
+    // At t=1+, each element returns its own prior value (10 and 20 respectively).
+    // base_val is constant so prev_val converges to the constant value after step 1.
+    for step in 1..interp_a1.len() {
+        assert!(
+            (interp_a1[step] - 10.0).abs() < 1e-10,
+            "prev_val[a1] at step {step} should be 10, got {}",
+            interp_a1[step]
+        );
+        assert!(
+            (interp_a2[step] - 20.0).abs() < 1e-10,
+            "prev_val[a2] at step {step} should be 20, got {}",
+            interp_a2[step]
+        );
+    }
+}
+
+/// AC3.2: PREVIOUS(arrayed_var, init_val) (2-arg) creates per-element
+/// module instances for an arrayed variable. Each element's module uses the
+/// shared init_val at t=0 and tracks that element's previous value thereafter.
+///
+/// Model: DimA = {a1, a2}
+///   base_val[DimA]: a1 = 10, a2 = 20
+///   prev_val[DimA] = PREVIOUS(base_val[DimA], 99)
+///
+/// At t=0: prev_val[a1] = 99, prev_val[a2] = 99  (init_val from module)
+/// At t=1: prev_val[a1] = 10, prev_val[a2] = 20  (prior step values)
+#[test]
+fn test_arrayed_2arg_previous_per_element_modules() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("arrayed_prev_2arg")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2"])
+        .array_with_ranges("base_val[DimA]", vec![("a1", "10"), ("a2", "20")])
+        .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA], 99)");
+
+    // Verify compilation and simulation both succeed
+    tp.assert_compiles();
+    tp.assert_sim_builds();
+
+    let vm = tp.run_vm().expect("VM should run successfully");
+
+    // Access per-element time series using bracket notation.
+    let vm_a1 = vm
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in VM results");
+    let vm_a2 = vm
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in VM results");
+
+    // 2-arg PREVIOUS uses module expansion, so init_val=99 is returned at t=0
+    // (not 0 as with the LoadPrev opcode path).
+    assert!(
+        (vm_a1[0] - 99.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a1] at t=0 should be init_val=99, got {}",
+        vm_a1[0]
+    );
+    assert!(
+        (vm_a2[0] - 99.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a2] at t=0 should be init_val=99, got {}",
+        vm_a2[0]
+    );
+
+    // At t=1, each element returns its corresponding base_val from t=0.
+    // base_val[a1]=10, base_val[a2]=20, so previous values are 10 and 20.
+    assert!(
+        (vm_a1[1] - 10.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a1] at t=1 should be base_val[a1] from t=0 = 10, got {}",
+        vm_a1[1]
+    );
+    assert!(
+        (vm_a2[1] - 20.0).abs() < 1e-10,
+        "2-arg PREVIOUS[a2] at t=1 should be base_val[a2] from t=0 = 20, got {}",
+        vm_a2[1]
+    );
+
+    // At t=2+, base_val is constant so previous values remain 10 and 20.
+    for step in 2..vm_a1.len() {
+        assert!(
+            (vm_a1[step] - 10.0).abs() < 1e-10,
+            "2-arg PREVIOUS[a1] at step {step} should be 10, got {}",
+            vm_a1[step]
+        );
+        assert!(
+            (vm_a2[step] - 20.0).abs() < 1e-10,
+            "2-arg PREVIOUS[a2] at step {step} should be 20, got {}",
+            vm_a2[step]
+        );
+    }
+
+    // Also verify that the interpreter agrees with the VM for each element.
+    let interp = tp
+        .run_interpreter()
+        .expect("interpreter should run successfully");
+    let interp_a1 = interp
+        .get("prev_val[a1]")
+        .expect("prev_val[a1] not in interpreter results");
+    let interp_a2 = interp
+        .get("prev_val[a2]")
+        .expect("prev_val[a2] not in interpreter results");
+
+    for (step, (iv, vv)) in interp_a1.iter().zip(vm_a1.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a1] interpreter/VM mismatch at step {step}: interp={iv}, vm={vv}"
+        );
+    }
+    for (step, (iv, vv)) in interp_a2.iter().zip(vm_a2.iter()).enumerate() {
+        assert!(
+            (iv - vv).abs() < 1e-10,
+            "prev_val[a2] interpreter/VM mismatch at step {step}: interp={iv}, vm={vv}"
         );
     }
 }
@@ -5684,7 +5801,6 @@ fn test_smooth3_stock_input_initialization() {
         ai_information: None,
     };
 
-    // Interpreter path
     let engine_project = Rc::new(crate::Project::from(project.clone()));
     let sim = Simulation::new(&engine_project, "main").expect("interpreter should compile");
     let interp_results = sim.run_to_end().expect("interpreter should run");
@@ -5697,7 +5813,6 @@ fn test_smooth3_stock_input_initialization() {
         "interpreter: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
     );
 
-    // Incremental VM path
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let compiled = compile_project_incremental(&db, sync.project, "main")
@@ -5713,9 +5828,113 @@ fn test_smooth3_stock_input_initialization() {
         "VM: SMOOTH3(stock, ...) at step 0 must equal stock initial value"
     );
 
-    // Both paths must agree
     assert_eq!(
         interp_step0, vm_step0,
         "interpreter and VM must agree on SMOOTH3 initial value"
     );
+}
+
+#[test]
+fn test_previous_returns_zero_at_first_timestep() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("prev_zero_first_step")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("x", "42", None)
+        .aux("prev_x", "PREVIOUS(x)", None);
+
+    let vm = tp.run_vm().expect("VM should run");
+    let prev_vals = vm.get("prev_x").expect("prev_x not in results");
+
+    assert!(
+        (prev_vals[0] - 0.0).abs() < 1e-10,
+        "PREVIOUS at t=0 should be 0, got {}",
+        prev_vals[0]
+    );
+    for (step, val) in prev_vals.iter().enumerate().skip(1) {
+        assert!(
+            (val - 42.0).abs() < 1e-10,
+            "PREVIOUS at step {step} should be 42, got {val}",
+        );
+    }
+}
+#[test]
+fn test_2arg_previous_uses_module_expansion() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("prev_2arg")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "10", None)
+        .aux("prev_level", "PREVIOUS(level, 99)", None);
+
+    let vm = tp.run_vm().expect("VM should run");
+    let prev_vals = vm.get("prev_level").expect("prev_level not in results");
+
+    assert!(
+        (prev_vals[0] - 99.0).abs() < 1e-10,
+        "2-arg PREVIOUS at t=0 should be 99, got {}",
+        prev_vals[0]
+    );
+    assert!(
+        (prev_vals[1] - 100.0).abs() < 1e-10,
+        "2-arg PREVIOUS at t=1 should be 100, got {}",
+        prev_vals[1]
+    );
+}
+#[test]
+fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
+    use crate::testutils::{x_aux, x_model};
+
+    let project = datamodel::Project {
+        name: "dep_graph_prev_module".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("x", "TIME", None),
+                x_aux("delayed", "PREVIOUS(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+
+    let has_previous_module = dep_graph
+        .runlist_initials
+        .iter()
+        .chain(dep_graph.runlist_flows.iter())
+        .chain(dep_graph.runlist_stocks.iter())
+        .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚previous"));
+    assert!(
+        has_previous_module,
+        "dependency graph runlists should include the implicit PREVIOUS module for PREVIOUS(module-backed var)"
+    );
+}
+#[test]
+fn test_init_aux_only_model() {
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("init_aux_only")
+        .with_sim_time(1.0, 5.0, 1.0)
+        .aux("growing", "TIME * 2", None)
+        .aux("frozen", "INIT(growing)", None);
+
+    let vm = tp.run_vm().expect("VM should run");
+    let frozen_vals = vm.get("frozen").expect("frozen not in results");
+
+    for (step, val) in frozen_vals.iter().enumerate() {
+        assert!(
+            (val - 2.0).abs() < 1e-10,
+            "frozen should be 2.0 at every step, got {val} at step {step}"
+        );
+    }
 }

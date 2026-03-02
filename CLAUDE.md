@@ -76,6 +76,15 @@ IMPORTANT: Simple, general, testable, maintainable code is better than preservin
 
 IMPORTANT: If feedback seems non-actionable, it means you need comments explaining why the code looks that way.
 
+## Comment and Rustdoc Standards
+
+- Preserve useful comments/docstrings when refactoring. Do not delete comments unless they are stale, wrong, or redundant with clearer replacement code.
+- Prefer comments that explain **why** (invariants, ordering constraints, cache behavior, edge-case semantics), not line-by-line mechanics.
+- Public Rust items and non-trivial internal functions should have concise rustdoc describing purpose, key assumptions, and side effects.
+- When behavior changes, update nearby comments in the same commit so docs and code stay aligned.
+- If you intentionally remove a comment block, replace it with an updated equivalent when the context is still non-obvious.
+- Code review should treat missing or stale “why” comments as actionable feedback, especially in simulation semantics, incremental compilation, and dependency ordering code.
+
 ## Development Standards
 
 - Rust: [docs/dev/rust.md](/docs/dev/rust.md)

@@ -2,12 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
+    canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::{datamodel, eqn_err};
@@ -19,7 +20,6 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
         }
         "npv" => &["stream", "discount_rate", "initial_value", "factor"],
         "previous" => &["input", "initial_value"],
-        "init" => &["input"],
         _ => {
             return None;
         }
@@ -35,7 +35,7 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
             if crate::stdlib::MODEL_NAMES.contains(&func.as_str())
-                || matches!(func.as_str(), "delay" | "delayn" | "smthn")
+                || matches!(func.as_str(), "delay" | "delayn" | "smthn" | "init")
             {
                 return true;
             }
@@ -132,6 +132,11 @@ pub struct BuiltinVisitor<'a> {
     active_subscript: Option<Vec<String>>,
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
+    /// Identifiers of Module variables in the parent model.
+    /// PREVIOUS(module_var) must fall through to module expansion
+    /// because modules occupy multiple slots and LoadPrev at the
+    /// base offset reads an internal sub-variable, not the output.
+    module_idents: Option<&'a HashSet<Ident<Canonical>>>,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -145,6 +150,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: Vec::new(),
             active_subscript: None,
             dimensions_ctx: None,
+            module_idents: None,
         }
     }
 
@@ -164,7 +170,39 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: get_dimension_names(dimensions),
             active_subscript: Some(subscript.to_vec()),
             dimensions_ctx,
+            module_idents: None,
         }
+    }
+
+    /// Set the module identifiers for PREVIOUS routing.
+    fn with_module_idents(mut self, module_idents: Option<&'a HashSet<Ident<Canonical>>>) -> Self {
+        self.module_idents = module_idents;
+        self
+    }
+
+    /// Returns true when the identifier names a module variable in either
+    /// the parent model (`module_idents`) or modules synthesized in this pass.
+    fn is_known_module_ident(&self, ident: &Ident<Canonical>) -> bool {
+        self.module_idents.is_some_and(|ids| ids.contains(ident))
+            || self
+                .vars
+                .get(ident)
+                .is_some_and(|var| matches!(var, datamodel::Variable::Module(_)))
+    }
+
+    /// PREVIOUS/INIT opcode routing only applies to direct scalar variables.
+    /// Module variables and qualified module outputs (`module·output`) must
+    /// be treated as module-backed so they can route through module expansion.
+    fn is_module_backed_ident(&self, ident: &RawIdent) -> bool {
+        let canonical = Ident::new(&canonicalize(ident.as_str()));
+        if self.is_known_module_ident(&canonical) {
+            return true;
+        }
+
+        ident
+            .as_str()
+            .split_once('·')
+            .is_some_and(|(base, _)| self.is_known_module_ident(&Ident::new(&canonicalize(base))))
     }
 
     /// Substitute dimension references in the expression with concrete element names.
@@ -325,22 +363,73 @@ impl<'a> BuiltinVisitor<'a> {
                     let rhs = it.next().unwrap();
                     return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
                 }
-                // PREVIOUS and INIT always go through module expansion.
+                // PREVIOUS and INIT opcode routing:
                 //
-                // PREVIOUS: The LoadPrev opcode and prev_values snapshot buffer
-                // exist as scaffolding, but activating them changes the model's
-                // dependency graph. LTM link-score equations depend on the
-                // PREVIOUS module instances for correct evaluation ordering.
-                // Promoting PREVIOUS to a builtin requires reworking how
-                // evaluation order is determined for LTM-augmented models.
+                // 1-arg PREVIOUS(var) where var is a simple scalar variable
+                // reference compiles to the LoadPrev opcode. All other
+                // PREVIOUS forms fall through to module expansion:
+                //   - 2-arg PREVIOUS(x, init_val)
+                //   - nested PREVIOUS(PREVIOUS(x))
+                //   - PREVIOUS(expr)
+                //   - PREVIOUS(module_var) -- modules occupy multiple slots,
+                //     so LoadPrev at the base offset reads the wrong value
                 //
-                // INIT: The stdlib module contains a stock that pulls the
-                // variable into the Initials runlist. Without this, aux-only
-                // models (no stocks) would have an empty Initials runlist and
-                // the initial_values snapshot would be all zeros.
-                if func == "previous" || func == "init" {
-                    // Fall through to module expansion.
+                let previous_needs_module = func == "previous"
+                    && (args.len() > 1
+                        || args.first().is_none_or(|a| match a {
+                            Var(ident, _) => self.is_module_backed_ident(ident),
+                            _ => true,
+                        }));
+                // LoadInitial only supports direct variable offsets. Rewrite
+                // INIT(expr) and INIT(module_var) to INIT($temp_arg), where
+                // $temp_arg captures expr/module_var each timestep and INIT
+                // freezes the t=0 snapshot of that scalar.
+                let init_needs_temp_arg = func == "init"
+                    && args.len() == 1
+                    && args.first().is_some_and(|a| match a {
+                        Var(ident, _) => self.is_module_backed_ident(ident),
+                        _ => true,
+                    });
+                if init_needs_temp_arg {
+                    let arg = args.into_iter().next().expect("init arity checked");
+                    let transformed_arg = if self.active_subscript.is_some() {
+                        self.substitute_dimension_refs(arg)
+                    } else {
+                        arg
+                    };
+                    let subscript_suffix = self.subscript_suffix();
+                    let id = if subscript_suffix.is_empty() {
+                        format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n)
+                    } else {
+                        format!(
+                            "$⁚{}⁚{}⁚arg0⁚{}",
+                            self.variable_name, self.n, subscript_suffix
+                        )
+                    };
+                    let eqn = print_eqn(&transformed_arg);
+                    let x_var = datamodel::Variable::Aux(datamodel::Aux {
+                        ident: id.clone(),
+                        equation: datamodel::Equation::Scalar(eqn),
+                        documentation: "".to_string(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    });
+                    self.vars.insert(Ident::new(&id), x_var);
+                    self.n += 1;
+                    return Ok(App(
+                        UntypedBuiltinFn(func, vec![Var(RawIdent::new_from_str(&id), loc)]),
+                        loc,
+                    ));
+                }
+                if previous_needs_module {
+                    // Fall through to module expansion for 2-arg form,
+                    // complex-argument forms, and module variable arguments.
                 } else if is_builtin_fn(&func) {
+                    // Builtins that survive routing stay as builtins (e.g.
+                    // PREVIOUS(var) and INIT(var)) and compile to opcodes.
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
@@ -455,14 +544,23 @@ impl<'a> BuiltinVisitor<'a> {
     }
 }
 
+/// Expand stdlib function calls (SMTH1, DELAY, etc.) and PREVIOUS/INIT
+/// builtins into implicit module instances and opcode-backed builtins.
+///
+/// When `module_idents` is provided, `PREVIOUS(module_var)` falls through
+/// to module expansion instead of compiling to LoadPrev, because modules
+/// occupy multiple slots and LoadPrev at the base offset reads an internal
+/// sub-variable rather than the output.
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
+    module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
-            let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+            let mut builtin_visitor =
+                BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
             let transformed = builtin_visitor.walk(ast)?;
             let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
             Ok((Ast::Scalar(transformed), vars))
@@ -483,7 +581,8 @@ pub fn instantiate_implicit_modules(
                         &dimensions,
                         &subscript,
                         dimensions_ctx,
-                    );
+                    )
+                    .with_module_idents(module_idents);
                     let transformed_ast = visitor.walk(ast_clone)?;
 
                     elements.insert(subscript_key, transformed_ast);
@@ -493,7 +592,8 @@ pub fn instantiate_implicit_modules(
                 Ok((Ast::Arrayed(dimensions, elements, None, false), all_vars))
             } else {
                 // No stdlib calls - original behavior
-                let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+                let mut builtin_visitor =
+                    BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
                 let transformed = builtin_visitor.walk(ast)?;
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
@@ -516,13 +616,15 @@ pub fn instantiate_implicit_modules(
                         &dimensions,
                         &subscript_parts,
                         dimensions_ctx,
-                    );
+                    )
+                    .with_module_idents(module_idents);
                     let transformed = visitor.walk(equation)?;
                     new_elements.insert(subscript_key, transformed);
                     all_vars.extend(visitor.vars.values().cloned());
                 }
                 let transformed_default = if let Some(default_expr) = default_expr {
-                    let mut default_visitor = BuiltinVisitor::new(variable_name);
+                    let mut default_visitor =
+                        BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
                     let transformed = default_visitor.walk(default_expr)?;
                     all_vars.extend(default_visitor.vars.values().cloned());
                     Some(transformed)
@@ -539,7 +641,8 @@ pub fn instantiate_implicit_modules(
                     all_vars,
                 ))
             } else {
-                let mut builtin_visitor = BuiltinVisitor::new(variable_name);
+                let mut builtin_visitor =
+                    BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
                 let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
                     .into_iter()
                     .map(|(subscript, equation)| {
@@ -965,6 +1068,18 @@ mod tests {
         project.assert_compiles();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[1.0, 1.0]);
+    }
+
+    /// Regression test: nested INIT must not repeatedly wrap generated arg helpers.
+    #[test]
+    fn test_nested_init_does_not_rewrite_generated_arg_helpers() {
+        let project = TestProject::new("nested_init_regression")
+            .aux("x", "1", None)
+            .aux("result", "INIT(INIT(x + 1))", None);
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 2.0]);
     }
 
     /// Test that DELAY (from DELAY FIXED mapping) works as delay1

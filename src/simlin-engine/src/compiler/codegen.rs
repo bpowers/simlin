@@ -983,6 +983,9 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Rank(_, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
+                    // Previous/Init are handled by the early-return path at the top
+                    // of walk_builtin (LoadPrev/LoadInitial opcodes). Reaching here
+                    // would be a logic error.
                     BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
                         unreachable!(
                             "Previous/Init builtins should be handled before reaching BuiltinId dispatch"

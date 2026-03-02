@@ -11,7 +11,7 @@ Equation text flows through these stages in order:
 1. **`src/lexer/`** - Tokenizer for equation syntax
 2. **`src/parser/`** - Recursive descent parser producing `Expr0` AST
 3. **`src/ast/`** - AST type system with progressive lowering: `Expr0` (parsed) -> `Expr1` (modules expanded) -> `Expr2` (dimensions resolved) -> `Expr3` (subscripts expanded). `array_view.rs` tracks array dimensions and sparsity.
-4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`, `PREVIOUS`, `INIT`). `builtins_visitor.rs` handles implicit module instantiation from `MODULE()` calls.
+4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`, `PREVIOUS`, `INIT`). `builtins_visitor.rs` handles implicit module instantiation and routes `PREVIOUS`/`INIT` between opcode compilation and module expansion: 1-arg `PREVIOUS(var)` for simple scalar variables compiles to `LoadPrev`; 2-arg `PREVIOUS(x, init_val)`, nested, module-variable, and expression arguments fall through to module expansion. `INIT(x)` always compiles to `LoadInitial`. Tracks `module_idents` to prevent `PREVIOUS(module_var)` from using `LoadPrev` (modules occupy multiple slots).
 5. **`src/compiler/`** - Multi-pass compilation to bytecode:
    - `mod.rs` - Orchestration; includes A2A hoisting logic that detects array-producing builtins (VectorElmMap, VectorSortOrder, AllocateAvailable) during array expansion, hoists them into `AssignTemp` pre-computations, and emits per-element `TempArrayElement` reads
    - `context.rs` - Symbol tables and variable metadata; `lower_preserving_dimensions()` skips Pass 1 dimension resolution to keep full array views for array-producing builtins
@@ -29,9 +29,9 @@ Equation text flows through these stages in order:
 
 - **`src/common.rs`** - Error types (`ErrorCode` with 100+ variants), `Result`, identifier types (`RawIdent`, `Ident<Canonical>`, dimension/element name types), canonicalization
 - **`src/datamodel.rs`** - Core structures: `Project`, `Model`, `Variable`, `Equation` (including `Arrayed` variant with `default_equation` for EXCEPT semantics), `Dimension` (with `mappings: Vec<DimensionMapping>` replacing the old `maps_to` field), `DimensionMapping`, `DataSource`/`DataSourceKind`, `UnitMap`
-- **`src/variable.rs`** - Variable variants (`Stock`, `Flow`, `Aux`, `Module`), `ModuleInput`, `Table` (graphical functions)
+- **`src/variable.rs`** - Variable variants (`Stock`, `Flow`, `Aux`, `Module`), `ModuleInput`, `Table` (graphical functions). `parse_var_with_module_context` accepts a `module_idents` set so `PREVIOUS(module_var)` falls through to module expansion instead of `LoadPrev`.
 - **`src/dimensions.rs`** - Dimension context and dimension matching for arrays
-- **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort
+- **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort. `collect_module_idents` pre-scans datamodel variables to identify which names will expand to modules (preventing incorrect `LoadPrev` compilation). `init_referenced_vars` extends the Initials runlist to include variables referenced by `INIT()` calls, ensuring their values are captured in the `initial_values` snapshot.
 - **`src/project.rs`** - `Project` struct aggregating models. `with_ltm()` and `with_ltm_all_links()` are deprecated; prefer `db::compile_project_incremental` with `ltm_enabled`/`ltm_discovery_mode` on `SourceProject`.
 - **`src/results.rs`** - `Results` (variable offsets + timeseries data), `Specs` (time/integration config)
 - **`src/patch.rs`** - `ModelPatch`/`ProjectPatch` for representing and applying model changes
@@ -40,7 +40,7 @@ Equation text flows through these stages in order:
 
 The primary compilation path uses salsa tracked functions for fine-grained incrementality. Key modules:
 
-- **`src/db.rs`** - `SimlinDb`, `SourceProject`/`SourceModel`/`SourceVariable` salsa inputs, `compile_project_incremental()` entry point, dependency graph computation, diagnostic accumulation via `CompilationDiagnostic` accumulator. `SourceProject` carries `ltm_enabled` and `ltm_discovery_mode` flags for LTM compilation. `Diagnostic` includes a `severity` field (`Error`/`Warning`) and `DiagnosticError` variants: `Equation`, `Model`, `Unit`, `Assembly`.
+- **`src/db.rs`** - `SimlinDb`, `SourceProject`/`SourceModel`/`SourceVariable` salsa inputs, `compile_project_incremental()` entry point, dependency graph computation, diagnostic accumulation via `CompilationDiagnostic` accumulator. `SourceProject` carries `ltm_enabled` and `ltm_discovery_mode` flags for LTM compilation. `Diagnostic` includes a `severity` field (`Error`/`Warning`) and `DiagnosticError` variants: `Equation`, `Model`, `Unit`, `Assembly`. `VariableDeps` includes `init_referenced_vars` to track variables referenced by `INIT()` calls; `init_referenced_idents` walks the AST to extract these references.
 - **`src/db_analysis.rs`** - Salsa-tracked causal graph analysis: `model_causal_edges`, `model_loop_circuits`, `model_cycle_partitions`, `model_detected_loops`. Produces `DetectedLoop` structs with polarity.
 - **`src/db_ltm.rs`** - LTM (Loops That Matter) equation parsing and compilation as salsa tracked functions. Handles link scores, loop scores, relative loop scores, and PREVIOUS module expansion for LTM synthetic variables.
 - **`src/db_diagnostic_tests.rs`** - Verification tests for diagnostic accumulation paths.

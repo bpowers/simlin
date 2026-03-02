@@ -753,6 +753,7 @@ impl Vm {
         self.next_chunk = 1;
         self.did_initials = false;
         self.step_accum = 0;
+        self.prev_values.fill(0.0);
         self.temp_storage.fill(0.0);
         self.stack.clear();
         self.view_stack.clear();
@@ -867,8 +868,8 @@ impl Vm {
             // During initials, LoadInitial falls back to curr[] (which IS the
             // initial value being computed). The snapshot hasn't been captured yet.
             initial_values: &self.initial_values,
-            // During initials, prev_values is not yet seeded; LoadPrev falls
-            // back to curr[] during the Initials phase.
+            // During initials, prev_values is zero-initialized so PREVIOUS(x)
+            // yields the 1-arg default at t=0.
             prev_values: &mut self.prev_values,
         };
 
@@ -897,10 +898,6 @@ impl Vm {
         // The initial_values buffer preserves t=0 values across all timesteps.
         let curr_start = self.curr_chunk * self.n_slots;
         self.initial_values
-            .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
-        // Seed prev_values with the post-initials state so that
-        // PREVIOUS(x) at t=0 returns the initial value of x.
-        self.prev_values
             .copy_from_slice(&data[curr_start..curr_start + self.n_slots]);
 
         self.did_initials = true;
@@ -1068,19 +1065,11 @@ impl Vm {
                     stack.push(curr[module_off + *off as usize]);
                 }
                 // LoadPrev reads from the prev_values snapshot taken after
-                // stocks but before the time advance each timestep. This
-                // ensures PREVIOUS(x) returns the value from the previous
-                // timestep, matching the stdlib module PREVIOUS behavior.
-                // During initials, prev_values is seeded from the
-                // post-initials state; we fall back to curr[].
+                // stocks but before the time advance each timestep. During
+                // initials this buffer is zero-initialized.
                 Opcode::LoadPrev { off } => {
                     let abs_off = module_off + *off as usize;
-                    let value = if part == StepPart::Initials {
-                        curr[abs_off]
-                    } else {
-                        prev_values[abs_off]
-                    };
-                    stack.push(value);
+                    stack.push(prev_values[abs_off]);
                 }
                 // LoadInitial reads from the initial-value buffer captured at t=0.
                 // During the initials phase, the snapshot hasn't been taken yet,
@@ -3234,6 +3223,66 @@ mod vm_reset_and_run_initials_tests {
     }
 
     #[test]
+    fn test_vm_reset_clears_previous_snapshot() {
+        let tp = TestProject::new("reset_prev_snapshot")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .aux("x", "1", None)
+            .aux("prev_x", "PREVIOUS(x)", None);
+        let (_, compiled) = build_compiled(&tp);
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.reset();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let prev_off = *results.offsets.get(&*canonicalize("prev_x")).unwrap();
+        let t0_prev = results.data[prev_off];
+        assert!(
+            (t0_prev - 0.0).abs() < 1e-10,
+            "PREVIOUS(x) at t=0 after reset should be 0, got {t0_prev}"
+        );
+    }
+
+    #[test]
+    fn test_previous_in_initials_vm_matches_interpreter() {
+        let tp = TestProject::new("previous_in_initials")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("x", "5", None)
+            .stock("s", "PREVIOUS(x)", &[], &[], None);
+
+        let interp = tp.run_interpreter().expect("interpreter should run");
+        let vm = tp.run_vm().expect("vm should run");
+        let interp_s = interp.get("s").expect("interpreter missing s");
+        let vm_s = vm.get("s").expect("vm missing s");
+
+        assert!(
+            (interp_s[0] - vm_s[0]).abs() < 1e-10,
+            "interpreter/vm mismatch for stock initial PREVIOUS(x): interp={}, vm={}",
+            interp_s[0],
+            vm_s[0]
+        );
+    }
+
+    #[test]
+    fn test_init_on_module_backed_var_freezes_initial_value() {
+        let tp = TestProject::new("init_module_backed")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .aux("x", "TIME", None)
+            .aux("delayed", "PREVIOUS(x, 99)", None)
+            .aux("frozen", "INIT(delayed)", None);
+
+        let vm = tp.run_vm().expect("VM should run");
+        let frozen_vals = vm.get("frozen").expect("frozen not in results");
+        for (step, val) in frozen_vals.iter().enumerate() {
+            assert!(
+                (val - 99.0).abs() < 1e-10,
+                "frozen should be 99.0 at every step, got {val} at step {step}"
+            );
+        }
+    }
+
+    #[test]
     fn test_compiled_simulation_clone_produces_equivalent_vm() {
         let tp = pop_model();
         let (_, compiled) = build_compiled(&tp);
@@ -5216,6 +5265,32 @@ mod vm_reset_run_to_and_constants_tests {
             assert!(
                 (a - b).abs() < 1e-10,
                 "step {step}: full={a} vs segmented={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_to_segments_preserve_previous_state() {
+        let tp = TestProject::new("run_to_prev_segments")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("x", "TIME", None)
+            .aux("prev_x", "PREVIOUS(x)", None);
+        let compiled = build_compiled(&tp);
+
+        let mut vm_full = Vm::new(compiled.clone()).unwrap();
+        vm_full.run_to_end().unwrap();
+        let full_prev = vm_full.get_series(&Ident::new("prev_x")).unwrap();
+
+        let mut vm_seg = Vm::new(compiled).unwrap();
+        vm_seg.run_to(2.0).unwrap();
+        vm_seg.run_to_end().unwrap();
+        let seg_prev = vm_seg.get_series(&Ident::new("prev_x")).unwrap();
+
+        assert_eq!(full_prev.len(), seg_prev.len());
+        for (step, (full, seg)) in full_prev.iter().zip(seg_prev.iter()).enumerate() {
+            assert!(
+                (full - seg).abs() < 1e-10,
+                "step {step}: full={full} vs segmented={seg}"
             );
         }
     }
