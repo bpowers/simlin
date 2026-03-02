@@ -1307,6 +1307,33 @@ fn test_classify_dependencies_matrix() {
             expected_previous_only: [].into(),
             expected_init_only: [].into(),
         },
+        DepTestCase {
+            // mixed x range: b appears as the PREVIOUS range start and as the direct
+            // range end.  b is in previous_referenced but also in non_previous (the
+            // direct range end occurrence), so previous_only is empty.
+            label: "mixed_prev_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    Expr2::App(
+                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    Expr2::Var(Ident::new("b"), None, loc),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "b"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
         // -- Reference form: both-lagged (PREVIOUS + INIT) --
         DepTestCase {
             // Edge case 6: PREVIOUS + INIT combined -- b is init_only
@@ -1363,6 +1390,53 @@ fn test_classify_dependencies_matrix() {
             expected_previous_referenced: ["b"].into(),
             expected_previous_only: [].into(),
             expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            // both-lagged x isModuleInput: the active (then) branch is
+            // PREVIOUS(a) + INIT(a).  a is in both previous_referenced and
+            // init_referenced.  INIT(a) walks a outside PREVIOUS context, so
+            // a ends up in non_previous, making previous_only empty.  a is
+            // never walked outside any lagged context, so init_only={a}.
+            label: "both_lagged_ismoduleinput",
+            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) + INIT(a) else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected_all: ["a"].into(),
+            expected_init_referenced: ["a"].into(),
+            expected_previous_referenced: ["a"].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: ["a"].into(),
+        },
+        DepTestCase {
+            // both-lagged x range: range start is PREVIOUS(x), range end is INIT(y).
+            // x is in previous_referenced and previous_only (never seen outside PREVIOUS).
+            // y is in init_referenced and init_only (never seen outside any lagged context).
+            label: "both_lagged_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Range(
+                    Expr2::App(
+                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("x"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    Expr2::App(
+                        BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("y"), None, loc))),
+                        None,
+                        loc,
+                    ),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "x", "y"].into(),
+            expected_init_referenced: ["y"].into(),
+            expected_previous_referenced: ["x"].into(),
+            expected_previous_only: ["x"].into(),
+            expected_init_only: ["y"].into(),
         },
         // -- Additional edge cases --
         DepTestCase {
