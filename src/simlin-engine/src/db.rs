@@ -870,7 +870,7 @@ fn variable_direct_dependencies_impl(
                 .map(crate::dimensions::Dimension::from)
                 .collect();
 
-            let dt_deps = match lowered.ast() {
+            let mut dt_deps = match lowered.ast() {
                 Some(ast) => crate::variable::identifier_set(ast, &converted_dims, module_inputs)
                     .into_iter()
                     .map(|id| id.to_string())
@@ -891,6 +891,11 @@ fn variable_direct_dependencies_impl(
                 Some(ast) => crate::variable::init_referenced_idents(ast),
                 None => BTreeSet::new(),
             };
+            let init_only_referenced_vars = match lowered.ast() {
+                Some(ast) => crate::variable::init_only_referenced_idents(ast),
+                None => BTreeSet::new(),
+            };
+            dt_deps.retain(|dep| !init_only_referenced_vars.contains(dep));
             let dt_previous_referenced_vars = match lowered.ast() {
                 Some(ast) => crate::variable::lagged_only_previous_idents(ast),
                 None => BTreeSet::new(),
@@ -1236,16 +1241,8 @@ fn model_dependency_graph_impl(
                 module_input_names.clone(),
             )
         };
-        let lagged_dt_previous: BTreeSet<String> = deps
-            .dt_previous_referenced_vars
-            .iter()
-            .map(|dep| normalize_dep(dep))
-            .collect();
-        let lagged_initial_previous: BTreeSet<String> = deps
-            .initial_previous_referenced_vars
-            .iter()
-            .map(|dep| normalize_dep(dep))
-            .collect();
+        let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
+        let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
         let kind = source_var.kind(db);
         let mut dt_deps = if kind == SourceVariableKind::Module {
             deps.dt_deps
@@ -1272,9 +1269,9 @@ fn model_dependency_graph_impl(
         } else {
             deps.dt_deps.clone()
         };
-        dt_deps.retain(|dep| !lagged_dt_previous.contains(&normalize_dep(dep)));
+        dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
         let mut initial_deps = deps.initial_deps.clone();
-        initial_deps.retain(|dep| !lagged_initial_previous.contains(&normalize_dep(dep)));
+        initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
 
         var_info.insert(
             name.clone(),

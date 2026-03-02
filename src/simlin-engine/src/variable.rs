@@ -1000,6 +1000,73 @@ pub fn lagged_only_previous_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     previous.difference(&non_previous).cloned().collect()
 }
 
+/// Collect identifiers referenced *only* through INIT(...) in an AST.
+///
+/// If an identifier appears both inside and outside INIT, it is excluded.
+pub fn init_only_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
+    fn walk_index(index: &IndexExpr2, non_init: &mut BTreeSet<String>, in_init: bool) {
+        match index {
+            IndexExpr2::Expr(expr) | IndexExpr2::Range(expr, _, _) => walk(expr, non_init, in_init),
+            IndexExpr2::Wildcard(_)
+            | IndexExpr2::StarRange(_, _)
+            | IndexExpr2::DimPosition(_, _) => {}
+        }
+    }
+
+    fn walk(expr: &Expr2, non_init: &mut BTreeSet<String>, in_init: bool) {
+        match expr {
+            Expr2::Const(_, _, _) => {}
+            Expr2::Var(ident, _, _) => {
+                if !in_init {
+                    non_init.insert(ident.to_string());
+                }
+            }
+            Expr2::App(builtin, _, _) => match builtin {
+                BuiltinFn::Init(arg) => walk(arg, non_init, true),
+                _ => walk_builtin_expr(builtin, |contents| {
+                    if let BuiltinContents::Expr(expr) = contents {
+                        walk(expr, non_init, in_init);
+                    }
+                }),
+            },
+            Expr2::Subscript(ident, args, _, _) => {
+                if !in_init {
+                    non_init.insert(ident.to_string());
+                }
+                for arg in args {
+                    walk_index(arg, non_init, in_init);
+                }
+            }
+            Expr2::Op2(_, lhs, rhs, _, _) => {
+                walk(lhs, non_init, in_init);
+                walk(rhs, non_init, in_init);
+            }
+            Expr2::Op1(_, expr, _, _) => walk(expr, non_init, in_init),
+            Expr2::If(cond, t, f, _, _) => {
+                walk(cond, non_init, in_init);
+                walk(t, non_init, in_init);
+                walk(f, non_init, in_init);
+            }
+        }
+    }
+
+    let init_refs = init_referenced_idents(ast);
+    let mut non_init = BTreeSet::new();
+    match ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => walk(expr, &mut non_init, false),
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            for expr in elements.values() {
+                walk(expr, &mut non_init, false);
+            }
+            if let Some(expr) = default_expr {
+                walk(expr, &mut non_init, false);
+            }
+        }
+    }
+
+    init_refs.difference(&non_init).cloned().collect()
+}
+
 #[test]
 fn test_identifier_sets() {
     let cases: &[(&str, &[&str])] = &[
@@ -1062,6 +1129,36 @@ fn test_identifier_sets() {
             eprintln!("Got: {id_set_test:?}");
         }
         assert_eq!(id_set_expected, id_set_test);
+    }
+}
+
+#[test]
+fn test_init_only_referenced_idents() {
+    use crate::ast::lower_ast;
+
+    let cases: &[(&str, &[&str])] = &[
+        ("INIT(b)", &["b"]),
+        ("INIT(b) + b", &[]),
+        ("INIT(m.out1) + m.out2", &["m·out1"]),
+    ];
+
+    for (eqn, expected) in cases {
+        let (ast, err) = parse_equation(
+            &datamodel::Equation::Scalar((*eqn).to_owned()),
+            &[],
+            false,
+            None,
+        );
+        assert!(err.is_empty());
+        let scope = ScopeStage0 {
+            models: &Default::default(),
+            dimensions: &Default::default(),
+            model_name: "test_model",
+        };
+        let lowered = lower_ast(&scope, ast.expect("failed to parse equation")).unwrap();
+        let got = init_only_referenced_idents(&lowered);
+        let expected: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(expected, got, "eqn={eqn}");
     }
 }
 
