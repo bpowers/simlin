@@ -100,8 +100,7 @@ pub fn analyze_model(
 ///
 /// Uses the caller-provided salsa `SimlinDb` and `SourceProject` for
 /// both compilation/simulation and structural loop analysis (via
-/// `model_causal_edges` / `causal_graph_from_edges`), avoiding the
-/// monolithic `Project::from` path entirely.
+/// `model_causal_edges` / `causal_graph_from_edges`).
 fn run_ltm_pipeline(
     project: &datamodel::Project,
     db: &mut SimlinDb,
@@ -134,8 +133,7 @@ fn run_ltm_pipeline(
     vm.run_to_end().ok()?;
     let results = vm.into_results();
 
-    // Build the CausalGraph from salsa-tracked causal edges rather than
-    // the monolithic Project::from path.
+    // Build the CausalGraph from salsa-tracked causal edges.
     let source_model = source_project.models(db).get(&actual_name).copied()?;
     let edges_result = crate::db::model_causal_edges(db, source_model, source_project);
     let mut causal_graph = crate::db::causal_graph_from_edges(edges_result);

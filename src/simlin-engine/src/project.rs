@@ -267,8 +267,8 @@ impl Project {
 }
 
 // Test-only LTM helpers: with_ltm(), with_ltm_all_links(), and their
-// supporting functions. No production callers remain; tests will be migrated
-// to the incremental path in Phase 5, after which these can be deleted.
+// supporting functions. No production callers remain; retained for the
+// AST interpreter cross-validation path (AC4.6).
 #[cfg(any(test, feature = "testing"))]
 use crate::common::{ErrorCode, ErrorKind};
 #[cfg(any(test, feature = "testing"))]

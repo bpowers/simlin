@@ -380,7 +380,7 @@ impl TestProject {
 
 /// Methods that use the monolithic `Project::from` construction path.
 /// These are retained only for the AST interpreter cross-validation path
-/// (AC4.6). Production compilation uses `compile_incremental`.
+/// (AC4.6). Production compilation uses `compile_project_incremental`.
 #[cfg(any(test, feature = "testing"))]
 impl TestProject {
     /// Build and compile the project

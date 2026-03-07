@@ -330,8 +330,8 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
-/// the graph from a monolithic `Project`) and callers that have a
-/// salsa-derived `CausalGraph`.
+/// the graph from a `Project`) and callers that have a salsa-derived
+/// `CausalGraph`.
 pub fn discover_loops_with_graph(
     results: &Results,
     causal_graph: &CausalGraph,

@@ -679,8 +679,7 @@ impl std::fmt::Debug for ParsedVariableResult {
 /// Context::new_with_builtins calls.
 ///
 /// Unit definition parsing errors are accumulated as diagnostics so they
-/// appear in `collect_all_diagnostics`. The monolithic `Project::from` path
-/// stores these in `engine::Project.errors` instead.
+/// appear in `collect_all_diagnostics`.
 #[salsa::tracked(returns(ref))]
 pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
     let dm_units = source_units_to_datamodel(project.units(db));
