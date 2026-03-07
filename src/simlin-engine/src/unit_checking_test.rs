@@ -22,7 +22,7 @@ mod tests {
             .aux_with_units("smoothed", "SMTH1(input, delay_time)", None)
             // This should work because smoothed has units of widgets
             .aux_with_units("output", "smoothed + 10", Some("widgets"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -39,7 +39,7 @@ mod tests {
             // SMTH1 with initial value should preserve units
             .aux_with_units("smoothed", "SMTH1(input, delay_time, initial)", None)
             .aux_with_units("output", "smoothed * 2", Some("widgets"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -73,7 +73,7 @@ mod tests {
             // DELAY1 should preserve units of input
             .aux_with_units("delayed", "DELAY1(input_flow, delay_time, initial)", None)
             .aux_with_units("total", "delayed + input_flow", Some("people"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -100,7 +100,7 @@ mod tests {
                 "growth_rate * 100 * years_value",
                 Some("dimensionless"),
             )
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -118,7 +118,7 @@ mod tests {
             )
             .flow_with_units("production", "100", Some("widgets/Month"))
             .flow_with_units("shipments", "80", Some("widgets/Month"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
                 "smoothed_acquisition * revenue_per_customer",
                 Some("dollars/weeks"),
             )
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
                 None,
             )
             .aux_with_units("total_rate", "delayed_rate + 5", Some("items/hours"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
                 None,
             )
             .aux_with_units("deviation", "ABS(smooth_signal - noisy_signal)", Some("kg"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -234,7 +234,7 @@ mod tests {
                 "position - previous_position",
                 Some("meters"),
             )
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
                 "current_temp - initial_temp",
                 Some("celsius"),
             )
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
             .aux_with_units("delayed", "DELAY1(smoothed, delay_time)", None)
             // Both should have units of "units"
             .aux_with_units("output", "smoothed + delayed", Some("units"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
             .aux_with_units("smooth_apples", "SMTH1(total_apples, time_period)", None)
             // This should work because smooth_apples has units of apples
             .aux_with_units("final_apples", "smooth_apples + 5", Some("apples"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
             .aux_with_units("time_constant", "5", Some("seconds"))
             .aux_with_units("smoothed_ratio", "SMTH1(ratio, time_constant)", None)
             .aux_with_units("final", "smoothed_ratio * 100", Some("dimensionless"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -340,7 +340,7 @@ mod tests {
             .aux_with_units("smooth_time", "2", Some("Month"))
             .aux_with_units("smoothed", "SMTH1(varying_input, smooth_time)", None)
             .aux_with_units("result", "smoothed", Some("widgets"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
             .aux_with_units("level2", "SMTH1(level1, slow_smooth)", None)
             // Both should have units of volts
             .aux_with_units("output", "level1 + level2", Some("volts"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -604,7 +604,7 @@ mod tests {
             )
             // Use the arrayed variable to verify units propagate
             .aux_with_units("total_rate", "SUM(regional_rate[*])", Some("widgets/days"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -626,7 +626,7 @@ mod tests {
             )
             // Use velocity in an expression with declared units to verify inference
             .aux_with_units("total_velocity", "SUM(velocity[*])", Some("meters/seconds"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -688,7 +688,7 @@ mod tests {
                 Some("widgets/days"),
             )
             .aux_with_units("total", "SUM(values[*])", Some("widgets/days"))
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -727,7 +727,7 @@ mod tests {
                 "IF condition > 0 THEN rate_a ELSE rate_b",
                 Some("widgets/days"),
             )
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -766,7 +766,7 @@ mod tests {
                 "SAFEDIV(numerator, denominator, fallback)",
                 Some("widgets/days"),
             )
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 
     #[test]
@@ -794,7 +794,10 @@ mod tests {
         // Critical test: Unit errors should NOT block simulation.
         // Many real-world models have unit errors but should still run.
         // The unit error should be detected and surfaced, but simulation should proceed.
-        use crate::project::Project as CompiledProject;
+        use crate::db::{
+            DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+            compile_project_incremental, sync_from_datamodel_incremental,
+        };
 
         let project = TestProject::new("unit_mismatch_runs_test")
             .unit("apples", None)
@@ -804,26 +807,36 @@ mod tests {
             .aux_with_units("orange_count", "20", Some("oranges"))
             .aux_with_units("fruit_total", "apple_count + orange_count", None); // Mismatch!
 
-        // Check that unit warning exists
         let datamodel = project.build_datamodel();
-        let compiled = CompiledProject::from(datamodel);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let sync_result = sync.to_sync_result();
 
-        // Verify there's a unit warning but no blocking errors
-        let has_unit_warning = compiled
-            .models
-            .values()
-            .any(|m| m.unit_warnings.as_ref().is_some_and(|w| !w.is_empty()));
+        // Compilation should succeed (unit errors are non-blocking)
+        let compiled = compile_project_incremental(&db, sync.project, "main");
+        assert!(
+            compiled.is_ok(),
+            "Compilation should succeed despite unit mismatch"
+        );
 
-        let has_blocking_errors = compiled.models.values().any(|m| {
-            m.errors.as_ref().is_some_and(|e| !e.is_empty()) || !m.get_variable_errors().is_empty()
+        // Diagnostics should surface the unit mismatch (as Unit diagnostic
+        // or as a Model-level UnitMismatch error from inference failure)
+        let diagnostics = collect_all_diagnostics(&db, &sync_result);
+        let has_unit_issues = diagnostics.iter().any(|d| {
+            matches!(d.error, DiagnosticError::Unit(_))
+                || matches!(
+                    &d.error,
+                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
+                )
         });
-
-        // Unit warnings should be present OR per-variable unit errors
-        let has_unit_issues = has_unit_warning
-            || compiled
-                .models
-                .values()
-                .any(|m| !m.get_unit_errors().is_empty());
+        let has_blocking_errors = diagnostics.iter().any(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && !matches!(d.error, DiagnosticError::Unit(_))
+                && !matches!(
+                    &d.error,
+                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
+                )
+        });
 
         assert!(
             has_unit_issues,
@@ -853,7 +866,10 @@ mod tests {
     #[test]
     fn test_unit_mismatch_in_stock_allows_simulation() {
         // Test that unit mismatch with stocks also allows simulation
-        use crate::project::Project as CompiledProject;
+        use crate::db::{
+            DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+            compile_project_incremental, sync_from_datamodel_incremental,
+        };
 
         let project = TestProject::new("stock_unit_mismatch_runs")
             .unit("widgets", None)
@@ -869,26 +885,35 @@ mod tests {
                 Some("widgets"),
             );
 
-        // Check that unit warning exists
         let datamodel = project.build_datamodel();
-        let compiled = CompiledProject::from(datamodel);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let sync_result = sync.to_sync_result();
 
-        // Verify there's a unit warning but no blocking errors
-        let has_unit_warning = compiled
-            .models
-            .values()
-            .any(|m| m.unit_warnings.as_ref().is_some_and(|w| !w.is_empty()));
+        // Compilation should succeed (unit errors are non-blocking)
+        let compiled = compile_project_incremental(&db, sync.project, "main");
+        assert!(
+            compiled.is_ok(),
+            "Compilation should succeed despite unit mismatch"
+        );
 
-        let has_blocking_errors = compiled.models.values().any(|m| {
-            m.errors.as_ref().is_some_and(|e| !e.is_empty()) || !m.get_variable_errors().is_empty()
+        // Diagnostics should surface the unit mismatch
+        let diagnostics = collect_all_diagnostics(&db, &sync_result);
+        let has_unit_issues = diagnostics.iter().any(|d| {
+            matches!(d.error, DiagnosticError::Unit(_))
+                || matches!(
+                    &d.error,
+                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
+                )
         });
-
-        // Unit warnings should be present OR per-variable unit errors
-        let has_unit_issues = has_unit_warning
-            || compiled
-                .models
-                .values()
-                .any(|m| !m.get_unit_errors().is_empty());
+        let has_blocking_errors = diagnostics.iter().any(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && !matches!(d.error, DiagnosticError::Unit(_))
+                && !matches!(
+                    &d.error,
+                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
+                )
+        });
 
         assert!(
             has_unit_issues,

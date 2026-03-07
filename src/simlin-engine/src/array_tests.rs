@@ -20,7 +20,7 @@ mod wildcard_tests {
             .array_const("source[args]", 10.0)
             .array_aux("result[args]", "source[*]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[10.0, 10.0, 10.0]);
     }
@@ -33,7 +33,7 @@ mod wildcard_tests {
             .array_const("population[City]", 1000.0)
             .array_aux("copy[City]", "population[*]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("copy", &[1000.0, 1000.0, 1000.0]);
     }
@@ -47,7 +47,7 @@ mod wildcard_tests {
             .array_aux("doubled[Index]", "base[*] * 2")
             .array_aux("added[Index]", "base[*] + 10");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("doubled", &[10.0, 10.0, 10.0, 10.0]);
         project.assert_interpreter_result("added", &[15.0, 15.0, 15.0, 15.0]);
@@ -62,7 +62,7 @@ mod wildcard_tests {
             .array_aux("b[Dim]", "a[*] * 3")
             .array_aux("c[Dim]", "b[*] + 1");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("b", &[6.0, 6.0, 6.0]);
         project.assert_interpreter_result("c", &[7.0, 7.0, 7.0]);
@@ -77,7 +77,7 @@ mod wildcard_tests {
             .array_const("source[X,Y]", 10.0) // All elements = 10
             .array_aux("copy[X,Y]", "source[*,*] * 2"); // Should double all elements
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("copy", &[20.0, 20.0, 20.0, 20.0, 20.0, 20.0]);
     }
@@ -92,7 +92,7 @@ mod wildcard_tests {
             .array_const("cube[X,Y,Z]", 3.0) // All elements = 3
             .array_aux("result[X,Y,Z]", "cube[*,*,*] + 1"); // Should add 1 to all elements
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]);
     }
@@ -105,7 +105,7 @@ mod wildcard_tests {
             .array_const("m[A]", 5.0) // All elements = 5
             .scalar_aux("first_item", "m[1]"); // XMILE uses simple numeric indices
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("first_item", 5.0);
     }
@@ -119,7 +119,7 @@ mod wildcard_tests {
             .array_const("m[A,B]", 5.0) // All elements = 5
             .array_aux("first_row[B]", "m[1, *]"); // Use numeric index per XMILE spec
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("first_row", &[5.0, 5.0]);
     }
@@ -144,7 +144,7 @@ mod wildcard_tests {
             .array_aux("row1[Col]", "matrix[1, *]") // Should be [10, 11, 12]
             .array_aux("row2[Col]", "matrix[2, *]"); // Should be [20, 21, 22]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("row1", &[10.0, 11.0, 12.0]);
         project.assert_interpreter_result("row2", &[20.0, 21.0, 22.0]);
@@ -170,7 +170,7 @@ mod wildcard_tests {
             .array_aux("col1[Row]", "matrix[*, 1]") // Should be [110, 210, 310]
             .array_aux("col2[Row]", "matrix[*, 2]"); // Should be [120, 220, 320]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("col1", &[110.0, 210.0, 310.0]);
         project.assert_interpreter_result("col2", &[120.0, 220.0, 320.0]);
@@ -196,7 +196,7 @@ mod wildcard_tests {
             .array_aux("boston_years[Year]", "population[Boston, *]") // Named dim uses element name
             .array_aux("year1_cities[City]", "population[*, 1]"); // Indexed dim uses numeric
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("boston_years", &[1100.0, 1200.0]);
         project.assert_interpreter_result("year1_cities", &[1100.0, 1100.0, 1100.0]);
@@ -226,7 +226,7 @@ mod wildcard_tests {
             .array_aux("slice_xz[X,Z]", "cube[*,2,*]") // Fix Y=2: [121, 122, 221, 222]
             .array_aux("slice_yz[Y,Z]", "cube[1,*,*]"); // Fix X=1: [111, 112, 121, 122]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("slice_xy", &[111.0, 121.0, 211.0, 221.0]);
         project.assert_interpreter_result("slice_xz", &[121.0, 122.0, 221.0, 222.0]);
@@ -264,7 +264,7 @@ mod wildcard_tests {
             .array_aux("profit1[Blerg,Product]", "sales[*,*] - costs[*,*]") // Element-wise subtraction
             .array_aux("profit2[Blerg,Product]", "sales - costs"); // different syntax same result
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // profit should be: [10-5, 20-10, 20-5, 40-10, 30-5, 60-10] = [5, 10, 15, 30, 25, 50]
         project.assert_interpreter_result("profit1", &[5.0, 10.0, 15.0, 30.0, 25.0, 50.0]);
@@ -287,7 +287,7 @@ mod wildcard_tests {
             .array_aux("values[Index]", "1 + Index") // Assuming Index gives position
             .array_aux("doubled[Index]", "values[*] * 2");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("doubled", &[4.0, 6.0, 8.0]);
     }
@@ -299,7 +299,7 @@ mod wildcard_tests {
             .array_aux("values[Cities]", "1 + Cities") // Assuming Index gives position
             .array_aux("doubled[Cities]", "values[*] * 2");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("doubled", &[4.0, 6.0]);
     }
@@ -311,7 +311,7 @@ mod wildcard_tests {
             .named_dimension("Cities", &["Boston", "NYC", "LA"])
             .array_aux("indices[Cities]", "Cities"); // Should be [1, 2, 3]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("indices", &[1.0, 2.0, 3.0]);
     }
@@ -338,6 +338,7 @@ mod dimension_position_tests {
             .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
             .scalar_aux("first_elem", "arr[@1]"); // Should get first element = 10
 
+        // @N position syntax is not yet supported on the incremental path
         project.assert_compiles();
         project.assert_sim_builds();
         project.assert_scalar_result("first_elem", 10.0);
@@ -362,7 +363,7 @@ mod dimension_position_tests {
             )
             .array_aux("transposed[Col,Row]", "matrix[@2, @1]"); // Swap dimensions
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original matrix is row-major: [11, 12, 13, 21, 22, 23]
         // Transposed should be: [11, 21, 12, 22, 13, 23]
@@ -392,7 +393,7 @@ mod dimension_position_tests {
             // Reorder to [Z,Y,X]
             .array_aux("reordered[Z,Y,X]", "cube[@3, @2, @1]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original cube is in X,Y,Z order: [111, 112, 121, 122, 211, 212, 221, 222]
         // Reordered to Z,Y,X should be: [111, 211, 121, 221, 112, 212, 122, 222]
@@ -429,7 +430,7 @@ mod dimension_position_tests {
             // Fix first dimension at position 1, keep all B, use C dimension
             .array_aux("slice[C,B]", "arr[1, *, @1]"); // Fix A=1, keep all B, use C dimension
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get A=1 slice with C,B ordering: [111, 121, 131, 112, 122, 132]
         project.assert_interpreter_result("slice", &[111.0, 121.0, 131.0, 112.0, 122.0, 132.0]);
@@ -461,7 +462,7 @@ mod transpose_tests {
             // which is equivalent to transpose
             .array_aux("transposed[Col,Row]", "matrix[@2, @1]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original matrix is row-major: [11, 12, 13, 21, 22, 23]
         // Transposed should be: [11, 21, 12, 22, 13, 23]
@@ -487,7 +488,7 @@ mod transpose_tests {
             )
             .array_aux("transposed[Col,Row]", "matrix'");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original matrix is row-major: [11, 12, 13, 21, 22, 23]
         // Transposed should be: [11, 21, 12, 22, 13, 23]
@@ -516,7 +517,7 @@ mod transpose_tests {
             )
             .array_aux("transposed[Z,Y,X]", "cube'");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original: [111, 112, 121, 122, 211, 212, 221, 222]
         // Transposed (Z,Y,X order): [111, 211, 121, 221, 112, 212, 122, 222]
@@ -545,7 +546,7 @@ mod transpose_tests {
             )
             .array_aux("doubled_transpose[Col,Row]", "(matrix * 2)'");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original * 2: [2, 4, 6, 8, 10, 12]
         // Transposed: [2, 8, 4, 10, 6, 12]
@@ -571,7 +572,7 @@ mod transpose_tests {
             )
             .scalar_aux("sum_transpose", "SUM(matrix')");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Sum should be same whether transposed or not: 1+2+3+4+5+6 = 21
         project.assert_scalar_result("sum_transpose", 21.0);
@@ -594,7 +595,7 @@ mod transpose_tests {
             )
             .array_aux("result[Points]", "vec'");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 1D transpose should be identity
         project.assert_interpreter_result("result", &[10.0, 20.0, 30.0, 40.0, 50.0]);
@@ -623,7 +624,7 @@ mod transpose_tests {
             // Use dimension positions as a workaround for bare transpose
             .array_aux("transposed[Z,Y,X]", "cube[@3, @2, @1]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Original order: X,Y,Z → [111, 112, 121, 122, 211, 212, 221, 222]
         // Transposed to Z,Y,X → [111, 211, 121, 221, 112, 212, 122, 222]
@@ -652,7 +653,7 @@ mod transpose_tests {
             )
             .array_aux("double_transpose[X,Y]", "(original')'");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get back the original
         project
@@ -676,7 +677,7 @@ mod transpose_tests {
             // Use dimension positions as a workaround for bare transpose
             .array_aux("sum[Row,Col]", "A + B[@2, @1]"); // B[@2,@1] has dimensions [Row,Col]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // A = [1,2,3,4], B' = [5,7,6,8], sum = [6,9,9,12]
         project.assert_interpreter_result("sum", &[6.0, 9.0, 9.0, 12.0]);
@@ -702,7 +703,7 @@ mod transpose_tests {
             // Use dimension positions as a workaround for bare transpose
             .scalar_aux("sum_transposed", "SUM(matrix[@2, @1])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Sum should be the same regardless of transpose
         project.assert_scalar_result("sum_transposed", 21.0);
@@ -723,7 +724,7 @@ mod range_tests {
             )
             .scalar_aux("summed", "SUM(2 * source[3:5] + 1)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("summed", 27.0);
     }
@@ -738,7 +739,7 @@ mod range_tests {
             )
             .scalar_aux("summed", "SUM(source[3:5])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("summed", 12.0);
     }
@@ -755,7 +756,7 @@ mod range_tests {
             )
             .array_aux("slice[B]", "source[3:5]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("slice", &[3.0, 4.0, 5.0]);
     }
@@ -787,7 +788,7 @@ mod range_tests {
             .indexed_dimension("SliceRow", 2)
             .array_aux("slice[SliceRow,Col]", "matrix[2:3, *]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get rows 2 and 3: [21, 22, 23, 31, 32, 33]
         project.assert_interpreter_result("slice", &[21.0, 22.0, 23.0, 31.0, 32.0, 33.0]);
@@ -820,7 +821,7 @@ mod range_tests {
             .indexed_dimension("SliceCol", 2)
             .array_aux("slice[Row,SliceCol]", "matrix[*, 2:3]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get columns 2 and 3: [12, 13, 22, 23, 32, 33]
         project.assert_interpreter_result("slice", &[12.0, 13.0, 22.0, 23.0, 32.0, 33.0]);
@@ -862,7 +863,7 @@ mod range_tests {
             .indexed_dimension("SliceCol", 3)
             .array_aux("slice[SliceRow,SliceCol]", "matrix[2:3, 2:4]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get 2x3 submatrix: [22, 23, 24, 32, 33, 34]
         project.assert_interpreter_result("slice", &[22.0, 23.0, 24.0, 32.0, 33.0, 34.0]);
@@ -914,7 +915,7 @@ mod range_tests {
             .indexed_dimension("SliceZ", 2)
             .array_aux("slice[X,Y,SliceZ]", "cube[*, *, 2:3]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get all X,Y with Z=2,3
         project.assert_interpreter_result(
@@ -957,7 +958,7 @@ mod range_tests {
             .indexed_dimension("SliceCol", 3)
             .array_aux("slice[SliceCol]", "matrix[2, 3:5]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get row 2, columns 3-5: [23, 24, 25]
         project.assert_interpreter_result("slice", &[23.0, 24.0, 25.0]);
@@ -981,7 +982,7 @@ mod range_tests {
             .indexed_dimension("Result", 3) // Boston, NYC, LA
             .array_aux("east_to_la[Result]", "population[Boston:LA]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("east_to_la", &[100.0, 200.0, 300.0]);
     }
@@ -1002,7 +1003,7 @@ mod range_tests {
             )
             .scalar_aux("mean_val", "MEAN(source[2:4])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("mean_val", 30.0);
     }
@@ -1017,7 +1018,7 @@ mod range_tests {
             )
             .scalar_aux("mean_val", "MEAN(2 * source[3:5] + 1)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("mean_val", 9.0);
     }
@@ -1032,7 +1033,7 @@ mod range_tests {
             )
             .scalar_aux("stddev_val", "STDDEV(source[2:4])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("stddev_val", 1.0);
     }
@@ -1047,7 +1048,7 @@ mod range_tests {
             )
             .scalar_aux("stddev_val", "STDDEV(source[1:5] / 2)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // source[1:5] = [2, 4, 6, 8, 10] (inclusive range per XMILE spec)
         // source[1:5] / 2 = [1, 2, 3, 4, 5], mean = 3, stddev = sqrt(2.5) ≈ 1.581
@@ -1070,7 +1071,7 @@ mod range_tests {
             )
             .scalar_aux("min_val", "MIN(source[2:4])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("min_val", 3.0);
     }
@@ -1085,7 +1086,7 @@ mod range_tests {
             )
             .scalar_aux("min_val", "MIN(source[3:5] * 2 - 1)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("min_val", 5.0);
     }
@@ -1106,7 +1107,7 @@ mod range_tests {
             )
             .scalar_aux("max_val", "MAX(source[2:4])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("max_val", 15.0);
     }
@@ -1121,7 +1122,7 @@ mod range_tests {
             )
             .scalar_aux("max_val", "MAX(source[3:5] * 2 - 1)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("max_val", 9.0);
     }
@@ -1136,7 +1137,7 @@ mod range_tests {
             )
             .scalar_aux("size_val", "SIZE(source[2:4])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("size_val", 3.0);
     }
@@ -1165,7 +1166,7 @@ mod range_tests {
             )
             .scalar_aux("size_val", "SIZE(matrix[2:3, 2:3])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("size_val", 4.0);
     }
@@ -1178,7 +1179,7 @@ mod range_tests {
             .named_dimension("DimA", &["A1", "A2", "A3"])
             .scalar_aux("a", "SIZE(DimA)"); // Should be 3
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("a", 3.0);
     }
@@ -1190,7 +1191,7 @@ mod range_tests {
             .indexed_dimension("Items", 5)
             .scalar_aux("count", "SIZE(Items)"); // Should be 5
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("count", 5.0);
     }
@@ -1204,7 +1205,7 @@ mod range_tests {
             .scalar_aux("a", "SIZE(DimA)") // a = 3
             .array_aux("b[DimA]", "10*SIZE(DimA)+a"); // b = 10*3 + 3 = 33
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("a", 3.0);
         project.assert_interpreter_result("b", &[33.0, 33.0, 33.0]);
@@ -1228,7 +1229,7 @@ mod range_tests {
             )
             .scalar_aux("q1_total", "SUM(sales[Jan:Mar])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("q1_total", 60.0); // 10 + 20 + 30
     }
@@ -1259,7 +1260,7 @@ mod range_tests {
             .indexed_dimension("SubCities", 2) // NYC, LA
             .array_aux("subset[SubCities,Year]", "data[NYC:LA, *]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get NYC and LA rows: [21,22,23,31,32,33]
         project.assert_interpreter_result("subset", &[21.0, 22.0, 23.0, 31.0, 32.0, 33.0]);
@@ -1300,7 +1301,7 @@ mod range_tests {
             .indexed_dimension("SubQuarters", 2) // Q2, Q3
             .array_aux("subset[SubProducts,SubQuarters]", "sales[B:D, 2:3]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get B,C,D for Q2,Q3: [21,22,31,32,41,42]
         project.assert_interpreter_result("subset", &[21.0, 22.0, 31.0, 32.0, 41.0, 42.0]);
@@ -1355,6 +1356,7 @@ mod combined_operations_tests {
     #[test]
     fn dimension_position_and_wildcard() {
         // Combine dimension position with wildcard
+        // @N position syntax is not yet supported on the incremental path
         TestProject::new("combined_dimpos_wildcard")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 3)
@@ -1375,7 +1377,7 @@ mod combined_operations_tests {
             .array_aux("costs[Period,Product]", "Product * 10")
             .array_aux("profit[Period,Product]", "sales[*,*] - costs[*,*]")
             .array_aux("total_profit[Period]", "SUM(profit[*, Product.*])")
-            .assert_compiles();
+            .assert_compiles_incremental();
     }
 }
 
@@ -1611,7 +1613,7 @@ mod star_range_subdimension_tests {
             // Direct subscript with star range
             .array_aux("result[SubA]", "b_2[*:SubA]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get elements A2 and A3 only (both are 10.0 since it's a constant array)
         project.assert_interpreter_result("result", &[10.0, 10.0]);
@@ -1628,7 +1630,7 @@ mod star_range_subdimension_tests {
             // *:SubA should resolve to A2:A3 (elements 2 and 3)
             .array_aux("k[SubA]", "b_2[*:SubA]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get elements A2 and A3 only
         project.assert_interpreter_result("k", &[2.0, 3.0]);
@@ -1647,7 +1649,7 @@ mod star_range_subdimension_tests {
             // SUM(values[*:SubA]) should sum elements A2 and A3
             .scalar_aux("total", "SUM(values[*:SubA])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should sum A2 (20) and A3 (30) = 50
         project.assert_scalar_result("total", 50.0);
@@ -1667,7 +1669,7 @@ mod star_range_subdimension_tests {
             // *:SubIndex should resolve to 2:4
             .array_aux("slice[SubIndex]", "arr[*:SubIndex] * 2");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get elements 2, 3, 4 multiplied by 2
         project.assert_interpreter_result("slice", &[20.0, 20.0, 20.0]);
@@ -1700,7 +1702,7 @@ mod star_range_subdimension_tests {
             // Select all rows, columns C2:C3
             .array_aux("slice[Row,SubCol]", "matrix[*, *:SubCol]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get columns C2 and C3 for all rows
         project.assert_interpreter_result("slice", &[12.0, 13.0, 22.0, 23.0, 32.0, 33.0]);
@@ -1718,7 +1720,7 @@ mod star_range_subdimension_tests {
             )
             .array_aux("result[SubA]", "values[*:SubA]");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should get A1 (10) and A3 (30)
         project.assert_interpreter_result("result", &[10.0, 30.0]);
@@ -1736,7 +1738,7 @@ mod star_range_subdimension_tests {
             )
             .scalar_aux("total", "SUM(values[*:SubA])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Should sum A1 (10) and A3 (30) = 40
         project.assert_scalar_result("total", 40.0);
@@ -1764,7 +1766,7 @@ mod star_range_subdimension_tests {
             // msum[D2] = SUM(m[D2, *]) = m[D2,E1] + m[D2,E2] = 21 + 22 = 43
             .array_aux("msum[DimD]", "SUM(m[DimD, *])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("msum", &[23.0, 43.0]);
     }
@@ -1793,7 +1795,7 @@ mod star_range_subdimension_tests {
             // Use dimension name DimD as subscript - should resolve to current element in A2A
             .array_aux("msum[DimD]", "SUM(m[DimD, *])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // msum[D1] = 11 + 12 = 23, msum[D2] = 21 + 22 = 43
         project.assert_interpreter_result("msum", &[23.0, 43.0]);
@@ -1896,7 +1898,7 @@ mod structural_lowering_tests {
             // SUM(data[3:7]) should sum elements at indices 3,4,5,6,7 = 3+4+5+6+7 = 25
             .scalar_aux("total", "SUM(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("total", 25.0);
     }
@@ -1914,7 +1916,7 @@ mod structural_lowering_tests {
             // Sum row 2 columns 2:4 -> matrix[2,2] + matrix[2,3] + matrix[2,4] = 22+23+24 = 69
             .scalar_aux("partial_sum", "SUM(matrix[2, col_start:col_end])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("partial_sum", 69.0);
     }
@@ -1934,7 +1936,7 @@ mod structural_lowering_tests {
             // Sum cube[1, 2:3, 2] = cube[1,2,2] + cube[1,3,2] = (100+20+2) + (100+30+2) = 122+132 = 254
             .scalar_aux("result", "SUM(cube[1, row_start:row_end, 2])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 254.0);
     }
@@ -1949,7 +1951,7 @@ mod structural_lowering_tests {
             .scalar_const("end_idx", 3.0) // end < start
             .scalar_aux("total", "SUM(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Reversed range should be empty, sum = 0
         project.assert_scalar_result("total", 0.0);
@@ -1966,7 +1968,7 @@ mod structural_lowering_tests {
             // SUM(data[3:100]) should clamp to [3:5] = 3+4+5 = 12
             .scalar_aux("total", "SUM(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("total", 12.0);
     }
@@ -1983,7 +1985,7 @@ mod structural_lowering_tests {
             // SUM(data[0:3]) - start=0 is clamped/handled, should sum 1+2+3 = 6
             .scalar_aux("total", "SUM(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // With 0 start clamped to valid range, we get data[1:3] = 1+2+3 = 6
         project.assert_scalar_result("total", 6.0);
@@ -1999,7 +2001,7 @@ mod structural_lowering_tests {
             // SUM(data[3:3]) - single element range
             .scalar_aux("total", "SUM(data[idx:idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // data[3] = 30
         project.assert_scalar_result("total", 30.0);
@@ -2017,6 +2019,7 @@ mod structural_lowering_tests {
             // NOT (20 + 30) / 5 = 10 (which would be wrong if using full array size)
             .scalar_aux("result", "MEAN(data[start_idx:end_idx])");
 
+        // MEAN with dynamic ranges is not yet supported on the incremental path
         project.assert_compiles();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 25.0);
@@ -2034,7 +2037,7 @@ mod structural_lowering_tests {
             // NOT 10 (full array size)
             .scalar_aux("result", "SIZE(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 5.0);
     }
@@ -2052,7 +2055,7 @@ mod structural_lowering_tests {
             // stddev = sqrt(100) = 10
             .scalar_aux("result", "STDDEV(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 10.0);
     }
@@ -2068,7 +2071,7 @@ mod structural_lowering_tests {
             // SIZE(data[7:3]) should be 0 (empty range)
             .scalar_aux("result", "SIZE(data[start_idx:end_idx])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 0.0);
     }
@@ -2350,7 +2353,7 @@ mod indexed_dimension_tests {
             .array_aux("costs[Regions]", "Regions * 10") // [10, 20, 30]
             .array_aux("combined[Products]", "sales + costs"); // [11, 22, 33]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[11.0, 22.0, 33.0]);
     }
@@ -2364,7 +2367,7 @@ mod indexed_dimension_tests {
             .array_aux("arr_b[B]", "B * 3") // [3, 6, 9, 12]
             .array_aux("sum[A]", "arr_a[*] + arr_b[*]"); // [5, 10, 15, 20]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("sum", &[5.0, 10.0, 15.0, 20.0]);
     }
@@ -2380,7 +2383,7 @@ mod indexed_dimension_tests {
             .array_aux("source[Size5]", "Size5 * 10") // [10, 20, 30, 40, 50]
             .array_aux("slice[Size5]", "source[1:3]"); // [10, 20, 30, NaN, NaN]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         let result = project.interpreter_result("slice");
         assert_eq!(result[0], 10.0);
@@ -2406,7 +2409,7 @@ mod indexed_dimension_tests {
             .array_aux("data[Idx]", "Idx") // [1, 2, 3, 4, 5]
             .scalar_aux("sum_first3", "SUM(data[1:3])"); // Should sum 1+2+3 = 6
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("sum_first3", 6.0);
     }
@@ -2421,7 +2424,7 @@ mod indexed_dimension_tests {
             .array_aux("data[FullIdx]", "FullIdx * 10") // [10, 20, 30, 40, 50]
             .array_aux("slice[SubIdx]", "data[*:SubIdx]"); // Should be [10, 20, 30]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("slice", &[10.0, 20.0, 30.0]);
     }
@@ -2435,7 +2438,7 @@ mod indexed_dimension_tests {
             .array_aux("data[Full]", "Full") // [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             .scalar_aux("sum_first5", "SUM(data[*:First5])"); // 1+2+3+4+5 = 15
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("sum_first5", 15.0);
     }
@@ -2451,7 +2454,7 @@ mod indexed_dimension_tests {
             .array_aux("b[AltRows, AltCols]", "AltRows + AltCols") // [[2,3,4],[3,4,5]]
             .array_aux("sum[Rows, Cols]", "a + b"); // [[13,15,17],[24,26,28]]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("sum", &[13.0, 15.0, 17.0, 24.0, 26.0, 28.0]);
     }
@@ -2467,7 +2470,7 @@ mod indexed_dimension_tests {
             .array_aux("named_arr[NamedDim]", "NamedDim") // [1, 2, 3] (position as value)
             .array_aux("result[NumericDim]", "numeric_arr * 2"); // [2, 4, 6]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[2.0, 4.0, 6.0]);
     }
@@ -2506,7 +2509,7 @@ mod indexed_dimension_tests {
             .array_aux("small[SmallDim]", "SmallDim * 5") // [5, 10, 15]
             .array_aux("expanded[LargeDim]", "small[1:3]"); // [5, 10, 15, NaN, NaN]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         let result = project.interpreter_result("expanded");
         assert_eq!(result[0], 5.0);
@@ -2528,7 +2531,7 @@ mod indexed_dimension_tests {
             // combined[1,1]=10, combined[1,2]=10, combined[2,1]=20, combined[2,2]=20
             .array_aux("combined[First, Second]", "source");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[10.0, 10.0, 20.0, 20.0]);
     }
@@ -2545,7 +2548,7 @@ mod indexed_dimension_tests {
             // combined[1,1]=1, combined[1,2]=2, combined[2,1]=1, combined[2,2]=2
             .array_aux("combined[First, Second]", "source");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[1.0, 2.0, 1.0, 2.0]);
     }
@@ -2562,7 +2565,7 @@ mod indexed_dimension_tests {
             // combined[1,1]=11, combined[1,2]=11, combined[2,1]=22, combined[2,2]=22
             .array_aux("combined[First, Second]", "a + b");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[11.0, 11.0, 22.0, 22.0]);
     }
@@ -2579,7 +2582,7 @@ mod indexed_dimension_tests {
             // combined[1,1]=11, combined[1,2]=12, combined[2,1]=21, combined[2,2]=22
             .array_aux("combined[First, Second]", "a + b");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[11.0, 12.0, 21.0, 22.0]);
     }
@@ -2595,7 +2598,7 @@ mod indexed_dimension_tests {
             // combined[i,j] = ten + b[j]
             .array_aux("combined[First, Second]", "ten + b");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[11.0, 12.0, 11.0, 12.0]);
     }
@@ -2610,7 +2613,7 @@ mod indexed_dimension_tests {
             // combined[i,j] = b[j]
             .array_aux("combined[First, Second]", "b");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[1.0, 2.0, 1.0, 2.0]);
     }
@@ -2625,7 +2628,7 @@ mod indexed_dimension_tests {
             // combined[i,j] = a[i]
             .array_aux("combined[First, Second]", "a");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[10.0, 10.0, 20.0, 20.0]);
     }
@@ -2648,7 +2651,7 @@ mod indexed_dimension_tests {
             // Should be: [101, 102, 201, 202, 301, 302] (row-major order)
             .array_aux("combined[First, Second]", "first_vals + second_vals");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("combined", &[101.0, 102.0, 201.0, 202.0, 301.0, 302.0]);
     }
@@ -2667,7 +2670,7 @@ mod indexed_dimension_tests {
             // Should be: [101, 102, 103, 201, 202, 203, 301, 302, 303]
             .array_aux("combined[First, Second]", "first_vals + second_vals");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result(
             "combined",
@@ -2703,7 +2706,7 @@ mod indexed_dimension_tests {
         //   For y=2: plane[2,2]=22, + line[z] = [122, 222, 322, 422]
         //   For y=3: plane[2,3]=23, + line[z] = [123, 223, 323, 423]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result(
             "cube",
@@ -2731,7 +2734,7 @@ mod indexed_dimension_tests {
             .array_aux("arr[A, B, C, D]", "A + B*2 + C*4 + D*8")
             .array_aux("result[A, B, C, D]", "arr + offset");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Verify a few values: offset is 100, arr values are:
         // arr[1,1,1,1] = 1+2+4+8 = 15, so result = 115
@@ -2763,7 +2766,7 @@ mod indexed_dimension_tests {
         //   For y=2: b[2]=200 → 2200 + [1,2,3,4] = [2201, 2202, 2203, 2204]
         //   For y=3: b[3]=300 → 2300 + [1,2,3,4] = [2301, 2302, 2303, 2304]
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result(
             "result",
@@ -2792,7 +2795,7 @@ mod indexed_dimension_tests {
         // line broadcasts across Y and Z
         // cube[1,*,*] = 100, cube[2,*,*] = 200
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result(
             "cube",
@@ -2819,7 +2822,7 @@ mod indexed_dimension_tests {
         // line broadcasts across X and Z
         // cube[*,1,*] = 10, cube[*,2,*] = 20
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result(
             "cube",
@@ -2846,7 +2849,7 @@ mod indexed_dimension_tests {
         // line broadcasts across X and Y
         // cube[*,*,1] = 1, cube[*,*,2] = 2
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result(
             "cube",
@@ -2905,7 +2908,7 @@ mod indexed_dimension_tests {
             .array_aux("arr[Other, Second]", "Other * 10 + Second") // [[11,12],[21,22]]
             .array_aux("result[Second, First]", "arr");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Correct: reordering happens because Second matches Second, Other matches First
         // result[Second, First] = transposed view of arr[Other, Second]
@@ -2951,7 +2954,7 @@ mod indexed_dimension_tests {
             // UNION: [A,B] + [C] → [A,B,C]
             .array_aux("cube[A, B, C]", "xy_plane + z_line");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // cube[a,b,c] = xy_plane[a,b] + z_line[c]
         // = (a*10 + b) + (c*100)
@@ -2976,7 +2979,7 @@ mod indexed_dimension_tests {
             .array_aux("row_vals[Cols]", "Cols * 10") // [10, 20, 30]
             .array_aux("grid[Rows, Cols]", "row_vals");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // grid[r,c] = row_vals[c] for all r
         // Row 1: [10, 20, 30]
@@ -3003,7 +3006,7 @@ mod dimension_mapping_tests {
             // Reference var_a from a DimB context - should use the mapping
             .array_aux("result[DimB]", "var_a");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // DimA[i] maps to DimB[i], so:
         // result[B1] = var_a[A1] = 10
@@ -3045,7 +3048,7 @@ mod dimension_mapping_tests {
             // Reference var_a from a SubB context - should use mapping via DimB
             .array_aux("result[SubB]", "var_a");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // result[B2] = var_a[A2] = 20
         // result[B3] = var_a[A3] = 30
@@ -3066,7 +3069,7 @@ mod dimension_mapping_tests {
             )
             .array_aux("result[SubB]", "var_a");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // result[B1] = var_a[A1] = 10
         // result[B3] = var_a[A3] = 30
@@ -3100,7 +3103,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
             .scalar_aux("i", "SUM(a[*]+h[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("i", &[198.0, 198.0]);
@@ -3119,7 +3122,7 @@ mod cross_dimension_reduction_tests {
             .array_aux("b[DimB]", "DimB * 10") // [10, 20, 30]
             .scalar_aux("result", "SUM(a[*]+b[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[129.0, 129.0]);
@@ -3136,7 +3139,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("b[DimA]", vec![("A1", "4"), ("A2", "5"), ("A3", "6")])
             .scalar_aux("result", "SUM(a[*]+b[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[21.0, 21.0]);
@@ -3156,7 +3159,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
             .scalar_aux("result", "SUM(a[*]*h[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[360.0, 360.0]);
@@ -3177,7 +3180,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
             .scalar_aux("result", "MEAN(a[*]+h[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[22.0, 22.0]);
@@ -3200,7 +3203,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("c[DimD]", vec![("D1", "100"), ("D2", "200")])
             .scalar_aux("result", "SUM(MEAN(a[*]+h[*]) + c[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[344.0, 344.0]);
@@ -3221,7 +3224,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
             .scalar_aux("result", "MAX(a[*]+h[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[33.0, 33.0]);
@@ -3242,7 +3245,7 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
             .scalar_aux("result", "MIN(a[*]+h[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[11.0, 11.0]);
@@ -3260,12 +3263,12 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
             .scalar_aux("result", "SUM(a[*]+h[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Verify interpreter result
         project.assert_interpreter_result("result", &[198.0, 198.0]);
         // Verify VM result matches
-        project.assert_vm_result("result", &[198.0, 198.0]);
+        project.assert_vm_result_incremental("result", &[198.0, 198.0]);
     }
 
     /// Test that nested reductions work correctly in the VM.
@@ -3281,12 +3284,12 @@ mod cross_dimension_reduction_tests {
             .array_with_ranges("c[DimD]", vec![("D1", "100"), ("D2", "200")])
             .scalar_aux("result", "SUM(MEAN(a[*]+h[*]) + c[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // Verify interpreter result
         project.assert_interpreter_result("result", &[344.0, 344.0]);
         // Verify VM result matches
-        project.assert_vm_result("result", &[344.0, 344.0]);
+        project.assert_vm_result_incremental("result", &[344.0, 344.0]);
     }
 }
 
@@ -3303,7 +3306,7 @@ mod sum_of_conditional_tests {
             .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
             .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[8.0, 8.0]);
     }
@@ -3316,9 +3319,9 @@ mod sum_of_conditional_tests {
             .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
             .scalar_aux("result", "SUM(IF values[*] > 2 THEN values[*] ELSE 0)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        project.assert_vm_result("result", &[8.0, 8.0]);
+        project.assert_vm_result_incremental("result", &[8.0, 8.0]);
     }
 
     #[test]
@@ -3330,7 +3333,7 @@ mod sum_of_conditional_tests {
             .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
             .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[2.0, 2.0]);
     }
@@ -3342,9 +3345,9 @@ mod sum_of_conditional_tests {
             .array_with_ranges("values[D]", vec![("1", "1"), ("2", "3"), ("3", "5")])
             .scalar_aux("result", "SUM(IF values[*] > 2 THEN 1 ELSE 0)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        project.assert_vm_result("result", &[2.0, 2.0]);
+        project.assert_vm_result_incremental("result", &[2.0, 2.0]);
     }
 }
 
@@ -3363,10 +3366,10 @@ mod compiler_limit_tests {
             .array_aux("c[Idx]", "3")
             .scalar_aux("result", "SUM(a[*] + b[*] + c[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // SUM((1+2+3) + (1+2+3) + (1+2+3)) = SUM(6,6,6) = 18
-        project.assert_vm_result("result", &[18.0, 18.0]);
+        project.assert_vm_result_incremental("result", &[18.0, 18.0]);
     }
 
     /// Test that reductions with multiple array sources work correctly.
@@ -3382,10 +3385,10 @@ mod compiler_limit_tests {
             .array_aux("e[Idx]", "5")
             .scalar_aux("result", "SUM(a[*] + b[*] + c[*] + d[*] + e[*])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // SUM((1+2+3+4+5) * 3 elements) = SUM(15,15,15) = 45
-        project.assert_vm_result("result", &[45.0, 45.0]);
+        project.assert_vm_result_incremental("result", &[45.0, 45.0]);
     }
 }
 
@@ -3499,7 +3502,7 @@ mod vector_elm_map_tests {
     #[test]
     fn in_bounds_elements_map_correctly_vm() {
         let project = make_oob_project("vem_inbounds_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
             (vals[0] - 10.0).abs() < 1e-9,
@@ -3516,7 +3519,7 @@ mod vector_elm_map_tests {
     #[test]
     fn out_of_bounds_element_returns_nan_vm() {
         let project = make_oob_project("vem_oob_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
             vals[2].is_nan(),
@@ -3554,7 +3557,7 @@ mod vector_elm_map_tests {
             .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
             .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
             .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 2, "expected 2 elements");
         assert!(
             vals[0].is_nan(),
@@ -3614,7 +3617,7 @@ mod arrayed_except_hoisting_tests {
     #[test]
     fn arrayed_except_preserves_override_vm() {
         let project = make_except_project("arrayed_except_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -3688,7 +3691,7 @@ mod first_element_override_hoisting_tests {
     #[test]
     fn first_override_rest_default_vm() {
         let project = make_project("first_override_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 99.0).abs() < 1e-9,
@@ -3755,7 +3758,7 @@ mod mixed_element_hoisting_tests {
     #[test]
     fn mixed_elements_vm() {
         let project = make_project("mixed_elements_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -3822,7 +3825,7 @@ mod nested_hoisting_first_override_tests {
     #[test]
     fn nested_first_override_vm() {
         let project = make_project("nested_first_override_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 99.0).abs() < 1e-9,
@@ -3889,7 +3892,7 @@ mod nested_override_different_wrapping_tests {
     #[test]
     fn nested_different_wrapping_vm() {
         let project = make_project("nested_diff_wrap_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 130.0).abs() < 1e-9,
@@ -3954,7 +3957,7 @@ mod toplevel_default_nested_override_tests {
     #[test]
     fn toplevel_default_nested_override_vm() {
         let project = make_project("toplevel_nested_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -4020,7 +4023,7 @@ mod different_builtin_override_tests {
     #[test]
     fn different_builtin_override_vm() {
         let project = make_project("diff_builtin_vm");
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 30.0).abs() < 1e-9,
@@ -4059,9 +4062,9 @@ mod vector_op_invalid_view_tests {
                 "vector_select(sel[high_idx:low_idx], data[*], -999, 0, 0)",
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert!(
             vals[0].is_nan(),
             "VECTOR SELECT with invalid view should return NaN, got {}",
@@ -4083,9 +4086,9 @@ mod vector_op_invalid_view_tests {
                 "vector_select(sel[*], data[high_idx:low_idx], -999, 0, 0)",
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert!(
             vals[0].is_nan(),
             "VECTOR SELECT with invalid expr view should return NaN, got {}",
@@ -4139,15 +4142,15 @@ mod dimension_dependent_scalar_arg_tests {
     #[test]
     fn vso_direction_varies_by_dimension_vm() {
         let project = make_vso_dim_dep_project("vso_dim_dep_vm");
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        assert_vso_dim_dep_results(&project.vm_result("result"));
+        assert_vso_dim_dep_results(&project.vm_result_incremental("result"));
     }
 
     #[test]
     fn vso_direction_varies_by_dimension_interpreter() {
         let project = make_vso_dim_dep_project("vso_dim_dep_interp");
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         assert_vso_dim_dep_results(&project.interpreter_result("result"));
     }
@@ -4163,9 +4166,9 @@ mod dimension_dependent_scalar_arg_tests {
             .array_with_ranges("dir[D]", vec![("1", "-1"), ("2", "1"), ("3", "1")])
             .array_aux("result[D]", "10 + vector_sort_order(vals[*], dir[D])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
             (vals[0] - 12.0).abs() < 1e-9,
@@ -4201,9 +4204,9 @@ mod dimension_dependent_scalar_arg_tests {
                 vec![("2", "999")],
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
-        let vals = project.vm_result("result");
+        let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         // Element 0 (dir=-1, desc): sort_order = [2, 3, 1] -> result[0] = 2
         assert!(
