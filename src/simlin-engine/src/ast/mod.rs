@@ -68,6 +68,7 @@ impl Ast<Expr0> {
 }
 
 impl Ast<Expr2> {
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
