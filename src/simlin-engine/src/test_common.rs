@@ -7,16 +7,25 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::ErrorCode;
-use crate::common::UnitError;
 use crate::common::{Canonical, Ident};
-use crate::compiler::Module;
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use crate::interpreter::Simulation;
-use crate::project::Project as CompiledProject;
 use crate::vm::{CompiledSimulation, Vm};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
+
+#[cfg(any(test, feature = "testing"))]
+use crate::common::ErrorCode;
+#[cfg(any(test, feature = "testing"))]
+use crate::common::UnitError;
+#[cfg(any(test, feature = "testing"))]
+use crate::compiler::Module;
+#[cfg(any(test, feature = "testing"))]
+use crate::interpreter::Simulation;
+#[cfg(any(test, feature = "testing"))]
+use crate::project::Project as CompiledProject;
+#[cfg(any(test, feature = "testing"))]
+use std::collections::BTreeSet;
+#[cfg(any(test, feature = "testing"))]
 use std::sync::Arc;
 
 /// Builder for creating test projects with support for arrays, units, and all variable types
@@ -367,7 +376,13 @@ impl TestProject {
             ai_information: None,
         }
     }
+}
 
+/// Methods that use the monolithic `Project::from` construction path.
+/// These are retained only for the AST interpreter cross-validation path
+/// (AC4.6). Production compilation uses `compile_incremental`.
+#[cfg(any(test, feature = "testing"))]
+impl TestProject {
     /// Build and compile the project
     pub fn compile(&self) -> Result<CompiledProject, Vec<(String, ErrorCode)>> {
         let datamodel = self.build_datamodel();
@@ -663,16 +678,6 @@ impl TestProject {
             .clone()
     }
 
-    /// Get VM results for a variable (allows checking for NaN values)
-    pub fn vm_result(&self, var_name: &str) -> Vec<f64> {
-        let results = self.run_vm().expect("VM should run successfully");
-
-        results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in VM results"))
-            .clone()
-    }
-
     /// Returns true if the flow runlist for the compiled module contains at least one
     /// AssignTemp node (indicating A2A hoisting occurred for array-producing builtins).
     pub fn flow_runlist_has_assign_temp(&self) -> bool {
@@ -721,6 +726,18 @@ impl TestProject {
         let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
         Module::new(&compiled, model.clone(), &inputs, true)
             .map_err(|e| format!("Failed to create module: {e:?}"))
+    }
+}
+
+impl TestProject {
+    /// Get VM results for a variable (allows checking for NaN values)
+    pub fn vm_result(&self, var_name: &str) -> Vec<f64> {
+        let results = self.run_vm().expect("VM should run successfully");
+
+        results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in VM results"))
+            .clone()
     }
 
     /// Run the VM via the incremental compilation path and get results.

@@ -11,17 +11,21 @@ use crate::common::{
     Canonical, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
     UnitError, canonicalize, topo_sort,
 };
-use crate::datamodel::{Dimension, UnitMap};
+use crate::datamodel::Dimension;
+#[cfg(any(test, feature = "testing"))]
+use crate::datamodel::UnitMap;
 use crate::db::{self, SourceModel, SourceProject};
 use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
 use crate::units::Context;
+#[cfg(any(test, feature = "testing"))]
+use crate::units_check;
 use crate::variable::{
     ModuleInput, Variable, identifier_set, parse_var, parse_var_with_module_context,
 };
 use crate::vm::StepPart;
-use crate::{datamodel, eqn_err, model_err, units_check, var_eqn_err};
+use crate::{datamodel, eqn_err, model_err, var_eqn_err};
 
 pub type ModuleInputSet = BTreeSet<Ident<Canonical>>;
 pub type DependencySet = BTreeSet<Ident<Canonical>>;
@@ -1069,6 +1073,9 @@ impl ModelStage1 {
         }
     }
 
+    /// Only called from the test-gated `run_default_model_checks`; the
+    /// production path runs unit checking via salsa tracked functions.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn check_units(
         &mut self,
         units_ctx: &Context,

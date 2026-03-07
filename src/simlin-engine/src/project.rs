@@ -35,23 +35,19 @@ impl Project {
     }
 }
 
+/// Runs unit inference and unit checking for a model during monolithic
+/// Project construction. Only used by the test-only `From<datamodel::Project>`
+/// impl; the production path uses salsa tracked functions for unit analysis.
+#[cfg(any(test, feature = "testing"))]
 fn run_default_model_checks(
     models: &HashMap<Ident<Canonical>, &ModelStage1>,
     units_ctx: &Context,
     model: &mut ModelStage1,
 ) {
-    // Run unit inference to compute units for variables without explicit declarations.
-    // The check_units call below validates inferred units against declared units.
-    // Check if the model has any variables with declared units.
-    // If not, we skip surfacing unit inference errors since the model
-    // wasn't designed with dimensional analysis in mind.
     let has_declared_units = model.variables.values().any(|var| var.units().is_some());
 
     let inferred_units =
         crate::units_infer::infer(models, units_ctx, model).unwrap_or_else(|err| {
-            // Only surface unit mismatches for models that have declared units.
-            // Store in unit_warnings (not errors) so simulation can still proceed.
-            // Unit mismatches are common in real-world models and shouldn't block simulation.
             if has_declared_units
                 && let crate::common::UnitError::InferenceError { code, .. } = &err
                 && *code == crate::common::ErrorCode::UnitMismatch
@@ -69,6 +65,9 @@ fn run_default_model_checks(
     model.check_units(units_ctx, &inferred_units)
 }
 
+/// Retained only for tests and the AST interpreter cross-validation path
+/// (AC4.6). Production compilation uses `compile_project_incremental`.
+#[cfg(any(test, feature = "testing"))]
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::base_from(project_datamodel, None, run_default_model_checks)
