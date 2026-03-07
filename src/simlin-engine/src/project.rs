@@ -4,19 +4,19 @@
 
 use std::collections::HashMap;
 
-#[cfg(any(test, feature = "testing"))]
-use crate::canonicalize;
 use crate::common::{Canonical, Error, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
 use crate::model::ModelStage1;
-#[cfg(any(test, feature = "testing"))]
-use crate::model::{ModelStage0, ScopeStage0};
-#[cfg(any(test, feature = "testing"))]
-use crate::units::Context;
-#[cfg(any(test, feature = "testing"))]
-use std::collections::BTreeSet;
 use std::sync::Arc;
+
+#[cfg(any(test, feature = "testing"))]
+use {
+    crate::canonicalize,
+    crate::model::{ModelStage0, ScopeStage0},
+    crate::units::Context,
+    std::collections::BTreeSet,
+};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]

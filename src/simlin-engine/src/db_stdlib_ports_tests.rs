@@ -70,23 +70,15 @@ fn test_link_score_equation_text_uses_composite_for_smth1_module_input() {
     let (input_source, model_name, port_name) = match &to_var {
         crate::variable::Variable::Module {
             model_name, inputs, ..
-        } => (
-            inputs
+        } => {
+            let entry = inputs
                 .iter()
                 .find(|input| input.dst == Ident::new("input"))
-                .map(|input| input.src.clone())
                 .unwrap_or_else(|| {
                     panic!("module instance inputs did not include 'input': {inputs:?}")
-                }),
-            model_name.clone(),
-            inputs
-                .iter()
-                .find(|input| input.dst == Ident::new("input"))
-                .map(|input| input.dst.clone())
-                .unwrap_or_else(|| {
-                    panic!("module instance inputs did not include 'input': {inputs:?}")
-                }),
-        ),
+                });
+            (entry.src.clone(), model_name.clone(), entry.dst.clone())
+        }
         _ => panic!("expected {module_name} to reconstruct as a module variable"),
     };
     let link_id = LtmLinkId::new(&db, input_source.to_string(), module_name.clone());

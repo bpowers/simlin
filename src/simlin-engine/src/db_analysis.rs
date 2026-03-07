@@ -444,6 +444,12 @@ pub(super) fn reconstruct_single_variable(
     None
 }
 
+/// Reconstruct an implicit (compiler-generated) variable from its datamodel form.
+///
+/// Module instances need special handling: `parse_var` does not preserve the
+/// `references` list from the datamodel, so input wiring (built via
+/// `build_module_inputs`) would be lost.  We short-circuit that case and
+/// construct `Variable::Module` directly from the stored `ModuleReference`s.
 fn reconstruct_implicit_variable(
     db: &dyn Db,
     model: SourceModel,

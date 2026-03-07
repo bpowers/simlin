@@ -1894,6 +1894,9 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
             let sync = sync_from_datamodel(&db, &dm_project);
             let mut ports = HashMap::new();
             for (model_name, synced_model) in &sync.models {
+                // PREVIOUS uses a stock internally for its one-step memory,
+                // but it is infrastructure — not a dynamic smoothing module
+                // whose inputs should get composite causal links.
                 if model_name == "stdlib⁚previous" {
                     continue;
                 }
