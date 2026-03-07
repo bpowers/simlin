@@ -1878,11 +1878,9 @@ impl Simulation {
     /// Monolithic bytecode compilation from an AST-walking `Simulation`
     /// into a bytecode `CompiledSimulation`.
     ///
-    /// Deprecated: production code uses `compile_project_incremental`
-    /// (in `db.rs`). This method is retained only because the incremental
-    /// path does not yet correctly propagate module input values during
-    /// VM simulation (GitHub #295). Once that is fixed, this method and
-    /// `compile_project` can be removed.
+    /// Retained for test cross-validation against the incremental path
+    /// (`db::compile_project_incremental`), which is now the sole
+    /// production compilation path.
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
         let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
             .modules
@@ -2094,11 +2092,9 @@ impl Simulation {
 
 /// Monolithic bytecode compilation from an `engine::Project`.
 ///
-/// Deprecated: production code uses `compile_project_incremental`
-/// (in `db.rs`). This function is retained only because the incremental
-/// path does not yet correctly propagate module input values during
-/// VM simulation (GitHub #295). Once that is fixed, this function and
-/// `Simulation::compile` can be removed.
+/// Retained for test cross-validation against the incremental path
+/// (`db::compile_project_incremental`), which is now the sole
+/// production compilation path.
 pub fn compile_project(
     project: &Project,
     main_model_name: &str,
