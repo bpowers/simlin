@@ -355,7 +355,7 @@ pub fn model_cycle_partitions(
 
 /// Reconstruct `Variable` objects from salsa-tracked parse results for
 /// all variables in a model (including implicit variables).
-pub(super) fn reconstruct_model_variables(
+pub(crate) fn reconstruct_model_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,

@@ -24,6 +24,7 @@ pub use db_analysis::{
     DetectedLoopsResult, LoopCircuitsResult, compute_link_polarities, model_causal_edges,
     model_cycle_partitions, model_detected_loops, model_loop_circuits,
 };
+pub(crate) use db_analysis::{causal_graph_from_edges, reconstruct_model_variables};
 
 #[path = "db_implicit_deps.rs"]
 mod db_implicit_deps;

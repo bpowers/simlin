@@ -4,12 +4,14 @@
 
 //! High-level model analysis API bundling compilation, simulation, and LTM loop discovery.
 //!
-//! This module provides `analyze_model()`, which takes a `datamodel::Project`,
+//! This module provides `analyze_model()`, which takes a `datamodel::Project`
+//! along with a `SimlinDb` and `SourceProject` for incremental compilation,
 //! runs the full LTM discovery pipeline, and returns a `ModelAnalysis` with
 //! the model snapshot (views stripped), time array, per-loop importance series,
 //! and dominant-period intervals.  On simulation failure the function returns
 //! `Ok` with empty loop fields so callers can still display the model snapshot.
 
+use crate::db::{SimlinDb, SourceProject};
 use crate::layout::metadata::{self, DominantPeriod, FeedbackLoop};
 use crate::{datamodel, json};
 
@@ -55,6 +57,11 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// Analyse a system-dynamics model: run LTM discovery and return the
 /// complete analysis bundle.
 ///
+/// The caller provides a salsa `SimlinDb` and `SourceProject` (already
+/// synced from the datamodel project) for incremental compilation, plus
+/// the `datamodel::Project` for model snapshot construction and UID
+/// resolution.
+///
 /// On any failure in the LTM pipeline (malformed equations, arrays, etc.)
 /// `Ok` is returned with the model snapshot but empty loop fields, giving
 /// callers graceful degradation rather than a hard error.
@@ -64,12 +71,14 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// single-model project convenience).
 pub fn analyze_model(
     project: &datamodel::Project,
+    db: &mut SimlinDb,
+    source_project: SourceProject,
     model_name: &str,
 ) -> Result<ModelAnalysis, String> {
     let json_model = model_snapshot(project, model_name)
         .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
 
-    let loop_result = run_ltm_pipeline(project, model_name);
+    let loop_result = run_ltm_pipeline(project, db, source_project, model_name);
 
     match loop_result {
         Some((time, loop_dominance, dominant_loops_by_period)) => Ok(ModelAnalysis {
@@ -89,18 +98,18 @@ pub fn analyze_model(
 
 /// Run the full LTM discovery pipeline.  Returns `None` on any failure.
 ///
-/// Compilation and simulation use the incremental salsa path
-/// (`SimlinDb` + `compile_project_incremental`) with LTM discovery mode
-/// enabled.  Structural loop analysis (`discover_loops`) still requires
-/// the monolithic `engine::Project` for its `CausalGraph`, so a plain
-/// `Project::from` is built for that purpose only (no `with_ltm_all_links`).
+/// Uses the caller-provided salsa `SimlinDb` and `SourceProject` for
+/// both compilation/simulation and structural loop analysis (via
+/// `model_causal_edges` / `causal_graph_from_edges`), avoiding the
+/// monolithic `Project::from` path entirely.
 fn run_ltm_pipeline(
     project: &datamodel::Project,
+    db: &mut SimlinDb,
+    source_project: SourceProject,
     model_name: &str,
 ) -> Option<(Vec<f64>, Vec<LoopSummary>, Vec<DominantPeriod>)> {
-    use std::rc::Rc;
+    use salsa::Setter;
 
-    // Canonicalize model name before moving project into catch_unwind.
     let actual_name = {
         let ident = project
             .models
@@ -112,77 +121,52 @@ fn run_ltm_pipeline(
         ident.or_else(|| project.models.first().map(|m| m.name.clone()))?
     };
 
-    // Build the UID -> loop name lookup from persisted loop_metadata before
-    // the pipeline consumes the project.
     let uid_to_loop_name = build_uid_to_loop_name(project, &actual_name);
 
-    let project_clone = project.clone();
-    let actual_name_clone = actual_name.clone();
+    // Enable LTM with discovery mode so that link score synthetic
+    // variables are generated for every causal edge.
+    source_project.set_ltm_enabled(db).to(true);
+    source_project.set_ltm_discovery_mode(db).to(true);
 
-    // The LTM pipeline may panic on certain malformed models; catch_unwind
-    // provides graceful degradation instead of crashing the server.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        use salsa::Setter;
+    let compiled_sim =
+        crate::db::compile_project_incremental(db, source_project, &actual_name).ok()?;
+    let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
+    vm.run_to_end().ok()?;
+    let results = vm.into_results();
 
-        // Use the incremental salsa path for compilation and simulation.
-        let mut db = crate::db::SimlinDb::default();
-        let source_project = {
-            let sync = crate::db::sync_from_datamodel(&db, &project_clone);
-            sync.project
-        };
+    // Build the CausalGraph from salsa-tracked causal edges rather than
+    // the monolithic Project::from path.
+    let source_model = source_project.models(db).get(&actual_name).copied()?;
+    let edges_result = crate::db::model_causal_edges(db, source_model, source_project);
+    let mut causal_graph = crate::db::causal_graph_from_edges(edges_result);
+    causal_graph.variables =
+        crate::db::reconstruct_model_variables(db, source_model, source_project);
 
-        // Enable LTM with discovery mode so that link score synthetic
-        // variables are generated for every causal edge (matching what
-        // `with_ltm_all_links()` used to do).
-        source_project.set_ltm_enabled(&mut db).to(true);
-        source_project.set_ltm_discovery_mode(&mut db).to(true);
+    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = edges_result
+        .stocks
+        .iter()
+        .map(|s| crate::common::Ident::new(s))
+        .collect();
 
-        let compiled_sim =
-            crate::db::compile_project_incremental(&db, source_project, &actual_name_clone).ok()?;
-        let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
-        vm.run_to_end().ok()?;
-        let results = vm.into_results();
+    let found_loops =
+        crate::ltm_finding::discover_loops_with_graph(&results, &causal_graph, &stocks).ok()?;
 
-        // discover_loops needs the monolithic engine::Project for its
-        // CausalGraph structural analysis.  A plain Project::from (without
-        // with_ltm_all_links) is sufficient since discover_loops only reads
-        // the model's variable graph, not LTM synthetic variables.
-        let structural_project = Rc::new(crate::project::Project::from(project_clone));
-        let found_loops = crate::ltm_finding::discover_loops(&results, &structural_project).ok()?;
+    let time = build_time_array(&results);
 
-        let time = build_time_array(&results);
+    let feedback_loops: Vec<FeedbackLoop> = found_loops.iter().map(to_feedback_loop).collect();
 
-        let feedback_loops: Vec<FeedbackLoop> = found_loops.iter().map(to_feedback_loop).collect();
+    let dominant_loops_by_period = metadata::calculate_dominant_periods(
+        &feedback_loops,
+        results.specs.start,
+        results.specs.save_step,
+    );
 
-        let dominant_loops_by_period = metadata::calculate_dominant_periods(
-            &feedback_loops,
-            results.specs.start,
-            results.specs.save_step,
-        );
+    let loop_dominance: Vec<LoopSummary> = found_loops
+        .iter()
+        .map(|fl| to_loop_summary(fl, &uid_to_loop_name, &actual_name, project))
+        .collect();
 
-        let loop_dominance: Vec<LoopSummary> = found_loops
-            .iter()
-            .map(|fl| {
-                to_loop_summary(
-                    fl,
-                    &uid_to_loop_name,
-                    &actual_name_clone,
-                    &structural_project.datamodel,
-                )
-            })
-            .collect();
-
-        Some((time, loop_dominance, dominant_loops_by_period))
-    }));
-    if let Err(ref panic) = result {
-        let msg = panic
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic".to_string());
-        eprintln!("simlin-engine: LTM pipeline panicked: {msg}");
-    }
-    result.ok().flatten()
+    Some((time, loop_dominance, dominant_loops_by_period))
 }
 
 /// Build a mapping from variable-UID sets to loop names using the model's
@@ -360,6 +344,13 @@ mod tests {
         crate::xmile::project_from_reader(&mut reader).expect("failed to parse XMILE")
     }
 
+    fn synced_db(project: &datamodel::Project) -> (SimlinDb, SourceProject) {
+        let db = SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, project);
+        let sp = sync.project;
+        (db, sp)
+    }
+
     fn broken_project() -> datamodel::Project {
         crate::test_common::TestProject::new("broken")
             .stock("population", "10", &["births"], &[], None)
@@ -376,7 +367,8 @@ mod tests {
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
         );
         let project = load_project(path);
-        let analysis = analyze_model(&project, "main").expect("analyze_model failed");
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
 
         assert!(
             !analysis.loop_dominance.is_empty(),
@@ -397,7 +389,8 @@ mod tests {
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
         );
         let project = load_project(path);
-        let analysis = analyze_model(&project, "main").expect("analyze_model failed");
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
 
         // Time array must be non-empty and its length must match loop importance lengths.
         assert!(!analysis.time.is_empty(), "time array must not be empty");
@@ -446,7 +439,8 @@ mod tests {
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
         );
         let project = load_project(path);
-        let analysis = analyze_model(&project, "main").expect("analyze_model failed");
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
 
         assert!(
             analysis.model.views.is_empty(),
@@ -460,8 +454,9 @@ mod tests {
     #[test]
     fn ac2_6_broken_model_returns_empty_loops() {
         let project = broken_project();
-        let analysis =
-            analyze_model(&project, "main").expect("analyze_model should not return Err");
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "main")
+            .expect("analyze_model should not return Err");
 
         // Model snapshot must still be present with the stock and flow.
         assert!(
@@ -494,7 +489,8 @@ mod tests {
             .flow("deaths", "population * 0.01", None)
             .build_datamodel();
 
-        let result = analyze_model(&project, "nonexistent");
+        let (mut db, sp) = synced_db(&project);
+        let result = analyze_model(&project, &mut db, sp, "nonexistent");
         assert!(
             result.is_err(),
             "analyze_model with an unknown model name must return Err, got Ok"
@@ -516,7 +512,8 @@ mod tests {
             .stock("population", "1000", &[], &[], None)
             .build_datamodel();
 
-        let result = analyze_model(&project, "main");
+        let (mut db, sp) = synced_db(&project);
+        let result = analyze_model(&project, &mut db, sp, "main");
         assert!(
             result.is_ok(),
             "analyze_model with 'main' alias must succeed even when the model is named 'Main'"

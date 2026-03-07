@@ -55,8 +55,13 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
     let requested_name = input.model_name.as_deref().unwrap_or("main");
     let model_name = super::resolve_model_name(&project, requested_name);
 
-    let analysis = simlin_engine::analysis::analyze_model(&project, model_name)
-        .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
+    let mut db = simlin_engine::db::SimlinDb::default();
+    let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+
+    let analysis =
+        simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name)
+            .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
         .loop_dominance
