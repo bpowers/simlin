@@ -31,8 +31,8 @@ Equation text flows through these stages in order:
 - **`src/datamodel.rs`** - Core structures: `Project`, `Model`, `Variable`, `Equation` (including `Arrayed` variant with `default_equation` for EXCEPT semantics), `Dimension` (with `mappings: Vec<DimensionMapping>` replacing the old `maps_to` field), `DimensionMapping`, `DataSource`/`DataSourceKind`, `UnitMap`
 - **`src/variable.rs`** - Variable variants (`Stock`, `Flow`, `Aux`, `Module`), `ModuleInput`, `Table` (graphical functions). `classify_dependencies()` is the primary API for extracting dependency categories from an AST in a single walk, returning a `DepClassification` with five sets: `all` (every referenced ident), `init_referenced`, `previous_referenced`, `previous_only` (idents only inside PREVIOUS), and `init_only` (idents only inside INIT/PREVIOUS). The older single-purpose functions (`identifier_set`, `init_referenced_idents`, etc.) remain as thin wrappers. `parse_var_with_module_context` accepts a `module_idents` set so `PREVIOUS(module_var)` falls through to module expansion instead of `LoadPrev`.
 - **`src/dimensions.rs`** - Dimension context and dimension matching for arrays
-- **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort. `collect_module_idents` pre-scans datamodel variables to identify which names will expand to modules (preventing incorrect `LoadPrev` compilation). `init_referenced_vars` extends the Initials runlist to include variables referenced by `INIT()` calls, ensuring their values are captured in the `initial_values` snapshot.
-- **`src/project.rs`** - `Project` struct aggregating models. `with_ltm()` and `with_ltm_all_links()` are gated behind `cfg(any(test, feature = "testing"))` (deprecated monolithic LTM pipeline, retained only for tests); prefer `db::compile_project_incremental` with `ltm_enabled`/`ltm_discovery_mode` on `SourceProject`.
+- **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort. `collect_module_idents` pre-scans datamodel variables to identify which names will expand to modules (preventing incorrect `LoadPrev` compilation). `init_referenced_vars` extends the Initials runlist to include variables referenced by `INIT()` calls, ensuring their values are captured in the `initial_values` snapshot. `check_units` is gated behind `cfg(any(test, feature = "testing"))` (production unit checking uses salsa tracked functions).
+- **`src/project.rs`** - `Project` struct aggregating models. `From<datamodel::Project>`, `with_ltm()`, and `with_ltm_all_links()` are all gated behind `cfg(any(test, feature = "testing"))` (monolithic construction path, retained only for tests and the AST interpreter cross-validation path); production code uses `db::compile_project_incremental` with `ltm_enabled`/`ltm_discovery_mode` on `SourceProject`.
 - **`src/results.rs`** - `Results` (variable offsets + timeseries data), `Specs` (time/integration config)
 - **`src/patch.rs`** - `ModelPatch`/`ProjectPatch` for representing and applying model changes
 
@@ -40,11 +40,12 @@ Equation text flows through these stages in order:
 
 The primary compilation path uses salsa tracked functions for fine-grained incrementality. Key modules:
 
-- **`src/db.rs`** - `SimlinDb`, `SourceProject`/`SourceModel`/`SourceVariable` salsa inputs, `compile_project_incremental()` entry point, dependency graph computation, diagnostic accumulation via `CompilationDiagnostic` accumulator. `SourceProject` carries `ltm_enabled` and `ltm_discovery_mode` flags for LTM compilation. `Diagnostic` includes a `severity` field (`Error`/`Warning`) and `DiagnosticError` variants: `Equation`, `Model`, `Unit`, `Assembly`. `VariableDeps` includes `init_referenced_vars` to track variables referenced by `INIT()` calls. Dependency extraction uses two calls to `classify_dependencies()` (one for the dt AST, one for the init AST) instead of separate walker functions.
+- **`src/db.rs`** - `SimlinDb`, `SourceProject`/`SourceModel`/`SourceVariable` salsa inputs, `compile_project_incremental()` entry point, dependency graph computation, diagnostic accumulation via `CompilationDiagnostic` accumulator. `SourceProject` carries `ltm_enabled` and `ltm_discovery_mode` flags for LTM compilation. `Diagnostic` includes a `severity` field (`Error`/`Warning`) and `DiagnosticError` variants: `Equation`, `Model`, `Unit`, `Assembly`. `VariableDeps` includes `init_referenced_vars` to track variables referenced by `INIT()` calls. Dependency extraction uses two calls to `classify_dependencies()` (one for the dt AST, one for the init AST) instead of separate walker functions. `parse_source_variable_with_module_context` is the sole parse entry point (the non-module-context variant was removed). `variable_relevant_dimensions` provides dimension-granularity invalidation: scalar variables produce an empty dimension set so dimension changes never invalidate their parse results.
 - **`src/db_analysis.rs`** - Salsa-tracked causal graph analysis: `model_causal_edges`, `model_loop_circuits`, `model_cycle_partitions`, `model_detected_loops`. Produces `DetectedLoop` structs with polarity.
 - **`src/db_ltm.rs`** - LTM (Loops That Matter) equation parsing and compilation as salsa tracked functions. Handles link scores, loop scores, relative loop scores, and PREVIOUS module expansion for LTM synthetic variables.
 - **`src/db_diagnostic_tests.rs`** - Verification tests for diagnostic accumulation paths.
 - **`src/db_differential_tests.rs`** - Differential tests verifying `classify_dependencies()` produces identical results to the old per-category walker functions, plus fragment-phase agreement tests ensuring dt/init ASTs yield consistent dependency classifications.
+- **`src/db_dimension_invalidation_tests.rs`** - Tests for dimension-granularity salsa invalidation: verifying that dimension changes only re-parse variables that reference those dimensions.
 - **`src/db_tests.rs`** - Core salsa pipeline tests.
 
 ## Format import/export
@@ -72,11 +73,18 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 
 ## Special features
 
-- **`src/analysis.rs`** - High-level model analysis API: `analyze_model()` bundles compilation, LTM loop discovery, and dominant-period calculation into a single `ModelAnalysis` result. Uses the incremental salsa path (`SimlinDb` + `compile_project_incremental`) for LTM compilation and simulation. Returns gracefully on simulation failure (empty loop fields, model snapshot intact).
+- **`src/analysis.rs`** - High-level model analysis API: `analyze_model(project, db, source_project, model_name)` bundles compilation, LTM loop discovery, and dominant-period calculation into a single `ModelAnalysis` result. The caller provides a `SimlinDb` and `SourceProject` (already synced); all compilation and structural analysis use the incremental salsa path. Returns gracefully on simulation failure (empty loop fields, model snapshot intact).
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
 - **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management)
+
+## Cargo features
+
+- **`testing`** - Exposes the monolithic `Project::from` construction path and associated test helpers (`with_ltm`, `with_ltm_all_links`, `check_units`, etc.). Required by `simulate`, `simulate_ltm`, and `compiler_vector` integration tests. Production code uses `compile_project_incremental` instead.
+- **`file_io`** - Filesystem-based data providers (CSV/Excel). Required by `simulate` and `simulate_ltm` tests.
+- **`schema`** - JSON Schema derivation via `schemars`.
+- **`ai_info`** - AI metadata signing.
 
 ## Generated files (do not edit by hand)
 
