@@ -1252,6 +1252,10 @@ impl ModelStage1 {
         self.errors = maybe_errors;
     }
 
+    /// Returns unit errors collected via the legacy monolithic compilation path.
+    /// The salsa incremental path emits unit errors through `CompilationDiagnostic`
+    /// accumulators; prefer `db::collect_model_diagnostics` for new code. This method
+    /// is retained for the monolithic test path and for cross-validation.
     pub fn get_unit_errors(&self) -> HashMap<Ident<Canonical>, Vec<UnitError>> {
         self.variables
             .iter()
@@ -1259,6 +1263,10 @@ impl ModelStage1 {
             .collect()
     }
 
+    /// Returns equation errors collected via the legacy monolithic compilation path.
+    /// The salsa incremental path emits equation errors through `CompilationDiagnostic`
+    /// accumulators; prefer `db::collect_model_diagnostics` for new code. This method
+    /// is retained for the monolithic test path and for cross-validation.
     pub fn get_variable_errors(&self) -> HashMap<Ident<Canonical>, Vec<EquationError>> {
         self.variables
             .iter()
