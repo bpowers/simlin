@@ -235,19 +235,7 @@ impl Project {
                 let instantiations = module_instantiations
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
-                // Use cached path when we have a synced model in the salsa db
-                if let Some(source_model) = source_models.get(model.name.as_str()) {
-                    model.set_dependencies_cached(
-                        salsa_db,
-                        *source_model,
-                        source_project,
-                        &models,
-                        &project_datamodel.dimensions,
-                        instantiations,
-                    );
-                } else {
-                    model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
-                }
+                model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
                 // things like unit inference happen through this callback
                 // Skip unit inference for implicit (stdlib) models as they are generic
                 // templates that only make sense when instantiated with specific inputs

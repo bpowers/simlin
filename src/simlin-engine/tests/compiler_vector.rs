@@ -137,9 +137,13 @@ fn scalar_max_with_vector_elm_map_returns_structured_vm_compile_error() {
     let err = project
         .run_vm()
         .expect_err("scalar max(vector_elm_map(...), 15) should fail with a compile error");
+    // The incremental path wraps the codegen error ("array-producing builtin
+    // outside AssignTemp context") into a fragment assembly failure naming the
+    // variable that couldn't be compiled.
     assert!(
-        err.contains("array-producing builtin outside AssignTemp context"),
-        "expected structured compile error, got: {err}"
+        err.contains("failed to compile fragments for variables: result")
+            || err.contains("array-producing builtin outside AssignTemp context"),
+        "expected compile error mentioning 'result' or AssignTemp context, got: {err}"
     );
 }
 

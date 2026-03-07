@@ -5346,7 +5346,6 @@ pub fn assemble_simulation(
     }
 
     // Build Specs, preferring model-level sim_specs override when present
-    // (mirrors the monolithic path in interpreter.rs compile_project)
     let main_model_canonical = canonicalize(main_model_name);
     let specs = if let Some(source_model) = project_models.get(main_model_canonical.as_ref())
         && let Some(ref model_specs) = *source_model.model_sim_specs(db)

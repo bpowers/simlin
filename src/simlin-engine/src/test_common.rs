@@ -723,67 +723,16 @@ impl TestProject {
             .map_err(|e| format!("Failed to create module: {e:?}"))
     }
 
-    /// Run the VM and get results
+    /// Run the VM via the incremental compilation path and get results.
     pub fn run_vm(&self) -> Result<HashMap<String, Vec<f64>>, String> {
-        let sim = self.build_sim()?;
-
-        // Compile to bytecode
-        let compiled = sim
-            .compile()
+        let compiled = self
+            .compile_incremental()
             .map_err(|e| format!("VM compilation failed: {e:?}"))?;
-
-        // Run the VM
         let mut vm = Vm::new(compiled).map_err(|e| format!("VM creation failed: {e:?}"))?;
         vm.run_to_end()
             .map_err(|e| format!("VM run failed: {e:?}"))?;
         let results = vm.into_results();
-
-        // Extract results - VM results use the same format as interpreter
-        let mut output: HashMap<String, Vec<f64>> = HashMap::new();
-
-        for (name, &offset) in &results.offsets {
-            let mut values = Vec::new();
-            for step in 0..results.step_count {
-                let idx = step * results.step_size + offset;
-                values.push(results.data[idx]);
-            }
-            output.insert(name.to_string(), values);
-        }
-
-        // Collect array variables by their base name (same logic as run_interpreter)
-        type ArrayElement = (usize, String, Vec<f64>);
-        let mut array_results: HashMap<Ident<Canonical>, Vec<ArrayElement>> = HashMap::new();
-        for (name, values) in &output {
-            if let Some(bracket_pos) = name.as_str().find('[') {
-                let base_name =
-                    Ident::<Canonical>::from_str_unchecked(&name.as_str()[..bracket_pos]);
-                let offset = results
-                    .offsets
-                    .get(&Ident::<Canonical>::from_str_unchecked(name))
-                    .copied()
-                    .unwrap_or(usize::MAX);
-                let entry = array_results.entry(base_name.clone()).or_default();
-                entry.push((offset, name.to_string(), values.clone()));
-            }
-        }
-
-        // Sort and flatten array elements
-        for (base_name, mut elements) in array_results {
-            elements.sort_by_key(|e| e.0);
-            if !elements.is_empty() {
-                let n_steps = elements[0].2.len();
-                let mut combined = Vec::new();
-                let last_step = n_steps - 1;
-                for (_offset, _name, values) in &elements {
-                    if last_step < values.len() {
-                        combined.push(values[last_step]);
-                    }
-                }
-                output.insert(base_name.to_string(), combined);
-            }
-        }
-
-        Ok(output)
+        Ok(collect_results(&results))
     }
 
     /// Test that VM evaluation succeeds and returns expected values
