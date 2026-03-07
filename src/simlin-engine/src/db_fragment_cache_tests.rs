@@ -6,8 +6,9 @@ use salsa::plumbing::AsId;
 
 use crate::datamodel;
 use crate::db::{
-    SimlinDb, compile_var_fragment, model_dependency_graph, model_dependency_graph_with_inputs,
-    sync_from_datamodel, sync_from_datamodel_incremental,
+    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, compile_var_fragment,
+    model_dependency_graph, model_dependency_graph_with_inputs, sync_from_datamodel,
+    sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -858,25 +859,16 @@ fn test_init_feedback_interpreter_path_is_acyclic() {
         ai_information: None,
     };
 
-    let compiled = crate::project::Project::from(project);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, &sync);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == DiagnosticSeverity::Error)
+        .collect();
     assert!(
-        compiled.errors.is_empty(),
-        "project-level compile errors should be empty: {:?}",
-        compiled.errors
-    );
-    let model = compiled
-        .models
-        .get(&crate::common::Ident::new("main"))
-        .expect("main model missing");
-    assert!(
-        model.errors.is_none(),
-        "model-level errors should be empty: {:?}",
-        model.errors
-    );
-    assert!(
-        model.get_variable_errors().is_empty(),
-        "variable errors should be empty: {:?}",
-        model.get_variable_errors()
+        errors.is_empty(),
+        "should have no errors for INIT feedback with active_initial; got: {errors:?}"
     );
 }
 

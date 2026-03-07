@@ -377,6 +377,51 @@ pub fn format_diagnostic(diag: &engine::db::Diagnostic) -> FormattedError {
     }
 }
 
+/// Format a diagnostic with snippet context from the datamodel.
+///
+/// Like `format_diagnostic`, but looks up the variable's equation text
+/// from `datamodel` to produce source-annotated snippet output for
+/// equation and unit errors.
+pub fn format_diagnostic_with_datamodel(
+    diag: &engine::db::Diagnostic,
+    datamodel: &DatamodelProject,
+) -> FormattedError {
+    use engine::db::DiagnosticError;
+    let dm_var = datamodel
+        .get_model(&diag.model)
+        .and_then(|m| diag.variable.as_deref().and_then(|v| m.get_variable(v)));
+    match &diag.error {
+        DiagnosticError::Equation(err) => {
+            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
+            format_equation_error(&diag.model, var_name, dm_var, err)
+        }
+        DiagnosticError::Unit(err) => {
+            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
+            format_unit_error(&diag.model, var_name, dm_var, err)
+        }
+        _ => format_diagnostic(diag),
+    }
+}
+
+/// Collect and format all diagnostics from the incremental (salsa) path,
+/// enriching equation/unit errors with snippet context from the datamodel.
+pub fn collect_formatted_issues_from_diagnostics(
+    diagnostics: &[engine::db::Diagnostic],
+    datamodel: &DatamodelProject,
+) -> FormattedErrors {
+    let mut formatted = FormattedErrors::default();
+    for diag in diagnostics {
+        let fe = format_diagnostic_with_datamodel(diag, datamodel);
+        match fe.kind {
+            FormattedErrorKind::Variable => formatted.has_variable_errors = true,
+            FormattedErrorKind::Model => formatted.has_model_errors = true,
+            _ => {}
+        }
+        formatted.errors.push(fe);
+    }
+    formatted
+}
+
 fn variable_equation_text(var: &Variable) -> Option<String> {
     match var.get_equation() {
         Some(Equation::Scalar(eqn)) => Some(eqn.clone()),
@@ -411,6 +456,7 @@ fn combine_snippet_and_summary(snippet: Option<String>, summary: String) -> Opti
 mod tests {
     use super::*;
     use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::{collect_all_diagnostics, sync_from_datamodel, SimlinDb};
     use simlin_engine::test_common::TestProject;
 
     #[test]
@@ -418,8 +464,10 @@ mod tests {
         let datamodel = TestProject::new("equation-error")
             .aux("bad", "1 + bogus", None)
             .build_datamodel();
-        let project = engine::Project::from(datamodel);
-        let formatted = collect_formatted_issues(&project);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let formatted = collect_formatted_issues_from_diagnostics(&diagnostics, &datamodel);
 
         assert!(formatted.has_variable_errors);
         let error = formatted
@@ -449,8 +497,10 @@ mod tests {
             .aux("source", "1", Some("Month"))
             .aux("bad_units", "source", Some("Person"))
             .build_datamodel();
-        let project = engine::Project::from(datamodel);
-        let formatted = collect_formatted_issues(&project);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let formatted = collect_formatted_issues_from_diagnostics(&diagnostics, &datamodel);
 
         let error = formatted
             .errors

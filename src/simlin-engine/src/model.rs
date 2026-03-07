@@ -1679,20 +1679,36 @@ fn test_get_incoming_links_basic() {
         source: None,
         ai_information: None,
     };
-    let compiled = crate::project::Project::from(project);
-    let model = compiled.models.get(&Ident::new("test")).unwrap();
+    let db = db::SimlinDb::default();
+    let sync = db::sync_from_datamodel(&db, &project);
+    let source_model = sync.models["test"].source;
+    let edges_result = db::model_causal_edges(&db, source_model, sync.project);
 
-    // "births" depends on "population" and "rate"
-    let births_deps = get_incoming_links(model, &Ident::new("births")).unwrap();
-    assert!(births_deps.contains(&Ident::new("population")));
-    assert!(births_deps.contains(&Ident::new("rate")));
+    // "births" depends on "population" and "rate": the causal edges map
+    // records dep -> {dependents}, so "population" and "rate" should each
+    // list "births" as a dependent.
+    assert!(
+        edges_result
+            .edges
+            .get("population")
+            .is_some_and(|s| s.contains("births")),
+        "births should depend on population"
+    );
+    assert!(
+        edges_result
+            .edges
+            .get("rate")
+            .is_some_and(|s| s.contains("births")),
+        "births should depend on rate"
+    );
 
-    // "rate" has no dependencies (constant)
-    let rate_deps = get_incoming_links(model, &Ident::new("rate")).unwrap();
-    assert!(rate_deps.is_empty());
-
-    // non-existent variable returns None
-    assert!(get_incoming_links(model, &Ident::new("nonexistent")).is_none());
+    // "rate" has no dependencies (constant) -- "rate" should not appear
+    // as a value in any edge set (nothing depends on rate except births,
+    // which we already checked). Verify rate has no outgoing edges of its own.
+    let rate_has_deps = edges_result.edges.values().any(|s| s.contains("rate"));
+    // "rate" appears as a dep key (things depend on rate), but rate itself
+    // should not appear as a dependent of anything.
+    assert!(!rate_has_deps, "rate should have no incoming dependencies");
 }
 
 #[test]

@@ -5,7 +5,9 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use simlin_engine::Project;
+use simlin_engine::db::{
+    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+};
 use simlin_engine::xmile;
 
 static TEST_MODELS: &[&str] = &[
@@ -56,20 +58,24 @@ fn roundtrips_model() {
         let mut f = BufReader::new(f);
 
         let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-        let project = Project::from(datamodel_project);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel_project);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
 
-        for (model_name, model) in project.models.iter() {
-            for (var_name, var) in model.variables.iter() {
-                if let Some(errors) = var.equation_errors() {
-                    for err in errors {
-                        eprintln!("  {model_name}.{var_name} error: {err}");
-                    }
-                }
+        for diag in &diagnostics {
+            if diag.severity == DiagnosticSeverity::Error {
+                eprintln!(
+                    "  {}.{} error: {:?}",
+                    diag.model,
+                    diag.variable.as_deref().unwrap_or("<model>"),
+                    diag.error
+                );
             }
         }
 
-        assert!(project.models.contains_key(&simlin_engine::common::Ident::<
-            simlin_engine::common::Canonical,
-        >::new("main")));
+        assert!(
+            sync.models.contains_key("main"),
+            "model should contain 'main'"
+        );
     }
 }
