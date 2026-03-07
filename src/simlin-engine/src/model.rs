@@ -11,17 +11,21 @@ use crate::common::{
     Canonical, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
     UnitError, canonicalize, topo_sort,
 };
-use crate::datamodel::{Dimension, UnitMap};
+use crate::datamodel::Dimension;
+#[cfg(any(test, feature = "testing"))]
+use crate::datamodel::UnitMap;
 use crate::db::{self, SourceModel, SourceProject};
 use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
 use crate::units::Context;
+#[cfg(any(test, feature = "testing"))]
+use crate::units_check;
 use crate::variable::{
     ModuleInput, Variable, identifier_set, parse_var, parse_var_with_module_context,
 };
 use crate::vm::StepPart;
-use crate::{datamodel, eqn_err, model_err, units_check, var_eqn_err};
+use crate::{datamodel, eqn_err, model_err, var_eqn_err};
 
 pub type ModuleInputSet = BTreeSet<Ident<Canonical>>;
 pub type DependencySet = BTreeSet<Ident<Canonical>>;
@@ -49,14 +53,14 @@ pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, Variable>,
-    /// Deprecated: model-level errors are now also accumulated via the salsa
-    /// accumulator in `compile_var_fragment` and `check_model_units`. Retained
-    /// because `Module::new` (interpreter path) checks this field for
-    /// early-exit validation, and `collect_formatted_issues` reads it.
+    /// Model-level errors are also accumulated via the salsa accumulator in
+    /// `compile_var_fragment` and `check_model_units`. This field is retained
+    /// because `Module::new` (interpreter path) checks it for early-exit
+    /// validation and several test helpers inspect it directly.
     pub errors: Option<Vec<Error>>,
-    /// Deprecated: unit warnings are now accumulated via the salsa accumulator
-    /// in `check_model_units`. Retained because `collect_formatted_issues`
-    /// reads this field in the monolithic compilation path.
+    /// Unit warnings are also accumulated via the salsa accumulator in
+    /// `check_model_units`. This field is retained for the monolithic
+    /// `Project::from` construction path used by tests.
     ///
     /// Contains unit-related issues that should be surfaced to users but
     /// should NOT block simulation. Unit mismatches are common in real-world
@@ -1069,6 +1073,9 @@ impl ModelStage1 {
         }
     }
 
+    /// Only called from the test-gated `run_default_model_checks`; the
+    /// production path runs unit checking via salsa tracked functions.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn check_units(
         &mut self,
         units_ctx: &Context,
@@ -1245,291 +1252,10 @@ impl ModelStage1 {
         self.errors = maybe_errors;
     }
 
-    /// Like `set_dependencies`, but uses salsa-cached per-variable dependency
-    /// extraction. Editing an equation to `a * b` from `a + b` (same deps)
-    /// skips re-extracting deps for that variable.
-    ///
-    /// Falls back to the existing `all_deps` path for models that use module
-    /// variables (cross-model dependency analysis), preserving existing
-    /// semantics while still routing non-module models through salsa.
-    pub(crate) fn set_dependencies_cached(
-        &mut self,
-        salsa_db: &dyn db::Db,
-        source_model: SourceModel,
-        source_project: SourceProject,
-        models: &HashMap<Ident<Canonical>, &ModelStage1>,
-        dimensions: &[Dimension],
-        instantiations: &BTreeSet<ModuleInputSet>,
-    ) {
-        let mut var_names: Vec<&Ident<Canonical>> = self.variables.keys().collect();
-        var_names.sort_unstable();
-
-        let mut var_errors: HashMap<Ident<Canonical>, HashSet<EquationError>> = HashMap::new();
-        let mut errors: Vec<Error> = Vec::new();
-        let has_module_variables = self.variables.values().any(|var| var.is_module());
-        let source_vars = source_model.variables(salsa_db);
-        let known_var_names: HashSet<String> = self
-            .variables
-            .keys()
-            .map(|ident| ident.as_str().to_string())
-            .collect();
-        let module_var_names: HashSet<String> = self
-            .variables
-            .iter()
-            .filter_map(|(ident, var)| {
-                if var.is_module() {
-                    Some(ident.as_str().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let dep_requires_all_deps = |dep: &str| -> bool {
-            // Absolute references should keep using the legacy path so
-            // existing validation errors are preserved.
-            if dep.starts_with("\\\u{00B7}") {
-                return true;
-            }
-
-            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-            if let Some(dot_pos) = effective.find('\u{00B7}') {
-                let base = &effective[..dot_pos];
-                if !known_var_names.contains(base) {
-                    return true;
-                }
-                !module_var_names.contains(base)
-            } else {
-                !known_var_names.contains(effective)
-            }
-        };
-
-        let has_unknown_cached_dep = |module_input_names: &[String]| -> bool {
-            for source_var in source_vars.values() {
-                let deps = if module_input_names.is_empty() {
-                    db::variable_direct_dependencies(salsa_db, *source_var, source_project)
-                } else {
-                    db::variable_direct_dependencies_with_inputs(
-                        salsa_db,
-                        *source_var,
-                        source_project,
-                        module_input_names.to_vec(),
-                    )
-                };
-
-                for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
-                    if dep_requires_all_deps(dep) {
-                        return true;
-                    }
-                }
-
-                for implicit in &deps.implicit_vars {
-                    for dep in implicit.dt_deps.iter().chain(implicit.initial_deps.iter()) {
-                        if dep_requires_all_deps(dep) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            false
-        };
-
-        let instantiations = instantiations
-            .iter()
-            .map(|instantiation| {
-                let mut ctx = DepContext {
-                    is_initial: false,
-                    model_name: self.name.as_str(),
-                    sibling_vars: &self.variables,
-                    models,
-                    module_inputs: Some(instantiation),
-                    dimensions,
-                };
-
-                let module_input_names: Vec<String> = instantiation
-                    .iter()
-                    .map(|ident| ident.as_str().to_string())
-                    .collect();
-
-                let can_use_salsa_graph =
-                    !has_module_variables && !has_unknown_cached_dep(&module_input_names);
-
-                let (dt_deps, initial_deps) = if can_use_salsa_graph {
-                    let dep_graph = if module_input_names.is_empty() {
-                        db::model_dependency_graph(salsa_db, source_model, source_project)
-                    } else {
-                        db::model_dependency_graph_with_inputs(
-                            salsa_db,
-                            source_model,
-                            source_project,
-                            module_input_names.clone(),
-                        )
-                    };
-
-                    if dep_graph.has_cycle {
-                        let dt_deps = match all_deps(&ctx, self.variables.values()) {
-                            Ok(deps) => Some(deps),
-                            Err((ident, err)) => {
-                                var_errors.entry(ident).or_default().insert(err);
-                                None
-                            }
-                        };
-
-                        ctx.is_initial = true;
-
-                        let initial_deps = match all_deps(&ctx, self.variables.values()) {
-                            Ok(deps) => Some(deps),
-                            Err((ident, err)) => {
-                                var_errors.entry(ident).or_default().insert(err);
-                                None
-                            }
-                        };
-
-                        (dt_deps, initial_deps)
-                    } else {
-                        let convert_dep_map = |deps: &HashMap<String, BTreeSet<String>>| {
-                            deps.iter()
-                                .map(|(name, values)| {
-                                    (
-                                        Ident::new(name),
-                                        values.iter().map(|value| Ident::new(value)).collect(),
-                                    )
-                                })
-                                .collect()
-                        };
-
-                        (
-                            Some(convert_dep_map(&dep_graph.dt_dependencies)),
-                            Some(convert_dep_map(&dep_graph.initial_dependencies)),
-                        )
-                    }
-                } else {
-                    let dt_deps = match all_deps(&ctx, self.variables.values()) {
-                        Ok(deps) => Some(deps),
-                        Err((ident, err)) => {
-                            var_errors.entry(ident).or_default().insert(err);
-                            None
-                        }
-                    };
-
-                    ctx.is_initial = true;
-
-                    let initial_deps = match all_deps(&ctx, self.variables.values()) {
-                        Ok(deps) => Some(deps),
-                        Err((ident, err)) => {
-                            var_errors.entry(ident).or_default().insert(err);
-                            None
-                        }
-                    };
-
-                    (dt_deps, initial_deps)
-                };
-
-                let init_referenced = self.init_referenced_vars();
-
-                let build_runlist = |deps: &HashMap<
-                    Ident<Canonical>,
-                    BTreeSet<Ident<Canonical>>,
-                >,
-                                     part: StepPart,
-                                     predicate: &dyn Fn(&Ident<Canonical>) -> bool|
-                 -> Vec<Ident<Canonical>> {
-                    let canonical_var_names: Vec<Ident<Canonical>> = var_names
-                        .iter()
-                        .filter(|id| predicate(id))
-                        .map(|id| (*id).clone())
-                        .collect();
-                    let runlist: Vec<&Ident<Canonical>> = canonical_var_names.iter().collect();
-                    let runlist = match part {
-                        StepPart::Initials => {
-                            let needed: HashSet<&Ident<Canonical>> = runlist
-                                .iter()
-                                .cloned()
-                                .filter(|id| {
-                                    let v = &self.variables[*id];
-                                    v.is_stock() || v.is_module() || init_referenced.contains(*id)
-                                })
-                                .collect();
-                            let mut runlist: HashSet<&Ident<Canonical>> =
-                                needed.iter().flat_map(|id| &deps[*id]).collect();
-                            runlist.extend(needed);
-                            let runlist = runlist.into_iter().collect();
-                            topo_sort(runlist, deps)
-                        }
-                        StepPart::Flows => topo_sort(runlist, deps),
-                        StepPart::Stocks => runlist,
-                    };
-                    runlist.into_iter().cloned().collect()
-                };
-
-                let runlist_initials = if let Some(deps) = initial_deps.as_ref() {
-                    build_runlist(deps, StepPart::Initials, &|_| true)
-                } else {
-                    vec![]
-                };
-
-                let runlist_flows = if let Some(deps) = dt_deps.as_ref() {
-                    build_runlist(deps, StepPart::Flows, &|id| {
-                        instantiation.contains(id) || !self.variables[id].is_stock()
-                    })
-                } else {
-                    vec![]
-                };
-
-                let runlist_stocks = if let Some(deps) = dt_deps.as_ref() {
-                    build_runlist(deps, StepPart::Stocks, &|id| {
-                        let v = &self.variables[id];
-                        !instantiation.contains(id) && (v.is_stock() || v.is_module())
-                    })
-                } else {
-                    vec![]
-                };
-
-                (
-                    instantiation.clone(),
-                    ModuleStage2 {
-                        model_ident: self.name.clone(),
-                        inputs: instantiation.clone(),
-                        dt_dependencies: dt_deps.unwrap_or_default(),
-                        initial_dependencies: initial_deps.unwrap_or_default(),
-                        runlist_initials,
-                        runlist_flows,
-                        runlist_stocks,
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
-        self.instantiations = Some(instantiations);
-
-        let mut variables_have_errors = false;
-        for (ident, var) in self.variables.iter_mut() {
-            if var_errors.contains_key(ident) {
-                let errors = std::mem::take(var_errors.get_mut(ident).unwrap());
-                for error in errors.into_iter() {
-                    var.push_error(error);
-                }
-                variables_have_errors = true;
-            }
-        }
-
-        if variables_have_errors {
-            errors.push(Error::new(
-                ErrorKind::Model,
-                ErrorCode::VariablesHaveErrors,
-                None,
-            ));
-        }
-
-        let maybe_errors = match errors.len() {
-            0 => None,
-            _ => Some(errors),
-        };
-
-        self.errors = maybe_errors;
-    }
-
+    /// Returns unit errors collected via the legacy monolithic compilation path.
+    /// The salsa incremental path emits unit errors through `CompilationDiagnostic`
+    /// accumulators; prefer `db::collect_model_diagnostics` for new code. This method
+    /// is retained for the monolithic test path and for cross-validation.
     pub fn get_unit_errors(&self) -> HashMap<Ident<Canonical>, Vec<UnitError>> {
         self.variables
             .iter()
@@ -1537,6 +1263,10 @@ impl ModelStage1 {
             .collect()
     }
 
+    /// Returns equation errors collected via the legacy monolithic compilation path.
+    /// The salsa incremental path emits equation errors through `CompilationDiagnostic`
+    /// accumulators; prefer `db::collect_model_diagnostics` for new code. This method
+    /// is retained for the monolithic test path and for cross-validation.
     pub fn get_variable_errors(&self) -> HashMap<Ident<Canonical>, Vec<EquationError>> {
         self.variables
             .iter()
@@ -1679,20 +1409,36 @@ fn test_get_incoming_links_basic() {
         source: None,
         ai_information: None,
     };
-    let compiled = crate::project::Project::from(project);
-    let model = compiled.models.get(&Ident::new("test")).unwrap();
+    let db = db::SimlinDb::default();
+    let sync = db::sync_from_datamodel(&db, &project);
+    let source_model = sync.models["test"].source;
+    let edges_result = db::model_causal_edges(&db, source_model, sync.project);
 
-    // "births" depends on "population" and "rate"
-    let births_deps = get_incoming_links(model, &Ident::new("births")).unwrap();
-    assert!(births_deps.contains(&Ident::new("population")));
-    assert!(births_deps.contains(&Ident::new("rate")));
+    // "births" depends on "population" and "rate": the causal edges map
+    // records dep -> {dependents}, so "population" and "rate" should each
+    // list "births" as a dependent.
+    assert!(
+        edges_result
+            .edges
+            .get("population")
+            .is_some_and(|s| s.contains("births")),
+        "births should depend on population"
+    );
+    assert!(
+        edges_result
+            .edges
+            .get("rate")
+            .is_some_and(|s| s.contains("births")),
+        "births should depend on rate"
+    );
 
-    // "rate" has no dependencies (constant)
-    let rate_deps = get_incoming_links(model, &Ident::new("rate")).unwrap();
-    assert!(rate_deps.is_empty());
-
-    // non-existent variable returns None
-    assert!(get_incoming_links(model, &Ident::new("nonexistent")).is_none());
+    // "rate" has no dependencies (constant) -- "rate" should not appear
+    // as a value in any edge set (nothing depends on rate except births,
+    // which we already checked). Verify rate has no outgoing edges of its own.
+    let rate_has_deps = edges_result.edges.values().any(|s| s.contains("rate"));
+    // "rate" appears as a dep key (things depend on rate), but rate itself
+    // should not appear as a dependent of anything.
+    assert!(!rate_has_deps, "rate should have no incoming dependencies");
 }
 
 #[test]
@@ -1831,161 +1577,6 @@ fn test_errors() {
             code: ErrorCode::UnknownDependency
         },
         err
-    );
-}
-
-#[test]
-fn test_cached_dependencies_preserve_unknown_dependency_errors() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
-    let main_model = x_model(
-        "main",
-        vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
-    );
-    let project_datamodel = datamodel::Project {
-        name: "cached_deps_errors".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![main_model.clone()],
-        source: None,
-        ai_information: None,
-    };
-
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let source_model = sync.models["main"].source;
-
-    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
-        vec![("main".to_string(), &main_model)]
-            .into_iter()
-            .map(|(name, m)| {
-                (
-                    Ident::new(&name),
-                    ModelStage0::new_cached(
-                        &db,
-                        source_model,
-                        sync.project,
-                        m,
-                        &[],
-                        &units_ctx,
-                        false,
-                    ),
-                )
-            })
-            .collect();
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
-
-    let no_module_inputs: ModuleInputSet = BTreeSet::new();
-    let default_instantiation = [no_module_inputs].iter().cloned().collect();
-    let scope = ScopeStage0 {
-        models: &models,
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
-    model.set_dependencies_cached(
-        &db,
-        source_model,
-        sync.project,
-        &HashMap::new(),
-        &[],
-        &default_instantiation,
-    );
-
-    assert!(model.errors.is_some());
-    assert_eq!(
-        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
-        &model.errors.as_ref().unwrap()[0]
-    );
-
-    let var_errors = model.get_variable_errors();
-    let aux_3_key = Ident::new("aux_3");
-    assert!(var_errors.contains_key(&aux_3_key));
-    let err = &var_errors[&aux_3_key][0];
-    assert_eq!(
-        &EquationError {
-            start: 0,
-            end: 16,
-            code: ErrorCode::UnknownDependency
-        },
-        err
-    );
-}
-
-#[test]
-fn test_cached_dependencies_preserve_expected_module_errors() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
-    let main_model = x_model(
-        "main",
-        vec![x_aux("foo", "1", None), x_aux("bad_ref", "foo.bar", None)],
-    );
-    let project_datamodel = datamodel::Project {
-        name: "cached_deps_expected_module".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![main_model.clone()],
-        source: None,
-        ai_information: None,
-    };
-
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let source_model = sync.models["main"].source;
-
-    let owned_models: HashMap<Ident<Canonical>, ModelStage0> =
-        vec![("main".to_string(), &main_model)]
-            .into_iter()
-            .map(|(name, m)| {
-                (
-                    Ident::new(&name),
-                    ModelStage0::new_cached(
-                        &db,
-                        source_model,
-                        sync.project,
-                        m,
-                        &[],
-                        &units_ctx,
-                        false,
-                    ),
-                )
-            })
-            .collect();
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
-
-    let no_module_inputs: ModuleInputSet = BTreeSet::new();
-    let default_instantiation = [no_module_inputs].iter().cloned().collect();
-    let scope = ScopeStage0 {
-        models: &models,
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    let mut model = ModelStage1::new(&scope, models[&*canonicalize("main")]);
-    model.set_dependencies_cached(
-        &db,
-        source_model,
-        sync.project,
-        &HashMap::new(),
-        &[],
-        &default_instantiation,
-    );
-
-    assert!(model.errors.is_some());
-    assert_eq!(
-        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
-        &model.errors.as_ref().unwrap()[0]
-    );
-
-    let var_errors = model.get_variable_errors();
-    let bad_ref_key = Ident::new("bad_ref");
-    assert!(var_errors.contains_key(&bad_ref_key));
-    assert!(
-        var_errors[&bad_ref_key]
-            .iter()
-            .any(|err| err.code == ErrorCode::ExpectedModule),
-        "cached dependency path should preserve ExpectedModule errors"
     );
 }
 

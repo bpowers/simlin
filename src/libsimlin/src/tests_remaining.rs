@@ -5922,7 +5922,7 @@ fn test_patch_then_ltm_sim_compiles_normally() {
             simlin_error_free(collected);
         }
 
-        // Create LTM simulation -- uses monolithic pipeline, not incremental
+        // Create LTM simulation -- simlin_sim_new uses the incremental pipeline for both LTM and non-LTM
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
 

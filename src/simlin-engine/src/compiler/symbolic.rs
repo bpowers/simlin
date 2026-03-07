@@ -1828,27 +1828,21 @@ mod tests {
     }
 
     fn compile_and_roundtrip(dm_project: &crate::datamodel::Project, model_name: &str) {
-        use std::collections::BTreeSet;
-        use std::sync::Arc;
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, dm_project, None);
+        let sim = crate::db::compile_project_incremental(&db, sync.project, model_name)
+            .expect("incremental compile should succeed");
 
-        let project = crate::project::Project::from(dm_project.clone());
-        let main_ident = crate::common::Ident::new(model_name);
-        let model = Arc::clone(&project.models[&main_ident]);
-        let inputs: BTreeSet<crate::common::Ident<crate::common::Canonical>> = BTreeSet::new();
-        let module = crate::compiler::Module::new(&project, model, &inputs, true).unwrap();
-        let compiled = module.compile().unwrap();
+        let compiled = &sim.modules[&sim.root];
 
-        // Build layout from Module's offset map
-        let model_offsets = &module.offsets[&main_ident];
-        let layout = VariableLayout::from_offset_map(model_offsets, module.n_slots);
+        let source_model = sync.models[model_name].source_model;
+        let layout = crate::db::compute_layout(&db, source_model, sync.project, true);
 
-        // Symbolize
-        let sym = symbolize_module(&compiled, &layout)
-            .unwrap_or_else(|e| panic!("symbolize_module failed: {}", e));
+        let sym = symbolize_module(compiled, layout)
+            .unwrap_or_else(|e| panic!("symbolize_module failed: {e}"));
 
-        // Resolve back with the same layout
-        let resolved = resolve_module(&sym, &layout)
-            .unwrap_or_else(|e| panic!("resolve_module failed: {}", e));
+        let resolved =
+            resolve_module(&sym, layout).unwrap_or_else(|e| panic!("resolve_module failed: {e}"));
 
         // Verify structural equivalence
         assert_eq!(compiled.ident, resolved.ident);
@@ -2037,9 +2031,6 @@ mod tests {
 
     #[test]
     fn test_resolve_uses_layout_n_slots_not_symbolic() {
-        use std::collections::BTreeSet;
-        use std::sync::Arc;
-
         let dm_project = x_project(
             default_sim_specs(),
             &[x_model(
@@ -2047,16 +2038,16 @@ mod tests {
                 vec![x_aux("a", "1", None), x_aux("b", "a + 1", None)],
             )],
         );
-        let project = crate::project::Project::from(dm_project.clone());
-        let main_ident = crate::common::Ident::new("main");
-        let model = Arc::clone(&project.models[&main_ident]);
-        let inputs: BTreeSet<crate::common::Ident<crate::common::Canonical>> = BTreeSet::new();
-        let module = crate::compiler::Module::new(&project, model, &inputs, true).unwrap();
-        let compiled = module.compile().unwrap();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &dm_project, None);
+        let sim = crate::db::compile_project_incremental(&db, sync.project, "main")
+            .expect("incremental compile should succeed");
 
-        let model_offsets = &module.offsets[&main_ident];
-        let layout = VariableLayout::from_offset_map(model_offsets, module.n_slots);
-        let sym = symbolize_module(&compiled, &layout).unwrap();
+        let compiled = &sim.modules[&sim.root];
+
+        let source_model = sync.models["main"].source_model;
+        let layout = crate::db::compute_layout(&db, source_model, sync.project, true);
+        let sym = symbolize_module(compiled, layout).unwrap();
 
         // Create a layout with more slots (simulating a variable addition)
         let mut bigger_entries = layout.entries.clone();

@@ -5,13 +5,11 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
-use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident};
-use crate::datamodel::{self, Equation};
+use crate::common::{Canonical, Error, Ident};
+use crate::datamodel;
 use crate::dimensions::DimensionsContext;
-use crate::ltm_augment::{generate_ltm_variables, generate_ltm_variables_all_links};
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
-use crate::variable::Variable;
 use std::sync::Arc;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -23,9 +21,10 @@ pub struct Project {
     pub models: HashMap<Ident<Canonical>, Arc<ModelStage1>>,
     #[allow(dead_code)]
     model_order: Vec<Ident<Canonical>>,
-    /// Deprecated: project-level errors are now also accumulated via the
-    /// salsa accumulator in `project_units_context`. This field is retained
-    /// for the monolithic `collect_formatted_issues` path in libsimlin.
+    /// Project-level errors are also accumulated via the salsa accumulator
+    /// in `project_units_context`. This field is retained for the monolithic
+    /// `Project::from` construction path used by tests and
+    /// `get_stdlib_composite_ports`.
     pub errors: Vec<Error>,
     /// Cached dimension context for subdimension lookups
     pub dimensions_ctx: DimensionsContext,
@@ -35,71 +34,21 @@ impl Project {
     pub fn name(&self) -> &str {
         &self.datamodel.name
     }
-
-    /// Create a new project with LTM instrumentation.
-    ///
-    /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
-    /// Prefer the salsa incremental path via `db::compile_project_incremental`
-    /// with `set_ltm_enabled(true)`. The only remaining production caller is
-    /// `layout::try_detect_ltm_loops_monolithic` (fallback when no db_state).
-    ///
-    /// Once that caller is migrated, this method and its helpers
-    /// (`abort_if_arrayed`, `inject_ltm_vars`) can be removed.
-    pub fn with_ltm(self) -> crate::common::Result<Self> {
-        abort_if_arrayed(&self)?;
-
-        let ltm_vars = generate_ltm_variables(&self)?;
-        if ltm_vars.is_empty() {
-            return Ok(self);
-        }
-
-        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
-    }
-
-    /// Create a new project with link score variables for ALL causal links.
-    ///
-    /// Unlike `with_ltm()` which only instruments detected loops, this generates
-    /// link score variables for every causal connection in the model. Used as a
-    /// prerequisite for `ltm_finding::discover_loops()` which finds important
-    /// loops heuristically from the simulation results.
-    ///
-    /// No loop score or relative loop score variables are generated -- those
-    /// are computed post-simulation by `discover_loops()`.
-    ///
-    /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
-    /// Prefer the salsa incremental path via `db::compile_project_incremental`
-    /// with `set_ltm_enabled(true)` and `set_ltm_discovery_mode(true)`.
-    /// No production callers remain; this method is only used by tests.
-    /// It can be removed once tests are migrated to the incremental path.
-    pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
-        abort_if_arrayed(&self)?;
-
-        let ltm_vars = generate_ltm_variables_all_links(&self)?;
-        if ltm_vars.is_empty() {
-            return Ok(self);
-        }
-
-        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
-    }
 }
 
+/// Runs unit inference and unit checking for a model during monolithic
+/// Project construction. Only used by the test-only `From<datamodel::Project>`
+/// impl; the production path uses salsa tracked functions for unit analysis.
+#[cfg(any(test, feature = "testing"))]
 fn run_default_model_checks(
     models: &HashMap<Ident<Canonical>, &ModelStage1>,
     units_ctx: &Context,
     model: &mut ModelStage1,
 ) {
-    // Run unit inference to compute units for variables without explicit declarations.
-    // The check_units call below validates inferred units against declared units.
-    // Check if the model has any variables with declared units.
-    // If not, we skip surfacing unit inference errors since the model
-    // wasn't designed with dimensional analysis in mind.
     let has_declared_units = model.variables.values().any(|var| var.units().is_some());
 
     let inferred_units =
         crate::units_infer::infer(models, units_ctx, model).unwrap_or_else(|err| {
-            // Only surface unit mismatches for models that have declared units.
-            // Store in unit_warnings (not errors) so simulation can still proceed.
-            // Unit mismatches are common in real-world models and shouldn't block simulation.
             if has_declared_units
                 && let crate::common::UnitError::InferenceError { code, .. } = &err
                 && *code == crate::common::ErrorCode::UnitMismatch
@@ -117,60 +66,13 @@ fn run_default_model_checks(
     model.check_units(units_ctx, &inferred_units)
 }
 
+/// Retained only for tests and the AST interpreter cross-validation path
+/// (AC4.6). Production compilation uses `compile_project_incremental`.
+#[cfg(any(test, feature = "testing"))]
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::base_from(project_datamodel, None, run_default_model_checks)
     }
-}
-
-/// Inject LTM synthetic variables into the datamodel.
-///
-/// For user models (present in `datamodel.models`), variables are appended
-/// directly. For stdlib models (not in `datamodel.models`), we fetch the
-/// stock model from generated code, add the synthetic variables, and append
-/// it to `datamodel.models`. `base_from()` detects these overrides by name
-/// and skips loading the generated version.
-///
-/// Helper for the deprecated `with_ltm()` / `with_ltm_all_links()` methods.
-/// Can be removed when those methods are removed.
-fn inject_ltm_vars(
-    mut datamodel: datamodel::Project,
-    ltm_vars: &HashMap<Ident<Canonical>, Vec<(Ident<Canonical>, datamodel::Variable)>>,
-) -> datamodel::Project {
-    let existing_model_names: std::collections::HashSet<String> = datamodel
-        .models
-        .iter()
-        .map(|m| canonicalize(&m.name).into_owned())
-        .collect();
-
-    for model in &mut datamodel.models {
-        let model_name = canonicalize(&model.name);
-        if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
-            for (_, var) in synthetic_vars {
-                model.variables.push(var.clone());
-            }
-        }
-    }
-
-    // Add augmented stdlib models to the datamodel
-    for (model_name, synthetic_vars) in ltm_vars {
-        let name_str = model_name.as_str();
-        if let Some(func_name) = name_str.strip_prefix("stdlib\u{205A}") {
-            let canonical_name = canonicalize(name_str).into_owned();
-            if existing_model_names.contains(&canonical_name) {
-                continue;
-            }
-            if let Some(mut stdlib_dm) = crate::stdlib::get(func_name) {
-                stdlib_dm.name = name_str.to_string();
-                for (_, var) in synthetic_vars {
-                    stdlib_dm.variables.push(var.clone());
-                }
-                datamodel.models.push(stdlib_dm);
-            }
-        }
-    }
-
-    datamodel
 }
 
 impl Project {
@@ -333,19 +235,7 @@ impl Project {
                 let instantiations = module_instantiations
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
-                // Use cached path when we have a synced model in the salsa db
-                if let Some(source_model) = source_models.get(model.name.as_str()) {
-                    model.set_dependencies_cached(
-                        salsa_db,
-                        *source_model,
-                        source_project,
-                        &models,
-                        &project_datamodel.dimensions,
-                        instantiations,
-                    );
-                } else {
-                    model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
-                }
+                model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
                 // things like unit inference happen through this callback
                 // Skip unit inference for implicit (stdlib) models as they are generic
                 // templates that only make sense when instantiated with specific inputs
@@ -376,18 +266,90 @@ impl Project {
     }
 }
 
-/// Check if any model in the project contains array variables.
-///
-/// Helper for the deprecated `with_ltm()` / `with_ltm_all_links()` methods.
-/// Can be removed when those methods are removed.
+// Test-only LTM helpers: with_ltm(), with_ltm_all_links(), and their
+// supporting functions. No production callers remain; retained for the
+// AST interpreter cross-validation path (AC4.6).
+#[cfg(any(test, feature = "testing"))]
+use crate::common::{ErrorCode, ErrorKind};
+#[cfg(any(test, feature = "testing"))]
+use crate::datamodel::Equation;
+#[cfg(any(test, feature = "testing"))]
+use crate::ltm_augment::{generate_ltm_variables, generate_ltm_variables_all_links};
+#[cfg(any(test, feature = "testing"))]
+use crate::variable::Variable;
+
+#[cfg(any(test, feature = "testing"))]
+impl Project {
+    pub fn with_ltm(self) -> crate::common::Result<Self> {
+        abort_if_arrayed(&self)?;
+
+        let ltm_vars = generate_ltm_variables(&self)?;
+        if ltm_vars.is_empty() {
+            return Ok(self);
+        }
+
+        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
+    }
+
+    pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
+        abort_if_arrayed(&self)?;
+
+        let ltm_vars = generate_ltm_variables_all_links(&self)?;
+        if ltm_vars.is_empty() {
+            return Ok(self);
+        }
+
+        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn inject_ltm_vars(
+    mut datamodel: datamodel::Project,
+    ltm_vars: &HashMap<Ident<Canonical>, Vec<(Ident<Canonical>, datamodel::Variable)>>,
+) -> datamodel::Project {
+    let existing_model_names: std::collections::HashSet<String> = datamodel
+        .models
+        .iter()
+        .map(|m| canonicalize(&m.name).into_owned())
+        .collect();
+
+    for model in &mut datamodel.models {
+        let model_name = canonicalize(&model.name);
+        if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
+            for (_, var) in synthetic_vars {
+                model.variables.push(var.clone());
+            }
+        }
+    }
+
+    for (model_name, synthetic_vars) in ltm_vars {
+        let name_str = model_name.as_str();
+        if let Some(func_name) = name_str.strip_prefix("stdlib\u{205A}") {
+            let canonical_name = canonicalize(name_str).into_owned();
+            if existing_model_names.contains(&canonical_name) {
+                continue;
+            }
+            if let Some(mut stdlib_dm) = crate::stdlib::get(func_name) {
+                stdlib_dm.name = name_str.to_string();
+                for (_, var) in synthetic_vars {
+                    stdlib_dm.variables.push(var.clone());
+                }
+                datamodel.models.push(stdlib_dm);
+            }
+        }
+    }
+
+    datamodel
+}
+
+#[cfg(any(test, feature = "testing"))]
 fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
     for (model_name, model) in &project.models {
-        // Skip implicit (stdlib) models
         if model.implicit {
             continue;
         }
 
-        // Check each variable for array dimensions
         for (var_name, var) in &model.variables {
             let has_arrays = match var {
                 Variable::Stock { eqn, .. } | Variable::Var { eqn, .. } => {

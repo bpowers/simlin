@@ -5,6 +5,15 @@
 use super::*;
 use crate::datamodel;
 
+/// Parse with an empty module-ident context (test convenience).
+fn parse_var_no_module_ctx(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+) -> &ParsedVariableResult {
+    parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+}
+
 fn simple_project() -> datamodel::Project {
     datamodel::Project {
         name: "test".to_string(),
@@ -482,7 +491,7 @@ fn test_parse_source_variable_scalar() {
     let result = sync_from_datamodel(&db, &project);
 
     let pop_var = result.models["main"].variables["population"].source;
-    let parsed = parse_source_variable(&db, pop_var, result.project);
+    let parsed = parse_var_no_module_ctx(&db, pop_var, result.project);
 
     // Should parse to a Var (aux) with equation "100"
     assert!(matches!(&parsed.variable, Variable::Var { .. }));
@@ -559,13 +568,13 @@ fn test_parse_source_variable_stock() {
 
     // Parse the stock variable
     let stock_var = result.models["main"].variables["inventory"].source;
-    let parsed = parse_source_variable(&db, stock_var, result.project);
+    let parsed = parse_var_no_module_ctx(&db, stock_var, result.project);
     assert!(matches!(&parsed.variable, Variable::Stock { .. }));
     assert_eq!(parsed.variable.ident(), "inventory");
 
     // Parse a flow variable
     let flow_var = result.models["main"].variables["production"].source;
-    let parsed = parse_source_variable(&db, flow_var, result.project);
+    let parsed = parse_var_no_module_ctx(&db, flow_var, result.project);
     assert!(matches!(
         &parsed.variable,
         Variable::Var { is_flow: true, .. }
@@ -583,7 +592,7 @@ fn test_parse_source_variable_matches_direct_parse() {
 
     // Parse via tracked function
     let pop_var = result.models["main"].variables["population"].source;
-    let tracked_result = parse_source_variable(&db, pop_var, result.project);
+    let tracked_result = parse_var_no_module_ctx(&db, pop_var, result.project);
 
     // Parse directly via parse_var for comparison
     let dm_var = &project.models[0].variables[0];
@@ -659,8 +668,8 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
 
     // Initial parse of both variables to prime the cache
     let beta_ptr_before = {
-        let alpha_result = parse_source_variable(&db, alpha_src, source_project);
-        let beta_result = parse_source_variable(&db, beta_src, source_project);
+        let alpha_result = parse_var_no_module_ctx(&db, alpha_src, source_project);
+        let beta_result = parse_var_no_module_ctx(&db, beta_src, source_project);
         assert_eq!(alpha_result.variable.ident(), "alpha");
         assert_eq!(beta_result.variable.ident(), "beta");
         beta_result as *const ParsedVariableResult
@@ -672,8 +681,8 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
         .to(SourceEquation::Scalar("42".to_string()));
 
     // Re-parse both: alpha should have new result, beta should be cached
-    let alpha_result_2 = parse_source_variable(&db, alpha_src, source_project);
-    let beta_result_2 = parse_source_variable(&db, beta_src, source_project);
+    let alpha_result_2 = parse_var_no_module_ctx(&db, alpha_src, source_project);
+    let beta_result_2 = parse_var_no_module_ctx(&db, beta_src, source_project);
 
     // Alpha's parse result should reflect the new equation
     if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
@@ -2186,7 +2195,7 @@ fn test_accumulator_parse_error_bad_equation() {
     let sync = sync_from_datamodel(&db, &project);
 
     // Verify struct field path also shows an error
-    let parsed = parse_source_variable(
+    let parsed = parse_var_no_module_ctx(
         &db,
         sync.models["main"].variables["broken"].source,
         sync.project,
@@ -2267,10 +2276,10 @@ fn test_accumulator_parity_with_struct_fields() {
     // Collect from accumulator
     let accum_diags = collect_all_diagnostics(&db, &sync);
 
-    // Collect from struct fields (parse_source_variable results)
+    // Collect from struct fields (parse results)
     let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
     for (var_name, synced_var) in &sync.models["main"].variables {
-        let parsed = parse_source_variable(&db, synced_var.source, sync.project);
+        let parsed = parse_var_no_module_ctx(&db, synced_var.source, sync.project);
         if let Some(errors) = parsed.variable.equation_errors() {
             for err in errors {
                 field_equation_errors.insert((var_name.clone(), err));
@@ -2515,8 +2524,8 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
     let alpha_src = state1.models["main"].variables["alpha"].source_var;
     let beta_src = state1.models["main"].variables["beta"].source_var;
     let beta_ptr_before = {
-        let _alpha_result = parse_source_variable(&db, alpha_src, state1.project);
-        let beta_result = parse_source_variable(&db, beta_src, state1.project);
+        let _alpha_result = parse_var_no_module_ctx(&db, alpha_src, state1.project);
+        let beta_result = parse_var_no_module_ctx(&db, beta_src, state1.project);
         beta_result as *const ParsedVariableResult
     };
 
@@ -2543,7 +2552,7 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
     );
 
     // Beta's parse result should be pointer-equal (cached)
-    let beta_result_after = parse_source_variable(&db, beta_src2, state2.project);
+    let beta_result_after = parse_var_no_module_ctx(&db, beta_src2, state2.project);
     let beta_ptr_after = beta_result_after as *const ParsedVariableResult;
     assert_eq!(
         beta_ptr_before, beta_ptr_after,
@@ -2552,7 +2561,7 @@ fn test_incremental_sync_preserves_cache_for_unchanged_variable() {
 
     // Alpha's parse result should reflect the new equation
     let alpha_src2 = state2.models["main"].variables["alpha"].source_var;
-    let alpha_result = parse_source_variable(&db, alpha_src2, state2.project);
+    let alpha_result = parse_var_no_module_ctx(&db, alpha_src2, state2.project);
     if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
         alpha_result.variable.ast()
     {
@@ -2703,7 +2712,7 @@ fn test_incremental_sync_successive_patches() {
 
     // Prime parse cache
     let pop_src = state0.models["main"].variables["population"].source_var;
-    let _ = parse_source_variable(&db, pop_src, state0.project);
+    let _ = parse_var_no_module_ctx(&db, pop_src, state0.project);
 
     // Patch 1: change project name (shouldn't affect variable cache)
     project.name = "renamed".to_string();
@@ -2728,7 +2737,7 @@ fn test_incremental_sync_successive_patches() {
     );
 
     // Parse should reflect the new equation
-    let result = parse_source_variable(&db, pop_src2, state2.project);
+    let result = parse_var_no_module_ctx(&db, pop_src2, state2.project);
     if let Some(crate::ast::Ast::Scalar(crate::ast::Expr0::Const(_, val, _))) =
         result.variable.ast()
     {
@@ -5886,12 +5895,9 @@ fn test_2arg_previous_uses_module_expansion() {
 fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
     use crate::testutils::{x_aux, x_model};
 
-    let project = datamodel::Project {
-        name: "dep_graph_prev_module".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![x_model(
+    let project = crate::testutils::x_project(
+        datamodel::SimSpecs::default(),
+        &[x_model(
             "main",
             vec![
                 x_aux("x", "TIME", None),
@@ -5899,9 +5905,7 @@ fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
                 x_aux("prev_delayed", "PREVIOUS(delayed)", None),
             ],
         )],
-        source: None,
-        ai_information: None,
-    };
+    );
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
@@ -5935,6 +5939,61 @@ fn test_init_aux_only_model() {
         assert!(
             (val - 2.0).abs() < 1e-10,
             "frozen should be 2.0 at every step, got {val} at step {step}"
+        );
+    }
+}
+
+#[test]
+fn test_previous_of_module_backed_variable_compiles_correctly() {
+    use crate::testutils::{x_aux, x_model};
+    use crate::vm::Vm;
+
+    // PREVIOUS(x) where x = SMTH1(input, 1) must use module expansion,
+    // not the LoadPrev opcode.  LoadPrev is only valid for simple scalar
+    // variables; module-backed variables like SMTH1 occupy multiple VM
+    // slots (internal stock + aux), so LoadPrev would read the wrong slot.
+    let project = datamodel::Project {
+        name: "previous_of_smooth".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            stop: 10.0,
+            ..Default::default()
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("input", "10", None),
+                x_aux("x", "SMTH1(input, 1)", None),
+                x_aux("y", "PREVIOUS(x, x)", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("PREVIOUS(SMTH1_var) should compile via incremental path");
+    let mut vm = Vm::new(compiled).expect("VM should build");
+    vm.run_to_end().expect("simulation should run");
+
+    let x_series = vm
+        .get_series(&crate::common::Ident::new("x"))
+        .expect("x missing");
+    let y_series = vm
+        .get_series(&crate::common::Ident::new("y"))
+        .expect("y missing");
+    assert_eq!(x_series.len(), y_series.len());
+
+    // y = PREVIOUS(x, x): at t>0, y[t] should equal x[t-1].
+    for t in 1..x_series.len() {
+        assert!(
+            (y_series[t] - x_series[t - 1]).abs() < 1e-6,
+            "step {t}: y={}, expected x_prev={}",
+            y_series[t],
+            x_series[t - 1],
         );
     }
 }

@@ -159,16 +159,13 @@ fn test_model_all_diagnostics_triggers_all_sources() {
 
 // ---- Task 6: AC2 verification tests ----
 
-/// AC2.1: Parity between old struct-field error collection and new
-/// salsa accumulator error collection. Both paths should produce
-/// the same set of error codes for a project with various error types.
+/// AC2.1: Salsa accumulator error collection produces the expected
+/// error codes for a project with various error types.
 #[test]
 fn test_ac2_1_accumulator_parity_with_old_path() {
     use crate::common::ErrorCode;
-    use crate::project::Project as CompiledProject;
     use std::collections::HashSet;
 
-    // Build a project with a mix of valid and invalid variables
     let project = datamodel::Project {
         name: "parity".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -227,46 +224,34 @@ fn test_ac2_1_accumulator_parity_with_old_path() {
         ai_information: None,
     };
 
-    // Old path: struct-field error collection
-    let compiled = CompiledProject::from(project.clone());
-    let mut old_error_codes: HashSet<ErrorCode> = HashSet::new();
-    for model in compiled.models.values() {
-        for (_var_name, var_errors) in model.get_variable_errors() {
-            for err in var_errors {
-                old_error_codes.insert(err.code);
-            }
-        }
-    }
-
-    // New path: salsa accumulator
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let diags = collect_all_diagnostics(&db, &sync);
-    let mut new_error_codes: HashSet<ErrorCode> = HashSet::new();
+    let mut error_codes: HashSet<ErrorCode> = HashSet::new();
     for d in &diags {
         if d.severity == DiagnosticSeverity::Error {
             match &d.error {
                 DiagnosticError::Equation(err) => {
-                    new_error_codes.insert(err.code);
+                    error_codes.insert(err.code);
                 }
                 DiagnosticError::Model(err) => {
-                    new_error_codes.insert(err.code);
+                    error_codes.insert(err.code);
                 }
                 _ => {}
             }
         }
     }
 
-    // The accumulator path should be a superset of the struct-field path
-    // for equation-level errors. The old path may include additional
-    // model/simulation-level errors that the accumulator doesn't cover yet.
-    for code in &old_error_codes {
-        assert!(
-            new_error_codes.contains(code),
-            "old path has error code {code:?} that accumulator path is missing; \
-             old: {old_error_codes:?}, new: {new_error_codes:?}"
-        );
-    }
+    // "bad_syntax" should produce a parse error and "empty" should produce
+    // an empty equation error. Both are equation-level errors.
+    assert!(
+        !error_codes.is_empty(),
+        "accumulator should produce errors for bad_syntax and empty variables"
+    );
+    assert!(
+        error_codes.contains(&ErrorCode::EmptyEquation),
+        "should contain EmptyEquation; got: {error_codes:?}"
+    );
 }
 
 /// AC2.2: BadTable error from mismatched x/y table lengths surfaces

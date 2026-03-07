@@ -7,5 +7,5 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ## Key Files
 
-- `src/main.rs` -- CLI entry point: argument parsing, model loading, simulation, format conversion
+- `src/main.rs` -- CLI entry point: argument parsing, model loading, simulation, format conversion. All compilation and simulation use the incremental salsa path (`SimlinDb` + `compile_project_incremental`); the monolithic `Project::from` path is not used.
 - `src/gen_stdlib.rs` -- Standard library generation utility (generates `stdlib.gen.rs` for simlin-engine)

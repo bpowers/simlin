@@ -11,10 +11,9 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::Arc;
 
+use simlin_engine::Vm;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{Project as CompiledProject, Simulation, Vm};
 
 // ---------------------------------------------------------------------------
 // Per-thread counting allocator
@@ -68,10 +67,7 @@ fn build_scalar_model(stop: f64) -> Vm {
         .stock("population", "initial_pop", &["births"], &["deaths"], None)
         .flow("births", "population * birth_rate", None)
         .flow("deaths", "population / lifespan", None);
-    let datamodel = tp.build_datamodel();
-    let project = Arc::new(CompiledProject::from(datamodel));
-    let sim = Simulation::new(&project, "main").unwrap();
-    let compiled = sim.compile().unwrap();
+    let compiled = tp.compile_incremental().unwrap();
     Vm::new(compiled).unwrap()
 }
 

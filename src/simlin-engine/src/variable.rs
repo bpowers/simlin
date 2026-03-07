@@ -82,7 +82,13 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         inflows: Vec<Ident<Canonical>>,
         outflows: Vec<Ident<Canonical>>,
         non_negative: bool,
+        /// Legacy field from the monolithic compilation path. In the salsa incremental
+        /// path, equation errors are emitted via `CompilationDiagnostic` accumulators
+        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
         errors: Vec<EquationError>,
+        /// Legacy field from the monolithic compilation path. In the salsa incremental
+        /// path, unit errors are emitted via `CompilationDiagnostic` accumulators
+        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
         unit_errors: Vec<UnitError>,
     },
     Var {
@@ -95,7 +101,13 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
+        /// Legacy field from the monolithic compilation path. In the salsa incremental
+        /// path, equation errors are emitted via `CompilationDiagnostic` accumulators
+        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
         errors: Vec<EquationError>,
+        /// Legacy field from the monolithic compilation path. In the salsa incremental
+        /// path, unit errors are emitted via `CompilationDiagnostic` accumulators
+        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
         unit_errors: Vec<UnitError>,
     },
     Module {
@@ -104,7 +116,13 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         model_name: Ident<Canonical>,
         units: Option<datamodel::UnitMap>,
         inputs: Vec<MI>,
+        /// Legacy field from the monolithic compilation path. In the salsa incremental
+        /// path, equation errors are emitted via `CompilationDiagnostic` accumulators
+        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
         errors: Vec<EquationError>,
+        /// Legacy field from the monolithic compilation path. In the salsa incremental
+        /// path, unit errors are emitted via `CompilationDiagnostic` accumulators
+        /// instead of being stored here. New code should use `db::collect_model_diagnostics`.
         unit_errors: Vec<UnitError>,
     },
 }
@@ -193,6 +211,9 @@ impl<MI, E> Variable<MI, E> {
         matches!(self, Variable::Module { .. })
     }
 
+    /// Returns equation errors stored in the legacy monolithic-path fields.
+    /// In the salsa incremental path, errors are emitted as `CompilationDiagnostic`
+    /// accumulators rather than stored here; prefer `db::collect_model_diagnostics`.
     pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
         let errors = match self {
             Variable::Stock { errors, .. }
@@ -206,6 +227,9 @@ impl<MI, E> Variable<MI, E> {
         }
     }
 
+    /// Returns unit errors stored in the legacy monolithic-path fields.
+    /// In the salsa incremental path, errors are emitted as `CompilationDiagnostic`
+    /// accumulators rather than stored here; prefer `db::collect_model_diagnostics`.
     pub fn unit_errors(&self) -> Option<Vec<UnitError>> {
         let errors = match self {
             Variable::Stock { unit_errors, .. }
@@ -219,6 +243,9 @@ impl<MI, E> Variable<MI, E> {
         }
     }
 
+    /// Appends an equation error to the legacy monolithic-path storage on this variable.
+    /// The monolithic path (non-salsa) uses mutation to collect errors after parsing;
+    /// the salsa path accumulates them via `CompilationDiagnostic` instead.
     pub fn push_error(&mut self, err: EquationError) {
         match self {
             Variable::Stock { errors, .. }
@@ -227,6 +254,9 @@ impl<MI, E> Variable<MI, E> {
         }
     }
 
+    /// Appends a unit error to the legacy monolithic-path storage on this variable.
+    /// The monolithic path (non-salsa) uses mutation to collect errors after unit checking;
+    /// the salsa path accumulates them via `CompilationDiagnostic` instead.
     pub fn push_unit_error(&mut self, err: UnitError) {
         match self {
             Variable::Stock { unit_errors, .. }

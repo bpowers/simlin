@@ -6,15 +6,14 @@ use crate::alloc::allocate_available;
 #[cfg(test)]
 use crate::ast::ArrayView;
 use crate::ast::{Ast, BinaryOp};
-use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::{BuiltinFn, Expr, Module, SubscriptIndex, UnaryOp};
 use crate::dimensions::SubscriptIterator;
 use crate::model::{ModuleInputSet, enumerate_modules};
 use crate::sim_err;
 use crate::vm::{
-    CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey,
-    Specs, StepPart, TIME_OFF, is_truthy, pulse, ramp, step,
+    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey, Specs, StepPart,
+    TIME_OFF, is_truthy, pulse, ramp, step,
 };
 use crate::{Project, Results, Variable, compiler};
 use float_cmp::approx_eq;
@@ -1875,29 +1874,6 @@ impl Simulation {
         })
     }
 
-    /// Monolithic bytecode compilation from an AST-walking `Simulation`
-    /// into a bytecode `CompiledSimulation`.
-    ///
-    /// Deprecated: production code uses `compile_project_incremental`
-    /// (in `db.rs`). This method is retained only because the incremental
-    /// path does not yet correctly propagate module input values during
-    /// VM simulation (GitHub #295). Once that is fixed, this method and
-    /// `compile_project` can be removed.
-    pub fn compile(&self) -> crate::Result<CompiledSimulation> {
-        let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
-            .modules
-            .iter()
-            .map(|(key, module)| module.compile().map(|module| (key.clone(), module)))
-            .collect();
-
-        Ok(CompiledSimulation::new(
-            modules?,
-            self.specs.clone(),
-            self.root.clone(),
-            self.offsets.clone(),
-        ))
-    }
-
     pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {
         self.calc_flattened_order(&self.root)
     }
@@ -2090,83 +2066,6 @@ impl Simulation {
             is_vensim: false,
         })
     }
-}
-
-/// Monolithic bytecode compilation from an `engine::Project`.
-///
-/// Deprecated: production code uses `compile_project_incremental`
-/// (in `db.rs`). This function is retained only because the incremental
-/// path does not yet correctly propagate module input values during
-/// VM simulation (GitHub #295). Once that is fixed, this function and
-/// `Simulation::compile` can be removed.
-pub fn compile_project(
-    project: &Project,
-    main_model_name: &str,
-) -> crate::Result<CompiledSimulation> {
-    let main_model_ident = Ident::new(main_model_name);
-    if !project.models.contains_key(&main_model_ident) {
-        return sim_err!(
-            NotSimulatable,
-            format!("no model named '{}' to simulate", main_model_name)
-        );
-    }
-
-    let modules = {
-        let project_models: HashMap<_, _> = project
-            .models
-            .iter()
-            .map(|(name, model)| (name.as_str(), model.as_ref()))
-            .collect();
-        enumerate_modules(&project_models, main_model_name, |model| model.name.clone())?
-    };
-
-    let module_names: Vec<&Ident<Canonical>> = {
-        let mut module_names: Vec<_> = modules.keys().collect();
-        module_names.sort_unstable();
-
-        let mut sorted_names = vec![&main_model_ident];
-        sorted_names.extend(
-            module_names
-                .into_iter()
-                .filter(|n| n.as_str() != main_model_name),
-        );
-        sorted_names
-    };
-
-    let root_input_set: ModuleInputSet = BTreeSet::new();
-    let root_key: ModuleKey = (main_model_ident.clone(), root_input_set);
-
-    let mut compiled_modules: HashMap<ModuleKey, CompiledModule> = HashMap::new();
-    for name in module_names {
-        let distinct_inputs = &modules[name];
-        for inputs in distinct_inputs.iter() {
-            let model = Arc::clone(&project.models[name]);
-            let is_root = name.as_str() == main_model_ident.as_str();
-            let module: Module = Module::new(project, model, inputs, is_root)?;
-            let compiled = module.compile()?;
-            let module_key: ModuleKey = (name.clone(), inputs.clone());
-            compiled_modules.insert(module_key, compiled);
-        }
-    }
-
-    let sim_specs_dm = project
-        .datamodel
-        .get_model(main_model_name)
-        .and_then(|model| model.sim_specs.clone())
-        .unwrap_or_else(|| project.datamodel.sim_specs.clone());
-
-    let specs: Specs = Specs::from(&sim_specs_dm);
-
-    let offsets = calc_flattened_offsets(project, main_model_name);
-    let offsets: HashMap<Ident<Canonical>, usize> =
-        offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
-
-    Ok(CompiledSimulation::new(
-        compiled_modules,
-        specs,
-        root_key,
-        offsets,
-    ))
 }
 
 /// calc_flattened_offsets generates a mapping from name to offset

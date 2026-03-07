@@ -317,6 +317,26 @@ fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
 /// The project must have been augmented with `with_ltm_all_links()` before
 /// simulation so that link score variables exist for all causal links.
 pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundLoop>> {
+    let stocks = get_stock_variables(project);
+    let main_model = find_main_model(project).ok_or_else(|| crate::common::Error {
+        kind: crate::common::ErrorKind::Model,
+        code: crate::common::ErrorCode::NotSimulatable,
+        details: Some("No non-implicit model found for loop discovery".to_string()),
+    })?;
+    let causal_graph = CausalGraph::from_model(main_model, project)?;
+    discover_loops_with_graph(results, &causal_graph, &stocks)
+}
+
+/// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
+///
+/// This is the implementation shared by `discover_loops` (which builds
+/// the graph from a `Project`) and callers that have a salsa-derived
+/// `CausalGraph`.
+pub fn discover_loops_with_graph(
+    results: &Results,
+    causal_graph: &CausalGraph,
+    stocks: &[Ident<Canonical>],
+) -> Result<Vec<FoundLoop>> {
     let link_offsets = parse_link_offsets(results);
     if link_offsets.is_empty() {
         return Ok(Vec::new());
@@ -328,7 +348,6 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
         .map(|((from, to), offset)| ((from.clone(), to.clone()), *offset))
         .collect();
 
-    let stocks = get_stock_variables(project);
     if stocks.is_empty() {
         return Ok(Vec::new());
     }
@@ -341,7 +360,7 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
 
     // Skip step 0 where link scores are NaN (PREVIOUS values don't exist)
     for step in 1..step_count {
-        let graph = SearchGraph::from_results(results, step, &link_offsets, &stocks);
+        let graph = SearchGraph::from_results(results, step, &link_offsets, stocks);
         let paths = graph.find_strongest_loops();
 
         for path in paths {
@@ -357,16 +376,6 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
     if all_paths.is_empty() {
         return Ok(Vec::new());
     }
-
-    // Build a CausalGraph to convert paths to Loop objects.
-    // Uses find_main_model for deterministic model selection (HashMap iteration
-    // order is non-deterministic, so we look up "main" by canonical name).
-    let main_model = find_main_model(project).ok_or_else(|| crate::common::Error {
-        kind: crate::common::ErrorKind::Model,
-        code: crate::common::ErrorCode::NotSimulatable,
-        details: Some("No non-implicit model found for loop discovery".to_string()),
-    })?;
-    let causal_graph = CausalGraph::from_model(main_model, project)?;
 
     // Convert paths to FoundLoop objects with scores
     let mut found_loops: Vec<FoundLoop> = Vec::new();

@@ -2911,13 +2911,6 @@ mod per_variable_initials_tests {
     use super::*;
     use crate::test_common::TestProject;
 
-    /// Helper: build a Simulation and CompiledSimulation from a TestProject
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
-        let sim = tp.build_sim().expect("build_sim failed");
-        let compiled = sim.compile().expect("compile failed");
-        (sim, compiled)
-    }
-
     #[test]
     fn test_per_var_initials_matches_interpreter() {
         let tp = TestProject::new("per_var_test")
@@ -2931,7 +2924,7 @@ mod per_variable_initials_tests {
         let interp_results = tp
             .run_interpreter()
             .expect("interpreter should run successfully");
-        let vm_results = tp.run_vm().expect("VM should run successfully");
+        let vm_results = tp.run_vm_incremental();
 
         let pop_ident = "population";
         let interp_pop = &interp_results[pop_ident];
@@ -2961,7 +2954,7 @@ mod per_variable_initials_tests {
             .flow("inflow", "0", None)
             .stock("s", "c", &["inflow"], &[], None);
 
-        let vm_results = tp.run_vm().expect("VM should succeed");
+        let vm_results = tp.run_vm_incremental();
         let interp_results = tp.run_interpreter().expect("interpreter should succeed");
 
         // Check initial values (step 0)
@@ -2984,12 +2977,18 @@ mod per_variable_initials_tests {
             std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
         let mut cursor = std::io::Cursor::new(file_bytes);
         let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
-        let project = std::sync::Arc::new(crate::project::Project::from(project_datamodel));
+
+        // Interpreter side (retained for cross-validation)
+        let project = std::sync::Arc::new(crate::project::Project::from(project_datamodel.clone()));
         let sim =
             crate::interpreter::Simulation::new(&project, "main").expect("Simulation should build");
-
         let interp_results = sim.run_to_end().expect("interpreter run should succeed");
-        let compiled = sim.compile().expect("compile should succeed");
+
+        // VM via incremental compilation
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
+        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+            .expect("incremental compile should succeed");
         let mut vm = Vm::new(compiled).expect("VM creation should succeed");
         vm.run_to_end().expect("VM run should succeed");
         let vm_results = vm.into_results();
@@ -3018,7 +3017,7 @@ mod per_variable_initials_tests {
             .flow("inflow", "0", None)
             .stock("pop", "rate * 1000", &["inflow"], &[], None);
 
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = tp.compile_incremental().expect("compile should succeed");
         let root_key = &compiled.root;
         let root_module = &compiled.modules[root_key];
 
@@ -3061,7 +3060,7 @@ mod per_variable_initials_tests {
         );
 
         // Verify the stock's initial value is correct: rate * 1000 = 100
-        let vm_results = tp.run_vm().expect("VM should succeed");
+        let vm_results = tp.run_vm_incremental();
         let pop_vm = &vm_results["pop"];
         assert_eq!(pop_vm[0], 100.0, "population initial should be 100");
     }
@@ -3076,7 +3075,7 @@ mod per_variable_initials_tests {
             .stock("s", "arr[A] + arr[B] + arr[C]", &["inflow"], &[], None);
 
         let interp_results = tp.run_interpreter().expect("interpreter should succeed");
-        let vm_results = tp.run_vm().expect("VM should succeed");
+        let vm_results = tp.run_vm_incremental();
 
         // arr[A]=1, arr[B]=2, arr[C]=3, so s = 1+2+3 = 6
         let s_interp = interp_results
@@ -3103,7 +3102,7 @@ mod per_variable_initials_tests {
         }
 
         // Verify CompiledInitial offsets for the array variable
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = tp.compile_incremental().expect("compile should succeed");
         let root_module = &compiled.modules[&compiled.root];
         let arr_initial = root_module
             .compiled_initials
@@ -3145,16 +3144,15 @@ mod vm_reset_and_run_initials_tests {
             .stock("population", "100", &["births"], &["deaths"], None)
     }
 
-    fn build_compiled(tp: &TestProject) -> (crate::interpreter::Simulation, CompiledSimulation) {
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
-        (sim, compiled)
+    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+        tp.compile_incremental()
+            .expect("incremental compile should succeed")
     }
 
     #[test]
     fn test_vm_reset_produces_identical_results() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         // First run
         let mut vm1 = Vm::new(compiled.clone()).unwrap();
@@ -3193,7 +3191,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_vm_reset_after_partial_run() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         // Full run for reference
         let mut vm_ref = Vm::new(compiled.clone()).unwrap();
@@ -3228,7 +3226,7 @@ mod vm_reset_and_run_initials_tests {
             .with_sim_time(0.0, 3.0, 1.0)
             .aux("x", "1", None)
             .aux("prev_x", "PREVIOUS(x)", None);
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
@@ -3285,7 +3283,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_compiled_simulation_clone_produces_equivalent_vm() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
         let compiled_clone = compiled.clone();
 
         let mut vm1 = Vm::new(compiled).unwrap();
@@ -3309,7 +3307,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_run_initials_then_run_to_end_matches_single_call() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         // VM A: single run_to_end
         let mut vm_a = Vm::new(compiled.clone()).unwrap();
@@ -3335,7 +3333,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_run_initials_is_idempotent() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_initials().unwrap();
@@ -3357,7 +3355,7 @@ mod vm_reset_and_run_initials_tests {
             .flow("inflow", "0", None)
             .stock("s", "rate * 1000", &["inflow"], &[], None);
 
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_initials().unwrap();
 
@@ -3384,7 +3382,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_get_series_after_run_to_end() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
@@ -3405,7 +3403,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_get_series_after_partial_run() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to(50.0).unwrap();
@@ -3433,7 +3431,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_get_series_after_run_initials_only() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_initials().unwrap();
@@ -3453,7 +3451,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_get_series_unknown_variable() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
@@ -3467,7 +3465,7 @@ mod vm_reset_and_run_initials_tests {
     #[test]
     fn test_get_series_before_any_run() {
         let tp = pop_model();
-        let (_, compiled) = build_compiled(&tp);
+        let compiled = build_compiled(&tp);
 
         let vm = Vm::new(compiled).unwrap();
         let series = vm.get_series(&Ident::new("population")).unwrap();
@@ -3493,8 +3491,8 @@ mod set_value_tests {
     }
 
     fn build_compiled(tp: &TestProject) -> CompiledSimulation {
-        let sim = tp.build_sim().unwrap();
-        sim.compile().unwrap()
+        tp.compile_incremental()
+            .expect("incremental compile should succeed")
     }
 
     #[test]
@@ -3682,8 +3680,7 @@ mod set_value_tests {
             .flow("births", "pop * birth_rate", None)
             .stock("pop", "100", &["births"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
         // birth_rate IS a simple constant, so set_value should succeed
@@ -3703,8 +3700,7 @@ mod set_value_tests {
             .flow("inflow", "pop * rate", None)
             .stock("pop", "100", &["inflow"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
         // "computed" depends on "rate", so it's not a simple constant
@@ -3772,10 +3768,9 @@ mod set_value_tests {
             std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
         let mut cursor = std::io::Cursor::new(file_bytes);
         let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
-        let project = std::sync::Arc::new(crate::project::Project::from(project_datamodel));
-        let sim =
-            crate::interpreter::Simulation::new(&project, "main").expect("Simulation should build");
-        let compiled = sim.compile().unwrap();
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
+        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main").unwrap();
 
         let mut vm = Vm::new(compiled).unwrap();
         let hares_ident = Ident::<Canonical>::from_unchecked("hares.hares".to_string());
@@ -3798,8 +3793,7 @@ mod set_value_tests {
             .flow("inflow", "0", None)
             .stock("s", "total", &["inflow"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
         let arr_b_ident = Ident::new("arr[b]");
@@ -3831,8 +3825,7 @@ mod set_value_tests {
             .flow("births", "pop * birth_rate", None)
             .stock("pop", "100", &["births"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
 
         // Run without override
         let mut vm1 = Vm::new(compiled.clone()).unwrap();
@@ -3878,8 +3871,7 @@ mod set_value_tests {
             .flow("inflow", "stock_val * total_rate", None)
             .stock("stock_val", "100", &["inflow"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
         // Override rate_a only, then run the full simulation
@@ -3914,8 +3906,7 @@ mod set_value_tests {
             .flow("inflow", "stock_val * rate + scaled", None)
             .stock("stock_val", "100", &["inflow"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
         vm.set_value(&Ident::new("rate"), 0.9).unwrap();
@@ -3942,8 +3933,7 @@ mod set_value_tests {
             .flow("inflow", "rate_a + rate_b", None)
             .stock("s", "0", &["inflow"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let root_module = &compiled.modules[&compiled.root];
 
         // Collect all AssignConstCurr literal_ids from the flows bytecode.
@@ -3985,8 +3975,7 @@ mod set_value_tests {
             .flow("inflow", "rate_a + rate_b", None)
             .stock("s", "rate_a + rate_b", &["inflow"], &[], None);
 
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         let mut vm = Vm::new(compiled).unwrap();
 
         vm.set_value(&Ident::new("rate_a"), 0.5).unwrap();
@@ -4134,8 +4123,7 @@ mod superinstruction_tests {
     use crate::test_common::TestProject;
 
     fn build_vm(tp: &TestProject) -> Vm {
-        let sim = tp.build_sim().unwrap();
-        let compiled = sim.compile().unwrap();
+        let compiled = tp.compile_incremental().unwrap();
         Vm::new(compiled).unwrap()
     }
 
@@ -4726,8 +4714,8 @@ mod vm_reset_run_to_and_constants_tests {
     }
 
     fn build_compiled(tp: &TestProject) -> CompiledSimulation {
-        let sim = tp.build_sim().unwrap();
-        sim.compile().unwrap()
+        tp.compile_incremental()
+            .expect("incremental compile should succeed")
     }
 
     // ================================================================
@@ -5112,8 +5100,7 @@ mod vm_reset_run_to_and_constants_tests {
         )
         .aux("x", "42", None);
 
-        let sim = tp.build_sim().expect("build_sim should succeed");
-        let compiled = sim.compile().expect("compile should succeed");
+        let compiled = tp.compile_incremental().expect("compile should succeed");
         assert!(Vm::new(compiled).is_ok(), "Vm::new must accept dt=1e-8");
     }
 
@@ -5133,8 +5120,7 @@ mod vm_reset_run_to_and_constants_tests {
         )
         .aux("x", "1", None);
 
-        let sim = tp.build_sim().expect("build_sim should succeed");
-        let compiled = sim.compile().expect("compile should succeed");
+        let compiled = tp.compile_incremental().expect("compile should succeed");
         assert!(Vm::new(compiled).is_err(), "Vm::new must reject dt=0");
     }
 

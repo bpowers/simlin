@@ -21,4 +21,4 @@ cargo build -p simlin-mcp
 
 ## Dependencies
 
-Depends on `simlin-engine` for model types, patch application, and file format parsing. Does NOT depend on `libsimlin` (the C FFI crate).
+Depends on `simlin-engine` for model types, patch application, and file format parsing. Does NOT depend on `libsimlin` (the C FFI crate). Tools that call `analyze_model` create a `SimlinDb` and `sync_from_datamodel` to provide the required salsa db and source project.

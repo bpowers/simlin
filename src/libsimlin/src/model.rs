@@ -672,7 +672,13 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         None => return ptr::null_mut(),
     };
 
-    let parsed = engine::db::parse_source_variable(&*db_locked, source_var, sync.project);
+    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
+    let parsed = engine::db::parse_source_variable_with_module_context(
+        &*db_locked,
+        source_var,
+        sync.project,
+        empty_ctx,
+    );
     let ast = match parsed.variable.ast() {
         Some(a) => a,
         None => return ptr::null_mut(),

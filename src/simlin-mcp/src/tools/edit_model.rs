@@ -222,8 +222,13 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         path.to_path_buf()
     };
 
-    let analysis = simlin_engine::analysis::analyze_model(&project, &model_name)
-        .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
+    let mut db = simlin_engine::db::SimlinDb::default();
+    let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+
+    let analysis =
+        simlin_engine::analysis::analyze_model(&project, &mut db, source_project, &model_name)
+            .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
     if !dry_run {
         let json_project = ejson::Project::from(project);

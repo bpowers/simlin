@@ -56,85 +56,6 @@ pub struct FormattedErrors {
     pub has_variable_errors: bool,
 }
 
-/// Collect and format all issues (errors and warnings) for a compiled project.
-///
-/// This includes:
-/// - Project-level errors
-/// - Variable equation errors
-/// - Unit definition errors
-/// - Model-level errors
-/// - Unit warnings (mismatches that don't block simulation but should be surfaced)
-///
-/// Note: Unit warnings are non-blocking issues that allow simulation to proceed,
-/// but are included here so they can be displayed to users for awareness.
-pub fn collect_formatted_issues(project: &engine::Project) -> FormattedErrors {
-    let mut formatted = FormattedErrors::default();
-
-    for error in &project.errors {
-        formatted.errors.push(format_project_error(error));
-    }
-
-    let datamodel: &DatamodelProject = &project.datamodel;
-
-    for (model_name, model) in &project.models {
-        let model_name = model_name.as_str();
-        let datamodel_model = datamodel.get_model(model_name);
-
-        let variable_errors = model.get_variable_errors();
-        if !variable_errors.is_empty() {
-            formatted.has_variable_errors = true;
-        }
-        for (var_name, errors) in variable_errors {
-            let datamodel_var = datamodel_model.and_then(|m| m.get_variable(var_name.as_str()));
-            for error in errors {
-                formatted.errors.push(format_equation_error(
-                    model_name,
-                    var_name.as_str(),
-                    datamodel_var,
-                    &error,
-                ));
-            }
-        }
-
-        let unit_errors = model.get_unit_errors();
-        for (var_name, errors) in unit_errors {
-            let datamodel_var = datamodel_model.and_then(|m| m.get_variable(var_name.as_str()));
-            for error in errors {
-                formatted.errors.push(format_unit_error(
-                    model_name,
-                    var_name.as_str(),
-                    datamodel_var,
-                    &error,
-                ));
-            }
-        }
-
-        if let Some(model_errors) = &model.errors {
-            for error in model_errors {
-                if error.code == ErrorCode::VariablesHaveErrors
-                    && !model.get_variable_errors().is_empty()
-                {
-                    continue;
-                }
-                formatted.has_model_errors = true;
-                formatted.errors.push(format_model_error(model_name, error));
-            }
-        }
-
-        // Collect unit warnings (unit mismatches that don't block simulation)
-        // These are surfaced to users but don't prevent running the model.
-        if let Some(unit_warnings) = &model.unit_warnings {
-            for warning in unit_warnings {
-                formatted
-                    .errors
-                    .push(format_model_error(model_name, warning));
-            }
-        }
-    }
-
-    formatted
-}
-
 /// Format a simulation error reported while creating a VM.
 pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedError {
     let message = format!("error compiling model '{model_name}': {error}");
@@ -147,46 +68,6 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         end_offset: 0,
         kind: FormattedErrorKind::Simulation,
         unit_error_kind: None,
-    }
-}
-
-fn format_project_error(error: &Error) -> FormattedError {
-    let message = format!("project error: {error}");
-    // Project-level unit definition errors should be marked as such
-    let (kind, unit_error_kind) = if error.code == ErrorCode::UnitDefinitionErrors {
-        (FormattedErrorKind::Units, Some(UnitErrorKind::Definition))
-    } else {
-        (FormattedErrorKind::Project, None)
-    };
-    FormattedError {
-        code: error.code,
-        message: Some(message),
-        model_name: None,
-        variable_name: None,
-        start_offset: 0,
-        end_offset: 0,
-        kind,
-        unit_error_kind,
-    }
-}
-
-fn format_model_error(model_name: &str, error: &Error) -> FormattedError {
-    let message = format!("error in model '{model_name}': {error}");
-    // Model-level unit mismatch errors come from unit inference failures
-    let (kind, unit_error_kind) = if error.code == ErrorCode::UnitMismatch {
-        (FormattedErrorKind::Units, Some(UnitErrorKind::Inference))
-    } else {
-        (FormattedErrorKind::Model, None)
-    };
-    FormattedError {
-        code: error.code,
-        message: Some(message),
-        model_name: Some(model_name.to_string()),
-        variable_name: None,
-        start_offset: 0,
-        end_offset: 0,
-        kind,
-        unit_error_kind,
     }
 }
 
@@ -319,10 +200,10 @@ fn format_unit_error(
 
 /// Convert a salsa accumulator diagnostic into a `FormattedError`.
 ///
-/// This produces the same structure as the struct-field path formatters
-/// (`format_equation_error`, `format_unit_error`, `format_model_error`)
-/// but reads from a `Diagnostic` instead of walking model/variable fields.
-/// No datamodel variable is available, so snippets are omitted.
+/// This produces the same structure as the per-field formatters
+/// (`format_equation_error`, `format_unit_error`) but reads from a
+/// `Diagnostic` instead of walking model/variable fields. No datamodel
+/// variable is available, so snippets are omitted.
 pub fn format_diagnostic(diag: &engine::db::Diagnostic) -> FormattedError {
     use engine::db::DiagnosticError;
     match &diag.error {
@@ -377,6 +258,51 @@ pub fn format_diagnostic(diag: &engine::db::Diagnostic) -> FormattedError {
     }
 }
 
+/// Format a diagnostic with snippet context from the datamodel.
+///
+/// Like `format_diagnostic`, but looks up the variable's equation text
+/// from `datamodel` to produce source-annotated snippet output for
+/// equation and unit errors.
+pub fn format_diagnostic_with_datamodel(
+    diag: &engine::db::Diagnostic,
+    datamodel: &DatamodelProject,
+) -> FormattedError {
+    use engine::db::DiagnosticError;
+    let dm_var = datamodel
+        .get_model(&diag.model)
+        .and_then(|m| diag.variable.as_deref().and_then(|v| m.get_variable(v)));
+    match &diag.error {
+        DiagnosticError::Equation(err) => {
+            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
+            format_equation_error(&diag.model, var_name, dm_var, err)
+        }
+        DiagnosticError::Unit(err) => {
+            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
+            format_unit_error(&diag.model, var_name, dm_var, err)
+        }
+        _ => format_diagnostic(diag),
+    }
+}
+
+/// Collect and format all diagnostics from the incremental (salsa) path,
+/// enriching equation/unit errors with snippet context from the datamodel.
+pub fn collect_formatted_issues_from_diagnostics(
+    diagnostics: &[engine::db::Diagnostic],
+    datamodel: &DatamodelProject,
+) -> FormattedErrors {
+    let mut formatted = FormattedErrors::default();
+    for diag in diagnostics {
+        let fe = format_diagnostic_with_datamodel(diag, datamodel);
+        match fe.kind {
+            FormattedErrorKind::Variable => formatted.has_variable_errors = true,
+            FormattedErrorKind::Model => formatted.has_model_errors = true,
+            _ => {}
+        }
+        formatted.errors.push(fe);
+    }
+    formatted
+}
+
 fn variable_equation_text(var: &Variable) -> Option<String> {
     match var.get_equation() {
         Some(Equation::Scalar(eqn)) => Some(eqn.clone()),
@@ -411,6 +337,7 @@ fn combine_snippet_and_summary(snippet: Option<String>, summary: String) -> Opti
 mod tests {
     use super::*;
     use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::{collect_all_diagnostics, sync_from_datamodel, SimlinDb};
     use simlin_engine::test_common::TestProject;
 
     #[test]
@@ -418,8 +345,10 @@ mod tests {
         let datamodel = TestProject::new("equation-error")
             .aux("bad", "1 + bogus", None)
             .build_datamodel();
-        let project = engine::Project::from(datamodel);
-        let formatted = collect_formatted_issues(&project);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let formatted = collect_formatted_issues_from_diagnostics(&diagnostics, &datamodel);
 
         assert!(formatted.has_variable_errors);
         let error = formatted
@@ -449,8 +378,10 @@ mod tests {
             .aux("source", "1", Some("Month"))
             .aux("bad_units", "source", Some("Person"))
             .build_datamodel();
-        let project = engine::Project::from(datamodel);
-        let formatted = collect_formatted_issues(&project);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let formatted = collect_formatted_issues_from_diagnostics(&diagnostics, &datamodel);
 
         let error = formatted
             .errors

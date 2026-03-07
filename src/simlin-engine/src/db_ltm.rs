@@ -20,8 +20,8 @@ use super::{
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
     model_implicit_var_info, model_ltm_all_link_synthetic_variables, model_ltm_synthetic_variables,
-    model_module_map, parse_source_variable, project_datamodel_dims, project_units_context,
-    variable_dimensions, variable_size,
+    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
+    project_datamodel_dims, project_units_context, variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -557,8 +557,13 @@ pub(super) fn compile_ltm_equation_fragment(
                         .map(|sm| compute_layout(db, *sm, project, false).n_slots)
                         .unwrap_or(1);
 
-                    let parent_parsed =
-                        parse_source_variable(db, im_meta.parent_source_var, project);
+                    let module_ctx = model_module_ident_context(db, model, vec![]);
+                    let parent_parsed = parse_source_variable_with_module_context(
+                        db,
+                        im_meta.parent_source_var,
+                        project,
+                        module_ctx,
+                    );
                     let input_prefix = format!("{module_var_name}\u{00B7}");
                     let module_inputs = parent_parsed
                         .implicit_vars

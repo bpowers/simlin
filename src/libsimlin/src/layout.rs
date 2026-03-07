@@ -86,17 +86,24 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         })
         .filter(|&z| z > 0.0);
 
-    // Build db_state from the persistent sync state so the layout engine
-    // can use the incremental salsa compilation path for LTM analysis.
+    // Layout generation requires the salsa db for dependency extraction
+    // and LTM analysis. The project must have been synced first.
     let mut db_locked = proj.db.lock().unwrap();
     let sync_locked = proj.sync_state.lock().unwrap();
-    let db_state = sync_locked
-        .as_ref()
-        .map(|state| (&mut *db_locked, state.project));
-    // Drop sync_locked before calling generate_best_layout (we only
-    // needed the SourceProject handle, which is Copy).
+    let source_project = match sync_locked.as_ref() {
+        Some(state) => state.project,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("project must be synced before layout generation"),
+            );
+            return;
+        }
+    };
     drop(sync_locked);
 
+    let db_state = Some((&mut *db_locked, source_project));
     let mut layout =
         match engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state) {
             Ok(l) => l,

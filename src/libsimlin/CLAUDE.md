@@ -15,7 +15,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
   - `SimlinErrorCode` enum (35+ variants), `SimlinErrorKind`, `SimlinUnitErrorKind`
 - **`src/ffi.rs`** - Opaque FFI marker types for cbindgen (`SimlinProject`, `SimlinSim`, `SimlinModel`, `SimlinError`) and C-compatible structs (`SimlinLoop`, `SimlinLoops`, `SimlinLink`, `SimlinLinks`, `SimlinLoopPolarity`, `SimlinLinkPolarity`, `SimlinJsonFormat`)
 - **`src/ffi_error.rs`** - Rich error objects for FFI: `ErrorDetail` builder, `OwnedDetail` with CStrings, `SimlinError` struct with code/message/details array, `FfiError` wrapper for anyhow chains
-- **`src/errors.rs`** - Human-readable error formatting: `FormattedError`/`FormattedErrors`, `collect_formatted_issues()`, `format_diagnostic()` (converts salsa `Diagnostic` to `FormattedError`), per-category formatters (project/model/equation/unit/assembly/simulation errors)
+- **`src/errors.rs`** - Human-readable error formatting: `FormattedError`/`FormattedErrors`, `format_diagnostic()` (converts salsa `Diagnostic` to `FormattedError`), `collect_formatted_issues_from_diagnostics()` (bulk conversion), per-category formatters (equation/unit/assembly/simulation errors). The old monolithic `collect_formatted_issues()` was removed; all error collection now goes through the salsa diagnostic accumulator path.
 
 ### Project lifecycle
 
@@ -55,7 +55,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 ### Layout
 
 - **`src/layout.rs`** - Automatic diagram layout:
-  - `simlin_project_diagram_sync()` - Generate best layout for a model, replacing its views in-place. Preserves existing zoom. Works on all targets including WASM.
+  - `simlin_project_diagram_sync()` - Generate best layout for a model, replacing its views in-place. Preserves existing zoom. Works on all targets including WASM. Requires the project to be synced to the salsa db first (returns an error otherwise).
 
 ### Patching
 

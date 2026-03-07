@@ -24,6 +24,7 @@ pub use db_analysis::{
     DetectedLoopsResult, LoopCircuitsResult, compute_link_polarities, model_causal_edges,
     model_cycle_partitions, model_detected_loops, model_loop_circuits,
 };
+pub(crate) use db_analysis::{causal_graph_from_edges, reconstruct_model_variables};
 
 #[path = "db_implicit_deps.rs"]
 mod db_implicit_deps;
@@ -678,8 +679,7 @@ impl std::fmt::Debug for ParsedVariableResult {
 /// Context::new_with_builtins calls.
 ///
 /// Unit definition parsing errors are accumulated as diagnostics so they
-/// appear in `collect_all_diagnostics`. Previously these were stored in
-/// `engine::Project.errors` and walked by `collect_formatted_issues`.
+/// appear in `collect_all_diagnostics`.
 #[salsa::tracked(returns(ref))]
 pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
     let dm_units = source_units_to_datamodel(project.units(db));
@@ -720,12 +720,25 @@ fn parse_source_variable_impl(
     project: SourceProject,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
-    let dims = project_datamodel_dims(db, project);
+    let relevant_dim_names = variable_relevant_dimensions(db, var);
+    let dims: Vec<datamodel::Dimension> = if relevant_dim_names.is_empty() {
+        // Scalar variable -- no dimension dependency, so changing any
+        // project dimension won't invalidate this parse result.
+        vec![]
+    } else {
+        let all_source_dims = project.dimensions(db);
+        let expanded = expand_maps_to_chains(relevant_dim_names, all_source_dims);
+        project_datamodel_dims(db, project)
+            .iter()
+            .filter(|d| expanded.contains(&d.name))
+            .cloned()
+            .collect()
+    };
     let units_ctx = project_units_context(db, project);
     let dm_var = reconstruct_variable(db, var);
     let mut implicit_vars = Vec::new();
     let variable = crate::variable::parse_var_with_module_context(
-        dims,
+        &dims,
         &dm_var,
         &mut implicit_vars,
         units_ctx,
@@ -739,14 +752,6 @@ fn parse_source_variable_impl(
     }
 }
 
-#[salsa::tracked(returns(ref))]
-pub fn parse_source_variable(
-    db: &dyn Db,
-    var: SourceVariable,
-    project: SourceProject,
-) -> ParsedVariableResult {
-    parse_source_variable_impl(db, var, project, None)
-}
 #[salsa::tracked(returns(ref))]
 pub fn parse_source_variable_with_module_context<'db>(
     db: &'db dyn Db,
@@ -787,7 +792,7 @@ fn module_ident_context_for_model<'db>(
 }
 
 #[salsa::tracked]
-fn model_module_ident_context<'db>(
+pub fn model_module_ident_context<'db>(
     db: &'db dyn Db,
     model: SourceModel,
     extra_module_idents: Vec<String>,
@@ -828,7 +833,7 @@ fn variable_direct_dependencies_impl(
     var: SourceVariable,
     project: SourceProject,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    module_ident_context: Option<ModuleIdentContext>,
+    module_ident_context: ModuleIdentContext,
 ) -> VariableDeps {
     match var.kind(db) {
         SourceVariableKind::Module => {
@@ -848,11 +853,8 @@ fn variable_direct_dependencies_impl(
             }
         }
         _ => {
-            let parsed = if let Some(module_ident_context) = module_ident_context {
-                parse_source_variable_with_module_context(db, var, project, module_ident_context)
-            } else {
-                parse_source_variable(db, var, project)
-            };
+            let parsed =
+                parse_source_variable_with_module_context(db, var, project, module_ident_context);
             let dims = source_dims_to_datamodel(project.dimensions(db));
             let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
             let models = HashMap::new();
@@ -908,12 +910,14 @@ fn variable_direct_dependencies_impl(
 
 #[salsa::tracked(returns(ref))]
 /// Default direct dependency extraction (no module-input specialization).
+/// Uses an empty module-ident context since the caller's model is unknown.
 pub fn variable_direct_dependencies(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> VariableDeps {
-    variable_direct_dependencies_impl(db, var, project, None, None)
+    let empty_context = ModuleIdentContext::new(db, vec![]);
+    variable_direct_dependencies_impl(db, var, project, None, empty_context)
 }
 
 /// Per-variable dependency extraction for a specific module input set.
@@ -929,7 +933,8 @@ pub fn variable_direct_dependencies_with_inputs(
     module_input_names: Vec<String>,
 ) -> VariableDeps {
     let module_inputs = canonical_module_input_set(&module_input_names);
-    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs), None)
+    let empty_context = ModuleIdentContext::new(db, vec![]);
+    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs), empty_context)
 }
 
 #[salsa::tracked(returns(ref))]
@@ -940,7 +945,7 @@ pub fn variable_direct_dependencies_with_context<'db>(
     project: SourceProject,
     module_ident_context: ModuleIdentContext<'db>,
 ) -> VariableDeps {
-    variable_direct_dependencies_impl(db, var, project, None, Some(module_ident_context))
+    variable_direct_dependencies_impl(db, var, project, None, module_ident_context)
 }
 
 #[salsa::tracked(returns(ref))]
@@ -952,13 +957,7 @@ pub fn variable_direct_dependencies_with_context_and_inputs<'db>(
     module_input_names: Vec<String>,
 ) -> VariableDeps {
     let module_inputs = canonical_module_input_set(&module_input_names);
-    variable_direct_dependencies_impl(
-        db,
-        var,
-        project,
-        Some(&module_inputs),
-        Some(module_ident_context),
-    )
+    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs), module_ident_context)
 }
 
 /// Metadata for a single implicit variable generated by builtin expansion.
@@ -1188,8 +1187,9 @@ fn model_dependency_graph_impl(
 
         // Include implicit variables from this variable's deps result.
         // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable), salsa's backdating ensures that if the
-        // deps + implicit vars haven't changed, this function is cached.
+        // parse_source_variable_with_module_context), salsa's backdating
+        // ensures that if the deps + implicit vars haven't changed, this
+        // function is cached.
         for implicit in &deps.implicit_vars {
             let mut dt_deps = implicit.dt_deps.clone();
             dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
@@ -1543,10 +1543,11 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // Helper: build a ModelStage0 from a SourceModel's parsed variables.
     let build_model_s0 = |src_model: &SourceModel, is_stdlib: bool| -> ModelStage0 {
         let src_vars = src_model.variables(db);
+        let module_ctx = model_module_ident_context(db, *src_model, vec![]);
         let mut var_list: Vec<VariableStage0> = Vec::new();
         let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
         for (_name, svar) in src_vars.iter() {
-            let parsed = parse_source_variable(db, *svar, project);
+            let parsed = parse_source_variable_with_module_context(db, *svar, project, module_ctx);
             var_list.push(parsed.variable.clone());
             implicit_dm.extend(parsed.implicit_vars.iter().cloned());
         }
@@ -1682,10 +1683,10 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset
-    // of parse_source_variable: it first accumulates unit definition
-    // syntax errors from the parsed variable, then checks for equation
-    // parse errors, then proceeds with compilation which can surface
-    // additional errors like BadTable, MismatchedDimensions, etc.
+    // of parse_source_variable_with_module_context: it first accumulates
+    // unit definition syntax errors from the parsed variable, then checks
+    // for equation parse errors, then proceeds with compilation which can
+    // surface additional errors like BadTable, MismatchedDimensions, etc.
     //
     // We use is_root: true and empty module_input_names for diagnostic
     // purposes. The is_root flag only affects offset layout (whether
@@ -1851,7 +1852,7 @@ pub fn module_ilink_equation_text<'db>(
 /// These are static properties of stdlib models and never change.
 ///
 /// On native targets, uses a separate thread for initialization because
-/// `Project::from()` creates its own salsa db, which conflicts if we're
+/// syncing creates a separate salsa db, which conflicts if we're
 /// inside a tracked function query on the caller's db.
 /// On wasm32, threads are unavailable so we initialize directly (safe
 /// because WASM is single-threaded).
@@ -1886,7 +1887,18 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
                 ai_information: None,
             };
 
-            let project = crate::project::Project::from(dm_project);
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &dm_project);
+            let source_models: HashMap<String, SourceModel> = sync
+                .models
+                .iter()
+                .map(|(name, sm)| (name.clone(), sm.source))
+                .collect();
+            let project = crate::project::Project::base_from(
+                dm_project,
+                Some((&db, sync.project, &source_models)),
+                |_, _, _| {},
+            );
             crate::ltm_augment::compute_composite_ports(&project)
         };
 
@@ -2885,13 +2897,84 @@ pub fn sync_from_datamodel_incremental(
     }
 }
 
+/// Expands a set of dimension names to include all dimensions reachable
+/// via `maps_to` / `mappings` in either direction.
+///
+/// Forward: if A maps_to B, {A} → {A, B}.
+/// Reverse: if A maps_to B, {B} → {B, A}.
+///
+/// The reverse direction is necessary when a variable declares its own
+/// dimension as e.g. DimB but its equation references DimA via a cross-
+/// dimension mapping (DimA → DimB). The per-element implicit variables
+/// created for the SMTH/DELAY expansion use elements of DimA, so DimA
+/// must be present in the DimensionsContext for the substitution to work.
+fn expand_maps_to_chains(
+    dim_names: &BTreeSet<String>,
+    all_dims: &[SourceDimension],
+) -> BTreeSet<String> {
+    let mut expanded = dim_names.clone();
+    let dim_map: HashMap<&str, &SourceDimension> =
+        all_dims.iter().map(|d| (d.name.as_str(), d)).collect();
+
+    let mut to_visit: Vec<String> = dim_names.iter().cloned().collect();
+    while let Some(name) = to_visit.pop() {
+        // Forward: follow maps_to and mappings targets from the current dim.
+        if let Some(dim) = dim_map.get(name.as_str()) {
+            if let Some(ref target) = dim.maps_to
+                && expanded.insert(target.clone())
+            {
+                to_visit.push(target.clone());
+            }
+            for mapping in &dim.mappings {
+                if expanded.insert(mapping.target.clone()) {
+                    to_visit.push(mapping.target.clone());
+                }
+            }
+        }
+        // Reverse: find any dimension that maps_to (or has a mapping targeting)
+        // our current dim. This ensures that when a variable is subscripted by
+        // DimB, the DimensionsContext also contains any DimA that maps to DimB,
+        // so cross-dimension subscript substitution works in builtins_visitor.
+        for source_dim in all_dims {
+            let maps_to_current = source_dim
+                .maps_to
+                .as_deref()
+                .is_some_and(|t| t == name.as_str())
+                || source_dim.mappings.iter().any(|m| m.target == name);
+            if maps_to_current && expanded.insert(source_dim.name.clone()) {
+                to_visit.push(source_dim.name.clone());
+            }
+        }
+    }
+    expanded
+}
+
+/// Extracts the set of dimension names referenced in a variable's equation.
+///
+/// Reads only `var.equation(db)` -- never the project-level dimension list.
+/// This means scalar variables produce an empty set without establishing a
+/// dependency on `project.dimensions`, so dimension changes cannot
+/// invalidate them. For arrayed variables the returned names come from the
+/// equation definition, not from the project dimension list.
+#[salsa::tracked(returns(ref))]
+pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSet<String> {
+    match var.equation(db) {
+        SourceEquation::Scalar(_) => BTreeSet::new(),
+        SourceEquation::ApplyToAll(dim_names, _) => dim_names.iter().cloned().collect(),
+        SourceEquation::Arrayed(dim_names, _, _) => dim_names.iter().cloned().collect(),
+    }
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn variable_dimensions(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> Vec<crate::dimensions::Dimension> {
-    let parsed = parse_source_variable(db, var, project);
+    // Module context doesn't affect dimension extraction, so an empty
+    // context is correct here.
+    let empty_context = ModuleIdentContext::new(db, vec![]);
+    let parsed = parse_source_variable_with_module_context(db, var, project, empty_context);
     match parsed.variable.get_dimensions() {
         Some(dims) => dims.to_vec(),
         None => Vec::new(),
@@ -5343,7 +5426,6 @@ pub fn assemble_simulation(
     }
 
     // Build Specs, preferring model-level sim_specs override when present
-    // (mirrors the monolithic path in interpreter.rs compile_project)
     let main_model_canonical = canonicalize(main_model_name);
     let specs = if let Some(source_model) = project_models.get(main_model_canonical.as_ref())
         && let Some(ref model_specs) = *source_model.model_sim_specs(db)
@@ -5793,11 +5875,11 @@ pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enable
     }
 }
 
-/// Compile a project incrementally using salsa.
+/// Compile a project incrementally using salsa tracked functions.
 ///
-/// This is the new entry point that replaces compile_project for the
-/// incremental path. Falls back to the monolithic compile_project when
-/// the incremental path is not yet supported (e.g., multi-model projects).
+/// This is the production compilation entry point. Returns the assembled
+/// `CompiledSimulation` for the named model, or `Err(NotSimulatable)` if
+/// compilation fails (e.g., unresolved references, unsupported builtins).
 pub fn compile_project_incremental(
     db: &SimlinDb,
     project: SourceProject,
@@ -5888,6 +5970,9 @@ mod db_diagnostic_tests;
 #[cfg(test)]
 #[path = "db_differential_tests.rs"]
 mod db_differential_tests;
+#[cfg(test)]
+#[path = "db_dimension_invalidation_tests.rs"]
+mod db_dimension_invalidation_tests;
 #[cfg(test)]
 #[path = "db_fragment_cache_tests.rs"]
 mod db_fragment_cache_tests;

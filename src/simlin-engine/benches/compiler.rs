@@ -8,7 +8,6 @@
 //! ## Benchmark groups
 //!
 //! - `parse_mdl` -- MDL text -> `datamodel::Project` (lexing + parsing + conversion)
-//! - `project_build` -- `datamodel::Project` -> engine `Project` (unit inference, dependency resolution)
 //! - `bytecode_compile` -- `datamodel::Project` -> `CompiledSimulation` (bytecode generation)
 //! - `full_pipeline` -- MDL text -> `CompiledSimulation` (all stages end-to-end)
 //! - `salsa_incremental` -- measures `compile_project_incremental` on synthetic
@@ -29,7 +28,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use simlin_engine::Project as CompiledProject;
 use simlin_engine::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::open_vensim;
@@ -68,16 +66,11 @@ fn load_model(fixture: &ModelFixture) -> String {
 }
 
 /// Check whether a datamodel project can be compiled to bytecode via the
-/// incremental path.  Uses catch_unwind because some models (e.g. C-LEARN)
-/// panic in the incremental compiler rather than returning a clean error.
+/// incremental path.
 fn is_simulatable(datamodel: &datamodel::Project) -> bool {
-    let dm = datamodel.clone();
-    std::panic::catch_unwind(|| {
-        let mut db = SimlinDb::default();
-        let state = sync_from_datamodel_incremental(&mut db, &dm, None);
-        compile_project_incremental(&db, state.project, "main")
-    })
-    .is_ok_and(|r| r.is_ok())
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    compile_project_incremental(&db, state.project, "main").is_ok()
 }
 
 /// Benchmark: MDL text -> datamodel::Project.
@@ -95,34 +88,6 @@ fn bench_parse_mdl(c: &mut Criterion) {
             &contents,
             |b, contents| {
                 b.iter(|| black_box(open_vensim(contents).unwrap()));
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Benchmark: datamodel::Project -> engine Project.
-///
-/// Measures unit inference, dependency resolution, topological sorting,
-/// and stdlib loading.  The parse step is excluded.
-fn bench_project_build(c: &mut Criterion) {
-    let mut group = c.benchmark_group("project_build");
-    group.measurement_time(Duration::from_secs(10));
-
-    for fixture in MODELS {
-        let contents = load_model(fixture);
-        let datamodel = open_vensim(&contents).unwrap();
-
-        group.bench_with_input(
-            BenchmarkId::from_parameter(fixture.name),
-            &datamodel,
-            |b, datamodel| {
-                b.iter_batched(
-                    || datamodel.clone(),
-                    |dm| black_box(CompiledProject::from(dm)),
-                    criterion::BatchSize::SmallInput,
-                );
             },
         );
     }
@@ -350,7 +315,6 @@ fn bench_incremental_add_remove(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_parse_mdl,
-    bench_project_build,
     bench_bytecode_compile,
     bench_full_pipeline,
     bench_incremental_equation_edit,

@@ -17,8 +17,9 @@ use crate::canonicalize;
 use crate::datamodel;
 
 use super::{
-    Db, SourceModel, SourceProject, SourceVariableKind, parse_source_variable,
-    source_dims_to_datamodel, variable_direct_dependencies,
+    Db, SourceModel, SourceProject, SourceVariableKind, model_module_ident_context,
+    parse_source_variable_with_module_context, source_dims_to_datamodel,
+    variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -116,7 +117,7 @@ pub(crate) fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm:
 /// dependency sets and structural variable info.
 ///
 /// Reads `variable_direct_dependencies` (establishing salsa dep on dep
-/// sets) and `parse_source_variable` (for implicit variable details like
+/// sets) and `parse_source_variable_with_module_context` (for implicit variable details like
 /// module input refs). Salsa backdating ensures that when equation text
 /// changes without changing the resulting edge structure, the cached
 /// result is reused and downstream graph algorithms are skipped.
@@ -127,6 +128,7 @@ pub fn model_causal_edges(
     project: SourceProject,
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
+    let module_ctx = model_module_ident_context(db, model, vec![]);
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
@@ -177,7 +179,8 @@ pub fn model_causal_edges(
         }
 
         // Include implicit variables (module instances from SMOOTH/DELAY expansion)
-        let parsed = parse_source_variable(db, *source_var, project);
+        let parsed =
+            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
@@ -352,7 +355,7 @@ pub fn model_cycle_partitions(
 
 /// Reconstruct `Variable` objects from salsa-tracked parse results for
 /// all variables in a model (including implicit variables).
-pub(super) fn reconstruct_model_variables(
+pub(crate) fn reconstruct_model_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -360,6 +363,7 @@ pub(super) fn reconstruct_model_variables(
     use crate::common::{Canonical, Ident};
 
     let source_vars = model.variables(db);
+    let module_ctx = model_module_ident_context(db, model, vec![]);
     let dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
     let models = HashMap::new();
@@ -372,7 +376,8 @@ pub(super) fn reconstruct_model_variables(
     let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
 
     for (name, source_var) in source_vars.iter() {
-        let parsed = parse_source_variable(db, *source_var, project);
+        let parsed =
+            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
         let lowered = crate::model::lower_variable(&scope, &parsed.variable);
         variables.insert(Ident::new(name), lowered);
 
@@ -410,6 +415,7 @@ pub(super) fn reconstruct_single_variable(
     use crate::common::{Canonical, Ident};
 
     let source_vars = model.variables(db);
+    let module_ctx = model_module_ident_context(db, model, vec![]);
     let dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
     let models = HashMap::new();
@@ -421,7 +427,8 @@ pub(super) fn reconstruct_single_variable(
 
     // Check explicit variables first
     if let Some(source_var) = source_vars.get(var_name) {
-        let parsed = parse_source_variable(db, *source_var, project);
+        let parsed =
+            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
         let lowered = crate::model::lower_variable(&scope, &parsed.variable);
         return Some(lowered);
     }
@@ -431,7 +438,8 @@ pub(super) fn reconstruct_single_variable(
     let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
 
     for (_name, source_var) in source_vars.iter() {
-        let parsed = parse_source_variable(db, *source_var, project);
+        let parsed =
+            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
             if Ident::<Canonical>::new(&imp_name) == canonical_target {

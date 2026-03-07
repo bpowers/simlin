@@ -7,15 +7,25 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::ErrorCode;
-use crate::common::UnitError;
 use crate::common::{Canonical, Ident};
-use crate::compiler::Module;
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
+use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use crate::vm::{CompiledSimulation, Vm};
+use std::collections::HashMap;
+
+#[cfg(any(test, feature = "testing"))]
+use crate::common::ErrorCode;
+#[cfg(any(test, feature = "testing"))]
+use crate::common::UnitError;
+#[cfg(any(test, feature = "testing"))]
+use crate::compiler::Module;
+#[cfg(any(test, feature = "testing"))]
 use crate::interpreter::Simulation;
+#[cfg(any(test, feature = "testing"))]
 use crate::project::Project as CompiledProject;
-use crate::vm::Vm;
-use std::collections::{BTreeSet, HashMap};
+#[cfg(any(test, feature = "testing"))]
+use std::collections::BTreeSet;
+#[cfg(any(test, feature = "testing"))]
 use std::sync::Arc;
 
 /// Builder for creating test projects with support for arrays, units, and all variable types
@@ -366,7 +376,13 @@ impl TestProject {
             ai_information: None,
         }
     }
+}
 
+/// Methods that use the monolithic `Project::from` construction path.
+/// These are retained only for the AST interpreter cross-validation path
+/// (AC4.6). Production compilation uses `compile_project_incremental`.
+#[cfg(any(test, feature = "testing"))]
+impl TestProject {
     /// Build and compile the project
     pub fn compile(&self) -> Result<CompiledProject, Vec<(String, ErrorCode)>> {
         let datamodel = self.build_datamodel();
@@ -662,16 +678,6 @@ impl TestProject {
             .clone()
     }
 
-    /// Get VM results for a variable (allows checking for NaN values)
-    pub fn vm_result(&self, var_name: &str) -> Vec<f64> {
-        let results = self.run_vm().expect("VM should run successfully");
-
-        results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in VM results"))
-            .clone()
-    }
-
     /// Returns true if the flow runlist for the compiled module contains at least one
     /// AssignTemp node (indicating A2A hoisting occurred for array-producing builtins).
     pub fn flow_runlist_has_assign_temp(&self) -> bool {
@@ -721,68 +727,29 @@ impl TestProject {
         Module::new(&compiled, model.clone(), &inputs, true)
             .map_err(|e| format!("Failed to create module: {e:?}"))
     }
+}
 
-    /// Run the VM and get results
+impl TestProject {
+    /// Get VM results for a variable (allows checking for NaN values)
+    pub fn vm_result(&self, var_name: &str) -> Vec<f64> {
+        let results = self.run_vm().expect("VM should run successfully");
+
+        results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in VM results"))
+            .clone()
+    }
+
+    /// Run the VM via the incremental compilation path and get results.
     pub fn run_vm(&self) -> Result<HashMap<String, Vec<f64>>, String> {
-        let sim = self.build_sim()?;
-
-        // Compile to bytecode
-        let compiled = sim
-            .compile()
+        let compiled = self
+            .compile_incremental()
             .map_err(|e| format!("VM compilation failed: {e:?}"))?;
-
-        // Run the VM
         let mut vm = Vm::new(compiled).map_err(|e| format!("VM creation failed: {e:?}"))?;
         vm.run_to_end()
             .map_err(|e| format!("VM run failed: {e:?}"))?;
         let results = vm.into_results();
-
-        // Extract results - VM results use the same format as interpreter
-        let mut output: HashMap<String, Vec<f64>> = HashMap::new();
-
-        for (name, &offset) in &results.offsets {
-            let mut values = Vec::new();
-            for step in 0..results.step_count {
-                let idx = step * results.step_size + offset;
-                values.push(results.data[idx]);
-            }
-            output.insert(name.to_string(), values);
-        }
-
-        // Collect array variables by their base name (same logic as run_interpreter)
-        type ArrayElement = (usize, String, Vec<f64>);
-        let mut array_results: HashMap<Ident<Canonical>, Vec<ArrayElement>> = HashMap::new();
-        for (name, values) in &output {
-            if let Some(bracket_pos) = name.as_str().find('[') {
-                let base_name =
-                    Ident::<Canonical>::from_str_unchecked(&name.as_str()[..bracket_pos]);
-                let offset = results
-                    .offsets
-                    .get(&Ident::<Canonical>::from_str_unchecked(name))
-                    .copied()
-                    .unwrap_or(usize::MAX);
-                let entry = array_results.entry(base_name.clone()).or_default();
-                entry.push((offset, name.to_string(), values.clone()));
-            }
-        }
-
-        // Sort and flatten array elements
-        for (base_name, mut elements) in array_results {
-            elements.sort_by_key(|e| e.0);
-            if !elements.is_empty() {
-                let n_steps = elements[0].2.len();
-                let mut combined = Vec::new();
-                let last_step = n_steps - 1;
-                for (_offset, _name, values) in &elements {
-                    if last_step < values.len() {
-                        combined.push(values[last_step]);
-                    }
-                }
-                output.insert(base_name.to_string(), combined);
-            }
-        }
-
-        Ok(output)
+        Ok(collect_results(&results))
     }
 
     /// Test that VM evaluation succeeds and returns expected values
@@ -808,6 +775,114 @@ impl TestProject {
             );
         }
     }
+
+    // ── Incremental compilation methods ────────────────────────────────
+
+    /// Compile the project via the incremental salsa pipeline.
+    pub fn compile_incremental(&self) -> crate::Result<CompiledSimulation> {
+        let datamodel = self.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        compile_project_incremental(&db, sync.project, "main")
+    }
+
+    /// Run the VM via the incremental compilation path and collect results.
+    pub fn run_vm_incremental(&self) -> HashMap<String, Vec<f64>> {
+        let compiled = self
+            .compile_incremental()
+            .expect("incremental compilation should succeed");
+        let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        collect_results(&results)
+    }
+
+    /// Assert that incremental compilation succeeds.
+    pub fn assert_compiles_incremental(&self) {
+        if let Err(e) = self.compile_incremental() {
+            panic!("Incremental compilation failed: {e:?}");
+        }
+    }
+
+    /// Get a single variable's results from an incremental VM run.
+    pub fn vm_result_incremental(&self, var_name: &str) -> Vec<f64> {
+        let results = self.run_vm_incremental();
+        results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in incremental VM results"))
+            .clone()
+    }
+
+    /// Assert that a variable's incremental VM results match expected values.
+    pub fn assert_vm_result_incremental(&self, var_name: &str, expected: &[f64]) {
+        let results = self.run_vm_incremental();
+
+        let actual = results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in incremental VM results"));
+
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "Incremental VM result length mismatch for {var_name}: expected {}, got {}",
+            expected.len(),
+            actual.len()
+        );
+
+        for (i, (actual_val, expected_val)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual_val - expected_val).abs() < 1e-6,
+                "Incremental VM value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
+            );
+        }
+    }
+}
+
+/// Extract variable timeseries from simulation results, including
+/// aggregated base-name entries for arrayed variables.
+fn collect_results(results: &crate::Results) -> HashMap<String, Vec<f64>> {
+    let mut output: HashMap<String, Vec<f64>> = HashMap::new();
+
+    for (name, &offset) in &results.offsets {
+        let mut values = Vec::new();
+        for step in 0..results.step_count {
+            let idx = step * results.step_size + offset;
+            values.push(results.data[idx]);
+        }
+        output.insert(name.to_string(), values);
+    }
+
+    type ArrayElement = (usize, String, Vec<f64>);
+    let mut array_results: HashMap<Ident<Canonical>, Vec<ArrayElement>> = HashMap::new();
+    for (name, values) in &output {
+        if let Some(bracket_pos) = name.as_str().find('[') {
+            let base_name = Ident::<Canonical>::from_str_unchecked(&name.as_str()[..bracket_pos]);
+            let offset = results
+                .offsets
+                .get(&Ident::<Canonical>::from_str_unchecked(name))
+                .copied()
+                .unwrap_or(usize::MAX);
+            let entry = array_results.entry(base_name.clone()).or_default();
+            entry.push((offset, name.to_string(), values.clone()));
+        }
+    }
+
+    for (base_name, mut elements) in array_results {
+        elements.sort_by_key(|e| e.0);
+        if !elements.is_empty() {
+            let n_steps = elements[0].2.len();
+            let mut combined = Vec::new();
+            let last_step = n_steps - 1;
+            for (_offset, _name, values) in &elements {
+                if last_step < values.len() {
+                    combined.push(values[last_step]);
+                }
+            }
+            output.insert(base_name.to_string(), combined);
+        }
+    }
+
+    output
 }
 
 /// Helper to parse array declarations like "name[dim1,dim2]"
