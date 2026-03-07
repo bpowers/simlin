@@ -16,12 +16,6 @@ pub mod uid;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 
-use crate::common::{Canonical, Ident, canonicalize};
-use crate::datamodel;
-use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
-use crate::datamodel::{Rect, ViewElement};
-use crate::model::ModelStage1;
-
 use self::annealing::{FlowTemplate, LineSegment, run_annealing_with_filter};
 use self::chain::{DIAGRAM_ORIGIN_MARGIN, compute_chain_positions, make_cloud_node_ident};
 use self::config::LayoutConfig;
@@ -36,6 +30,10 @@ use self::placement::{
 use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
 use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
+use crate::common::{Ident, canonicalize};
+use crate::datamodel;
+use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
+use crate::datamodel::{Rect, ViewElement};
 
 /// Tracks the bounding box of all layout elements.
 struct Bounds {
@@ -1865,33 +1863,22 @@ fn resolve_model_name<'a>(project: &'a datamodel::Project, model_name: &'a str) 
         .unwrap_or(model_name)
 }
 
-fn try_compile_model(
+/// Ensure we have a mutable salsa db + source project, creating a
+/// temporary one if the caller didn't provide one.
+fn ensure_db_state_mut<'a>(
     project: &datamodel::Project,
-    model_name: &str,
-) -> Option<std::sync::Arc<ModelStage1>> {
-    let actual_name = resolve_model_name(project, model_name);
-    let project_clone = project.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::project::Project::from(project_clone)
-    }));
-    let compiled = result.ok()?;
-    let model_ident = Ident::new(actual_name);
-    compiled.models.get(&model_ident).cloned()
-}
-
-/// Returns true if the compiled model has reliable AST-based dependency
-/// information for the given variable. When false (variable not found or
-/// has no AST due to a parse error), callers should fall back to
-/// string-heuristic extraction.
-fn has_compiled_ast(cm: &ModelStage1, ident: &Ident<Canonical>) -> bool {
-    matches!(
-        cm.variables.get(ident),
-        Some(crate::variable::Variable::Stock {
-            init_ast: Some(_),
-            ..
-        }) | Some(crate::variable::Variable::Var { ast: Some(_), .. })
-            | Some(crate::variable::Variable::Module { .. })
-    )
+    db_state: Option<(&'a mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    local_db: &'a mut Option<crate::db::SimlinDb>,
+) -> (&'a mut crate::db::SimlinDb, crate::db::SourceProject) {
+    match db_state {
+        Some((db, sp)) => (db, sp),
+        None => {
+            let db = local_db.insert(crate::db::SimlinDb::default());
+            // Extract the Copy SourceProject handle before reborrowing db.
+            let source_project = crate::db::sync_from_datamodel(db, project).project;
+            (db, source_project)
+        }
+    }
 }
 
 /// Extract variable dependencies from an equation using word-boundary
@@ -2003,25 +1990,17 @@ fn build_feedback_loops_from_metadata(
     feedback_loops
 }
 
-/// Try to detect feedback loops using LTM analysis: compile the project,
-/// detect loops, augment with synthetic LTM variables, simulate, and extract
-/// importance time series. Returns `None` if any step fails, signaling the
-/// caller to fall back to persisted loop_metadata.
-///
-/// When `db_state` is provided, uses the incremental salsa compilation path
-/// instead of the monolithic `Project::from` + `with_ltm()` pipeline.
+/// Try to detect feedback loops using LTM analysis via the incremental
+/// salsa compilation path. Compiles the project, detects loops, augments
+/// with synthetic LTM variables, simulates, and extracts importance time
+/// series. Returns `None` if any step fails, signaling the caller to fall
+/// back to persisted loop_metadata.
 fn try_detect_ltm_loops(
-    project: &datamodel::Project,
+    db: &mut crate::db::SimlinDb,
+    source_project: crate::db::SourceProject,
     model_name: &str,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<Vec<metadata::FeedbackLoop>> {
-    let actual_name = resolve_model_name(project, model_name).to_string();
-
-    if let Some((db, source_project)) = db_state {
-        try_detect_ltm_loops_incremental(db, source_project, &actual_name)
-    } else {
-        try_detect_ltm_loops_monolithic(project, &actual_name)
-    }
+    try_detect_ltm_loops_incremental(db, source_project, model_name)
 }
 
 /// Incremental salsa path for LTM loop detection.
@@ -2097,85 +2076,11 @@ fn try_detect_ltm_loops_incremental(
     Some(feedback_loops)
 }
 
-/// Monolithic fallback path for LTM loop detection (used when no db is
-/// available). Uses the deprecated `Project::with_ltm()` pipeline.
-///
-/// This should be migrated to the salsa incremental path so that
-/// `with_ltm()` can be removed entirely.
-fn try_detect_ltm_loops_monolithic(
-    project: &datamodel::Project,
-    actual_name: &str,
-) -> Option<Vec<metadata::FeedbackLoop>> {
-    use std::rc::Rc;
-
-    let project_clone = project.clone();
-    let actual_name = actual_name.to_string();
-
-    // Run the entire LTM pipeline inside catch_unwind since compilation
-    // can panic on malformed models (e.g., missing module references).
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let compiled = crate::project::Project::from(project_clone);
-        let model_ident = Ident::new(&actual_name);
-
-        let compiled_model = compiled.models.get(&model_ident)?;
-        let model_loops = crate::ltm::detect_loops(compiled_model, &compiled).ok()?;
-        if model_loops.is_empty() {
-            return Some(Vec::new());
-        }
-
-        // Augment with LTM synthetic variables and simulate
-        let ltm_project = compiled.with_ltm().ok()?;
-        let sim = crate::interpreter::Simulation::new(&Rc::new(ltm_project), &actual_name).ok()?;
-        let compiled_sim = sim.compile().ok()?;
-        let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
-        vm.run_to_end().ok()?;
-
-        let mut feedback_loops = Vec::new();
-        for loop_item in &model_loops {
-            let polarity = match loop_item.polarity {
-                crate::ltm::LoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
-                crate::ltm::LoopPolarity::Balancing => LoopPolarity::Balancing,
-                crate::ltm::LoopPolarity::Undetermined => LoopPolarity::Undetermined,
-            };
-
-            let variables: Vec<String> = {
-                let mut vars: Vec<String> =
-                    loop_item.links.iter().map(|l| l.from.to_string()).collect();
-                if let Some(first) = vars.first().cloned() {
-                    vars.push(first);
-                }
-                vars
-            };
-
-            // Extract the relative loop score time series
-            let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", loop_item.id);
-            let var_ident = Ident::new(&var_name);
-            let importance_series = vm
-                .get_series(&var_ident)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|v| if v.is_finite() { v } else { 0.0 })
-                .collect();
-
-            feedback_loops.push(metadata::FeedbackLoop {
-                name: loop_item.id.clone(),
-                polarity,
-                variables,
-                importance_series,
-                dominant_period: None,
-            });
-        }
-
-        Some(feedback_loops)
-    }))
-    .ok()
-    .flatten()
-}
-
 /// Compute metadata for a model from its variable definitions and dependency structure.
 ///
-/// When `db_state` is provided, LTM loop detection uses the incremental salsa
-/// compilation path instead of building a monolithic `Project`.
+/// Uses the salsa incremental compilation path for dependency extraction and
+/// LTM loop detection. When `db_state` is `None`, creates a temporary salsa
+/// db internally.
 pub fn compute_metadata(
     project: &datamodel::Project,
     model_name: &str,
@@ -2244,7 +2149,17 @@ pub fn compute_metadata(
         }
     }
 
-    let compiled_model = try_compile_model(project, model_name);
+    // Use a salsa db for dependency extraction and LTM detection, creating
+    // a temporary one if the caller didn't provide one.
+    let mut local_db: Option<crate::db::SimlinDb> = None;
+    let (db, source_project) = ensure_db_state_mut(project, db_state, &mut local_db);
+
+    let actual_model_name = resolve_model_name(project, model_name);
+    let canonical_model_name = canonicalize(actual_model_name);
+    let source_model = source_project
+        .models(db)
+        .get(canonical_model_name.as_ref())
+        .copied();
 
     let all_idents: HashSet<String> = model
         .variables
@@ -2260,18 +2175,32 @@ pub fn compute_metadata(
         let var_ident = canonicalize(var.get_ident()).into_owned();
         dep_graph.entry(var_ident.clone()).or_default();
 
-        let deps: Vec<String> = if let Some(ref cm) = compiled_model {
-            let ident_key = Ident::<Canonical>::new(&var_ident);
-            if has_compiled_ast(cm, &ident_key) {
-                crate::model::get_incoming_links(cm, &ident_key)
-                    .map(|deps| deps.into_iter().map(|id| id.to_string()).collect())
-                    .unwrap_or_default()
-            } else {
-                extract_equation_deps(var, &all_idents)
-            }
-        } else {
-            extract_equation_deps(var, &all_idents)
-        };
+        // Use salsa dependency extraction when the source model and
+        // variable are available. When the salsa path returns empty
+        // deps (e.g. because of a parse error producing no AST), fall
+        // back to string heuristics so broken equations still get
+        // approximate dependency information for layout.
+        let deps: Vec<String> = source_model
+            .and_then(|sm| {
+                let sv = sm.variables(db).get(&var_ident)?.to_owned();
+                let var_deps = crate::db::variable_direct_dependencies(db, sv, source_project);
+                let mut combined: Vec<String> = var_deps
+                    .dt_deps
+                    .iter()
+                    .chain(var_deps.initial_deps.iter())
+                    .cloned()
+                    .collect();
+                combined.sort();
+                combined.dedup();
+                if combined.is_empty() {
+                    let heuristic = extract_equation_deps(var, &all_idents);
+                    if !heuristic.is_empty() {
+                        return Some(heuristic);
+                    }
+                }
+                Some(combined)
+            })
+            .unwrap_or_else(|| extract_equation_deps(var, &all_idents));
 
         // Filter to only include deps that are actual rendered model
         // variables. AST extraction can yield module-internal identifiers
@@ -2338,7 +2267,7 @@ pub fn compute_metadata(
 
     // Try LTM-based loop detection. Falls back to persisted loop_metadata
     // if LTM detection or simulation fails.
-    let mut feedback_loops = try_detect_ltm_loops(project, model_name, db_state)
+    let mut feedback_loops = try_detect_ltm_loops(db, source_project, actual_model_name)
         .unwrap_or_else(|| build_feedback_loops_from_metadata(model, &uid_to_ident));
     feedback_loops.sort_by(|a, b| {
         b.average_importance()
@@ -4373,19 +4302,6 @@ mod tests {
     fn test_resolve_model_name_passthrough_for_unknown_model() {
         let project = test_project(simple_model());
         assert_eq!(resolve_model_name(&project, "nonexistent"), "nonexistent");
-    }
-
-    #[test]
-    fn test_try_compile_model_with_main_alias() {
-        let mut model = simple_model();
-        model.name = String::new();
-        let project = test_project(model);
-        // Should find the model via "main" alias
-        let compiled = try_compile_model(&project, "main");
-        assert!(
-            compiled.is_some(),
-            "try_compile_model should resolve 'main' to the unnamed model"
-        );
     }
 
     #[test]
