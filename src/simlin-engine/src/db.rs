@@ -5793,11 +5793,11 @@ pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enable
     }
 }
 
-/// Compile a project incrementally using salsa.
+/// Compile a project incrementally using salsa tracked functions.
 ///
-/// This is the new entry point that replaces compile_project for the
-/// incremental path. Falls back to the monolithic compile_project when
-/// the incremental path is not yet supported (e.g., multi-model projects).
+/// This is the production compilation entry point. Returns the assembled
+/// `CompiledSimulation` for the named model, or `Err(NotSimulatable)` if
+/// compilation fails (e.g., unresolved references, unsupported builtins).
 pub fn compile_project_incremental(
     db: &SimlinDb,
     project: SourceProject,

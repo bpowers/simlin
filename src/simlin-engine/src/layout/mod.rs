@@ -2035,19 +2035,10 @@ fn try_detect_ltm_loops_incremental(
     let actual_name_owned = actual_name.to_string();
 
     // Phase 1: Model lookup and loop detection.
-    // Wrapped in catch_unwind since salsa queries can panic on
-    // malformed models (e.g., missing module references).
     let detected = {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let canonical_name = crate::canonicalize(&actual_name_owned);
-            let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
-            Some(crate::db::model_detected_loops(
-                db,
-                source_model,
-                source_project,
-            ))
-        }));
-        result.ok().flatten()?
+        let canonical_name = crate::canonicalize(&actual_name_owned);
+        let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
+        crate::db::model_detected_loops(db, source_model, source_project)
     };
 
     if detected.loops.is_empty() {
@@ -2055,21 +2046,17 @@ fn try_detect_ltm_loops_incremental(
     }
 
     // Phase 2: LTM compile and simulate.
-    // Set ltm_enabled BEFORE catch_unwind and reset AFTER so that
-    // the flag is always cleared even if compilation panics.
     source_project.set_ltm_enabled(db).to(true);
-    let vm_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::db::compile_project_incremental(db, source_project, &actual_name_owned)
-            .ok()
-            .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
-            .and_then(|mut vm| {
-                vm.run_to_end().ok()?;
-                Some(vm)
-            })
-    }));
+    let vm_result = crate::db::compile_project_incremental(db, source_project, &actual_name_owned)
+        .ok()
+        .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
+        .and_then(|mut vm| {
+            vm.run_to_end().ok()?;
+            Some(vm)
+        });
     source_project.set_ltm_enabled(db).to(false);
 
-    let vm = vm_result.ok().flatten()?;
+    let vm = vm_result?;
 
     // Phase 3: Build feedback loop structs from VM results.
     let mut feedback_loops = Vec::new();

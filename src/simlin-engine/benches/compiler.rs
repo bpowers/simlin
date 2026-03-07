@@ -68,16 +68,11 @@ fn load_model(fixture: &ModelFixture) -> String {
 }
 
 /// Check whether a datamodel project can be compiled to bytecode via the
-/// incremental path.  Uses catch_unwind because some models (e.g. C-LEARN)
-/// panic in the incremental compiler rather than returning a clean error.
+/// incremental path.
 fn is_simulatable(datamodel: &datamodel::Project) -> bool {
-    let dm = datamodel.clone();
-    std::panic::catch_unwind(|| {
-        let mut db = SimlinDb::default();
-        let state = sync_from_datamodel_incremental(&mut db, &dm, None);
-        compile_project_incremental(&db, state.project, "main")
-    })
-    .is_ok_and(|r| r.is_ok())
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    compile_project_incremental(&db, state.project, "main").is_ok()
 }
 
 /// Benchmark: MDL text -> datamodel::Project.

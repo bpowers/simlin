@@ -1290,28 +1290,12 @@ fn incremental_compilation_covers_all_models() {
             continue;
         };
 
-        let model_path_owned = model_path.to_string();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut salsa_db = SimlinDb::default();
-            let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel_project, None);
-            compile_project_incremental(&salsa_db, sync.project, "main")
-        }));
+        let mut salsa_db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel_project, None);
+        let result = compile_project_incremental(&salsa_db, sync.project, "main");
 
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                failures.push((model_path_owned, format!("{e}")));
-            }
-            Err(panic) => {
-                let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                failures.push((model_path_owned, format!("PANIC: {msg}")));
-            }
+        if let Err(e) = result {
+            failures.push((model_path.to_string(), format!("{e}")));
         }
     }
 
