@@ -720,12 +720,25 @@ fn parse_source_variable_impl(
     project: SourceProject,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
-    let dims = project_datamodel_dims(db, project);
+    let relevant_dim_names = variable_relevant_dimensions(db, var);
+    let dims: Vec<datamodel::Dimension> = if relevant_dim_names.is_empty() {
+        // Scalar variable -- no dimension dependency, so changing any
+        // project dimension won't invalidate this parse result.
+        vec![]
+    } else {
+        let all_source_dims = project.dimensions(db);
+        let expanded = expand_maps_to_chains(relevant_dim_names, all_source_dims);
+        project_datamodel_dims(db, project)
+            .iter()
+            .filter(|d| expanded.contains(&d.name))
+            .cloned()
+            .collect()
+    };
     let units_ctx = project_units_context(db, project);
     let dm_var = reconstruct_variable(db, var);
     let mut implicit_vars = Vec::new();
     let variable = crate::variable::parse_var_with_module_context(
-        dims,
+        &dims,
         &dm_var,
         &mut implicit_vars,
         units_ctx,
@@ -2881,6 +2894,52 @@ pub fn sync_from_datamodel_incremental(
     PersistentSyncState {
         project: source_project,
         models: new_models,
+    }
+}
+
+/// Expands a set of dimension names to include transitive `maps_to` and
+/// `mappings` targets. Given `{A}` where A maps_to B and B maps_to C, the
+/// result is `{A, B, C}`. The `BTreeSet::insert` returning `false` on
+/// duplicates prevents infinite loops in circular mapping chains.
+fn expand_maps_to_chains(
+    dim_names: &BTreeSet<String>,
+    all_dims: &[SourceDimension],
+) -> BTreeSet<String> {
+    let mut expanded = dim_names.clone();
+    let dim_map: HashMap<&str, &SourceDimension> =
+        all_dims.iter().map(|d| (d.name.as_str(), d)).collect();
+
+    let mut to_visit: Vec<String> = dim_names.iter().cloned().collect();
+    while let Some(name) = to_visit.pop() {
+        if let Some(dim) = dim_map.get(name.as_str()) {
+            if let Some(ref target) = dim.maps_to
+                && expanded.insert(target.clone())
+            {
+                to_visit.push(target.clone());
+            }
+            for mapping in &dim.mappings {
+                if expanded.insert(mapping.target.clone()) {
+                    to_visit.push(mapping.target.clone());
+                }
+            }
+        }
+    }
+    expanded
+}
+
+/// Extracts the set of dimension names referenced in a variable's equation.
+///
+/// Reads only `var.equation(db)` -- never the project-level dimension list.
+/// This means scalar variables produce an empty set without establishing a
+/// dependency on `project.dimensions`, so dimension changes cannot
+/// invalidate them. For arrayed variables the returned names come from the
+/// equation definition, not from the project dimension list.
+#[salsa::tracked(returns(ref))]
+pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSet<String> {
+    match var.equation(db) {
+        SourceEquation::Scalar(_) => BTreeSet::new(),
+        SourceEquation::ApplyToAll(dim_names, _) => dim_names.iter().cloned().collect(),
+        SourceEquation::Arrayed(dim_names, _, _) => dim_names.iter().cloned().collect(),
     }
 }
 
