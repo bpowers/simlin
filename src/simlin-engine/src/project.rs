@@ -2,14 +2,20 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
+#[cfg(any(test, feature = "testing"))]
 use crate::canonicalize;
 use crate::common::{Canonical, Error, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
-use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
+use crate::model::ModelStage1;
+#[cfg(any(test, feature = "testing"))]
+use crate::model::{ModelStage0, ScopeStage0};
+#[cfg(any(test, feature = "testing"))]
 use crate::units::Context;
+#[cfg(any(test, feature = "testing"))]
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -23,8 +29,7 @@ pub struct Project {
     model_order: Vec<Ident<Canonical>>,
     /// Project-level errors are also accumulated via the salsa accumulator
     /// in `project_units_context`. This field is retained for the monolithic
-    /// `Project::from` construction path used by tests and
-    /// `get_stdlib_composite_ports`.
+    /// `Project::from` construction path used by tests.
     pub errors: Vec<Error>,
     /// Cached dimension context for subdimension lookups
     pub dimensions_ctx: DimensionsContext,
@@ -75,6 +80,7 @@ impl From<datamodel::Project> for Project {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl Project {
     pub(crate) fn base_from<'a, F>(
         project_datamodel: datamodel::Project,

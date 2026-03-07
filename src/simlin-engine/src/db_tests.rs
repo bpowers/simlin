@@ -3549,11 +3549,7 @@ fn test_ac1_6_cross_model_isolation() {
 fn test_ac2_4_stdlib_composite_scores_cached() {
     let db = SimlinDb::default();
 
-    // Use the "smooth" stdlib model directly.
-    let stdlib_model = match crate::stdlib::get("smooth") {
-        Some(m) => m,
-        None => return,
-    };
+    let stdlib_model = crate::stdlib::get("smth1").expect("smth1 stdlib model should exist");
 
     let stdlib_project = datamodel::Project {
         name: "stdlib_test".to_string(),
