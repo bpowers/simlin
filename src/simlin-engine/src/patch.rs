@@ -9,7 +9,6 @@ use crate::common::{
     Canonical, CanonicalElementName, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result,
 };
 use crate::datamodel::{self, Variable};
-use crate::project::Project as CompiledProject;
 use std::collections::HashMap;
 
 /// A patch to apply to a project. Contains project-level operations
@@ -314,12 +313,16 @@ fn apply_rename_variable(
         return Ok(());
     }
 
-    let compiled_project = CompiledProject::from(project.clone());
-    let compiled_model = compiled_project
+    // Use the salsa incremental path to parse and lower variables,
+    // giving us the ASTs needed for dependency-aware renaming.
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, project);
+    let source_model = sync
         .models
         .get(&*canonicalize(model_name))
-        .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::BadModelName, None))?
-        .clone();
+        .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::BadModelName, None))?;
+    let compiled_vars =
+        crate::db::reconstruct_model_variables(&db, source_model.source, sync.project);
 
     let model = get_model_mut(project, model_name)?;
 
@@ -344,8 +347,7 @@ fn apply_rename_variable(
         })
         .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
 
-    let compiled_vars = &compiled_model.variables;
-    rename_model_equations(model, compiled_vars, &old_ident, &new_ident);
+    rename_model_equations(model, &compiled_vars, &old_ident, &new_ident);
 
     if is_flow {
         update_stock_flow_references(model, &old_ident, &new_ident);

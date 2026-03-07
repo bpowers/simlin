@@ -1840,7 +1840,7 @@ pub fn module_ilink_equation_text<'db>(
 /// These are static properties of stdlib models and never change.
 ///
 /// On native targets, uses a separate thread for initialization because
-/// `Project::from()` creates its own salsa db, which conflicts if we're
+/// syncing creates a separate salsa db, which conflicts if we're
 /// inside a tracked function query on the caller's db.
 /// On wasm32, threads are unavailable so we initialize directly (safe
 /// because WASM is single-threaded).
@@ -1875,7 +1875,18 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
                 ai_information: None,
             };
 
-            let project = crate::project::Project::from(dm_project);
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &dm_project);
+            let source_models: HashMap<String, SourceModel> = sync
+                .models
+                .iter()
+                .map(|(name, sm)| (name.clone(), sm.source))
+                .collect();
+            let project = crate::project::Project::base_from(
+                dm_project,
+                Some((&db, sync.project, &source_models)),
+                |_, _, _| {},
+            );
             crate::ltm_augment::compute_composite_ports(&project)
         };
 
