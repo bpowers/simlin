@@ -5,13 +5,11 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
-use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident};
-use crate::datamodel::{self, Equation};
+use crate::common::{Canonical, Error, Ident};
+use crate::datamodel;
 use crate::dimensions::DimensionsContext;
-use crate::ltm_augment::{generate_ltm_variables, generate_ltm_variables_all_links};
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
-use crate::variable::Variable;
 use std::sync::Arc;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -34,52 +32,6 @@ pub struct Project {
 impl Project {
     pub fn name(&self) -> &str {
         &self.datamodel.name
-    }
-
-    /// Create a new project with LTM instrumentation.
-    ///
-    /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
-    /// Prefer the salsa incremental path via `db::compile_project_incremental`
-    /// with `set_ltm_enabled(true)`. The only remaining production caller is
-    /// `layout::try_detect_ltm_loops_monolithic` (fallback when no db_state).
-    ///
-    /// Once that caller is migrated, this method and its helpers
-    /// (`abort_if_arrayed`, `inject_ltm_vars`) can be removed.
-    pub fn with_ltm(self) -> crate::common::Result<Self> {
-        abort_if_arrayed(&self)?;
-
-        let ltm_vars = generate_ltm_variables(&self)?;
-        if ltm_vars.is_empty() {
-            return Ok(self);
-        }
-
-        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
-    }
-
-    /// Create a new project with link score variables for ALL causal links.
-    ///
-    /// Unlike `with_ltm()` which only instruments detected loops, this generates
-    /// link score variables for every causal connection in the model. Used as a
-    /// prerequisite for `ltm_finding::discover_loops()` which finds important
-    /// loops heuristically from the simulation results.
-    ///
-    /// No loop score or relative loop score variables are generated -- those
-    /// are computed post-simulation by `discover_loops()`.
-    ///
-    /// Deprecated: this is the monolithic (non-incremental) LTM pipeline.
-    /// Prefer the salsa incremental path via `db::compile_project_incremental`
-    /// with `set_ltm_enabled(true)` and `set_ltm_discovery_mode(true)`.
-    /// No production callers remain; this method is only used by tests.
-    /// It can be removed once tests are migrated to the incremental path.
-    pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
-        abort_if_arrayed(&self)?;
-
-        let ltm_vars = generate_ltm_variables_all_links(&self)?;
-        if ltm_vars.is_empty() {
-            return Ok(self);
-        }
-
-        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
     }
 }
 
@@ -121,56 +73,6 @@ impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::base_from(project_datamodel, None, run_default_model_checks)
     }
-}
-
-/// Inject LTM synthetic variables into the datamodel.
-///
-/// For user models (present in `datamodel.models`), variables are appended
-/// directly. For stdlib models (not in `datamodel.models`), we fetch the
-/// stock model from generated code, add the synthetic variables, and append
-/// it to `datamodel.models`. `base_from()` detects these overrides by name
-/// and skips loading the generated version.
-///
-/// Helper for the deprecated `with_ltm()` / `with_ltm_all_links()` methods.
-/// Can be removed when those methods are removed.
-fn inject_ltm_vars(
-    mut datamodel: datamodel::Project,
-    ltm_vars: &HashMap<Ident<Canonical>, Vec<(Ident<Canonical>, datamodel::Variable)>>,
-) -> datamodel::Project {
-    let existing_model_names: std::collections::HashSet<String> = datamodel
-        .models
-        .iter()
-        .map(|m| canonicalize(&m.name).into_owned())
-        .collect();
-
-    for model in &mut datamodel.models {
-        let model_name = canonicalize(&model.name);
-        if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
-            for (_, var) in synthetic_vars {
-                model.variables.push(var.clone());
-            }
-        }
-    }
-
-    // Add augmented stdlib models to the datamodel
-    for (model_name, synthetic_vars) in ltm_vars {
-        let name_str = model_name.as_str();
-        if let Some(func_name) = name_str.strip_prefix("stdlib\u{205A}") {
-            let canonical_name = canonicalize(name_str).into_owned();
-            if existing_model_names.contains(&canonical_name) {
-                continue;
-            }
-            if let Some(mut stdlib_dm) = crate::stdlib::get(func_name) {
-                stdlib_dm.name = name_str.to_string();
-                for (_, var) in synthetic_vars {
-                    stdlib_dm.variables.push(var.clone());
-                }
-                datamodel.models.push(stdlib_dm);
-            }
-        }
-    }
-
-    datamodel
 }
 
 impl Project {
@@ -376,18 +278,90 @@ impl Project {
     }
 }
 
-/// Check if any model in the project contains array variables.
-///
-/// Helper for the deprecated `with_ltm()` / `with_ltm_all_links()` methods.
-/// Can be removed when those methods are removed.
+// Test-only LTM helpers: with_ltm(), with_ltm_all_links(), and their
+// supporting functions. No production callers remain; tests will be migrated
+// to the incremental path in Phase 5, after which these can be deleted.
+#[cfg(any(test, feature = "testing"))]
+use crate::common::{ErrorCode, ErrorKind};
+#[cfg(any(test, feature = "testing"))]
+use crate::datamodel::Equation;
+#[cfg(any(test, feature = "testing"))]
+use crate::ltm_augment::{generate_ltm_variables, generate_ltm_variables_all_links};
+#[cfg(any(test, feature = "testing"))]
+use crate::variable::Variable;
+
+#[cfg(any(test, feature = "testing"))]
+impl Project {
+    pub fn with_ltm(self) -> crate::common::Result<Self> {
+        abort_if_arrayed(&self)?;
+
+        let ltm_vars = generate_ltm_variables(&self)?;
+        if ltm_vars.is_empty() {
+            return Ok(self);
+        }
+
+        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
+    }
+
+    pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
+        abort_if_arrayed(&self)?;
+
+        let ltm_vars = generate_ltm_variables_all_links(&self)?;
+        if ltm_vars.is_empty() {
+            return Ok(self);
+        }
+
+        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn inject_ltm_vars(
+    mut datamodel: datamodel::Project,
+    ltm_vars: &HashMap<Ident<Canonical>, Vec<(Ident<Canonical>, datamodel::Variable)>>,
+) -> datamodel::Project {
+    let existing_model_names: std::collections::HashSet<String> = datamodel
+        .models
+        .iter()
+        .map(|m| canonicalize(&m.name).into_owned())
+        .collect();
+
+    for model in &mut datamodel.models {
+        let model_name = canonicalize(&model.name);
+        if let Some(synthetic_vars) = ltm_vars.get(&*model_name) {
+            for (_, var) in synthetic_vars {
+                model.variables.push(var.clone());
+            }
+        }
+    }
+
+    for (model_name, synthetic_vars) in ltm_vars {
+        let name_str = model_name.as_str();
+        if let Some(func_name) = name_str.strip_prefix("stdlib\u{205A}") {
+            let canonical_name = canonicalize(name_str).into_owned();
+            if existing_model_names.contains(&canonical_name) {
+                continue;
+            }
+            if let Some(mut stdlib_dm) = crate::stdlib::get(func_name) {
+                stdlib_dm.name = name_str.to_string();
+                for (_, var) in synthetic_vars {
+                    stdlib_dm.variables.push(var.clone());
+                }
+                datamodel.models.push(stdlib_dm);
+            }
+        }
+    }
+
+    datamodel
+}
+
+#[cfg(any(test, feature = "testing"))]
 fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
     for (model_name, model) in &project.models {
-        // Skip implicit (stdlib) models
         if model.implicit {
             continue;
         }
 
-        // Check each variable for array dimensions
         for (var_name, var) in &model.variables {
             let has_arrays = match var {
                 Variable::Stock { eqn, .. } | Variable::Var { eqn, .. } => {
