@@ -10,12 +10,22 @@ use std::rc::Rc;
 use std::result::Result as StdResult;
 
 use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::db::set_project_ltm_enabled;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::xmile;
-use simlin_engine::{Project, Results, Vm, json, ltm, ltm_finding};
+use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm, ltm_finding};
 
 const LTM_TOLERANCE: f64 = 0.05;
+
+/// Compile a datamodel project to a VM simulation using the incremental
+/// salsa path with LTM enabled.
+fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> CompiledSimulation {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main").unwrap()
+}
 
 struct LtmResults {
     loop_scores: HashMap<String, Vec<(f64, f64)>>,
@@ -200,9 +210,8 @@ fn simulate_ltm_path(model_path: &str) {
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
 
-    let project = Project::from(datamodel_project);
-    // Save a reference to the original datamodel for the incremental VM path.
-    let datamodel_for_vm = project.datamodel.clone();
+    // Interpreter leg with LTM (retained for cross-validation per AC4.6)
+    let project = Project::from(datamodel_project.clone());
     let ltm_project = project.with_ltm().unwrap();
 
     let main_ident: Ident<Canonical> = Ident::new("main");
@@ -213,13 +222,7 @@ fn simulate_ltm_path(model_path: &str) {
     let results1 = sim.run_to_end().unwrap();
 
     // VM leg via incremental path with LTM enabled
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_for_vm, None);
-    {
-        use salsa::Setter;
-        sync.project.set_ltm_enabled(&mut db).to(true);
-    }
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled = compile_ltm_incremental(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results2 = vm.into_results();
@@ -632,13 +635,11 @@ fn test_smooth_goal_seeking_ltm() {
         "Should have loop score variables"
     );
 
-    // Run on VM for cross-validation.
-    // NOTE: This test uses SMOOTH (stdlib module instances) in a feedback
-    // path. The incremental LTM compilation path does not yet support
-    // module-containing models with LTM enabled -- fragment compilation
-    // fails for variables whose LTM-augmented names reference module
-    // instance separators. Keep the monolithic sim.compile() path here
-    // until the incremental path handles this case.
+    // VM leg via monolithic path. The incremental LTM compilation path
+    // does not yet support module-containing models (SMTH1 expands to a
+    // stdlib module instance whose LTM-augmented names fail layout
+    // resolution). Kept on sim.compile() until the incremental path
+    // handles this case.
     let compiled = sim.compile().unwrap();
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
