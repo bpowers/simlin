@@ -117,7 +117,7 @@ pub(crate) fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm:
 /// dependency sets and structural variable info.
 ///
 /// Reads `variable_direct_dependencies` (establishing salsa dep on dep
-/// sets) and `parse_source_variable` (for implicit variable details like
+/// sets) and `parse_source_variable_with_module_context` (for implicit variable details like
 /// module input refs). Salsa backdating ensures that when equation text
 /// changes without changing the resulting edge structure, the cached
 /// result is reused and downstream graph algorithms are skipped.

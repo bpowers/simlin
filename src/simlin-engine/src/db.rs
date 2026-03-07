@@ -740,14 +740,6 @@ fn parse_source_variable_impl(
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn parse_source_variable(
-    db: &dyn Db,
-    var: SourceVariable,
-    project: SourceProject,
-) -> ParsedVariableResult {
-    parse_source_variable_impl(db, var, project, None)
-}
-#[salsa::tracked(returns(ref))]
 pub fn parse_source_variable_with_module_context<'db>(
     db: &'db dyn Db,
     var: SourceVariable,
@@ -1182,8 +1174,9 @@ fn model_dependency_graph_impl(
 
         // Include implicit variables from this variable's deps result.
         // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable), salsa's backdating ensures that if the
-        // deps + implicit vars haven't changed, this function is cached.
+        // parse_source_variable_with_module_context), salsa's backdating
+        // ensures that if the deps + implicit vars haven't changed, this
+        // function is cached.
         for implicit in &deps.implicit_vars {
             let mut dt_deps = implicit.dt_deps.clone();
             dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
@@ -1677,10 +1670,10 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset
-    // of parse_source_variable: it first accumulates unit definition
-    // syntax errors from the parsed variable, then checks for equation
-    // parse errors, then proceeds with compilation which can surface
-    // additional errors like BadTable, MismatchedDimensions, etc.
+    // of parse_source_variable_with_module_context: it first accumulates
+    // unit definition syntax errors from the parsed variable, then checks
+    // for equation parse errors, then proceeds with compilation which can
+    // surface additional errors like BadTable, MismatchedDimensions, etc.
     //
     // We use is_root: true and empty module_input_names for diagnostic
     // purposes. The is_root flag only affects offset layout (whether
