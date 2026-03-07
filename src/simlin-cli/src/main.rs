@@ -4,21 +4,23 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::rc::Rc;
 use std::result::Result as StdResult;
 
 use pico_args::Arguments;
 
 use simlin::errors::{
-    FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_issues,
-    format_simulation_error,
+    FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
 };
 use simlin_engine::common::ErrorKind;
 use simlin_engine::datamodel::Project as DatamodelProject;
-use simlin_engine::prost::Message;
-use simlin_engine::{
-    Error, ErrorCode, Project, Result, Results, Variable, Vm, datamodel, project_io, serde,
+use simlin_engine::db::{
+    PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
+    compile_project_incremental, model_detected_loops, model_module_ident_context,
+    parse_source_variable_with_module_context, set_project_ltm_enabled, sync_from_datamodel,
+    sync_from_datamodel_incremental,
 };
+use simlin_engine::prost::Message;
+use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmile};
 
 mod gen_stdlib;
@@ -189,23 +191,37 @@ fn report_formatted_errors(formatted: &FormattedErrors) {
     }
 }
 
-fn format_and_report_project_errors(project: &Project) -> FormattedErrors {
-    let formatted = collect_formatted_issues(project);
-    report_formatted_errors(&formatted);
+/// Collect diagnostics from the salsa accumulator path and convert them
+/// to the same `FormattedErrors` structure the CLI has always used.
+fn collect_diagnostics_as_formatted(
+    db: &SimlinDb,
+    source_project: SourceProject,
+    sync_state: &PersistentSyncState,
+) -> FormattedErrors {
+    // Trigger compilation so that diagnostics are accumulated
+    let _ = compile_project_incremental(db, source_project, "main");
+    let sync = sync_state.to_sync_result();
+    let diagnostics = collect_all_diagnostics(db, &sync);
+    let mut formatted = FormattedErrors::default();
+    for diag in &diagnostics {
+        let fe = format_diagnostic(diag);
+        if fe.kind == FormattedErrorKind::Variable {
+            formatted.has_variable_errors = true;
+        }
+        if fe.kind == FormattedErrorKind::Model {
+            formatted.has_model_errors = true;
+        }
+        formatted.errors.push(fe);
+    }
     formatted
 }
 
-fn run_incremental(
-    datamodel: &DatamodelProject,
+fn run_simulation(
+    db: &SimlinDb,
+    source_project: SourceProject,
     model_name: &str,
-    enable_ltm: bool,
 ) -> StdResult<Results, Error> {
-    let mut db = simlin_engine::db::SimlinDb::default();
-    let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
-    if enable_ltm {
-        simlin_engine::db::set_project_ltm_enabled(&mut db, sync.project, true);
-    }
-    let compiled = simlin_engine::db::compile_project_incremental(&db, sync.project, model_name)?;
+    let compiled = compile_project_incremental(db, source_project, model_name)?;
     let mut vm = Vm::new(compiled)?;
     vm.run_to_end()?;
     Ok(vm.into_results())
@@ -220,9 +236,11 @@ fn handle_simulation_error(err: &Error, formatted: &FormattedErrors) {
 }
 
 fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
-    let engine_project = Project::from(project.clone());
-    let formatted = format_and_report_project_errors(&engine_project);
-    match run_incremental(project, "main", false) {
+    let mut db = SimlinDb::default();
+    let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
+    let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state);
+    report_formatted_errors(&formatted);
+    match run_simulation(&db, sync_state.project, "main") {
         Ok(results) => results,
         Err(err) => {
             handle_simulation_error(&err, &formatted);
@@ -233,28 +251,30 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
 
 fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     if enable_ltm {
-        // Use the monolithic Project only for loop detection and error
-        // reporting; actual simulation goes through the incremental path.
-        let engine_project = Project::from(project.clone());
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
+        let source_project = sync_state.project;
 
-        use simlin_engine::ltm;
-        for (model_name, model) in &engine_project.models {
-            if model.implicit {
+        // Detect and report loops via the salsa path
+        let models = source_project.models(&db);
+        for (model_name, source_model) in models.iter() {
+            if model_name.starts_with("stdlib\u{205A}") {
                 continue;
             }
-            if let Ok(loops) = ltm::detect_loops(model, &engine_project)
-                && !loops.is_empty()
-            {
+            let detected = model_detected_loops(&db, *source_model, source_project);
+            if !detected.loops.is_empty() {
                 eprintln!("# Loops in model '{}':", model_name);
-                for loop_item in &loops {
-                    eprintln!("{} := {}", loop_item.id, loop_item.format_path());
+                for loop_item in &detected.loops {
+                    eprintln!("{} := {}", loop_item.id, loop_item.variables.join(" -> "));
                 }
             }
         }
 
-        let formatted = format_and_report_project_errors(&engine_project);
+        let formatted = collect_diagnostics_as_formatted(&db, source_project, &sync_state);
+        report_formatted_errors(&formatted);
 
-        match run_incremental(project, "main", true) {
+        set_project_ltm_enabled(&mut db, source_project, true);
+        match run_simulation(&db, source_project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -264,7 +284,8 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
         }
 
         // LTM failed, fall back to non-LTM incremental simulation.
-        match run_incremental(project, "main", false) {
+        set_project_ltm_enabled(&mut db, source_project, false);
+        match run_simulation(&db, source_project, "main") {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -274,6 +295,116 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     }
 
     run_datamodel_with_errors(project)
+}
+
+fn print_equations(project: &DatamodelProject, output: Option<String>) {
+    let mut output_file =
+        File::create(output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, project);
+
+    let model_names = sync.project.model_names(&db);
+    let models = sync.project.models(&db);
+
+    for model_name in model_names.iter() {
+        let source_model = match models.get(model_name) {
+            Some(m) => *m,
+            None => continue,
+        };
+
+        // Skip stdlib models (implicitly added for module expansion)
+        if model_name.starts_with("stdlib\u{205A}") {
+            continue;
+        }
+
+        let var_names = source_model.variable_names(&db);
+        let vars = source_model.variables(&db);
+        let module_ident_context = model_module_ident_context(&db, source_model, vec![]);
+
+        output_file
+            .write_fmt(format_args!("% {model_name}\n"))
+            .unwrap();
+        output_file
+            .write_fmt(format_args!("\\begin{{align*}}\n"))
+            .unwrap();
+
+        let var_count = var_names.len();
+        for (i, var_name) in var_names.iter().enumerate() {
+            let source_var = match vars.get(var_name) {
+                Some(v) => *v,
+                None => continue,
+            };
+
+            let parsed = parse_source_variable_with_module_context(
+                &db,
+                source_var,
+                sync.project,
+                module_ident_context,
+            );
+            let var = &parsed.variable;
+
+            let is_stock = var.is_stock();
+            let subscript = if is_stock { "(t_0)" } else { "" };
+            let display_name = str::replace(var_name.as_str(), "_", "\\_");
+            let continuation = if !is_stock && i == var_count - 1 {
+                ""
+            } else {
+                " \\\\"
+            };
+            let eqn = var
+                .ast()
+                .map(|ast| ast.to_latex())
+                .unwrap_or_else(|| "\\varnothing".to_owned());
+            output_file
+                .write_fmt(format_args!(
+                    "\\mathrm{{{display_name}}}{subscript} & = {eqn}{continuation}\n"
+                ))
+                .unwrap();
+
+            if is_stock {
+                let inflows = source_var.inflows(&db);
+                let outflows = source_var.outflows(&db);
+                let continuation = if i == var_count - 1 { "" } else { " \\\\" };
+                let use_parens = inflows.len() + outflows.len() > 1;
+                let mut flow_eqn = inflows
+                    .iter()
+                    .map(|inflow| {
+                        format!("\\mathrm{{{}}}", str::replace(inflow.as_str(), "_", "\\_"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                if !outflows.is_empty() {
+                    flow_eqn = format!(
+                        "{}-{}",
+                        flow_eqn,
+                        outflows
+                            .iter()
+                            .map(|outflow| format!(
+                                "\\mathrm{{{}}}",
+                                str::replace(outflow.as_str(), "_", "\\_")
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(" - ")
+                    );
+                }
+                if use_parens {
+                    flow_eqn = format!("({flow_eqn}) ");
+                } else {
+                    flow_eqn = format!("{flow_eqn} \\cdot ");
+                }
+                output_file
+                    .write_fmt(format_args!(
+                        "\\mathrm{{{display_name}}}(t) & = \\mathrm{{{display_name}}}(t - dt) + {flow_eqn} dt{continuation}\n"
+                    ))
+                    .unwrap();
+            }
+        }
+
+        output_file
+            .write_fmt(format_args!("\\end{{align*}}\n"))
+            .unwrap();
+    }
 }
 
 fn main() {
@@ -330,82 +461,7 @@ fn main() {
     let project = project.unwrap();
 
     if args.is_equations {
-        let mut output_file =
-            File::create(args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
-
-        let project = Rc::new(Project::from(project));
-        for (model_name, model) in project.models.iter().filter(|(_, model)| !model.implicit) {
-            output_file
-                .write_fmt(format_args!("% {model_name}\n"))
-                .unwrap();
-            output_file
-                .write_fmt(format_args!("\\begin{{align*}}\n"))
-                .unwrap();
-
-            let var_count = model.variables.len();
-            for (i, (var_name, var)) in model.variables.iter().enumerate() {
-                let subscript = if var.is_stock() { "(t_0)" } else { "" };
-                let var_name = str::replace(var_name.as_str(), "_", "\\_");
-                let continuation = if !var.is_stock() && i == var_count - 1 {
-                    ""
-                } else {
-                    " \\\\"
-                };
-                let eqn = var
-                    .ast()
-                    .map(|ast| ast.to_latex())
-                    .unwrap_or_else(|| "\\varnothing".to_owned());
-                output_file
-                    .write_fmt(format_args!(
-                        "\\mathrm{{{var_name}}}{subscript} & = {eqn}{continuation}\n"
-                    ))
-                    .unwrap();
-
-                if var.is_stock()
-                    && let Variable::Stock {
-                        inflows, outflows, ..
-                    } = var
-                {
-                    let continuation = if i == var_count - 1 { "" } else { " \\\\" };
-                    let use_parens = inflows.len() + outflows.len() > 1;
-                    let mut eqn = inflows
-                        .iter()
-                        .map(|inflow| {
-                            format!("\\mathrm{{{}}}", str::replace(inflow.as_str(), "_", "\\_"))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" + ");
-                    if !outflows.is_empty() {
-                        eqn = format!(
-                            "{}-{}",
-                            eqn,
-                            outflows
-                                .iter()
-                                .map(|inflow| format!(
-                                    "\\mathrm{{{}}}",
-                                    str::replace(inflow.as_str(), "_", "\\_")
-                                ))
-                                .collect::<Vec<_>>()
-                                .join(" - ")
-                        );
-                    }
-                    if use_parens {
-                        eqn = format!("({eqn}) ");
-                    } else {
-                        eqn = format!("{eqn} \\cdot ");
-                    }
-                    output_file
-                            .write_fmt(format_args!(
-                                "\\mathrm{{{var_name}}}(t) & = \\mathrm{{{var_name}}}(t - dt) + {eqn} dt{continuation}\n"
-                            ))
-                            .unwrap();
-                }
-            }
-
-            output_file
-                .write_fmt(format_args!("\\end{{align*}}\n"))
-                .unwrap();
-        }
+        print_equations(&project, args.output);
     } else if args.is_convert {
         let pb_project = match serde::serialize(&project) {
             Ok(pb) => pb,

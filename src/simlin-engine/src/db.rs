@@ -780,7 +780,7 @@ fn module_ident_context_for_model<'db>(
 }
 
 #[salsa::tracked]
-fn model_module_ident_context<'db>(
+pub fn model_module_ident_context<'db>(
     db: &'db dyn Db,
     model: SourceModel,
     extra_module_idents: Vec<String>,
