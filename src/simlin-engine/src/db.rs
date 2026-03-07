@@ -1808,6 +1808,10 @@ pub fn link_score_equation_text<'db>(
     })
 }
 
+/// Build a causal graph from pre-computed edges and enumerate all pathways
+/// from each input port to "output".  Shared by `get_stdlib_composite_ports`
+/// (which only needs the port *names*) and `module_ltm_synthetic_variables`
+/// (which also uses the pathway structures for equation generation).
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
 ) -> HashMap<crate::common::Ident<crate::common::Canonical>, Vec<Vec<crate::ltm::Link>>> {
