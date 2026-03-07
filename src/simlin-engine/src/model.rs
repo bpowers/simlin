@@ -53,14 +53,14 @@ pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, Variable>,
-    /// Deprecated: model-level errors are now also accumulated via the salsa
-    /// accumulator in `compile_var_fragment` and `check_model_units`. Retained
-    /// because `Module::new` (interpreter path) checks this field for
-    /// early-exit validation, and `collect_formatted_issues` reads it.
+    /// Model-level errors are also accumulated via the salsa accumulator in
+    /// `compile_var_fragment` and `check_model_units`. This field is retained
+    /// because `Module::new` (interpreter path) checks it for early-exit
+    /// validation and several test helpers inspect it directly.
     pub errors: Option<Vec<Error>>,
-    /// Deprecated: unit warnings are now accumulated via the salsa accumulator
-    /// in `check_model_units`. Retained because `collect_formatted_issues`
-    /// reads this field in the monolithic compilation path.
+    /// Unit warnings are also accumulated via the salsa accumulator in
+    /// `check_model_units`. This field is retained for the monolithic
+    /// `Project::from` construction path used by tests.
     ///
     /// Contains unit-related issues that should be surfaced to users but
     /// should NOT block simulation. Unit mismatches are common in real-world

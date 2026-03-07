@@ -21,9 +21,10 @@ pub struct Project {
     pub models: HashMap<Ident<Canonical>, Arc<ModelStage1>>,
     #[allow(dead_code)]
     model_order: Vec<Ident<Canonical>>,
-    /// Deprecated: project-level errors are now also accumulated via the
-    /// salsa accumulator in `project_units_context`. This field is retained
-    /// for the monolithic `collect_formatted_issues` path in libsimlin.
+    /// Project-level errors are also accumulated via the salsa accumulator
+    /// in `project_units_context`. This field is retained for the monolithic
+    /// `Project::from` construction path used by tests and
+    /// `get_stdlib_composite_ports`.
     pub errors: Vec<Error>,
     /// Cached dimension context for subdimension lookups
     pub dimensions_ctx: DimensionsContext,
