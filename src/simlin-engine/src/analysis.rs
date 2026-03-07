@@ -117,36 +117,29 @@ fn run_ltm_pipeline(
     source_project: SourceProject,
     model_name: &str,
 ) -> Option<(Vec<f64>, Vec<LoopSummary>, Vec<DominantPeriod>)> {
-    // Canonicalize so the name matches the keys in source_project.models(db).
-    let actual_name = {
-        let ident = project
-            .models
-            .iter()
-            .find(|m| {
-                crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
-            })
-            .map(|m| crate::canonicalize(&m.name).into_owned());
-        ident.or_else(|| {
-            project
-                .models
-                .first()
-                .map(|m| crate::canonicalize(&m.name).into_owned())
-        })?
-    };
+    let matched_model = project.models.iter().find(|m| {
+        crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
+    });
+    let dm_model = matched_model.or_else(|| project.models.first())?;
 
-    let uid_to_loop_name = build_uid_to_loop_name(project, &actual_name);
+    // Original name for datamodel lookups (get_model does exact matching);
+    // canonical name for salsa map lookups (models(db) uses canonical keys).
+    let original_name = &dm_model.name;
+    let canonical_name = crate::canonicalize(original_name).into_owned();
+
+    let uid_to_loop_name = build_uid_to_loop_name(project, original_name);
 
     // LTM flags are set by the caller (analyze_model) before this function
     // is called, and restored after it returns.
 
     let compiled_sim =
-        crate::db::compile_project_incremental(db, source_project, &actual_name).ok()?;
+        crate::db::compile_project_incremental(db, source_project, &canonical_name).ok()?;
     let mut vm = crate::vm::Vm::new(compiled_sim).ok()?;
     vm.run_to_end().ok()?;
     let results = vm.into_results();
 
     // Build the CausalGraph from salsa-tracked causal edges.
-    let source_model = source_project.models(db).get(&actual_name).copied()?;
+    let source_model = source_project.models(db).get(&canonical_name).copied()?;
     let edges_result = crate::db::model_causal_edges(db, source_model, source_project);
     let mut causal_graph = crate::db::causal_graph_from_edges(edges_result);
     causal_graph.variables =
@@ -173,7 +166,7 @@ fn run_ltm_pipeline(
 
     let loop_dominance: Vec<LoopSummary> = found_loops
         .iter()
-        .map(|fl| to_loop_summary(fl, &uid_to_loop_name, &actual_name, project))
+        .map(|fl| to_loop_summary(fl, &uid_to_loop_name, original_name, project))
         .collect();
 
     Some((time, loop_dominance, dominant_loops_by_period))

@@ -660,6 +660,74 @@ fn test_dep_graph_excludes_self_references() {
     );
 }
 
+/// Constants must have zero deps in the dep graph when the salsa path is used.
+/// Previously the heuristic fallback would run whenever salsa deps were empty,
+/// potentially adding spurious edges for constant variables.
+#[test]
+fn test_constant_variable_has_no_deps_with_salsa() {
+    use simlin_engine::layout::compute_layout_metadata;
+    use std::io::BufReader;
+
+    // "capacity" is the constant name, and "cap" appears as a substring
+    // in variable name "capacity_factor". The heuristic fallback might
+    // match tokens from the equation text against variable names, but the
+    // salsa path should correctly return empty deps for a constant.
+    let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>test</vendor><product version="1.0">test</product></header>
+  <sim_specs><start>0</start><stop>10</stop><dt>1</dt></sim_specs>
+  <model>
+    <variables>
+      <aux name="capacity">
+        <eqn>100</eqn>
+      </aux>
+      <aux name="growth_rate">
+        <eqn>0.05</eqn>
+      </aux>
+      <stock name="population">
+        <eqn>10</eqn>
+        <inflow>births</inflow>
+      </stock>
+      <flow name="births">
+        <eqn>population * growth_rate * (1 - population / capacity)</eqn>
+      </flow>
+    </variables>
+  </model>
+</xmile>"#;
+
+    let mut reader = BufReader::new(xmile.as_bytes());
+    let project = simlin_engine::open_xmile(&mut reader).unwrap();
+
+    let mut db = SimlinDb::default();
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+    let source_project = state.to_sync_result().project;
+
+    let metadata =
+        compute_layout_metadata(&project, MAIN_MODEL, Some((&mut db, source_project))).unwrap();
+
+    // Constants should have no equation deps (structural edges may still exist).
+    let capacity_deps = metadata
+        .dep_graph
+        .get("capacity")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        capacity_deps.is_empty(),
+        "constant 'capacity' should have no deps, got: {:?}",
+        capacity_deps
+    );
+    let growth_rate_deps = metadata
+        .dep_graph
+        .get("growth_rate")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        growth_rate_deps.is_empty(),
+        "constant 'growth_rate' should have no deps, got: {:?}",
+        growth_rate_deps
+    );
+}
+
 /// Verify that ltm_enabled is reset to false after compute_metadata
 /// completes, even when the incremental LTM path encounters failures
 /// (e.g., compilation or simulation errors).

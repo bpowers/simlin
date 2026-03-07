@@ -2176,10 +2176,10 @@ pub fn compute_metadata(
         dep_graph.entry(var_ident.clone()).or_default();
 
         // Use salsa dependency extraction when the source model and
-        // variable are available. When the salsa path returns empty
-        // deps (e.g. because of a parse error producing no AST), fall
-        // back to string heuristics so broken equations still get
-        // approximate dependency information for layout.
+        // variable are available. Only fall back to string heuristics
+        // when the variable is not in the source model, or when the
+        // equation failed to parse (no AST). If parsing succeeded but
+        // deps are empty, the variable is a genuine constant.
         let deps: Vec<String> = source_model
             .and_then(|sm| {
                 let sv = sm.variables(db).get(&var_ident)?.to_owned();
@@ -2193,9 +2193,18 @@ pub fn compute_metadata(
                 combined.sort();
                 combined.dedup();
                 if combined.is_empty() {
-                    let heuristic = extract_equation_deps(var, &all_idents);
-                    if !heuristic.is_empty() {
-                        return Some(heuristic);
+                    // Check whether the equation actually parsed. If the AST
+                    // is None, the equation has syntax errors and we fall back
+                    // to string heuristics for approximate layout deps.
+                    let empty_ctx = crate::db::ModuleIdentContext::new(db, vec![]);
+                    let parsed = crate::db::parse_source_variable_with_module_context(
+                        db,
+                        sv,
+                        source_project,
+                        empty_ctx,
+                    );
+                    if parsed.variable.ast().is_none() {
+                        return Some(extract_equation_deps(var, &all_idents));
                     }
                 }
                 Some(combined)
