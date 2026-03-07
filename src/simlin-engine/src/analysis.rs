@@ -75,10 +75,20 @@ pub fn analyze_model(
     source_project: SourceProject,
     model_name: &str,
 ) -> Result<ModelAnalysis, String> {
+    use salsa::Setter;
+
     let json_model = model_snapshot(project, model_name)
         .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
 
+    // Enable LTM discovery for this analysis; restore flags before returning
+    // so the caller's db state stays clean.
+    source_project.set_ltm_enabled(db).to(true);
+    source_project.set_ltm_discovery_mode(db).to(true);
+
     let loop_result = run_ltm_pipeline(project, db, source_project, model_name);
+
+    source_project.set_ltm_enabled(db).to(false);
+    source_project.set_ltm_discovery_mode(db).to(false);
 
     match loop_result {
         Some((time, loop_dominance, dominant_loops_by_period)) => Ok(ModelAnalysis {
@@ -107,8 +117,7 @@ fn run_ltm_pipeline(
     source_project: SourceProject,
     model_name: &str,
 ) -> Option<(Vec<f64>, Vec<LoopSummary>, Vec<DominantPeriod>)> {
-    use salsa::Setter;
-
+    // Canonicalize so the name matches the keys in source_project.models(db).
     let actual_name = {
         let ident = project
             .models
@@ -116,16 +125,19 @@ fn run_ltm_pipeline(
             .find(|m| {
                 crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
             })
-            .map(|m| m.name.clone());
-        ident.or_else(|| project.models.first().map(|m| m.name.clone()))?
+            .map(|m| crate::canonicalize(&m.name).into_owned());
+        ident.or_else(|| {
+            project
+                .models
+                .first()
+                .map(|m| crate::canonicalize(&m.name).into_owned())
+        })?
     };
 
     let uid_to_loop_name = build_uid_to_loop_name(project, &actual_name);
 
-    // Enable LTM with discovery mode so that link score synthetic
-    // variables are generated for every causal edge.
-    source_project.set_ltm_enabled(db).to(true);
-    source_project.set_ltm_discovery_mode(db).to(true);
+    // LTM flags are set by the caller (analyze_model) before this function
+    // is called, and restored after it returns.
 
     let compiled_sim =
         crate::db::compile_project_incremental(db, source_project, &actual_name).ok()?;
@@ -515,6 +527,70 @@ mod tests {
         assert!(
             result.is_ok(),
             "analyze_model with 'main' alias must succeed even when the model is named 'Main'"
+        );
+    }
+
+    // ---- non-canonical model name must not break causal graph lookup ----
+
+    #[test]
+    fn non_canonical_model_name_finds_causal_edges() {
+        // Model name "Main" (uppercase) must still produce loop results,
+        // because models(db) is keyed by canonical names.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let mut project = load_project(path);
+        // Rename the model to a non-canonical form
+        project.models[0].name = "Main".to_string();
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis = analyze_model(&project, &mut db, sp, "Main").expect("analyze_model failed");
+
+        assert!(
+            !analysis.loop_dominance.is_empty(),
+            "non-canonical model name must still produce loop results"
+        );
+    }
+
+    // ---- LTM flags must be reset after analyze_model ----
+
+    #[test]
+    fn ltm_flags_reset_after_analyze() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let project = load_project(path);
+        let (mut db, sp) = synced_db(&project);
+        let _analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
+
+        // After analyze_model returns, LTM flags must be restored to false
+        // so subsequent compilations don't unexpectedly run in LTM discovery mode.
+        assert!(
+            !sp.ltm_enabled(&db),
+            "ltm_enabled must be false after analyze_model returns"
+        );
+        assert!(
+            !sp.ltm_discovery_mode(&db),
+            "ltm_discovery_mode must be false after analyze_model returns"
+        );
+    }
+
+    #[test]
+    fn ltm_flags_reset_after_failed_analysis() {
+        let project = broken_project();
+        let (mut db, sp) = synced_db(&project);
+        let _analysis = analyze_model(&project, &mut db, sp, "main")
+            .expect("analyze_model should not return Err");
+
+        assert!(
+            !sp.ltm_enabled(&db),
+            "ltm_enabled must be false after failed analyze_model"
+        );
+        assert!(
+            !sp.ltm_discovery_mode(&db),
+            "ltm_discovery_mode must be false after failed analyze_model"
         );
     }
 }

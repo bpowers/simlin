@@ -308,7 +308,8 @@ fn print_equations(project: &DatamodelProject, output: Option<String>) {
     let models = sync.project.models(&db);
 
     for model_name in model_names.iter() {
-        let source_model = match models.get(model_name) {
+        let canonical_name = simlin_engine::canonicalize(model_name);
+        let source_model = match models.get(canonical_name.as_ref()) {
             Some(m) => *m,
             None => continue,
         };
