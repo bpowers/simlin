@@ -2897,10 +2897,17 @@ pub fn sync_from_datamodel_incremental(
     }
 }
 
-/// Expands a set of dimension names to include transitive `maps_to` and
-/// `mappings` targets. Given `{A}` where A maps_to B and B maps_to C, the
-/// result is `{A, B, C}`. The `BTreeSet::insert` returning `false` on
-/// duplicates prevents infinite loops in circular mapping chains.
+/// Expands a set of dimension names to include all dimensions reachable
+/// via `maps_to` / `mappings` in either direction.
+///
+/// Forward: if A maps_to B, {A} → {A, B}.
+/// Reverse: if A maps_to B, {B} → {B, A}.
+///
+/// The reverse direction is necessary when a variable declares its own
+/// dimension as e.g. DimB but its equation references DimA via a cross-
+/// dimension mapping (DimA → DimB). The per-element implicit variables
+/// created for the SMTH/DELAY expansion use elements of DimA, so DimA
+/// must be present in the DimensionsContext for the substitution to work.
 fn expand_maps_to_chains(
     dim_names: &BTreeSet<String>,
     all_dims: &[SourceDimension],
@@ -2911,6 +2918,7 @@ fn expand_maps_to_chains(
 
     let mut to_visit: Vec<String> = dim_names.iter().cloned().collect();
     while let Some(name) = to_visit.pop() {
+        // Forward: follow maps_to and mappings targets from the current dim.
         if let Some(dim) = dim_map.get(name.as_str()) {
             if let Some(ref target) = dim.maps_to
                 && expanded.insert(target.clone())
@@ -2921,6 +2929,20 @@ fn expand_maps_to_chains(
                 if expanded.insert(mapping.target.clone()) {
                     to_visit.push(mapping.target.clone());
                 }
+            }
+        }
+        // Reverse: find any dimension that maps_to (or has a mapping targeting)
+        // our current dim. This ensures that when a variable is subscripted by
+        // DimB, the DimensionsContext also contains any DimA that maps to DimB,
+        // so cross-dimension subscript substitution works in builtins_visitor.
+        for source_dim in all_dims {
+            let maps_to_current = source_dim
+                .maps_to
+                .as_deref()
+                .is_some_and(|t| t == name.as_str())
+                || source_dim.mappings.iter().any(|m| m.target == name);
+            if maps_to_current && expanded.insert(source_dim.name.clone()) {
+                to_visit.push(source_dim.name.clone());
             }
         }
     }
