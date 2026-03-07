@@ -5938,3 +5938,58 @@ fn test_init_aux_only_model() {
         );
     }
 }
+
+#[test]
+fn test_previous_of_module_backed_variable_compiles_correctly() {
+    use crate::testutils::{x_aux, x_model};
+    use crate::vm::Vm;
+
+    // PREVIOUS(x) where x = SMTH1(input, 1) must use module expansion,
+    // not the LoadPrev opcode.  LoadPrev is only valid for simple scalar
+    // variables; module-backed variables like SMTH1 occupy multiple VM
+    // slots (internal stock + aux), so LoadPrev would read the wrong slot.
+    let project = datamodel::Project {
+        name: "previous_of_smooth".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            stop: 10.0,
+            ..Default::default()
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("input", "10", None),
+                x_aux("x", "SMTH1(input, 1)", None),
+                x_aux("y", "PREVIOUS(x, x)", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("PREVIOUS(SMTH1_var) should compile via incremental path");
+    let mut vm = Vm::new(compiled).expect("VM should build");
+    vm.run_to_end().expect("simulation should run");
+
+    let x_series = vm
+        .get_series(&crate::common::Ident::new("x"))
+        .expect("x missing");
+    let y_series = vm
+        .get_series(&crate::common::Ident::new("y"))
+        .expect("y missing");
+    assert_eq!(x_series.len(), y_series.len());
+
+    // y = PREVIOUS(x, x): at t>0, y[t] should equal x[t-1].
+    for t in 1..x_series.len() {
+        assert!(
+            (y_series[t] - x_series[t - 1]).abs() < 1e-6,
+            "step {t}: y={}, expected x_prev={}",
+            y_series[t],
+            x_series[t - 1],
+        );
+    }
+}
