@@ -171,9 +171,12 @@ pub(crate) fn normalize_subscripts3(
             }
 
             IndexExpr3::DimPosition(pos, _) => {
-                // @1 is position 0, @2 is position 1, etc.
-                let dim_idx = (*pos as usize).saturating_sub(1);
-                IndexOp::DimPosition(dim_idx)
+                // @N is 1-based: @1 -> position 0, @2 -> position 1, etc.
+                // @0 is invalid; bail out so the caller reports an error.
+                if *pos == 0 {
+                    return None;
+                }
+                IndexOp::DimPosition(*pos as usize - 1)
             }
 
             IndexExpr3::Expr(expr) => {

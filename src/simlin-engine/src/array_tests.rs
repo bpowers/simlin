@@ -338,8 +338,7 @@ mod dimension_position_tests {
             .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
             .scalar_aux("first_elem", "arr[@1]"); // Should get first element = 10
 
-        // @N position syntax is not yet supported on the incremental path
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("first_elem", 10.0);
     }
@@ -434,6 +433,45 @@ mod dimension_position_tests {
         project.assert_sim_builds();
         // Should get A=1 slice with C,B ordering: [111, 121, 131, 112, 122, 132]
         project.assert_interpreter_result("slice", &[111.0, 121.0, 131.0, 112.0, 122.0, 132.0]);
+    }
+
+    #[test]
+    fn dimension_position_zero_is_error() {
+        // @0 is invalid (positions are 1-based)
+        let project = TestProject::new("dim_pos_zero")
+            .indexed_dimension("Items", 3)
+            .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .scalar_aux("first_elem", "arr[@0]");
+
+        let result = project.compile_incremental();
+        assert!(result.is_err(), "@0 should be rejected as out-of-range");
+        let err = result.unwrap_err();
+        let details = format!("{err:?}");
+        assert!(
+            details.contains("first_elem"),
+            "error should reference the variable name, got: {details}"
+        );
+    }
+
+    #[test]
+    fn dimension_position_out_of_range_is_error() {
+        // @5 exceeds dimension size 3
+        let project = TestProject::new("dim_pos_oob")
+            .indexed_dimension("Items", 3)
+            .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .scalar_aux("first_elem", "arr[@5]");
+
+        let result = project.compile_incremental();
+        assert!(
+            result.is_err(),
+            "@5 should be rejected for size-3 dimension"
+        );
+        let err = result.unwrap_err();
+        let details = format!("{err:?}");
+        assert!(
+            details.contains("first_elem"),
+            "error should reference the variable name, got: {details}"
+        );
     }
 }
 
@@ -1356,14 +1394,33 @@ mod combined_operations_tests {
     #[test]
     fn dimension_position_and_wildcard() {
         // Combine dimension position with wildcard
-        // @N position syntax is not yet supported on the incremental path
         TestProject::new("combined_dimpos_wildcard")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 3)
             .indexed_dimension("Z", 4)
             .array_aux("cube[X,Y,Z]", "X * 100 + Y * 10 + Z")
-            .array_aux("slice[Z,Y]", "cube[@1, *, @3]") // Fix X=0, reorder Y and Z
-            .assert_compiles();
+            .array_aux("slice[Z,Y]", "cube[@1, *, @3]") // Fix X=1, reorder Y and Z
+            .assert_compiles_incremental();
+    }
+
+    #[test]
+    fn dimension_position_and_wildcard_indexed_values() {
+        // Verify @N with wildcard produces correct values on indexed dimensions.
+        // This catches a bug where the A2A iteration subscript from the LHS
+        // dimension (Y) is incorrectly used as the RHS dimension (X) subscript
+        // when both are indexed and their numeric ranges overlap.
+        let project = TestProject::new("dimpos_wildcard_values")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 3)
+            .array_aux("matrix[X, Y]", "X * 10 + Y")
+            // row[Y] = matrix[@1, *] should select first row: [11, 12, 13]
+            .array_aux("row[Y]", "matrix[@1, *]")
+            // Check second element of row: matrix[1, 2] = 12
+            .scalar_aux("check", "row[@2]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_scalar_result("check", 12.0);
     }
 
     #[test]
@@ -2019,10 +2076,38 @@ mod structural_lowering_tests {
             // NOT (20 + 30) / 5 = 10 (which would be wrong if using full array size)
             .scalar_aux("result", "MEAN(data[start_idx:end_idx])");
 
-        // MEAN with dynamic ranges is not yet supported on the incremental path
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 25.0);
+    }
+
+    #[test]
+    fn mean_of_scalar_expression() {
+        // MEAN(scalar_expr) where the argument is a composite scalar expression
+        // (not an array) should compile and return the expression's value.
+        // Regression: routing all single-arg MEAN through emit_array_reduce
+        // broke this because walk_expr_as_view can't handle Expr::Op2.
+        let project = TestProject::new("mean_scalar_expr")
+            .scalar_aux("x", "5")
+            .scalar_aux("result", "MEAN(x + 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 6.0);
+    }
+
+    #[test]
+    fn mean_of_scalar_var() {
+        // MEAN(scalar_var) where the argument is a bare scalar Var hits the
+        // Expr::Var arm and goes through emit_array_reduce/walk_expr_as_view.
+        // Verify the VM's ArrayMean opcode handles a 1-element view correctly.
+        let project = TestProject::new("mean_scalar_var")
+            .scalar_aux("x", "7")
+            .scalar_aux("result", "MEAN(x)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 7.0);
     }
 
     #[test]

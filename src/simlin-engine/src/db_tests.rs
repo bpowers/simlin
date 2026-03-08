@@ -4971,7 +4971,7 @@ fn test_arrayed_1arg_previous_loadprev_per_element() {
         .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA])");
 
     // Verify compilation and simulation both succeed
-    tp.assert_compiles();
+    tp.assert_compiles_incremental();
     tp.assert_sim_builds();
 
     let interp = tp
@@ -5059,7 +5059,7 @@ fn test_arrayed_2arg_previous_per_element_modules() {
         .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA], 99)");
 
     // Verify compilation and simulation both succeed
-    tp.assert_compiles();
+    tp.assert_compiles_incremental();
     tp.assert_sim_builds();
 
     let vm = tp.run_vm().expect("VM should run successfully");
