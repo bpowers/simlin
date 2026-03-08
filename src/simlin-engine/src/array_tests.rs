@@ -2056,8 +2056,7 @@ mod structural_lowering_tests {
             // NOT (20 + 30) / 5 = 10 (which would be wrong if using full array size)
             .scalar_aux("result", "MEAN(data[start_idx:end_idx])");
 
-        // MEAN with dynamic ranges is not yet supported on the incremental path
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 25.0);
     }
