@@ -1223,7 +1223,25 @@ impl Context<'_> {
                     active_dimension: self.active_dimension.as_deref(),
                 };
 
-                if let Some(operations) = normalize_subscripts3(indices, &config) {
+                if let Some(mut operations) = normalize_subscripts3(indices, &config) {
+                    // In scalar context (no active A2A dimension and not
+                    // inside an array-reducing builtin like SUM), resolve
+                    // DimPosition(@N) to a concrete Single element offset.
+                    // DimPosition normally preserves the dimension for A2A
+                    // iteration, but in scalar context @N selects element N.
+                    if self.active_dimension.is_none() && !self.preserve_wildcards_for_iteration {
+                        for (i, op) in operations.iter_mut().enumerate() {
+                            if let IndexOp::DimPosition(pos) = op {
+                                let pos_1based = *pos + 1;
+                                if pos_1based == 0 || pos_1based > dims[i].len() {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                                }
+                                // Convert to 0-based Single index
+                                *op = IndexOp::Single(pos_1based - 1);
+                            }
+                        }
+                    }
+
                     // Build a unified view for any combination of static operations
                     let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
 
@@ -2129,35 +2147,51 @@ impl Context<'_> {
             }
 
             IndexExpr3::DimPosition(pos, dim_loc) => {
-                // @1, @2, etc. in dynamic context
+                let pos_val = *pos as usize;
+
+                // Scalar context: no active A2A dimension, resolve @N directly
+                // to a concrete 1-based element offset in the target dimension.
                 if self.active_dimension.is_none() {
-                    return sim_err!(
-                        ArrayReferenceNeedsExplicitSubscripts,
-                        id.as_str().to_string()
-                    );
+                    if pos_val == 0 || pos_val > dims[i].len() {
+                        return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                    }
+                    return Ok(SubscriptIndex::Single(Expr::Const(
+                        pos_val as f64,
+                        *dim_loc,
+                    )));
                 }
+
+                // A2A context: try to resolve via the active subscript at
+                // this position (dimension-reordering path, e.g. matrix[@2, @1]).
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
-                let pos = (*pos as usize).saturating_sub(1);
-                if pos >= active_subscripts.len() {
+                let pos_0 = pos_val.saturating_sub(1);
+                if pos_0 < active_subscripts.len() {
+                    let subscript = &active_subscripts[pos_0];
+                    let dim = &dims[i];
+
+                    if let Some(offset) = dim.get_offset(subscript) {
+                        return Ok(SubscriptIndex::Single(Expr::Const(
+                            (offset + 1) as f64,
+                            *dim_loc,
+                        )));
+                    } else if let Ok(idx_val) = subscript.as_str().parse::<usize>() {
+                        return Ok(SubscriptIndex::Single(Expr::Const(
+                            idx_val as f64,
+                            *dim_loc,
+                        )));
+                    }
+                }
+
+                // A2A fallback for mixed cases (e.g. cube[@1, *, @3]) where
+                // the active subscript doesn't match the target dimension.
+                // Resolve to a concrete 1-based offset, same as scalar context.
+                if pos_val == 0 || pos_val > dims[i].len() {
                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
                 }
-
-                let subscript = &active_subscripts[pos];
-                let dim = &dims[i];
-
-                if let Some(offset) = dim.get_offset(subscript) {
-                    Ok(SubscriptIndex::Single(Expr::Const(
-                        (offset + 1) as f64,
-                        *dim_loc,
-                    )))
-                } else if let Ok(idx_val) = subscript.as_str().parse::<usize>() {
-                    Ok(SubscriptIndex::Single(Expr::Const(
-                        idx_val as f64,
-                        *dim_loc,
-                    )))
-                } else {
-                    sim_err!(MismatchedDimensions, id.as_str().to_string())
-                }
+                Ok(SubscriptIndex::Single(Expr::Const(
+                    pos_val as f64,
+                    *dim_loc,
+                )))
             }
 
             IndexExpr3::Expr(e) => {

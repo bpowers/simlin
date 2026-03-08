@@ -338,8 +338,7 @@ mod dimension_position_tests {
             .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
             .scalar_aux("first_elem", "arr[@1]"); // Should get first element = 10
 
-        // @N position syntax is not yet supported on the incremental path
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("first_elem", 10.0);
     }
@@ -1356,14 +1355,13 @@ mod combined_operations_tests {
     #[test]
     fn dimension_position_and_wildcard() {
         // Combine dimension position with wildcard
-        // @N position syntax is not yet supported on the incremental path
         TestProject::new("combined_dimpos_wildcard")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 3)
             .indexed_dimension("Z", 4)
             .array_aux("cube[X,Y,Z]", "X * 100 + Y * 10 + Z")
-            .array_aux("slice[Z,Y]", "cube[@1, *, @3]") // Fix X=0, reorder Y and Z
-            .assert_compiles();
+            .array_aux("slice[Z,Y]", "cube[@1, *, @3]") // Fix X=1, reorder Y and Z
+            .assert_compiles_incremental();
     }
 
     #[test]
