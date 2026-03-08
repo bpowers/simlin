@@ -738,7 +738,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[SubA]", "DELAY1(input[SubA], delay_time, init)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -753,7 +753,7 @@ mod tests {
             .aux("init_scalar", "0", None)
             .array_aux("d[DimA]", "DELAY1(input_a[DimA], delay, init_scalar)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -776,7 +776,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[DimA]", "DELAY1(input_a[DimA], delay, init)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
 
         // Get results for 2 timesteps (0 and 1)
@@ -800,7 +800,7 @@ mod tests {
                 "DELAY1(input_a[DimA], delay_a[DimA], init_a[DimA])",
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -824,7 +824,7 @@ mod tests {
                 "DELAY1(input_a[DimA], delay_a[DimA], init_a[DimA])",
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
 
         // At step 1: output = stock/delay
@@ -843,7 +843,7 @@ mod tests {
             .array_const("delay_a[DimA]", 1.0)
             .array_aux("d[DimA]", "DELAY3(input, delay_a[DimA])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -857,7 +857,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 1, init)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -871,7 +871,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 3, init)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -884,7 +884,7 @@ mod tests {
             .aux("smooth_time", "1", None)
             .array_aux("s[DimA]", "SMTH1(input_a[DimA], smooth_time)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -898,7 +898,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("s[DimA]", "SMTHN(input_a[DimA], smooth_time, 1, init)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -925,7 +925,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[Idx]", "DELAY1(input[Idx], delay_time, init)");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -939,7 +939,7 @@ mod tests {
             .array_const("delay_a[DimA]", 1.0)
             .array_aux("d[DimA]", "k * DELAY3(input, delay_a[DimA])");
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -962,7 +962,7 @@ mod tests {
                 ],
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -979,7 +979,7 @@ mod tests {
                 vec![("A1", "DELAY1(input1, delay_time, init)"), ("A2", "42")],
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -1001,7 +1001,7 @@ mod tests {
                 ],
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 
@@ -1024,7 +1024,7 @@ mod tests {
                 None,
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         // output = stock + inflow * DT
         // t=0: stock=0, inflow=10*1*(1+0)^0=10, output = 0 + 10*1 = 10
@@ -1050,7 +1050,7 @@ mod tests {
                 None,
             );
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         let results = project.run_interpreter().unwrap();
         let vals = results.get("result").unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
             .aux("b", "3", None)
             .aux("result", "MODULO(a, b)", None);
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[1.0, 1.0]);
     }
@@ -1083,7 +1083,7 @@ mod tests {
             .aux("x", "1", None)
             .aux("result", "INIT(INIT(x + 1))", None);
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_interpreter_result("result", &[2.0, 2.0]);
     }
@@ -1097,7 +1097,7 @@ mod tests {
             .aux("init", "0", None)
             .aux("result", "DELAY(input, delay_time, init)", None);
 
-        project.assert_compiles();
+        project.assert_compiles_incremental();
         project.assert_sim_builds();
     }
 }
