@@ -140,8 +140,11 @@ impl Project {
         // Build ModelStage0 from salsa-parsed variables for all models.
         let project_models = source_project.models(db);
         let mut all_s0: Vec<ModelStage0> = Vec::new();
-        for (_name, src_model) in project_models.iter() {
-            let is_stdlib = src_model.name(db).starts_with("stdlib\u{205A}");
+        for (canonical_name, src_model) in project_models.iter() {
+            // Use the canonical key (always lowercase) for stdlib
+            // detection so non-canonical spellings are handled correctly.
+            let is_stdlib = canonical_name.starts_with("stdlib\u{205A}");
+            let model_name = src_model.name(db);
             let src_vars = src_model.variables(db);
             // For stdlib models, ALL variable names must be module idents
             // so PREVIOUS(module_input) uses module expansion instead of
@@ -186,8 +189,8 @@ impl Project {
                 .map(|v| (Ident::new(v.ident()), v))
                 .collect();
             all_s0.push(ModelStage0 {
-                ident: Ident::new(src_model.name(db)),
-                display_name: src_model.name(db).clone(),
+                ident: Ident::new(model_name),
+                display_name: model_name.clone(),
                 variables,
                 errors: None,
                 implicit: is_stdlib,
