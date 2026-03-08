@@ -2097,6 +2097,20 @@ mod structural_lowering_tests {
     }
 
     #[test]
+    fn mean_of_scalar_var() {
+        // MEAN(scalar_var) where the argument is a bare scalar Var hits the
+        // Expr::Var arm and goes through emit_array_reduce/walk_expr_as_view.
+        // Verify the VM's ArrayMean opcode handles a 1-element view correctly.
+        let project = TestProject::new("mean_scalar_var")
+            .scalar_aux("x", "7")
+            .scalar_aux("result", "MEAN(x)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 7.0);
+    }
+
+    #[test]
     fn size_with_dynamic_range() {
         // Test SIZE with dynamic range - must return actual range size
         let project = TestProject::new("size_dynamic_range")
