@@ -12,18 +12,21 @@
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
 use crate::canonicalize;
-use crate::common::{Canonical, Ident, Result};
+use crate::common::{Canonical, Ident};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
-use crate::ltm::{
-    CausalGraph, CyclePartitions, Link, Loop, ModuleLtmRole, classify_module_for_ltm, detect_loops,
-    normalize_module_ref,
-};
-use crate::project::Project;
+use crate::ltm::{CyclePartitions, Loop, normalize_module_ref};
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
-// Type alias for clarity
+#[cfg(any(test, feature = "testing"))]
+use {
+    crate::common::Result,
+    crate::ltm::{CausalGraph, Link, ModuleLtmRole, classify_module_for_ltm, detect_loops},
+    crate::project::Project,
+};
+
+#[cfg(any(test, feature = "testing"))]
 pub(crate) type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
 /// Map from module model name to the set of input ports that have composite
@@ -125,6 +128,7 @@ fn build_partial_equation(
 
 /// Augment a project with LTM synthetic variables
 /// Returns a map of model name to synthetic variables to add
+#[cfg(any(test, feature = "testing"))]
 pub fn generate_ltm_variables(
     project: &Project,
 ) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
@@ -137,6 +141,7 @@ pub fn generate_ltm_variables(
 /// participating in detected loops, this generates link score variables for every
 /// causal connection in the model. Loop score and relative loop score variables
 /// are NOT generated -- those are computed post-simulation by `discover_loops()`.
+#[cfg(any(test, feature = "testing"))]
 pub fn generate_ltm_variables_all_links(
     project: &Project,
 ) -> Result<HashMap<Ident<Canonical>, SyntheticVariables>> {
@@ -145,6 +150,7 @@ pub fn generate_ltm_variables_all_links(
 
 /// Pre-compute which input ports on each dynamic stdlib module have causal
 /// pathways to the output. Only these ports get composite link score variables.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn compute_composite_ports(project: &Project) -> CompositePortMap {
     let mut result = HashMap::new();
     for (model_name, model) in &project.models {
@@ -168,6 +174,7 @@ pub(crate) fn compute_composite_ports(project: &Project) -> CompositePortMap {
     result
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn generate_ltm_variables_inner(
     project: &Project,
     all_links_mode: bool,
@@ -257,6 +264,7 @@ fn generate_ltm_variables_inner(
 }
 
 /// Generate link score variables for all links
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generate_link_score_variables(
     links: &HashSet<Link>,
     variables: &HashMap<Ident<Canonical>, Variable>,
@@ -697,6 +705,7 @@ fn generate_relative_loop_score_equation(loop_id: &str, same_group_ids: &[&str])
 
 /// Generate internal link score, pathway, and composite variables for a
 /// dynamic stdlib module. Returns variables to add to the stdlib model.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generate_module_internal_ltm_variables(
     _model_name: &Ident<Canonical>,
     module_model: &crate::model::ModelStage1,
@@ -771,6 +780,7 @@ pub(crate) fn generate_module_internal_ltm_variables(
 /// For N=1: just the pathway name.
 /// For N=2: `if ABS(p1) >= ABS(p2) then p1 else p2`
 /// For N>2: `if ABS(pN) >= ABS(max_of_rest) then pN else max_of_rest` (recursive)
+#[cfg(any(test, feature = "testing"))]
 fn generate_max_abs_chain(pathway_names: &[String]) -> String {
     match pathway_names.len() {
         0 => "0".to_string(),
