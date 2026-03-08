@@ -360,6 +360,15 @@ impl<'module> Compiler<'module> {
         }
     }
 
+    /// Emit the array-reduce pattern: push view, emit reduction opcode, pop view.
+    /// Used by SUM, SIZE, STDDEV, MIN (1-arg), MAX (1-arg), and MEAN (1-arg).
+    fn emit_array_reduce(&mut self, arg: &Expr, opcode: Opcode) -> Result<Option<()>> {
+        self.walk_expr_as_view(arg)?;
+        self.push(opcode);
+        self.push(Opcode::PopView {});
+        Ok(Some(()))
+    }
+
     fn walk(&mut self, exprs: &[Expr]) -> Result<ByteCode> {
         for expr in exprs.iter() {
             self.walk_expr(expr)?;
@@ -793,32 +802,22 @@ impl<'module> Compiler<'module> {
                     }
                     BuiltinFn::Max(a, b) => {
                         if let Some(b) = b {
-                            // Two-argument scalar max
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
                         } else {
-                            // Single-argument array max
-                            self.walk_expr_as_view(a)?;
-                            self.push(Opcode::ArrayMax {});
-                            self.push(Opcode::PopView {});
-                            return Ok(Some(()));
+                            return self.emit_array_reduce(a, Opcode::ArrayMax {});
                         }
                     }
                     BuiltinFn::Min(a, b) => {
                         if let Some(b) = b {
-                            // Two-argument scalar min
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
                         } else {
-                            // Single-argument array min
-                            self.walk_expr_as_view(a)?;
-                            self.push(Opcode::ArrayMin {});
-                            self.push(Opcode::PopView {});
-                            return Ok(Some(()));
+                            return self.emit_array_reduce(a, Opcode::ArrayMin {});
                         }
                     }
                     BuiltinFn::Quantum(a, b) => {
@@ -899,25 +898,13 @@ impl<'module> Compiler<'module> {
                         return sim_err!(TodoArrayBuiltin, "RANK not yet supported".to_owned());
                     }
                     BuiltinFn::Size(arg) => {
-                        // SIZE returns the number of elements in an array
-                        self.walk_expr_as_view(arg)?;
-                        self.push(Opcode::ArraySize {});
-                        self.push(Opcode::PopView {});
-                        return Ok(Some(()));
+                        return self.emit_array_reduce(arg, Opcode::ArraySize {});
                     }
                     BuiltinFn::Stddev(arg) => {
-                        // STDDEV computes standard deviation of array elements
-                        self.walk_expr_as_view(arg)?;
-                        self.push(Opcode::ArrayStddev {});
-                        self.push(Opcode::PopView {});
-                        return Ok(Some(()));
+                        return self.emit_array_reduce(arg, Opcode::ArrayStddev {});
                     }
                     BuiltinFn::Sum(arg) => {
-                        // SUM computes the sum of array elements
-                        self.walk_expr_as_view(arg)?;
-                        self.push(Opcode::ArraySum {});
-                        self.push(Opcode::PopView {});
-                        return Ok(Some(()));
+                        return self.emit_array_reduce(arg, Opcode::ArraySum {});
                     }
                     BuiltinFn::VectorSelect(sel, expr, max_val, action, _err) => {
                         self.walk_expr_as_view(sel)?;
