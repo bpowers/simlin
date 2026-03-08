@@ -26,8 +26,8 @@ pub struct Project {
     #[allow(dead_code)]
     model_order: Vec<Ident<Canonical>>,
     /// Project-level errors. With the `from_salsa` construction path,
-    /// unit definition errors are accumulated via the salsa accumulator
-    /// in `project_units_context`; this field is always empty.
+    /// unit definition errors are recovered from the salsa accumulator
+    /// in `project_units_context` so callers can still inspect them.
     pub errors: Vec<Error>,
     /// Cached dimension context for subdimension lookups
     pub dimensions_ctx: DimensionsContext,
@@ -110,14 +110,30 @@ impl Project {
     where
         F: FnMut(&HashMap<Ident<Canonical>, &ModelStage1>, &Context, &mut ModelStage1),
     {
-        use crate::common::topo_sort;
+        use crate::common::{ErrorCode, ErrorKind, topo_sort};
         use crate::db::{
-            model_module_ident_context, parse_source_variable_with_module_context,
-            project_datamodel_dims, project_units_context,
+            CompilationDiagnostic, DiagnosticError, model_module_ident_context,
+            parse_source_variable_with_module_context, project_datamodel_dims,
+            project_units_context,
         };
         use crate::model::{ModelStage0, VariableStage0, enumerate_modules};
 
         let units_ctx = project_units_context(db, source_project);
+
+        // Recover unit definition errors from the salsa accumulator so
+        // callers that inspect Project.errors (e.g. tests) still see them.
+        let project_errors: Vec<Error> =
+            project_units_context::accumulated::<CompilationDiagnostic>(db, source_project)
+                .into_iter()
+                .filter_map(|cd| match &cd.0.error {
+                    DiagnosticError::Unit(unit_err) => Some(Error {
+                        kind: ErrorKind::Model,
+                        code: ErrorCode::UnitDefinitionErrors,
+                        details: Some(format!("{unit_err}")),
+                    }),
+                    _ => None,
+                })
+                .collect();
         let dm_dims = project_datamodel_dims(db, source_project);
         let dims_ctx = DimensionsContext::from(dm_dims.as_slice());
 
@@ -151,12 +167,20 @@ impl Project {
                 implicit_dm.extend(parsed.implicit_vars.iter().cloned());
             }
             // Parse implicit vars (SMOOTH/DELAY expansion).
-            let mut dummy: Vec<datamodel::Variable> = Vec::new();
+            let mut nested_implicit: Vec<datamodel::Variable> = Vec::new();
             var_list.extend(implicit_dm.into_iter().map(|dm_var| {
-                crate::variable::parse_var(dm_dims, &dm_var, &mut dummy, units_ctx, |mi| {
-                    Ok(Some(mi.clone()))
-                })
+                crate::variable::parse_var(
+                    dm_dims,
+                    &dm_var,
+                    &mut nested_implicit,
+                    units_ctx,
+                    |mi| Ok(Some(mi.clone())),
+                )
             }));
+            debug_assert!(
+                nested_implicit.is_empty(),
+                "implicit vars should not produce further implicit vars"
+            );
             let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
                 .into_iter()
                 .map(|v| (Ident::new(v.ident()), v))
@@ -240,7 +264,7 @@ impl Project {
             datamodel: project_datamodel,
             models,
             model_order: ordered_models,
-            errors: vec![],
+            errors: project_errors,
             dimensions_ctx: dims_ctx,
         }
     }
@@ -369,6 +393,39 @@ fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unit_definition_errors_surface_in_project_errors() {
+        use crate::common::ErrorCode;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+        let model = x_model("main", vec![x_aux("x", "1", None)]);
+        let sim_specs = sim_specs_with_units("years");
+        let mut dm = x_project(sim_specs, &[model]);
+        // Add a duplicate unit definition to provoke a unit parse error.
+        dm.units.push(datamodel::Unit {
+            name: "widget".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec![],
+        });
+        dm.units.push(datamodel::Unit {
+            name: "widget".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec![],
+        });
+
+        let project = Project::from(dm);
+        assert!(
+            project
+                .errors
+                .iter()
+                .any(|e| e.code == ErrorCode::UnitDefinitionErrors),
+            "Project.errors should contain UnitDefinitionErrors, got: {:?}",
+            project.errors,
+        );
+    }
 
     #[test]
     fn test_project_with_ltm() {
