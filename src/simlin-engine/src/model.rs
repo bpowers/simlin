@@ -872,6 +872,7 @@ pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
 }
 
 #[cfg(any(test, feature = "testing"))]
+#[allow(dead_code)]
 impl ModelStage0 {
     pub fn new(
         x_model: &datamodel::Model,
