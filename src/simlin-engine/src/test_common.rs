@@ -529,21 +529,6 @@ impl TestProject {
         Ok(output)
     }
 
-    /// Test that compilation succeeds
-    pub fn assert_compiles(&self) {
-        match self.compile() {
-            Ok(_) => {}
-            Err(errors) => {
-                let error_msg = errors
-                    .iter()
-                    .map(|(loc, code)| format!("{loc}: {code:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                panic!("Compilation failed with errors: {error_msg}");
-            }
-        }
-    }
-
     /// Test that compilation fails with specific error
     pub fn assert_compile_error(&self, expected_error: ErrorCode) {
         self.assert_compile_error_impl(expected_error)
