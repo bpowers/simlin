@@ -2163,27 +2163,30 @@ impl Context<'_> {
                     )));
                 }
 
-                // A2A context: only resolve @N via active subscripts when the
-                // target dimension at this position is actually being iterated.
-                // This distinguishes full reorders (matrix[@2, @1]) from mixed
-                // @N-with-wildcard cases (matrix[@1, *]) where @N should be a
-                // constant position: for indexed dimensions, numeric element
-                // names overlap across dimensions, so get_offset alone can't
-                // discriminate.
+                // A2A context: try to resolve @N via the active subscript at
+                // this position (dimension-reordering path, e.g. matrix[@2, @1]).
+                // For named dimensions, element names are unique across dimensions,
+                // so get_offset reliably distinguishes elements — this also handles
+                // subdimension cases (e.g. selected[SubRegion] = data[@1]).
+                // For indexed dimensions, numeric element names overlap across
+                // unrelated dimensions (e.g. "2" is valid in both X and Y), so
+                // get_offset alone can't discriminate the mixed-wildcard case
+                // (row[Y] = matrix[@1, *]); we require an exact dimension match.
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let dim = &dims[i];
-                if active_dims.iter().any(|ad| ad == dim) {
-                    let pos_0 = pos_val.saturating_sub(1);
-                    if pos_0 < active_subscripts.len() {
-                        let subscript = &active_subscripts[pos_0];
-
-                        if let Some(offset) = dim.get_offset(subscript) {
-                            return Ok(SubscriptIndex::Single(Expr::Const(
-                                (offset + 1) as f64,
-                                *dim_loc,
-                            )));
-                        }
+                let pos_0 = pos_val.saturating_sub(1);
+                if pos_0 < active_subscripts.len() {
+                    let subscript = &active_subscripts[pos_0];
+                    let allow_binding = match dim {
+                        Dimension::Named(..) => true,
+                        Dimension::Indexed(..) => active_dims.iter().any(|ad| ad == dim),
+                    };
+                    if allow_binding && let Some(offset) = dim.get_offset(subscript) {
+                        return Ok(SubscriptIndex::Single(Expr::Const(
+                            (offset + 1) as f64,
+                            *dim_loc,
+                        )));
                     }
                 }
 

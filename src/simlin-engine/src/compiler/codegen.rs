@@ -863,6 +863,10 @@ impl<'module> Compiler<'module> {
                     }
                     BuiltinFn::Mean(args) => {
                         if args.len() == 1 {
+                            // MEAN is variadic (Vec<Expr>), unlike other array-reduce
+                            // builtins which take Box<Expr>. Single-arg MEAN can receive
+                            // scalar expressions (Op2, etc.) that walk_expr_as_view
+                            // can't handle, so we match on expression type first.
                             match &args[0] {
                                 Expr::StaticSubscript(..)
                                 | Expr::TempArray(..)
