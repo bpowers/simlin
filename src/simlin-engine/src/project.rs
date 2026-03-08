@@ -126,11 +126,14 @@ impl Project {
             project_units_context::accumulated::<CompilationDiagnostic>(db, source_project)
                 .into_iter()
                 .filter_map(|cd| match &cd.0.error {
-                    DiagnosticError::Unit(unit_err) => Some(Error {
-                        kind: ErrorKind::Model,
-                        code: ErrorCode::UnitDefinitionErrors,
-                        details: Some(format!("{unit_err}")),
-                    }),
+                    DiagnosticError::Unit(unit_err) => {
+                        let name = cd.0.variable.as_deref().unwrap_or("unknown");
+                        Some(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::UnitDefinitionErrors,
+                            details: Some(format!("{name}: {unit_err}")),
+                        })
+                    }
                     _ => None,
                 })
                 .collect();
@@ -141,9 +144,12 @@ impl Project {
         let project_models = source_project.models(db);
         let mut all_s0: Vec<ModelStage0> = Vec::new();
         for (canonical_name, src_model) in project_models.iter() {
-            // Use the canonical key (always lowercase) for stdlib
-            // detection so non-canonical spellings are handled correctly.
-            let is_stdlib = canonical_name.starts_with("stdlib\u{205A}");
+            // Only treat a model as implicit/stdlib if it matches one
+            // of the known stdlib model names, not just any model whose
+            // name starts with the stdlib prefix.
+            let is_stdlib = canonical_name
+                .strip_prefix("stdlib\u{205A}")
+                .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix));
             let model_name = src_model.name(db);
             let src_vars = src_model.variables(db);
             // For stdlib models, ALL variable names must be module idents
@@ -420,13 +426,24 @@ mod tests {
         });
 
         let project = Project::from(dm);
+        let unit_errs: Vec<_> = project
+            .errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::UnitDefinitionErrors)
+            .collect();
         assert!(
-            project
-                .errors
-                .iter()
-                .any(|e| e.code == ErrorCode::UnitDefinitionErrors),
+            !unit_errs.is_empty(),
             "Project.errors should contain UnitDefinitionErrors, got: {:?}",
             project.errors,
+        );
+        // The failing unit name must appear in the error details so
+        // callers can identify which unit definition is broken.
+        assert!(
+            unit_errs
+                .iter()
+                .any(|e| e.details.as_deref().unwrap_or("").contains("widget")),
+            "Error details should include the unit name 'widget', got: {:?}",
+            unit_errs,
         );
     }
 

@@ -689,11 +689,11 @@ pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::unit
         Err(unit_parse_errors) => {
             // Accumulate each unit definition parsing error as a
             // project-level diagnostic (no model / variable).
-            for (_unit_name, eq_errors) in &unit_parse_errors {
+            for (unit_name, eq_errors) in &unit_parse_errors {
                 for eq_err in eq_errors {
                     CompilationDiagnostic(Diagnostic {
                         model: String::new(),
-                        variable: None,
+                        variable: Some(unit_name.clone()),
                         error: DiagnosticError::Unit(crate::common::UnitError::DefinitionError(
                             eq_err.clone(),
                             None,
