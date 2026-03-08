@@ -434,6 +434,45 @@ mod dimension_position_tests {
         // Should get A=1 slice with C,B ordering: [111, 121, 131, 112, 122, 132]
         project.assert_interpreter_result("slice", &[111.0, 121.0, 131.0, 112.0, 122.0, 132.0]);
     }
+
+    #[test]
+    fn dimension_position_zero_is_error() {
+        // @0 is invalid (positions are 1-based)
+        let project = TestProject::new("dim_pos_zero")
+            .indexed_dimension("Items", 3)
+            .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .scalar_aux("first_elem", "arr[@0]");
+
+        let result = project.compile_incremental();
+        assert!(result.is_err(), "@0 should be rejected as out-of-range");
+        let err = result.unwrap_err();
+        let details = format!("{err:?}");
+        assert!(
+            details.contains("first_elem"),
+            "error should reference the variable name, got: {details}"
+        );
+    }
+
+    #[test]
+    fn dimension_position_out_of_range_is_error() {
+        // @5 exceeds dimension size 3
+        let project = TestProject::new("dim_pos_oob")
+            .indexed_dimension("Items", 3)
+            .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .scalar_aux("first_elem", "arr[@5]");
+
+        let result = project.compile_incremental();
+        assert!(
+            result.is_err(),
+            "@5 should be rejected for size-3 dimension"
+        );
+        let err = result.unwrap_err();
+        let details = format!("{err:?}");
+        assert!(
+            details.contains("first_elem"),
+            "error should reference the variable name, got: {details}"
+        );
+    }
 }
 
 #[cfg(test)]
