@@ -863,7 +863,18 @@ impl<'module> Compiler<'module> {
                     }
                     BuiltinFn::Mean(args) => {
                         if args.len() == 1 {
-                            return self.emit_array_reduce(&args[0], Opcode::ArrayMean {});
+                            match &args[0] {
+                                Expr::StaticSubscript(..)
+                                | Expr::TempArray(..)
+                                | Expr::Var(..)
+                                | Expr::Subscript(..) => {
+                                    return self.emit_array_reduce(&args[0], Opcode::ArrayMean {});
+                                }
+                                _ => {
+                                    self.walk_expr(&args[0])?.unwrap();
+                                    return Ok(Some(()));
+                                }
+                            }
                         }
 
                         // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N

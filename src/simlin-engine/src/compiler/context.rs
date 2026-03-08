@@ -2163,24 +2163,27 @@ impl Context<'_> {
                     )));
                 }
 
-                // A2A context: try to resolve via the active subscript at
-                // this position (dimension-reordering path, e.g. matrix[@2, @1]).
+                // A2A context: only resolve @N via active subscripts when the
+                // target dimension at this position is actually being iterated.
+                // This distinguishes full reorders (matrix[@2, @1]) from mixed
+                // @N-with-wildcard cases (matrix[@1, *]) where @N should be a
+                // constant position: for indexed dimensions, numeric element
+                // names overlap across dimensions, so get_offset alone can't
+                // discriminate.
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
-                let pos_0 = pos_val.saturating_sub(1);
-                if pos_0 < active_subscripts.len() {
-                    let subscript = &active_subscripts[pos_0];
-                    let dim = &dims[i];
+                let active_dims = self.active_dimension.as_ref().unwrap();
+                let dim = &dims[i];
+                if active_dims.iter().any(|ad| ad == dim) {
+                    let pos_0 = pos_val.saturating_sub(1);
+                    if pos_0 < active_subscripts.len() {
+                        let subscript = &active_subscripts[pos_0];
 
-                    if let Some(offset) = dim.get_offset(subscript) {
-                        return Ok(SubscriptIndex::Single(Expr::Const(
-                            (offset + 1) as f64,
-                            *dim_loc,
-                        )));
-                    } else if let Ok(idx_val) = subscript.as_str().parse::<usize>() {
-                        return Ok(SubscriptIndex::Single(Expr::Const(
-                            idx_val as f64,
-                            *dim_loc,
-                        )));
+                        if let Some(offset) = dim.get_offset(subscript) {
+                            return Ok(SubscriptIndex::Single(Expr::Const(
+                                (offset + 1) as f64,
+                                *dim_loc,
+                            )));
+                        }
                     }
                 }
 

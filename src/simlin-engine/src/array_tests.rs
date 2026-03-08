@@ -1404,6 +1404,26 @@ mod combined_operations_tests {
     }
 
     #[test]
+    fn dimension_position_and_wildcard_indexed_values() {
+        // Verify @N with wildcard produces correct values on indexed dimensions.
+        // This catches a bug where the A2A iteration subscript from the LHS
+        // dimension (Y) is incorrectly used as the RHS dimension (X) subscript
+        // when both are indexed and their numeric ranges overlap.
+        let project = TestProject::new("dimpos_wildcard_values")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 3)
+            .array_aux("matrix[X, Y]", "X * 10 + Y")
+            // row[Y] = matrix[@1, *] should select first row: [11, 12, 13]
+            .array_aux("row[Y]", "matrix[@1, *]")
+            // Check second element of row: matrix[1, 2] = 12
+            .scalar_aux("check", "row[@2]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_scalar_result("check", 12.0);
+    }
+
+    #[test]
     #[ignore] // Enable when all operations are implemented
     fn complex_expression() {
         // Test complex array expression
@@ -2059,6 +2079,21 @@ mod structural_lowering_tests {
         project.assert_compiles_incremental();
         project.assert_sim_builds();
         project.assert_scalar_result("result", 25.0);
+    }
+
+    #[test]
+    fn mean_of_scalar_expression() {
+        // MEAN(scalar_expr) where the argument is a composite scalar expression
+        // (not an array) should compile and return the expression's value.
+        // Regression: routing all single-arg MEAN through emit_array_reduce
+        // broke this because walk_expr_as_view can't handle Expr::Op2.
+        let project = TestProject::new("mean_scalar_expr")
+            .scalar_aux("x", "5")
+            .scalar_aux("result", "MEAN(x + 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 6.0);
     }
 
     #[test]
