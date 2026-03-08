@@ -952,9 +952,12 @@ fn test_inference() {
         for _ in 0..64 {
             let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
                 Ok(Default::default());
-            let _project = crate::project::Project::base_from(
+            let db = crate::db::SimlinDb::default();
+            let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+            let _project = crate::project::Project::from_salsa(
                 project_datamodel.clone(),
-                None,
+                &db,
+                sync.project,
                 |models, units_ctx, model| {
                     results = infer(models, units_ctx, model);
                 },
@@ -1037,9 +1040,12 @@ fn test_inference_negative() {
                     sources: vec![],
                     details: None,
                 });
-            let _project = crate::project::Project::base_from(
+            let db = crate::db::SimlinDb::default();
+            let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+            let _project = crate::project::Project::from_salsa(
                 project_datamodel.clone(),
-                None,
+                &db,
+                sync.project,
                 |models, units_ctx, model| {
                     results = infer(models, units_ctx, model);
                 },
@@ -1062,9 +1068,12 @@ fn test_inference_error_has_location() {
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
-    let _project = crate::project::Project::base_from(
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
         project_datamodel.clone(),
-        None,
+        &db,
+        sync.project,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },
@@ -1204,9 +1213,12 @@ fn test_multi_metavar_constraint_mismatch() {
             sources: vec![],
             details: None,
         });
-    let _project = crate::project::Project::base_from(
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
         project_datamodel.clone(),
-        None,
+        &db,
+        sync.project,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },
@@ -1443,9 +1455,12 @@ fn test_rank_builtin_unit_inference() {
 
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
     let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
-    let _project = crate::project::Project::base_from(
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
         project_datamodel.clone(),
-        None,
+        &db,
+        sync.project,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },
@@ -1489,9 +1504,12 @@ fn test_unify_conflict_detection() {
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
-    let _project = crate::project::Project::base_from(
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
         project_datamodel.clone(),
-        None,
+        &db,
+        sync.project,
         |models, units_ctx, model| {
             results = infer(models, units_ctx, model);
         },

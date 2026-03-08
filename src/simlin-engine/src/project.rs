@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 #[cfg(any(test, feature = "testing"))]
 use {
-    crate::canonicalize,
-    crate::model::{ModelStage0, ScopeStage0},
-    crate::units::Context,
+    crate::canonicalize, crate::model::ScopeStage0, crate::units::Context,
     std::collections::BTreeSet,
 };
 
@@ -27,9 +25,9 @@ pub struct Project {
     pub models: HashMap<Ident<Canonical>, Arc<ModelStage1>>,
     #[allow(dead_code)]
     model_order: Vec<Ident<Canonical>>,
-    /// Project-level errors are also accumulated via the salsa accumulator
-    /// in `project_units_context`. This field is retained for the monolithic
-    /// `Project::from` construction path used by tests.
+    /// Project-level errors. With the `from_salsa` construction path,
+    /// unit definition errors are accumulated via the salsa accumulator
+    /// in `project_units_context`; this field is always empty.
     pub errors: Vec<Error>,
     /// Cached dimension context for subdimension lookups
     pub dimensions_ctx: DimensionsContext,
@@ -41,9 +39,10 @@ impl Project {
     }
 }
 
-/// Runs unit inference and unit checking for a model during monolithic
-/// Project construction. Only used by the test-only `From<datamodel::Project>`
-/// impl; the production path uses salsa tracked functions for unit analysis.
+/// Runs unit inference and unit checking for a model during
+/// `from_salsa` construction. Matches the behavior of the salsa
+/// `check_model_units` tracked function but stores results on the
+/// model struct instead of accumulating via the salsa accumulator.
 #[cfg(any(test, feature = "testing"))]
 fn run_default_model_checks(
     models: &HashMap<Ident<Canonical>, &ModelStage1>,
@@ -76,135 +75,117 @@ fn run_default_model_checks(
 #[cfg(any(test, feature = "testing"))]
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
-        Self::base_from(project_datamodel, None, run_default_model_checks)
+        Self::from_datamodel(project_datamodel)
     }
 }
 
 #[cfg(any(test, feature = "testing"))]
 impl Project {
-    pub(crate) fn base_from<'a, F>(
+    /// Convenience constructor: creates a local salsa DB, syncs the
+    /// datamodel, and builds the Project via `from_salsa` with default
+    /// unit inference/checking.
+    pub(crate) fn from_datamodel(project_datamodel: datamodel::Project) -> Self {
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+        Self::from_salsa(
+            project_datamodel,
+            &db,
+            sync.project,
+            run_default_model_checks,
+        )
+    }
+
+    /// Build a `Project` from a pre-synced salsa database.
+    ///
+    /// All variable parsing comes from salsa-cached results (no
+    /// redundant parsing). The caller provides the salsa DB and
+    /// `SourceProject`; the `model_cb` runs per non-stdlib model
+    /// after dependency resolution (typically unit inference/checking).
+    pub(crate) fn from_salsa<F>(
         project_datamodel: datamodel::Project,
-        cached_sources: Option<(
-            &'a dyn crate::db::Db,
-            crate::db::SourceProject,
-            &'a HashMap<String, crate::db::SourceModel>,
-        )>,
+        db: &dyn crate::db::Db,
+        source_project: crate::db::SourceProject,
         mut model_cb: F,
     ) -> Self
     where
         F: FnMut(&HashMap<Ident<Canonical>, &ModelStage1>, &Context, &mut ModelStage1),
     {
-        use crate::common::{ErrorCode, ErrorKind, topo_sort};
-        use crate::db::{SimlinDb, sync_from_datamodel};
-        use crate::model::enumerate_modules;
-
-        let mut project_errors = vec![];
-
-        let units_ctx =
-            Context::new_with_builtins(&project_datamodel.units, &project_datamodel.sim_specs)
-                .unwrap_or_else(|errs| {
-                    for (unit_name, unit_errs) in errs {
-                        for err in unit_errs {
-                            project_errors.push(Error {
-                                kind: ErrorKind::Model,
-                                code: ErrorCode::UnitDefinitionErrors,
-                                details: Some(format!("{unit_name}: {err}")),
-                            });
-                        }
-                    }
-                    Default::default()
-                });
-
-        // Set up salsa database/source handles for per-variable caching.
-        let mut local_salsa_db: Option<SimlinDb> = None;
-        let mut local_source_models: Option<HashMap<String, crate::db::SourceModel>> = None;
-        let (salsa_db, source_project, source_models): (
-            &dyn crate::db::Db,
-            crate::db::SourceProject,
-            &HashMap<String, crate::db::SourceModel>,
-        ) = if let Some((db, source_project, source_models)) = cached_sources {
-            (db, source_project, source_models)
-        } else {
-            let db = local_salsa_db.insert(SimlinDb::default());
-            let sync_result = sync_from_datamodel(db, &project_datamodel);
-            let source_project = sync_result.project;
-            let source_models_ref = local_source_models.insert(
-                sync_result
-                    .models
-                    .iter()
-                    .map(|(name, synced_model)| (name.clone(), synced_model.source))
-                    .collect(),
-            );
-            (db, source_project, source_models_ref)
+        use crate::common::topo_sort;
+        use crate::db::{
+            model_module_ident_context, parse_source_variable_with_module_context,
+            project_datamodel_dims, project_units_context,
         };
+        use crate::model::{ModelStage0, VariableStage0, enumerate_modules};
 
-        // Build set of model names present in the datamodel so we can detect
-        // when a stdlib model has been overridden (e.g., by LTM augmentation
-        // adding synthetic variables to a stdlib model's definition).
-        let datamodel_model_names: std::collections::HashSet<String> = project_datamodel
-            .models
-            .iter()
-            .map(|m| canonicalize(&m.name).into_owned())
-            .collect();
+        let units_ctx = project_units_context(db, source_project);
+        let dm_dims = project_datamodel_dims(db, source_project);
+        let dims_ctx = DimensionsContext::from(dm_dims.as_slice());
 
-        // Pull in stdlib models, skipping any that are overridden in the datamodel.
-        // Stdlib models use direct parsing (no salsa caching).
-        let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES
-            .iter()
-            .filter(|name| {
-                let canonical = canonicalize(&format!("stdlib\u{205A}{name}")).into_owned();
-                !datamodel_model_names.contains(&canonical)
-            })
-            .map(|name| crate::stdlib::get(name).unwrap())
-            .map(|x_model| {
-                ModelStage0::new(&x_model, &project_datamodel.dimensions, &units_ctx, true)
-            })
-            .collect();
-
-        // User models use salsa-cached per-variable parsing when the model
-        // has a corresponding SourceModel in the sync result.
-        models_list.extend(project_datamodel.models.iter().map(|m| {
-            let canonical_name = canonicalize(&m.name);
-            let is_stdlib_override = crate::stdlib::MODEL_NAMES
-                .iter()
-                .any(|name| canonicalize(&format!("stdlib\u{205A}{name}")) == canonical_name);
-
-            if let Some(source_model) = source_models.get(canonical_name.as_ref()) {
-                ModelStage0::new_cached(
-                    salsa_db,
-                    *source_model,
-                    source_project,
-                    m,
-                    &project_datamodel.dimensions,
-                    &units_ctx,
-                    is_stdlib_override,
-                )
+        // Build ModelStage0 from salsa-parsed variables for all models.
+        let project_models = source_project.models(db);
+        let mut all_s0: Vec<ModelStage0> = Vec::new();
+        for (_name, src_model) in project_models.iter() {
+            let is_stdlib = src_model.name(db).starts_with("stdlib\u{205A}");
+            let src_vars = src_model.variables(db);
+            // For stdlib models, ALL variable names must be module idents
+            // so PREVIOUS(module_input) uses module expansion instead of
+            // LoadPrev. Inside a submodule, module inputs are passed via a
+            // transient array with no persistent slot in prev_values;
+            // LoadPrev would return the current value, not the previous one.
+            let extra_module_idents: Vec<String> = if is_stdlib {
+                src_vars.keys().cloned().collect()
             } else {
-                ModelStage0::new(
-                    m,
-                    &project_datamodel.dimensions,
-                    &units_ctx,
-                    is_stdlib_override,
-                )
+                vec![]
+            };
+            let module_ctx = model_module_ident_context(db, *src_model, extra_module_idents);
+            let mut var_list: Vec<VariableStage0> = Vec::new();
+            let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
+            for (_vname, svar) in src_vars.iter() {
+                let parsed = parse_source_variable_with_module_context(
+                    db,
+                    *svar,
+                    source_project,
+                    module_ctx,
+                );
+                var_list.push(parsed.variable.clone());
+                implicit_dm.extend(parsed.implicit_vars.iter().cloned());
             }
-        }));
+            // Parse implicit vars (SMOOTH/DELAY expansion).
+            let mut dummy: Vec<datamodel::Variable> = Vec::new();
+            var_list.extend(implicit_dm.into_iter().map(|dm_var| {
+                crate::variable::parse_var(dm_dims, &dm_var, &mut dummy, units_ctx, |mi| {
+                    Ok(Some(mi.clone()))
+                })
+            }));
+            let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
+                .into_iter()
+                .map(|v| (Ident::new(v.ident()), v))
+                .collect();
+            all_s0.push(ModelStage0 {
+                ident: Ident::new(src_model.name(db)),
+                display_name: src_model.name(db).clone(),
+                variables,
+                errors: None,
+                implicit: is_stdlib,
+            });
+        }
 
-        let models: HashMap<Ident<Canonical>, &ModelStage0> =
-            models_list.iter().map(|m| (m.ident.clone(), m)).collect();
-
-        let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
-        let mut models_list: Vec<ModelStage1> = models_list
+        // ModelStage0 -> ModelStage1
+        let models_s0: HashMap<Ident<Canonical>, &ModelStage0> =
+            all_s0.iter().map(|m| (m.ident.clone(), m)).collect();
+        let mut models_list: Vec<ModelStage1> = all_s0
             .iter()
-            .map(|model| {
+            .map(|ms0| {
                 let scope = ScopeStage0 {
-                    models: &models,
+                    models: &models_s0,
                     dimensions: &dims_ctx,
-                    model_name: model.ident.as_str(),
+                    model_name: ms0.ident.as_str(),
                 };
-                ModelStage1::new(&scope, model)
+                ModelStage1::new(&scope, ms0)
             })
             .collect();
 
+        // Topo-sort by model dependencies.
         let model_order = {
             let model_deps: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>> = models_list
                 .iter_mut()
@@ -222,18 +203,14 @@ impl Project {
                 .map(|(i, n)| (n.clone(), i))
                 .collect::<HashMap<Ident<Canonical>, usize>>()
         };
-
-        // sort our model list so that the dependency resolution below works
         models_list.sort_unstable_by(|a, b| model_order[&a.name].cmp(&model_order[&b.name]));
 
         let module_instantiations = {
             let models = models_list.iter().map(|m| (m.name.as_str(), m)).collect();
-            // FIXME: ignoring the result here because if we have errors, it doesn't really matter
             enumerate_modules(&models, "main", |model| model.name.clone()).unwrap_or_default()
         };
 
-        // dependency resolution; we need to do this as a second pass
-        // to ensure we have the information available for modules
+        // Dependency resolution + model callbacks (unit inference etc.).
         {
             let no_instantiations = BTreeSet::new();
             let mut models: HashMap<Ident<Canonical>, &ModelStage1> = HashMap::new();
@@ -241,12 +218,9 @@ impl Project {
                 let instantiations = module_instantiations
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
-                model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
-                // things like unit inference happen through this callback
-                // Skip unit inference for implicit (stdlib) models as they are generic
-                // templates that only make sense when instantiated with specific inputs
+                model.set_dependencies(&models, dm_dims.as_slice(), instantiations);
                 if !model.implicit {
-                    model_cb(&models, &units_ctx, model);
+                    model_cb(&models, units_ctx, model);
                 }
                 models.insert(model.name.clone(), model);
             }
@@ -266,7 +240,7 @@ impl Project {
             datamodel: project_datamodel,
             models,
             model_order: ordered_models,
-            errors: project_errors,
+            errors: vec![],
             dimensions_ctx: dims_ctx,
         }
     }
@@ -294,7 +268,10 @@ impl Project {
             return Ok(self);
         }
 
-        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
+        Ok(Project::from_datamodel(inject_ltm_vars(
+            self.datamodel,
+            &ltm_vars,
+        )))
     }
 
     pub fn with_ltm_all_links(self) -> crate::common::Result<Self> {
@@ -305,7 +282,10 @@ impl Project {
             return Ok(self);
         }
 
-        Ok(Project::from(inject_ltm_vars(self.datamodel, &ltm_vars)))
+        Ok(Project::from_datamodel(inject_ltm_vars(
+            self.datamodel,
+            &ltm_vars,
+        )))
     }
 }
 
