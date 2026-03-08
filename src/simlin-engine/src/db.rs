@@ -1808,6 +1808,19 @@ pub fn link_score_equation_text<'db>(
     })
 }
 
+/// Build a causal graph from pre-computed edges and enumerate all pathways
+/// from each input port to "output".  Shared by `get_stdlib_composite_ports`
+/// (which only needs the port *names*) and `module_ltm_synthetic_variables`
+/// (which also uses the pathway structures for equation generation).
+fn module_input_pathways_from_edges(
+    edges_result: &CausalEdgesResult,
+) -> HashMap<crate::common::Ident<crate::common::Canonical>, Vec<Vec<crate::ltm::Link>>> {
+    use crate::common::{Canonical, Ident};
+
+    let graph = causal_graph_from_edges(edges_result);
+    graph.enumerate_module_pathways(&Ident::<Canonical>::new("output"))
+}
+
 /// Compute the internal link score equation text for a single causal link
 /// inside a stdlib dynamic module (e.g. SMOOTH, DELAY).
 ///
@@ -1863,16 +1876,10 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
         let compute = || {
             use crate::common::{Canonical, Ident};
 
-            let mut models = Vec::new();
-            for name in &[
-                "smooth", "delay1", "delay3", "trend", "previous",
-            ] {
-                if let Some(mut dm_model) = crate::stdlib::get(name) {
-                    dm_model.name = format!("stdlib\u{205A}{name}");
-                    models.push(dm_model);
-                }
-            }
-
+            let models: Vec<_> = crate::stdlib::MODEL_NAMES
+                .iter()
+                .filter_map(|name| crate::stdlib::get(name))
+                .collect();
             if models.is_empty() {
                 return HashMap::<Ident<Canonical>, std::collections::HashSet<Ident<Canonical>>>::new();
             }
@@ -1889,17 +1896,29 @@ fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap
 
             let db = SimlinDb::default();
             let sync = sync_from_datamodel(&db, &dm_project);
-            let source_models: HashMap<String, SourceModel> = sync
-                .models
-                .iter()
-                .map(|(name, sm)| (name.clone(), sm.source))
-                .collect();
-            let project = crate::project::Project::base_from(
-                dm_project,
-                Some((&db, sync.project, &source_models)),
-                |_, _, _| {},
-            );
-            crate::ltm_augment::compute_composite_ports(&project)
+            let mut ports = HashMap::new();
+            for (model_name, synced_model) in &sync.models {
+                // PREVIOUS uses a stock internally for its one-step memory,
+                // but it is infrastructure — not a dynamic smoothing module
+                // whose inputs should get composite causal links.
+                if model_name == "stdlib⁚previous" {
+                    continue;
+                }
+
+                let edges_result = model_causal_edges(&db, synced_model.source, sync.project);
+                if edges_result.stocks.is_empty() {
+                    continue;
+                }
+
+                let input_ports: std::collections::HashSet<_> =
+                    module_input_pathways_from_edges(edges_result)
+                        .into_keys()
+                        .collect();
+                if !input_ports.is_empty() {
+                    ports.insert(Ident::new(model_name), input_ports);
+                }
+            }
+            ports
         };
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -2075,35 +2094,11 @@ pub fn module_ltm_synthetic_variables(
     model: SourceModel,
     project: SourceProject,
 ) -> LtmVariablesResult {
-    use crate::common::{Canonical, Ident};
-
     // Check if this is a dynamic module (has stocks) via the edge result
     let edges_result = model_causal_edges(db, model, project);
     if edges_result.stocks.is_empty() {
         return LtmVariablesResult { vars: vec![] };
     }
-
-    // Build CausalGraph for pathway enumeration
-    let graph_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-        .edges
-        .iter()
-        .map(|(from, tos)| {
-            (
-                Ident::new(from),
-                tos.iter().map(|t| Ident::new(t)).collect(),
-            )
-        })
-        .collect();
-    let stocks: std::collections::HashSet<Ident<Canonical>> =
-        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-    let variables = reconstruct_model_variables(db, model, project);
-    let graph = crate::ltm::CausalGraph {
-        edges: graph_edges,
-        stocks,
-        variables,
-        module_graphs: HashMap::new(),
-    };
 
     // Generate internal link scores via per-link tracked function
     let mut vars = Vec::new();
@@ -2117,8 +2112,7 @@ pub fn module_ltm_synthetic_variables(
     }
 
     // Enumerate pathways from input ports to output
-    let output_ident = Ident::new("output");
-    let pathways = graph.enumerate_module_pathways(&output_ident);
+    let pathways = module_input_pathways_from_edges(edges_result);
 
     for (input_port, port_pathways) in &pathways {
         let mut pathway_names = Vec::new();
@@ -5979,6 +5973,9 @@ mod db_fragment_cache_tests;
 #[cfg(test)]
 #[path = "db_prev_init_tests.rs"]
 mod db_prev_init_tests;
+#[cfg(test)]
+#[path = "db_stdlib_ports_tests.rs"]
+mod db_stdlib_ports_tests;
 #[cfg(test)]
 #[path = "db_tests.rs"]
 mod db_tests;

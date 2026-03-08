@@ -960,6 +960,7 @@ pub fn identifier_set(
 ///
 /// These are not same-step dependencies, but they must be included in the
 /// initials runlist so INIT can read their captured t=0 values.
+#[cfg(any(test, feature = "testing"))]
 pub fn init_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     classify_dependencies(ast, &[], None).init_referenced
 }
@@ -974,6 +975,7 @@ pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
 /// Collect identifiers referenced *only* through PREVIOUS(...) in an AST.
 ///
 /// If an identifier appears both inside and outside PREVIOUS, it is excluded.
+#[cfg(any(test, feature = "testing"))]
 pub fn lagged_only_previous_idents_with_module_inputs(
     ast: &Ast<Expr2>,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
@@ -984,6 +986,7 @@ pub fn lagged_only_previous_idents_with_module_inputs(
 /// Collect identifiers referenced *only* through INIT(...) in an AST.
 ///
 /// If an identifier appears both inside and outside INIT, it is excluded.
+#[cfg(any(test, feature = "testing"))]
 pub fn init_only_referenced_idents_with_module_inputs(
     ast: &Ast<Expr2>,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,

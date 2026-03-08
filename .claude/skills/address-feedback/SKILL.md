@@ -37,10 +37,12 @@ git push
 
 Then run both reviews and collect their output:
 
-**Codex review** -- run with a 30-minute timeout:
+**Codex review** -- run this EXACT command with a 30-minute timeout:
 ```bash
-codex -c 'model="gpt-5.3-codex"' -c 'model_reasoning_effort="xhigh"' exec review --json --base origin/main | tee /tmp/codex.stdout | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'
+codex -c 'model="gpt-5.4"' -c 'model_reasoning_effort="xhigh"' exec review --json --base origin/main | tee /tmp/codex.stdout | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'
 ```
+
+If that command can't be run exactly, return an error to the user, as it means we need to update our environment, skills or prompts.
 
 **Claude review** -- launch a sub-agent that invokes the `/review` skill.  Use the Task tool with `subagent_type: "general-purpose"` and a prompt like:
 

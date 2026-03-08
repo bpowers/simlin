@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+codex \
+  -c 'model="gpt-5.4"' \
+  -c 'model_reasoning_effort="xhigh"' \
+  exec review --json --base origin/main \
+  | tee /tmp/codex.stdout \
+  | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'

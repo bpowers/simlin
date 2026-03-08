@@ -17,9 +17,9 @@ use crate::canonicalize;
 use crate::datamodel;
 
 use super::{
-    Db, SourceModel, SourceProject, SourceVariableKind, model_module_ident_context,
-    parse_source_variable_with_module_context, source_dims_to_datamodel,
-    variable_direct_dependencies,
+    Db, SourceModel, SourceProject, SourceVariableKind, build_module_inputs,
+    model_module_ident_context, parse_source_variable_with_module_context,
+    source_dims_to_datamodel, variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -382,18 +382,10 @@ pub(crate) fn reconstruct_model_variables(
         variables.insert(Ident::new(name), lowered);
 
         // Add implicit variables (module instances from SMOOTH/DELAY expansion)
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            let mut dummy_implicits = Vec::new();
-            let parsed_imp = crate::variable::parse_var(
-                &dims,
-                implicit_dm_var,
-                &mut dummy_implicits,
-                &units_ctx,
-                |mi| Ok(Some(mi.clone())),
-            );
-            let lowered_imp = crate::model::lower_variable(&scope, &parsed_imp);
+            let lowered_imp =
+                reconstruct_implicit_variable(db, model, &dims, &scope, implicit_dm_var);
             variables.insert(Ident::new(&imp_name), lowered_imp);
         }
     }
@@ -435,7 +427,6 @@ pub(super) fn reconstruct_single_variable(
 
     // Search implicit variables from all source variables
     let canonical_target: Ident<Canonical> = Ident::new(var_name);
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
 
     for (_name, source_var) in source_vars.iter() {
         let parsed =
@@ -443,19 +434,61 @@ pub(super) fn reconstruct_single_variable(
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
             if Ident::<Canonical>::new(&imp_name) == canonical_target {
-                let mut dummy_implicits = Vec::new();
-                let parsed_imp = crate::variable::parse_var(
-                    &dims,
-                    implicit_dm_var,
-                    &mut dummy_implicits,
-                    &units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                );
-                let lowered_imp = crate::model::lower_variable(&scope, &parsed_imp);
+                let lowered_imp =
+                    reconstruct_implicit_variable(db, model, &dims, &scope, implicit_dm_var);
                 return Some(lowered_imp);
             }
         }
     }
 
     None
+}
+
+/// Reconstruct an implicit (compiler-generated) variable from its datamodel form.
+///
+/// Module instances need special handling: `parse_var` does not preserve the
+/// `references` list from the datamodel, so input wiring (built via
+/// `build_module_inputs`) would be lost.  We short-circuit that case and
+/// construct `Variable::Module` directly from the stored `ModuleReference`s.
+fn reconstruct_implicit_variable(
+    db: &dyn Db,
+    model: SourceModel,
+    dims: &[datamodel::Dimension],
+    scope: &crate::model::ScopeStage0<'_>,
+    implicit_dm_var: &datamodel::Variable,
+) -> crate::variable::Variable {
+    use crate::common::{Canonical, Ident};
+
+    if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+        let ident = Ident::<Canonical>::new(implicit_dm_var.get_ident());
+        let module_var_prefix = format!("{}·", ident.as_str());
+        let inputs = build_module_inputs(
+            model.name(db),
+            &module_var_prefix,
+            dm_module
+                .references
+                .iter()
+                .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+        );
+
+        return crate::variable::Variable::Module {
+            ident,
+            model_name: Ident::new(&dm_module.model_name),
+            units: None,
+            inputs,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+    }
+
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
+    let mut dummy_implicits = Vec::new();
+    let parsed_imp = crate::variable::parse_var(
+        dims,
+        implicit_dm_var,
+        &mut dummy_implicits,
+        &units_ctx,
+        |mi| Ok(Some(mi.clone())),
+    );
+    crate::model::lower_variable(scope, &parsed_imp)
 }
