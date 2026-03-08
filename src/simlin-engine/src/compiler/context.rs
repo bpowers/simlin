@@ -1233,6 +1233,8 @@ impl Context<'_> {
                         for (i, op) in operations.iter_mut().enumerate() {
                             if let IndexOp::DimPosition(pos) = op {
                                 let pos_1based = *pos + 1;
+                                // pos_1based == 0 is defensive: normalize_subscripts3
+                                // already rejects @0, but we guard here too.
                                 if pos_1based == 0 || pos_1based > dims[i].len() {
                                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
                                 }
