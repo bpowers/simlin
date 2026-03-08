@@ -14,15 +14,15 @@ import { FirestoreTable } from './table-firestore';
 import { Table } from './table';
 
 export class FirestoreDatabase implements Database {
-  private readonly client: Firestore;
+  readonly firestore: Firestore;
   readonly file: Table<File>;
   readonly project: Table<Project>;
   readonly preview: Table<Preview>;
   readonly user: Table<User>;
 
   constructor(client: Firestore) {
-    this.client = client;
-    const db = this.client;
+    this.firestore = client;
+    const db = this.firestore;
 
     this.file = new FirestoreTable(File, { db, name: 'files' });
     this.project = new FirestoreTable(Project, { db, name: 'project', hoistColumns: { version: 7 } });

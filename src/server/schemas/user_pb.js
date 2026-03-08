@@ -79,7 +79,8 @@ provider: jspb.Message.getFieldWithDefault(msg, 5, ""),
 created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
 isAdmin: jspb.Message.getBooleanFieldWithDefault(msg, 6, false),
 isDeactivated: jspb.Message.getBooleanFieldWithDefault(msg, 7, false),
-canCreateProjects: jspb.Message.getBooleanFieldWithDefault(msg, 9, false)
+canCreateProjects: jspb.Message.getBooleanFieldWithDefault(msg, 9, false),
+providerUserId: jspb.Message.getFieldWithDefault(msg, 10, "")
   };
 
   if (includeInstance) {
@@ -152,6 +153,10 @@ proto.User.deserializeBinaryFromReader = function(msg, reader) {
     case 9:
       var value = /** @type {boolean} */ (reader.readBool());
       msg.setCanCreateProjects(value);
+      break;
+    case 10:
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
+      msg.setProviderUserId(value);
       break;
     default:
       reader.skipField();
@@ -243,6 +248,13 @@ proto.User.serializeBinaryToWriter = function(message, writer) {
   if (f) {
     writer.writeBool(
       9,
+      f
+    );
+  }
+  f = message.getProviderUserId();
+  if (f.length > 0) {
+    writer.writeString(
+      10,
       f
     );
   }
@@ -427,6 +439,24 @@ proto.User.prototype.getCanCreateProjects = function() {
  */
 proto.User.prototype.setCanCreateProjects = function(value) {
   return jspb.Message.setProto3BooleanField(this, 9, value);
+};
+
+
+/**
+ * optional string provider_user_id = 10;
+ * @return {string}
+ */
+proto.User.prototype.getProviderUserId = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 10, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.User} returns this
+ */
+proto.User.prototype.setProviderUserId = function(value) {
+  return jspb.Message.setProto3StringField(this, 10, value);
 };
 
 

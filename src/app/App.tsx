@@ -4,15 +4,6 @@
 
 import * as React from 'react';
 
-import { initializeApp } from '@firebase/app';
-import {
-  getAuth,
-  connectAuthEmulator,
-  onAuthStateChanged,
-  Auth as FirebaseAuth,
-  User as FirebaseUser,
-} from '@firebase/auth';
-
 import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
 
 import { defined } from '@simlin/core/common';
@@ -25,12 +16,6 @@ import { User } from './User';
 
 import styles from './App.module.css';
 
-const config = {
-  apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
-  authDomain: 'auth.simlin.com',
-};
-const firebaseApp = initializeApp(config);
-
 interface EditorMatchParams {
   username: string;
   projectName: string;
@@ -42,8 +27,6 @@ class UserInfoSingleton {
   private resultPromise?: Promise<[User | undefined, number]>;
   private result?: [User | undefined, number];
   constructor() {
-    // store this promise; we might race calling get() below, but all racers will
-    // await this single fetch result.
     this.fetch();
   }
 
@@ -75,7 +58,6 @@ class UserInfoSingleton {
     this.fetch();
 
     if (resultPromise) {
-      // don't leave the promise un-awaited
       await resultPromise;
     }
   }
@@ -87,8 +69,6 @@ interface AppState {
   authUnknown: boolean;
   isNewUser?: boolean;
   user?: User;
-  auth: FirebaseAuth;
-  firebaseIdToken?: string | null;
 }
 
 class InnerApp extends React.PureComponent<{}, AppState> {
@@ -97,82 +77,11 @@ class InnerApp extends React.PureComponent<{}, AppState> {
   constructor(props: {}) {
     super(props);
 
-    const isDevServer = process.env.NODE_ENV === 'development';
-    const auth = getAuth(firebaseApp);
-    if (isDevServer) {
-      connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
-    }
-
     this.state = {
       authUnknown: true,
-      auth,
     };
-
-    // notify our app when a user logs in
-    onAuthStateChanged(auth, this.authStateChanged);
 
     setTimeout(this.getUserInfo);
-  }
-
-  authStateChanged = (user: FirebaseUser | null) => {
-    setTimeout(this.asyncAuthStateChanged, undefined, user);
-  };
-
-  asyncAuthStateChanged = async (user: FirebaseUser | null) => {
-    if (!user) {
-      this.setState({ firebaseIdToken: null });
-      return;
-    }
-
-    const firebaseIdToken = await user.getIdToken();
-    this.setState({ firebaseIdToken });
-    await this.maybeLogin(undefined, firebaseIdToken);
-  };
-
-  async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
-    authIsKnown = authIsKnown || !this.state.authUnknown;
-    if (!authIsKnown) {
-      return;
-    }
-
-    // if we know the user, we don't need to log in
-    const [user] = await userInfo.get();
-    if (user) {
-      return;
-    }
-
-    const idToken = firebaseIdToken ?? this.state.firebaseIdToken;
-    if (idToken === null || idToken === undefined) {
-      return;
-    }
-
-    const bodyContents = {
-      idToken,
-    };
-
-    const base = this.getBaseURL();
-    const apiPath = `${base}/session`;
-    const response = await fetch(apiPath, {
-      credentials: 'same-origin',
-      method: 'POST',
-      cache: 'no-cache',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(bodyContents),
-    });
-
-    const status = response.status;
-    if (!(status >= 200 && status < 400)) {
-      const body = await response.json();
-      const errorMsg =
-        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-      // this.appendModelError(errorMsg);
-      console.log(`session error: ${errorMsg}`);
-      return undefined;
-    }
-
-    this.handleUsernameChanged();
   }
 
   getUserInfo = async (): Promise<void> => {
@@ -181,7 +90,6 @@ class InnerApp extends React.PureComponent<{}, AppState> {
       this.setState({
         authUnknown: false,
       });
-      await this.maybeLogin(true);
       return;
     }
     const isNewUser = user.id.startsWith(`temp-`);
@@ -230,11 +138,9 @@ class InnerApp extends React.PureComponent<{}, AppState> {
     const projectParam = urlParams.get('project');
     if (projectParam) return <Redirect to={projectParam} />;
 
-    // if a user is navigating to a project,
-    // skip the high level auth check, to enable public models
     if (!/\/.*\/.*/.test(window.location.pathname)) {
       if (!this.state.user) {
-        return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
+        return <Login disabled={this.state.authUnknown} onLoginSuccess={this.handleUsernameChanged} />;
       }
 
       if (this.state.isNewUser) {
