@@ -862,22 +862,8 @@ impl<'module> Compiler<'module> {
                         self.walk_expr(c)?.unwrap();
                     }
                     BuiltinFn::Mean(args) => {
-                        // Check if this is a single array argument (array mean)
-                        // vs multiple scalar arguments (variadic mean)
                         if args.len() == 1 {
-                            // Check if the argument is an array expression
-                            let arg = &args[0];
-                            let is_array = matches!(
-                                arg,
-                                Expr::StaticSubscript(_, _, _) | Expr::TempArray(_, _, _)
-                            );
-                            if is_array {
-                                // Array mean - use ArrayMean opcode
-                                self.walk_expr_as_view(arg)?;
-                                self.push(Opcode::ArrayMean {});
-                                self.push(Opcode::PopView {});
-                                return Ok(Some(()));
-                            }
+                            return self.emit_array_reduce(&args[0], Opcode::ArrayMean {});
                         }
 
                         // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N
