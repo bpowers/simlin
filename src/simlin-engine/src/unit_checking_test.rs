@@ -367,9 +367,8 @@ mod tests {
     fn test_previous_basic_functionality() {
         // Test PREVIOUS function returns exact previous timestep values per XMILE spec
         //
-        // NOTE: The stdlib/previous.stmx implementation uses a stock mechanism
-        // which may cause smoothing when values change between save steps.
-        // However, for values sampled at save steps, it works correctly.
+        // PREVIOUS is intrinsic now: it returns the explicit fallback on the
+        // first timestep, then the last dt snapshot thereafter.
 
         let results = TestProject::new("previous_basic")
             .with_sim_time(0.0, 2.0, 0.5) // Run from t=0 to t=2 with dt=0.5

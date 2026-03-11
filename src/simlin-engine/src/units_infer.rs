@@ -518,10 +518,26 @@ impl UnitInferer<'_> {
                 BuiltinFn::AllocateAvailable(req, _, _) => {
                     self.gen_constraints(req, prefix, current_var, constraints)
                 }
-                // Previous(x) and Init(x) preserve the units of their argument
-                BuiltinFn::Previous(a) | BuiltinFn::Init(a) => {
-                    self.gen_constraints(a, prefix, current_var, constraints)
+                // Previous(x, fallback) and Init(x) preserve the units of the
+                // lagged/current argument; the fallback must be compatible.
+                BuiltinFn::Previous(a, b) => {
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
+                    let b_units = self.gen_constraints(b, prefix, current_var, constraints)?;
+                    // Constrain fallback to match the lagged argument's units,
+                    // analogous to Max/Min handling.
+                    if let Units::Explicit(ref a_map) = a_units
+                        && let Units::Explicit(b_map) = b_units
+                    {
+                        let loc = a.get_loc().union(&b.get_loc());
+                        constraints.push(LocatedConstraint::new(
+                            combine(UnitOp::Div, a_map.clone(), b_map),
+                            current_var,
+                            Some(loc),
+                        ));
+                    }
+                    Ok(a_units)
                 }
+                BuiltinFn::Init(a) => self.gen_constraints(a, prefix, current_var, constraints),
             },
             Expr2::Subscript(base_name, _, _, _) => {
                 // A subscripted expression has the same units as the base array
@@ -1142,6 +1158,114 @@ pub(crate) fn infer(
     };
 
     units.infer(model)
+}
+
+/// PREVIOUS(x) desugars to PREVIOUS(x, 0). The inferred units should
+/// come from x, not the fallback 0 constant.
+#[test]
+fn test_previous_infers_units_from_lagged_arg() {
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+
+    // position has explicit units "widget". prev_pos has no declared
+    // units; inference should propagate "widget" from position
+    // through PREVIOUS(position, 0).
+    let test_case: &[(crate::datamodel::Variable, &str)] = &[
+        (x_aux("position", "10", Some("widget")), "widget"),
+        (x_aux("prev_pos", "PREVIOUS(position)", None), "widget"),
+    ];
+
+    let expected = test_case
+        .iter()
+        .map(|(var, units)| (var.get_ident(), *units))
+        .collect::<HashMap<&str, &str>>();
+    let vars = test_case
+        .iter()
+        .map(|(var, _)| var)
+        .cloned()
+        .collect::<Vec<_>>();
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    for _ in 0..64 {
+        let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+        let _project = crate::project::Project::from_salsa(
+            project_datamodel.clone(),
+            &db,
+            sync.project,
+            |models, units_ctx, model| {
+                results = infer(models, units_ctx, model);
+            },
+        );
+        let results = results.unwrap();
+        for (ident, expected_units) in expected.iter() {
+            let expected_units: UnitMap =
+                crate::units::parse_units(&units_ctx, Some(expected_units))
+                    .unwrap()
+                    .unwrap();
+            if let Some(computed_units) = results.get(&*canonicalize(ident)) {
+                assert_eq!(
+                    expected_units, *computed_units,
+                    "variable '{ident}': expected {expected_units:?} but got {computed_units:?}"
+                );
+            } else {
+                panic!("inference results don't contain variable '{ident}'");
+            }
+        }
+    }
+}
+
+/// PREVIOUS(x, fallback) should propagate units from x to fallback
+/// during inference, so a fallback with incompatible declared units
+/// is detected as a mismatch.
+#[test]
+fn test_previous_constrains_fallback_units() {
+    let sim_specs = sim_specs_with_units("parsec");
+
+    // "seed" has wrong units ("wallop" vs "widget"). PREVIOUS(position, seed)
+    // should fail inference because the fallback is constrained to match
+    // the lagged argument.
+    let test_case: &[(crate::datamodel::Variable, &str)] = &[
+        (x_aux("position", "10", Some("widget")), "widget"),
+        (x_aux("seed", "0", Some("wallop")), "wallop"),
+        (
+            x_aux("prev_pos", "PREVIOUS(position, seed)", None),
+            "widget",
+        ),
+    ];
+
+    let vars = test_case
+        .iter()
+        .map(|(var, _unit)| var)
+        .cloned()
+        .collect::<Vec<_>>();
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs, &[model]);
+
+    for _ in 0..64 {
+        let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
+            Err(UnitError::InferenceError {
+                code: ErrorCode::UnitMismatch,
+                sources: vec![],
+                details: None,
+            });
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+        let _project = crate::project::Project::from_salsa(
+            project_datamodel.clone(),
+            &db,
+            sync.project,
+            |models, units_ctx, model| {
+                results = infer(models, units_ctx, model);
+            },
+        );
+        assert!(
+            results.is_err(),
+            "PREVIOUS(widget, wallop) should fail unit inference"
+        );
+    }
 }
 
 #[test]

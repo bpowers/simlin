@@ -129,8 +129,6 @@ impl LoopPolarity {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModuleLtmRole {
-    /// PREVIOUS -- LTM infrastructure module, never analyze
-    Infrastructure,
     /// Has internal stocks (SMOOTH, DELAY, TREND, user-defined modules with stocks)
     DynamicModule,
     /// No internal stocks -- pure passthrough
@@ -139,18 +137,9 @@ pub(crate) enum ModuleLtmRole {
 
 /// Classify a module model for LTM analysis.
 ///
-/// The PREVIOUS infrastructure module is used BY link score equations
-/// and must never be analyzed to avoid infinite recursion. Dynamic modules
-/// contain stocks and need composite link scores. Stateless modules are
-/// passthroughs.
-pub(crate) fn classify_module_for_ltm(
-    model_name: &Ident<Canonical>,
-    module_model: &ModelStage1,
-) -> ModuleLtmRole {
-    let name = model_name.as_str();
-    if name == "stdlib⁚previous" {
-        return ModuleLtmRole::Infrastructure;
-    }
+/// Dynamic modules contain stocks and need composite link scores.
+/// Stateless modules are passthroughs.
+pub(crate) fn classify_module_for_ltm(module_model: &ModelStage1) -> ModuleLtmRole {
     if module_model
         .variables
         .values()
@@ -369,8 +358,7 @@ impl CausalGraph {
             {
                 // Build internal graph for this module instance if we have the model
                 if let Some(module_model) = project.models.get(model_name)
-                    && classify_module_for_ltm(model_name, module_model)
-                        == ModuleLtmRole::DynamicModule
+                    && classify_module_for_ltm(module_model) == ModuleLtmRole::DynamicModule
                 {
                     // Recursively build graph for the module
                     let module_graph = CausalGraph::from_model(module_model, project)?;
@@ -3255,32 +3243,6 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_previous_as_infrastructure() {
-        use crate::test_common::TestProject;
-
-        // PREVIOUS is used by LTM link score equations, so any LTM-augmented
-        // project will have it.
-        let project = TestProject::new("test_classify_prev")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .stock("level", "50", &["adj"], &[], None)
-            .flow("adj", "(100 - level) / 5", None)
-            .compile()
-            .expect("should compile");
-
-        let ltm_project = project.with_ltm().expect("should augment with LTM");
-        let prev_ident = Ident::new("stdlib⁚previous");
-        let prev_model = ltm_project
-            .models
-            .get(&prev_ident)
-            .expect("should have stdlib⁚previous model");
-
-        assert_eq!(
-            classify_module_for_ltm(&prev_ident, prev_model),
-            ModuleLtmRole::Infrastructure
-        );
-    }
-
-    #[test]
     fn test_classify_smth1_as_dynamic() {
         use crate::test_common::TestProject;
 
@@ -3298,7 +3260,7 @@ mod tests {
             .expect("should have stdlib⁚smth1 model");
 
         assert_eq!(
-            classify_module_for_ltm(&smth1_ident, smth1_model),
+            classify_module_for_ltm(smth1_model),
             ModuleLtmRole::DynamicModule
         );
     }

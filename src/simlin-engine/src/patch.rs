@@ -708,9 +708,10 @@ fn rename_builtin(
             Box::new(rename_expr(b, old_ident, new_ident)),
             Box::new(rename_expr(c, old_ident, new_ident)),
         ),
-        BuiltinFn::Previous(expr) => {
-            BuiltinFn::Previous(Box::new(rename_expr(expr, old_ident, new_ident)))
-        }
+        BuiltinFn::Previous(a, b) => BuiltinFn::Previous(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
         BuiltinFn::Init(expr) => BuiltinFn::Init(Box::new(rename_expr(expr, old_ident, new_ident))),
     }
 }
@@ -914,9 +915,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
             "allocate_available".to_string(),
             vec![expr2_to_expr0(a), expr2_to_expr0(b), expr2_to_expr0(c)],
         ),
-        BuiltinFn::Previous(expr) => {
-            UntypedBuiltinFn("previous".to_string(), vec![expr2_to_expr0(expr)])
-        }
+        BuiltinFn::Previous(a, b) => UntypedBuiltinFn(
+            "previous".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
         BuiltinFn::Init(expr) => UntypedBuiltinFn("init".to_string(), vec![expr2_to_expr0(expr)]),
     }
 }

@@ -560,11 +560,10 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
-    /// Load the previous-timestep value of a variable from the prev_values
-    /// snapshot. Pushes `prev_values[module_off + off]` (or falls back to
-    /// `curr[]` during initials). Only simple PREVIOUS(var) compiles to
-    /// this opcode; nested PREVIOUS, PREVIOUS(TIME), and 2-arg forms use
-    /// module expansion instead.
+    /// Resolve PREVIOUS(var, fallback) for a direct scalar variable.
+    /// Pops the already-evaluated fallback from the stack, then pushes either
+    /// `prev_values[module_off + off]` or that fallback when `TIME ==
+    /// INITIAL_TIME`.
     LoadPrev {
         off: VariableOffset,
     },
@@ -895,10 +894,13 @@ impl Opcode {
             // Constants/variables: push 1
             Opcode::LoadConstant { .. }
             | Opcode::LoadVar { .. }
-            | Opcode::LoadPrev { .. }
             | Opcode::LoadInitial { .. }
             | Opcode::LoadGlobalVar { .. }
             | Opcode::LoadModuleInput { .. } => (0, 1),
+
+            // LoadPrev pops the caller-provided fallback, then pushes
+            // either the fallback (at t=INITIAL_TIME) or prev_values[off].
+            Opcode::LoadPrev { .. } => (1, 1),
 
             // Legacy subscript: PushSubscriptIndex pops an index from the
             // arithmetic stack and appends it to a separate subscript_index
@@ -1451,6 +1453,13 @@ mod tests {
             .stack_effect(),
             (2, 0)
         );
+    }
+
+    #[test]
+    fn test_stack_effect_load_prev_pops_fallback() {
+        // LoadPrev pops the fallback value from the stack, then
+        // pushes the result (either the fallback or prev_values[off]).
+        assert_eq!((Opcode::LoadPrev { off: 0 }).stack_effect(), (1, 1));
     }
 
     #[test]

@@ -252,7 +252,22 @@ impl Expr1 {
                     "vector_elm_map" => check_arity!(VectorElmMap, 2),
                     "vector_sort_order" => check_arity!(VectorSortOrder, 2),
                     "allocate_available" => check_arity!(AllocateAvailable, 3),
-                    "previous" => check_arity!(Previous, 1),
+                    // Unary PREVIOUS(x) desugars to PREVIOUS(x, 0).
+                    // builtins_visitor may have already added the fallback
+                    // at Expr0 level, so both 1-arg and 2-arg forms are valid.
+                    "previous" => {
+                        if args.len() == 1 {
+                            let a = args.remove(0);
+                            let zero = Expr1::Const("0".to_string(), 0.0, loc);
+                            BuiltinFn::Previous(Box::new(a), Box::new(zero))
+                        } else if args.len() == 2 {
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::Previous(Box::new(a), Box::new(b))
+                        } else {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                    }
                     "init" => check_arity!(Init, 1),
                     _ => {
                         // TODO: this could be a table reference, array reference,
@@ -419,9 +434,10 @@ impl Expr1 {
                         Box::new(b.constify_dimensions(scope)),
                         Box::new(c.constify_dimensions(scope)),
                     ),
-                    BuiltinFn::Previous(a) => {
-                        BuiltinFn::Previous(Box::new(a.constify_dimensions(scope)))
-                    }
+                    BuiltinFn::Previous(a, b) => BuiltinFn::Previous(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
                     BuiltinFn::Init(a) => BuiltinFn::Init(Box::new(a.constify_dimensions(scope))),
                 };
                 Expr1::App(func, loc)

@@ -189,8 +189,8 @@ impl Expr3 {
                     | Size(e)
                     | Stddev(e)
                     | Sum(e)
-                    | Previous(e)
                     | Init(e) => e.references_a2a_dimension(),
+                    Previous(a, b) => a.references_a2a_dimension() || b.references_a2a_dimension(),
                     Max(a, b) | Min(a, b) => {
                         a.references_a2a_dimension()
                             || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
@@ -965,9 +965,13 @@ impl<'a> Pass1Context<'a> {
                     req_a2a || pp_a2a || avail_a2a,
                 )
             }
-            Previous(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Previous(Box::new(new_e)), has_a2a)
+            Previous(a, b) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                (
+                    Previous(Box::new(new_a), Box::new(new_b)),
+                    a_has_a2a || b_has_a2a,
+                )
             }
             Init(e) => {
                 let (new_e, has_a2a) = self.transform_inner(*e);

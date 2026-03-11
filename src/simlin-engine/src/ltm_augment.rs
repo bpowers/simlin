@@ -5,9 +5,9 @@
 //! LTM project augmentation - adds synthetic variables for link and loop scores
 //!
 //! This module generates synthetic variables for Loops That Matter (LTM) analysis.
-//! The generated equations use the PREVIOUS function, which is implemented as a
-//! module in stdlib/previous.stmx (not as a builtin function). The PREVIOUS module
-//! uses a stock-and-flow structure to store and return the previous timestep's value.
+//! The generated equations use the intrinsic two-argument `PREVIOUS(value, initial)`
+//! function. First- and second-timestep guards are expressed explicitly with
+//! `TIME = INITIAL_TIME` and `PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME`.
 
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
@@ -157,7 +157,7 @@ pub(crate) fn compute_composite_ports(project: &Project) -> CompositePortMap {
         if !model.implicit {
             continue;
         }
-        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+        if classify_module_for_ltm(model) != ModuleLtmRole::DynamicModule {
             continue;
         }
         let graph = match CausalGraph::from_model(model, project) {
@@ -248,7 +248,7 @@ fn generate_ltm_variables_inner(
         if !model.implicit {
             continue;
         }
-        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+        if classify_module_for_ltm(model) != ModuleLtmRole::DynamicModule {
             continue;
         }
         let module_vars = generate_module_internal_ltm_variables(model_name, model, project);
@@ -379,7 +379,7 @@ fn generate_module_link_score_equation(
 
     format!(
         "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_q} - PREVIOUS({from_q})) = 0) \
@@ -549,7 +549,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     // Return 0 at the initial timestep when PREVIOUS values don't exist yet
     format!(
         "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_q} - PREVIOUS({from_q})) = 0) \
@@ -587,7 +587,7 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     // Return 0 for the first two timesteps when we don't have enough history for second-order differences
     format!(
         "if \
-            (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
+            (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) \
             then 0 \
             else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
     )
@@ -648,7 +648,7 @@ fn generate_stock_to_flow_equation(
     // Return 0 at the initial timestep when PREVIOUS values don't exist yet
     format!(
         "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ({flow_diff} = 0) OR ({stock_diff} = 0) \
@@ -1080,7 +1080,7 @@ mod tests {
         // Verify the EXACT equation structure
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((y - PREVIOUS(y)) = 0) OR ((x - PREVIOUS(x)) = 0) \
@@ -1119,7 +1119,7 @@ mod tests {
         // ABS wraps the ratio; sign is fixed (+1 for inflows) per corrected 2023 formula
         // Returns 0 for first two timesteps when insufficient history
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
+            (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) \
             then 0 \
             else ABS(SAFEDIV(\
                 (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
@@ -1158,7 +1158,7 @@ mod tests {
         // ABS wraps the ratio; sign is fixed (-1 for outflows) per corrected 2023 formula
         // Returns 0 for first two timesteps when insufficient history
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
+            (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) \
             then 0 \
             else -ABS(SAFEDIV(\
                 (PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
@@ -1325,7 +1325,7 @@ mod tests {
         // Verify the EXACT equation structure for module-to-variable link
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((processed - PREVIOUS(processed)) = 0) OR ((smoother - PREVIOUS(smoother)) = 0) \
@@ -1390,7 +1390,7 @@ mod tests {
         // Verify the EXACT equation structure for variable-to-module link
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((processor - PREVIOUS(processor)) = 0) OR ((raw_data - PREVIOUS(raw_data)) = 0) \
@@ -1449,7 +1449,7 @@ mod tests {
         // Verify the EXACT equation structure for module-to-module link
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((filter_b - PREVIOUS(filter_b)) = 0) OR ((filter_a - PREVIOUS(filter_a)) = 0) \
@@ -1608,7 +1608,7 @@ mod tests {
         // Sign term uses first-order stock change per LTM paper formula
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((deaths - PREVIOUS(deaths)) = 0) OR \
@@ -1655,7 +1655,7 @@ mod tests {
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         // Non-stock dependencies (like rate) get wrapped in PREVIOUS()
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((production - PREVIOUS(production)) = 0) OR \
@@ -1701,7 +1701,7 @@ mod tests {
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         // Non-stock dependencies (like drain_time) get wrapped in PREVIOUS()
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((drainage - PREVIOUS(drainage)) = 0) OR \
@@ -1744,7 +1744,7 @@ mod tests {
         // Sign term uses first-order stock change per LTM paper formula
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((births - PREVIOUS(births)) = 0) OR \
@@ -1786,7 +1786,7 @@ mod tests {
         // Sign term uses first-order stock change per LTM paper formula
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((constant_flow - PREVIOUS(constant_flow)) = 0) OR \
@@ -1831,7 +1831,7 @@ mod tests {
         // wrap the variable `s` in PREVIOUS, not the function name.
         // (The parse roundtrip lowercases function names — case-insensitive language.)
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((y - PREVIOUS(y)) = 0) OR ((max_val - PREVIOUS(max_val)) = 0) \
@@ -1920,7 +1920,7 @@ mod tests {
         // Sign term uses first-order stock change per LTM paper formula
         // Returns 0 at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            (TIME = PREVIOUS(TIME)) \
+            (TIME = INITIAL_TIME) \
             then 0 \
             else if \
                 ((inflow - PREVIOUS(inflow)) = 0) OR \

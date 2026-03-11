@@ -241,9 +241,8 @@ pub struct Vm {
     // Used by LoadInitial opcode to freeze a variable's initial value.
     initial_values: Box<[f64]>,
     // Snapshot of curr[] taken after stocks but before the time advance
-    // each timestep.  LoadPrev reads from this buffer so that
-    // PREVIOUS(x) returns the value of x from the previous timestep,
-    // matching the stdlib module-based PREVIOUS behavior.
+    // each timestep. LoadPrev reads from this buffer after the first
+    // timestep; when TIME == INITIAL_TIME it returns its fallback instead.
     prev_values: Box<[f64]>,
 }
 
@@ -868,8 +867,8 @@ impl Vm {
             // During initials, LoadInitial falls back to curr[] (which IS the
             // initial value being computed). The snapshot hasn't been captured yet.
             initial_values: &self.initial_values,
-            // During initials, prev_values is zero-initialized so PREVIOUS(x)
-            // yields the 1-arg default at t=0.
+            // LoadPrev chooses its fallback when TIME == INITIAL_TIME, so a
+            // fresh zeroed prev_values buffer is sufficient here.
             prev_values: &mut self.prev_values,
         };
 
@@ -1064,12 +1063,17 @@ impl Vm {
                 Opcode::LoadVar { off } => {
                     stack.push(curr[module_off + *off as usize]);
                 }
-                // LoadPrev reads from the prev_values snapshot taken after
-                // stocks but before the time advance each timestep. During
-                // initials this buffer is zero-initialized.
+                // LoadPrev pops the caller-provided fallback and uses it when
+                // TIME == INITIAL_TIME; otherwise it reads from prev_values.
                 Opcode::LoadPrev { off } => {
+                    let fallback = stack.pop();
                     let abs_off = module_off + *off as usize;
-                    stack.push(prev_values[abs_off]);
+                    let value = if crate::float::approx_eq(curr[TIME_OFF], curr[INITIAL_TIME_OFF]) {
+                        fallback
+                    } else {
+                        prev_values[abs_off]
+                    };
+                    stack.push(value);
                 }
                 // LoadInitial reads from the initial-value buffer captured at t=0.
                 // During the initials phase, the snapshot hasn't been taken yet,

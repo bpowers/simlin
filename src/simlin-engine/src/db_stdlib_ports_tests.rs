@@ -28,10 +28,6 @@ fn test_stdlib_composite_ports_include_dynamic_module_inputs() {
             "{model_name} should be present in the stdlib composite-port cache"
         );
     }
-    assert!(
-        !ports.contains_key(&Ident::new("stdlib⁚previous")),
-        "PREVIOUS is infrastructure and must not get composite ports"
-    );
 }
 
 #[test]

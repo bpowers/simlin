@@ -5,7 +5,7 @@
 // because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME).
 // Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs.
 //
-// Stdlib SHA256: 3204863937f4a2210e69947f59536cbb14e7e1515b12c2c89e48ffc3f162d11e
+// Stdlib SHA256: 7edfc8d7e03eda7f3cbdc9acf9dd6b809c8aaee1c851499ea61935270576aefc
 
 #![allow(
     clippy::approx_constant,
@@ -21,16 +21,13 @@ use crate::datamodel::{
     SimMethod, SimSpecs, Stock, StockFlow, Variable, View, ViewElement, Visibility, view_element,
 };
 
-pub const MODEL_NAMES: [&str; 7] = [
-    "delay1", "delay3", "npv", "previous", "smth1", "smth3", "trend",
-];
+pub const MODEL_NAMES: [&str; 6] = ["delay1", "delay3", "npv", "smth1", "smth3", "trend"];
 
 pub fn get(name: &str) -> Option<Model> {
     match name {
         "delay1" => Some(delay1()),
         "delay3" => Some(delay3()),
         "npv" => Some(npv()),
-        "previous" => Some(previous()),
         "smth1" => Some(smth1()),
         "smth3" => Some(smth3()),
         "trend" => Some(trend()),
@@ -424,166 +421,6 @@ fn delay3() -> Model {
                 y: 171_f64,
             })],
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
-            zoom: 1_f64,
-            use_lettered_polarity: false,
-        })],
-        loop_metadata: vec![],
-        groups: vec![],
-    }
-}
-
-fn previous() -> Model {
-    Model {
-        name: "stdlib⁚previous".to_string(),
-        sim_specs: None,
-        variables: vec![
-            Variable::Flow(Flow {
-                ident: "draining".to_string(),
-                equation: Equation::Scalar("output / DT".to_string()),
-                documentation: "".to_string(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: Compat::default(),
-            }),
-            Variable::Aux(Aux {
-                ident: "initial_value".to_string(),
-                equation: Equation::Scalar("0".to_string()),
-                documentation: "".to_string(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: Compat::default(),
-            }),
-            Variable::Aux(Aux {
-                ident: "input".to_string(),
-                equation: Equation::Scalar("0".to_string()),
-                documentation: "".to_string(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: Compat::default(),
-            }),
-            Variable::Flow(Flow {
-                ident: "measuring".to_string(),
-                equation: Equation::Scalar("input / DT".to_string()),
-                documentation: "".to_string(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: Compat::default(),
-            }),
-            Variable::Stock(Stock {
-                ident: "output".to_string(),
-                equation: Equation::Scalar("initial_value".to_string()),
-                documentation: "".to_string(),
-                units: None,
-                inflows: vec!["measuring".to_string()],
-                outflows: vec!["draining".to_string()],
-                ai_state: None,
-                uid: None,
-                compat: Compat::default(),
-            }),
-        ],
-        views: vec![View::StockFlow(StockFlow {
-            name: None,
-            elements: vec![
-                ViewElement::Stock(view_element::Stock {
-                    name: "output".to_string(),
-                    uid: 1,
-                    x: 418_f64,
-                    y: 211_f64,
-                    label_side: LabelSide::Top,
-                }),
-                ViewElement::Flow(view_element::Flow {
-                    name: "measuring".to_string(),
-                    uid: 2,
-                    x: 351.75_f64,
-                    y: 211_f64,
-                    label_side: LabelSide::Bottom,
-                    points: vec![
-                        FlowPoint {
-                            x: 308_f64,
-                            y: 211_f64,
-                            attached_to_uid: Some(8),
-                        },
-                        FlowPoint {
-                            x: 395.5_f64,
-                            y: 211_f64,
-                            attached_to_uid: Some(1),
-                        },
-                    ],
-                }),
-                ViewElement::Flow(view_element::Flow {
-                    name: "draining".to_string(),
-                    uid: 3,
-                    x: 468.75_f64,
-                    y: 210_f64,
-                    label_side: LabelSide::Top,
-                    points: vec![
-                        FlowPoint {
-                            x: 440.5_f64,
-                            y: 210_f64,
-                            attached_to_uid: Some(1),
-                        },
-                        FlowPoint {
-                            x: 521_f64,
-                            y: 210_f64,
-                            attached_to_uid: Some(9),
-                        },
-                    ],
-                }),
-                ViewElement::Link(view_element::Link {
-                    uid: 4,
-                    from_uid: 1,
-                    to_uid: 3,
-                    shape: LinkShape::Arc(39.56_f64),
-                    polarity: None,
-                }),
-                ViewElement::Aux(view_element::Aux {
-                    name: "initial value".to_string(),
-                    uid: 5,
-                    x: 351.75_f64,
-                    y: 133_f64,
-                    label_side: LabelSide::Bottom,
-                }),
-                ViewElement::Aux(view_element::Aux {
-                    name: "input".to_string(),
-                    uid: 6,
-                    x: 293_f64,
-                    y: 133_f64,
-                    label_side: LabelSide::Bottom,
-                }),
-                ViewElement::Link(view_element::Link {
-                    uid: 7,
-                    from_uid: 6,
-                    to_uid: 2,
-                    shape: LinkShape::Arc(48.01299999999998_f64),
-                    polarity: None,
-                }),
-                ViewElement::Cloud(view_element::Cloud {
-                    uid: 8,
-                    flow_uid: 2,
-                    x: 308_f64,
-                    y: 211_f64,
-                }),
-                ViewElement::Cloud(view_element::Cloud {
-                    uid: 9,
-                    flow_uid: 3,
-                    x: 521_f64,
-                    y: 210_f64,
-                }),
-            ],
-            view_box: Rect {
-                x: 0_f64,
-                y: 0_f64,
-                width: 0_f64,
-                height: 0_f64,
-            },
             zoom: 1_f64,
             use_lettered_polarity: false,
         })],

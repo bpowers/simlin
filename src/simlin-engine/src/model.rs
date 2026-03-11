@@ -806,9 +806,9 @@ where
 ///   whose equations parse to a top-level stdlib function call (e.g. SMTH1,
 ///   DELAY, etc.)
 ///
-/// This set is needed so that `PREVIOUS(module_var)` falls through to module
-/// expansion instead of compiling to LoadPrev, because modules occupy
-/// multiple slots and LoadPrev at the base offset reads the wrong value.
+/// This set is needed so that `PREVIOUS(module_var)` rewrites through a
+/// synthesized scalar helper aux instead of compiling `LoadPrev` directly
+/// against a multi-slot module.
 pub(crate) fn collect_module_idents(
     variables: &[datamodel::Variable],
 ) -> HashSet<Ident<Canonical>> {
@@ -840,8 +840,7 @@ pub(crate) fn collect_module_idents(
 /// Check if a scalar equation's top-level expression is a stdlib function call.
 ///
 /// Uses `is_stdlib_module_function` as the underlying predicate for name
-/// matching, with additional PREVIOUS arg-count logic: 1-arg PREVIOUS uses
-/// the LoadPrev opcode, while 2+ args expand to a module.
+/// matching.
 ///
 /// This intentionally re-parses the equation text rather than reusing the
 /// already-parsed AST. It runs during `collect_module_idents` (called from
@@ -858,14 +857,9 @@ pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
         return false;
     };
     match &ast {
-        Expr0::App(crate::builtins::UntypedBuiltinFn(func, args), _) => {
+        Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
             let func_lower = func.to_lowercase();
-            // PREVIOUS(x) with 1 arg uses LoadPrev; 2+ args expand to a module.
-            if func_lower == "previous" {
-                args.len() > 1
-            } else {
-                crate::builtins::is_stdlib_module_function(&func_lower)
-            }
+            crate::builtins::is_stdlib_module_function(&func_lower)
         }
         _ => false,
     }
@@ -882,21 +876,20 @@ impl ModelStage0 {
     ) -> Self {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
 
-        // Determine which variable names should force PREVIOUS to module
-        // expansion (rather than the LoadPrev opcode).
+        // Determine which variable names should force PREVIOUS to synthesize
+        // a scalar temp arg rather than reading a flat slot directly.
         //
         // For user models, only explicit Module variables and stdlib-call
-        // Aux/Flow variables need module expansion because they occupy
+        // Aux/Flow variables need temp-arg rewriting because they occupy
         // multiple slots and LoadPrev at the base offset reads the wrong
         // sub-variable.
         //
         // For implicit (stdlib) models, ALL variable names are included.
         // Inside a submodule, some variables are module inputs whose values
         // are passed from the parent via a transient array -- they have no
-        // persistent slot in prev_values. PREVIOUS(module_input) compiled
-        // as LoadPrev/LoadModuleInput returns the CURRENT value, not the
-        // previous one. Module expansion creates a stock that correctly
-        // tracks the one-step delay.
+        // persistent slot in prev_values. PREVIOUS(module_input) must first
+        // capture the current scalar into a temp helper so LoadPrev reads
+        // that helper's slot on the next step.
         let module_idents: HashSet<Ident<Canonical>> = if implicit {
             x_model
                 .variables
@@ -965,11 +958,10 @@ impl ModelStage0 {
     ) -> Self {
         // For implicit (stdlib) models, bypass the salsa cache and use
         // the direct path with module_idents awareness. This ensures
-        // PREVIOUS calls inside submodules always expand to modules
-        // rather than compiling to LoadPrev/LoadModuleInput, which
-        // returns the current value instead of the previous value for
-        // module inputs. The performance impact is negligible since
-        // stdlib models have very few variables.
+        // PREVIOUS calls inside submodules rewrite through scalar helper
+        // auxes instead of compiling LoadPrev/LoadModuleInput directly
+        // against transient module-input slots. The performance impact is
+        // negligible since stdlib models have very few variables.
         if implicit {
             return Self::new(x_model, dimensions, units_ctx, implicit);
         }
@@ -979,9 +971,9 @@ impl ModelStage0 {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
         let mut variable_list: Vec<VariableStage0> = Vec::new();
 
-        // Collect module identifiers for the PREVIOUS gate.
+        // Collect module identifiers for the PREVIOUS/INIT helper rewrite.
         // For user models, only explicit Module variables and stdlib-call
-        // Aux/Flow variables need module expansion.
+        // Aux/Flow variables are multi-slot/module-backed.
         let module_idents: HashSet<Ident<Canonical>> = collect_module_idents(&x_model.variables);
         let mut module_ident_list: Vec<String> = module_idents
             .iter()
@@ -1597,7 +1589,7 @@ fn test_errors() {
 }
 
 #[test]
-fn test_new_cached_preserves_previous_module_expansion() {
+fn test_new_cached_preserves_previous_helper_rewrite() {
     let units_ctx = Context::new(&[], &Default::default()).unwrap();
     let main_model = x_model(
         "main",
@@ -1636,21 +1628,21 @@ fn test_new_cached_preserves_previous_module_expansion() {
         false,
     );
 
-    let has_previous_module = |model: &ModelStage0| {
+    let has_previous_helper = |model: &ModelStage0| {
         model
             .variables
             .keys()
-            .any(|ident| ident.as_str().starts_with("$⁚prev_sub⁚0⁚previous"))
+            .any(|ident| ident.as_str().starts_with("$⁚prev_sub⁚0⁚arg0"))
     };
 
     assert!(
-        has_previous_module(&direct),
-        "direct parse should expand PREVIOUS(sub) into an implicit module"
+        has_previous_helper(&direct),
+        "direct parse should synthesize a scalar helper for PREVIOUS(sub)"
     );
     assert_eq!(
-        has_previous_module(&direct),
-        has_previous_module(&cached),
-        "cached parse should preserve PREVIOUS(module_var) module expansion"
+        has_previous_helper(&direct),
+        has_previous_helper(&cached),
+        "cached parse should preserve PREVIOUS(module_var) helper rewriting"
     );
 }
 
@@ -1730,7 +1722,7 @@ fn test_init_expression_interpreter_vm_parity() {
 }
 
 #[test]
-fn test_previous_module_input_var_uses_module_expansion() {
+fn test_previous_module_input_var_uses_helper_rewrite() {
     let units_ctx = Context::new(&[], &Default::default()).unwrap();
     let module_input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input".to_string(),
@@ -1754,8 +1746,8 @@ fn test_previous_module_input_var_uses_module_expansion() {
         parsed
             .variables
             .keys()
-            .any(|ident| ident.as_str().starts_with("$⁚lagged⁚0⁚previous")),
-        "PREVIOUS(module_input) should be expanded to an implicit previous module"
+            .any(|ident| ident.as_str().starts_with("$⁚lagged⁚0⁚arg0")),
+        "PREVIOUS(module_input) should synthesize a scalar helper aux"
     );
 }
 
@@ -1770,8 +1762,8 @@ fn test_model_implicit_var_info_uses_module_context() {
             "main",
             vec![
                 x_aux("x", "TIME", None),
-                x_aux("delayed", "PREVIOUS(x, 99)", None),
-                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+                x_aux("delayed", "SMTH1(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed, 123)", None),
             ],
         )],
         source: None,
@@ -1784,8 +1776,8 @@ fn test_model_implicit_var_info_uses_module_context() {
     assert!(
         implicit_info
             .keys()
-            .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚previous")),
-        "model_implicit_var_info should include implicit vars for PREVIOUS(module-backed var)"
+            .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚arg0")),
+        "model_implicit_var_info should include helper auxes for PREVIOUS(module-backed var)"
     );
 }
 
@@ -1800,8 +1792,8 @@ fn test_incremental_compile_previous_of_module_backed_var() {
             "main",
             vec![
                 x_aux("x", "TIME", None),
-                x_aux("delayed", "PREVIOUS(x, 99)", None),
-                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+                x_aux("delayed", "SMTH1(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed, 123)", None),
             ],
         )],
         source: None,
@@ -1818,7 +1810,7 @@ fn test_incremental_compile_previous_of_module_backed_var() {
 }
 
 #[test]
-fn test_collect_module_idents_skips_one_arg_previous() {
+fn test_collect_module_idents_skips_intrinsic_previous() {
     let vars = vec![
         x_aux("x", "TIME", None),
         x_aux("prev_x", "PREVIOUS(x)", None),
@@ -1827,16 +1819,16 @@ fn test_collect_module_idents_skips_one_arg_previous() {
     let ids = collect_module_idents(&vars);
     assert!(
         !ids.contains(&Ident::new("prev_x")),
-        "1-arg PREVIOUS should stay on the opcode path, not module-backed",
+        "1-arg PREVIOUS should stay on the intrinsic opcode path",
     );
     assert!(
-        ids.contains(&Ident::new("prev_x_init")),
-        "2-arg PREVIOUS should remain module-backed",
+        !ids.contains(&Ident::new("prev_x_init")),
+        "2-arg PREVIOUS should also stay intrinsic",
     );
 }
 
 #[test]
-fn test_collect_module_idents_marks_apply_to_all_stdlib_calls() {
+fn test_collect_module_idents_skips_apply_to_all_previous() {
     let vars = vec![
         x_aux("x", "TIME", None),
         datamodel::Variable::Aux(datamodel::Aux {
@@ -1855,8 +1847,8 @@ fn test_collect_module_idents_marks_apply_to_all_stdlib_calls() {
     ];
     let ids = collect_module_idents(&vars);
     assert!(
-        ids.contains(&Ident::new("prev_x_init")),
-        "ApplyToAll equations that invoke 2-arg PREVIOUS should be marked module-backed",
+        !ids.contains(&Ident::new("prev_x_init")),
+        "ApplyToAll equations that invoke PREVIOUS should stay intrinsic",
     );
 }
 

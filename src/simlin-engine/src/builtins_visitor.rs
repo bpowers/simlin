@@ -19,7 +19,6 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
             &["input", "delay_time", "initial_value"]
         }
         "npv" => &["stream", "discount_rate", "initial_value", "factor"],
-        "previous" => &["input", "initial_value"],
         _ => {
             return None;
         }
@@ -34,9 +33,11 @@ fn contains_stdlib_call(expr: &Expr0) -> bool {
         Const(_, _, _) => false,
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
-            // INIT is included because it needs per-element temp vars in A2A
-            // context, though it doesn't create a standalone module.
-            if crate::builtins::is_stdlib_module_function(func.as_str()) || func.as_str() == "init"
+            // INIT/PREVIOUS are included because they may need per-element
+            // temp vars in A2A context, though they don't create standalone
+            // stdlib modules.
+            if crate::builtins::is_stdlib_module_function(func.as_str())
+                || matches!(func.as_str(), "init" | "previous")
             {
                 return true;
             }
@@ -122,11 +123,11 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 
 pub struct BuiltinVisitor<'a> {
     variable_name: &'a str,
-    /// Modules synthesized during the current walk (e.g., SMOOTH, DELAY,
-    /// PREVIOUS expansions). These are created using the same
+    /// Modules synthesized during the current walk (e.g., SMOOTH, DELAY
+    /// expansions). These are created using the same
     /// `is_stdlib_module_function` classification rule, extending the base
     /// set from `collect_module_idents()` at runtime so that nested references
-    /// (like `PREVIOUS(SMOOTH(...))`) correctly route through module expansion.
+    /// (like `PREVIOUS(SMOOTH(...))`) correctly synthesize scalar helper args.
     vars: HashMap<Ident<Canonical>, datamodel::Variable>,
     n: usize,
     self_allowed: bool,
@@ -139,9 +140,8 @@ pub struct BuiltinVisitor<'a> {
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
     /// Identifiers of Module variables in the parent model.
-    /// PREVIOUS(module_var) must fall through to module expansion
-    /// because modules occupy multiple slots and LoadPrev at the
-    /// base offset reads an internal sub-variable, not the output.
+    /// PREVIOUS(module_var) must synthesize a scalar temp arg rather than
+    /// reading a flat slot directly, because modules occupy multiple slots.
     module_idents: Option<&'a HashSet<Ident<Canonical>>>,
 }
 
@@ -198,7 +198,8 @@ impl<'a> BuiltinVisitor<'a> {
 
     /// PREVIOUS/INIT opcode routing only applies to direct scalar variables.
     /// Module variables and qualified module outputs (`module·output`) must
-    /// be treated as module-backed so they can route through module expansion.
+    /// be treated as module-backed so PREVIOUS/INIT can synthesize scalar
+    /// helper args before compiling to intrinsic opcodes.
     fn is_module_backed_ident(&self, ident: &RawIdent) -> bool {
         let canonical = Ident::new(&canonicalize(ident.as_str()));
         if self.is_known_module_ident(&canonical) {
@@ -329,6 +330,37 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
+    fn make_temp_arg(&mut self, arg: Expr0) -> RawIdent {
+        let transformed_arg = if self.active_subscript.is_some() {
+            self.substitute_dimension_refs(arg)
+        } else {
+            arg
+        };
+        let subscript_suffix = self.subscript_suffix();
+        let id = if subscript_suffix.is_empty() {
+            format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n)
+        } else {
+            format!(
+                "$⁚{}⁚{}⁚arg0⁚{}",
+                self.variable_name, self.n, subscript_suffix
+            )
+        };
+        let eqn = print_eqn(&transformed_arg);
+        let x_var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: id.clone(),
+            equation: datamodel::Equation::Scalar(eqn),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        });
+        self.vars.insert(Ident::new(&id), x_var);
+        self.n += 1;
+        RawIdent::new_from_str(&id)
+    }
+
     fn walk_index(&mut self, expr: IndexExpr0) -> Result<IndexExpr0, EquationError> {
         use IndexExpr0::*;
         let result: IndexExpr0 = match expr {
@@ -369,23 +401,26 @@ impl<'a> BuiltinVisitor<'a> {
                     let rhs = it.next().unwrap();
                     return Ok(Op2(BinaryOp::Mod, Box::new(lhs), Box::new(rhs), loc));
                 }
+                let args = if func == "previous" && args.len() == 1 {
+                    let mut args = args;
+                    args.push(Const("0".to_string(), 0.0, loc));
+                    args
+                } else {
+                    args
+                };
                 // PREVIOUS and INIT opcode routing:
                 //
-                // 1-arg PREVIOUS(var) where var is a simple scalar variable
-                // reference compiles to the LoadPrev opcode. All other
-                // PREVIOUS forms fall through to module expansion:
-                //   - 2-arg PREVIOUS(x, init_val)
-                //   - nested PREVIOUS(PREVIOUS(x))
-                //   - PREVIOUS(expr)
-                //   - PREVIOUS(module_var) -- modules occupy multiple slots,
-                //     so LoadPrev at the base offset reads the wrong value
-                //
-                let previous_needs_module = func == "previous"
-                    && (args.len() > 1
-                        || args.first().is_none_or(|a| match a {
-                            Var(ident, _) => self.is_module_backed_ident(ident),
-                            _ => true,
-                        }));
+                // PREVIOUS compiles to the intrinsic opcode path for both
+                // unary and binary syntax. When arg0 is not a direct scalar
+                // slot (nested PREVIOUS, PREVIOUS(expr), PREVIOUS(module_var),
+                // module inputs inside implicit models, etc.), rewrite arg0
+                // to a synthesized scalar temp variable.
+                let previous_needs_temp_arg = func == "previous"
+                    && args.len() == 2
+                    && args.first().is_some_and(|a| match a {
+                        Var(ident, _) => self.is_module_backed_ident(ident),
+                        _ => true,
+                    });
                 // LoadInitial only supports direct variable offsets. Rewrite
                 // INIT(expr) and INIT(module_var) to INIT($temp_arg), where
                 // $temp_arg captures expr/module_var each timestep and INIT
@@ -396,46 +431,24 @@ impl<'a> BuiltinVisitor<'a> {
                         Var(ident, _) => self.is_module_backed_ident(ident),
                         _ => true,
                     });
-                if init_needs_temp_arg {
-                    let arg = args.into_iter().next().expect("init arity checked");
-                    let transformed_arg = if self.active_subscript.is_some() {
-                        self.substitute_dimension_refs(arg)
-                    } else {
-                        arg
-                    };
-                    let subscript_suffix = self.subscript_suffix();
-                    let id = if subscript_suffix.is_empty() {
-                        format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n)
-                    } else {
-                        format!(
-                            "$⁚{}⁚{}⁚arg0⁚{}",
-                            self.variable_name, self.n, subscript_suffix
-                        )
-                    };
-                    let eqn = print_eqn(&transformed_arg);
-                    let x_var = datamodel::Variable::Aux(datamodel::Aux {
-                        ident: id.clone(),
-                        equation: datamodel::Equation::Scalar(eqn),
-                        documentation: "".to_string(),
-                        units: None,
-                        gf: None,
-                        ai_state: None,
-                        uid: None,
-                        compat: datamodel::Compat::default(),
-                    });
-                    self.vars.insert(Ident::new(&id), x_var);
-                    self.n += 1;
+                if previous_needs_temp_arg {
+                    let mut args = args.into_iter();
+                    let arg0 = args.next().expect("previous arity checked");
+                    let fallback = args.next().expect("previous arity checked");
+                    let id = self.make_temp_arg(arg0);
                     return Ok(App(
-                        UntypedBuiltinFn(func, vec![Var(RawIdent::new_from_str(&id), loc)]),
+                        UntypedBuiltinFn(func, vec![Var(id, loc), fallback]),
                         loc,
                     ));
                 }
-                if previous_needs_module {
-                    // Fall through to module expansion for 2-arg form,
-                    // complex-argument forms, and module variable arguments.
-                } else if is_builtin_fn(&func) {
+                if init_needs_temp_arg {
+                    let arg = args.into_iter().next().expect("init arity checked");
+                    let id = self.make_temp_arg(arg);
+                    return Ok(App(UntypedBuiltinFn(func, vec![Var(id, loc)]), loc));
+                }
+                if is_builtin_fn(&func) {
                     // Builtins that survive routing stay as builtins (e.g.
-                    // PREVIOUS(var) and INIT(var)) and compile to opcodes.
+                    // PREVIOUS(var, init) and INIT(var)) and compile to opcodes.
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
@@ -553,10 +566,8 @@ impl<'a> BuiltinVisitor<'a> {
 /// Expand stdlib function calls (SMTH1, DELAY, etc.) and PREVIOUS/INIT
 /// builtins into implicit module instances and opcode-backed builtins.
 ///
-/// When `module_idents` is provided, `PREVIOUS(module_var)` falls through
-/// to module expansion instead of compiling to LoadPrev, because modules
-/// occupy multiple slots and LoadPrev at the base offset reads an internal
-/// sub-variable rather than the output.
+/// When `module_idents` is provided, `PREVIOUS(module_var)` synthesizes a
+/// scalar temp arg instead of reading a flat slot directly.
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,

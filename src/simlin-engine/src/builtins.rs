@@ -103,7 +103,7 @@ pub enum BuiltinFn<Expr> {
     // ALLOCATE AVAILABLE(request, priority_profile, avail)
     AllocateAvailable(Box<Expr>, Box<Expr>, Box<Expr>),
     // builtins replacing stdlib modules
-    Previous(Box<Expr>),
+    Previous(Box<Expr>, Box<Expr>),
     Init(Box<Expr>),
 }
 
@@ -153,7 +153,7 @@ impl<Expr> BuiltinFn<Expr> {
             VectorSortOrder(_, _) => "vector_sort_order",
             AllocateAvailable(_, _, _) => "allocate_available",
             // builtins replacing stdlib modules
-            Previous(_) => "previous",
+            Previous(_, _) => "previous",
             Init(_) => "init",
         }
     }
@@ -251,7 +251,7 @@ impl<Expr> BuiltinFn<Expr> {
             AllocateAvailable(a, b, c) => {
                 AllocateAvailable(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?))
             }
-            Previous(a) => Previous(Box::new(f(*a)?)),
+            Previous(a, b) => Previous(Box::new(f(*a)?), Box::new(f(*b)?)),
             Init(a) => Init(Box::new(f(*a)?)),
         })
     }
@@ -280,7 +280,11 @@ impl<Expr> BuiltinFn<Expr> {
             }
             Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
             | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a) | Sum(a)
-            | Previous(a) | Init(a) => f(a),
+            | Init(a) => f(a),
+            Previous(a, b) => {
+                f(a);
+                f(b);
+            }
             Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
             Max(a, b) | Min(a, b) => {
                 f(a);
@@ -455,8 +459,11 @@ where
         | BuiltinFn::Size(a)
         | BuiltinFn::Stddev(a)
         | BuiltinFn::Sum(a)
-        | BuiltinFn::Previous(a)
         | BuiltinFn::Init(a) => cb(BuiltinContents::Expr(a)),
+        BuiltinFn::Previous(a, b) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+        }
         BuiltinFn::Mean(args) => {
             args.iter().for_each(|a| cb(BuiltinContents::Expr(a)));
         }

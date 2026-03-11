@@ -113,8 +113,11 @@ fn test_sync_simple_project() {
             .model_names(&db)
             .contains(&"main".to_string())
     );
-    // 1 user model + 7 stdlib models (init stdlib removed)
-    assert_eq!(result.project.model_names(&db).len(), 8);
+    // 1 user model + the remaining stdlib models (PREVIOUS/INIT are intrinsic).
+    assert_eq!(
+        result.project.model_names(&db).len(),
+        1 + crate::stdlib::MODEL_NAMES.len()
+    );
 
     let sim_specs = result.project.sim_specs(&db);
     assert_eq!(sim_specs.start, 0.0);
@@ -4876,15 +4879,14 @@ fn test_init_opcode_interpreter_vm_parity() {
     }
 }
 
-/// "previous" is still in MODEL_NAMES because 2-arg PREVIOUS(x, init_val)
-/// still uses module expansion. "init" was removed -- 1-arg INIT now
-/// compiles directly to LoadInitial.
+/// PREVIOUS and INIT are both intrinsic now and should not appear in the
+/// stdlib model registry.
 #[test]
-fn test_previous_still_in_stdlib_model_names() {
+fn test_previous_removed_from_stdlib_model_names() {
     let names = crate::stdlib::MODEL_NAMES;
     assert!(
-        names.contains(&"previous"),
-        "expected 'previous' in MODEL_NAMES (2-arg form still module-expanded)"
+        !names.contains(&"previous"),
+        "'previous' should no longer be in MODEL_NAMES"
     );
     assert!(
         !names.contains(&"init"),
@@ -4896,8 +4898,8 @@ fn test_previous_still_in_stdlib_model_names() {
 /// is recomputed each timestep; PREVIOUS(flow) should return the prior
 /// timestep's computed flow value.
 ///
-/// Like stocks, the 1-arg PREVIOUS(flow) form returns 0 at t=0
-/// (stdlib module default initial_value).
+/// Like stocks, the 1-arg PREVIOUS(flow) form returns its desugared
+/// fallback `0` at t=0.
 #[test]
 fn test_previous_of_flow_interpreter_vm_parity() {
     use crate::test_common::TestProject;
@@ -4927,9 +4929,8 @@ fn test_previous_of_flow_interpreter_vm_parity() {
         );
     }
 
-    // The stdlib PREVIOUS module defaults initial_value=0 for the 1-arg
-    // form. At t=0, PREVIOUS(growth) returns 0. At subsequent steps it
-    // returns growth's value from the prior timestep.
+    // Unary PREVIOUS desugars to PREVIOUS(growth, 0). At t=0 it returns 0,
+    // and at subsequent steps it returns growth's prior-timestep value.
     let growth_vals = interp
         .get("growth")
         .expect("growth not in interpreter results");
@@ -5010,15 +5011,15 @@ fn test_arrayed_1arg_previous_loadprev_per_element() {
         );
     }
 
-    // At t=0, LoadPrev reads from prev_values which is initialized to zeros.
+    // At t=0, unary PREVIOUS uses its desugared fallback of 0.
     assert!(
         (interp_a1[0] - 0.0).abs() < 1e-10,
-        "prev_val[a1] at t=0 should be 0 (LoadPrev zeros), got {}",
+        "prev_val[a1] at t=0 should be 0, got {}",
         interp_a1[0]
     );
     assert!(
         (interp_a2[0] - 0.0).abs() < 1e-10,
-        "prev_val[a2] at t=0 should be 0 (LoadPrev zeros), got {}",
+        "prev_val[a2] at t=0 should be 0, got {}",
         interp_a2[0]
     );
 
@@ -5038,18 +5039,18 @@ fn test_arrayed_1arg_previous_loadprev_per_element() {
     }
 }
 
-/// AC3.2: PREVIOUS(arrayed_var, init_val) (2-arg) creates per-element
-/// module instances for an arrayed variable. Each element's module uses the
-/// shared init_val at t=0 and tracks that element's previous value thereafter.
+/// AC3.2: PREVIOUS(arrayed_var, init_val) (2-arg) compiles per element with
+/// the explicit fallback. Each element uses the shared init_val at t=0 and
+/// tracks that element's previous value thereafter.
 ///
 /// Model: DimA = {a1, a2}
 ///   base_val[DimA]: a1 = 10, a2 = 20
 ///   prev_val[DimA] = PREVIOUS(base_val[DimA], 99)
 ///
-/// At t=0: prev_val[a1] = 99, prev_val[a2] = 99  (init_val from module)
+/// At t=0: prev_val[a1] = 99, prev_val[a2] = 99  (explicit fallback)
 /// At t=1: prev_val[a1] = 10, prev_val[a2] = 20  (prior step values)
 #[test]
-fn test_arrayed_2arg_previous_per_element_modules() {
+fn test_arrayed_2arg_previous_per_element() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("arrayed_prev_2arg")
@@ -5072,8 +5073,7 @@ fn test_arrayed_2arg_previous_per_element_modules() {
         .get("prev_val[a2]")
         .expect("prev_val[a2] not in VM results");
 
-    // 2-arg PREVIOUS uses module expansion, so init_val=99 is returned at t=0
-    // (not 0 as with the LoadPrev opcode path).
+    // The explicit fallback is returned at t=0.
     assert!(
         (vm_a1[0] - 99.0).abs() < 1e-10,
         "2-arg PREVIOUS[a1] at t=0 should be init_val=99, got {}",
@@ -5689,8 +5689,8 @@ fn test_previous_self_initial_value() {
     let dep_graph = model_dependency_graph(&db, source_model, sync.project);
     assert!(
         dep_graph.runlist_initials.contains(&"switch".to_string()),
-        "switch must be in the initials runlist so the PREVIOUS module's \
-         stock is initialized after switch is computed"
+        "switch must be in the initials runlist so PREVIOUS fallback helpers \
+         are initialized after switch is computed"
     );
 
     let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
@@ -5864,7 +5864,7 @@ fn test_previous_returns_zero_at_first_timestep() {
     }
 }
 #[test]
-fn test_2arg_previous_uses_module_expansion() {
+fn test_2arg_previous_uses_explicit_fallback() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("prev_2arg")
@@ -5888,7 +5888,7 @@ fn test_2arg_previous_uses_module_expansion() {
     );
 }
 #[test]
-fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
+fn test_dependency_graph_includes_previous_helper_for_module_backed_var() {
     use crate::testutils::{x_aux, x_model};
 
     let project = crate::testutils::x_project(
@@ -5897,8 +5897,8 @@ fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
             "main",
             vec![
                 x_aux("x", "TIME", None),
-                x_aux("delayed", "PREVIOUS(x, 99)", None),
-                x_aux("prev_delayed", "PREVIOUS(delayed)", None),
+                x_aux("delayed", "SMTH1(x, 99)", None),
+                x_aux("prev_delayed", "PREVIOUS(delayed, 123)", None),
             ],
         )],
     );
@@ -5908,15 +5908,15 @@ fn test_dependency_graph_includes_previous_module_for_module_backed_var() {
     let source_model = sync.models["main"].source;
     let dep_graph = model_dependency_graph(&db, source_model, sync.project);
 
-    let has_previous_module = dep_graph
+    let has_previous_helper = dep_graph
         .runlist_initials
         .iter()
         .chain(dep_graph.runlist_flows.iter())
         .chain(dep_graph.runlist_stocks.iter())
-        .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚previous"));
+        .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚arg0"));
     assert!(
-        has_previous_module,
-        "dependency graph runlists should include the implicit PREVIOUS module for PREVIOUS(module-backed var)"
+        has_previous_helper,
+        "dependency graph runlists should include the helper aux for PREVIOUS(module-backed var)"
     );
 }
 #[test]
@@ -5944,10 +5944,9 @@ fn test_previous_of_module_backed_variable_compiles_correctly() {
     use crate::testutils::{x_aux, x_model};
     use crate::vm::Vm;
 
-    // PREVIOUS(x) where x = SMTH1(input, 1) must use module expansion,
-    // not the LoadPrev opcode.  LoadPrev is only valid for simple scalar
-    // variables; module-backed variables like SMTH1 occupy multiple VM
-    // slots (internal stock + aux), so LoadPrev would read the wrong slot.
+    // PREVIOUS(x) where x = SMTH1(input, 1) must rewrite through a scalar
+    // helper aux, not LoadPrev directly against the module-backed variable.
+    // Module-backed variables like SMTH1 occupy multiple VM slots.
     let project = datamodel::Project {
         name: "previous_of_smooth".to_string(),
         sim_specs: datamodel::SimSpecs {

@@ -1364,29 +1364,19 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         }
                     }
-                    BuiltinFn::Previous(arg) => {
-                        // PREVIOUS(x): return the value of x from the previous
-                        // timestep, read from the snapshot taken after stocks
-                        // but before the time advance.
-                        //
-                        // Only simple PREVIOUS(var) reaches here via the
-                        // builtin path. Nested PREVIOUS and 2-arg forms go
-                        // through module expansion in the builtins_visitor.
-                        let prev_vals = self.sim.prev_values.borrow();
-                        if prev_vals.is_empty() {
-                            // Before the first timestep snapshot, prev_values
-                            // is empty. Return 0.0 to match the 1-arg stdlib
-                            // PREVIOUS default (initial_value=0) and the VM's
-                            // zero-initialized prev_values buffer.
-                            0.0
+                    BuiltinFn::Previous(arg, fallback) => {
+                        if crate::float::approx_eq(self.curr[TIME_OFF], self.curr[INITIAL_TIME_OFF])
+                        {
+                            self.eval(fallback)
                         } else {
+                            let prev_vals = self.sim.prev_values.borrow();
                             match arg.as_ref() {
                                 Expr::Var(off, _) => prev_vals[self.off + *off],
+                                // builtins_visitor rewrites non-scalar PREVIOUS args
+                                // through helper auxes, so only Var nodes should
+                                // reach here in practice.  If one slips through,
+                                // evaluating the current value is the safe fallback.
                                 _ => {
-                                    // Fallback: evaluate the expression normally.
-                                    // In practice, only Var reaches here because
-                                    // the builtins_visitor only promotes simple
-                                    // PREVIOUS(var) to the builtin path.
                                     drop(prev_vals);
                                     self.eval(arg)
                                 }
