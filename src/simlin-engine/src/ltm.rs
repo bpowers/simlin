@@ -139,10 +139,7 @@ pub(crate) enum ModuleLtmRole {
 ///
 /// Dynamic modules contain stocks and need composite link scores.
 /// Stateless modules are passthroughs.
-pub(crate) fn classify_module_for_ltm(
-    _model_name: &Ident<Canonical>,
-    module_model: &ModelStage1,
-) -> ModuleLtmRole {
+pub(crate) fn classify_module_for_ltm(module_model: &ModelStage1) -> ModuleLtmRole {
     if module_model
         .variables
         .values()
@@ -361,8 +358,7 @@ impl CausalGraph {
             {
                 // Build internal graph for this module instance if we have the model
                 if let Some(module_model) = project.models.get(model_name)
-                    && classify_module_for_ltm(model_name, module_model)
-                        == ModuleLtmRole::DynamicModule
+                    && classify_module_for_ltm(module_model) == ModuleLtmRole::DynamicModule
                 {
                     // Recursively build graph for the module
                     let module_graph = CausalGraph::from_model(module_model, project)?;
@@ -3264,7 +3260,7 @@ mod tests {
             .expect("should have stdlib⁚smth1 model");
 
         assert_eq!(
-            classify_module_for_ltm(&smth1_ident, smth1_model),
+            classify_module_for_ltm(smth1_model),
             ModuleLtmRole::DynamicModule
         );
     }

@@ -857,9 +857,8 @@ pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
         return false;
     };
     match &ast {
-        Expr0::App(crate::builtins::UntypedBuiltinFn(func, args), _) => {
+        Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
             let func_lower = func.to_lowercase();
-            let _ = args;
             crate::builtins::is_stdlib_module_function(&func_lower)
         }
         _ => false,

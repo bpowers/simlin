@@ -252,6 +252,9 @@ impl Expr1 {
                     "vector_elm_map" => check_arity!(VectorElmMap, 2),
                     "vector_sort_order" => check_arity!(VectorSortOrder, 2),
                     "allocate_available" => check_arity!(AllocateAvailable, 3),
+                    // Unary PREVIOUS(x) desugars to PREVIOUS(x, 0).
+                    // builtins_visitor may have already added the fallback
+                    // at Expr0 level, so both 1-arg and 2-arg forms are valid.
                     "previous" => {
                         if args.len() == 1 {
                             let a = args.remove(0);

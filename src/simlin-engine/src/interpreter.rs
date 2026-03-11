@@ -1372,6 +1372,10 @@ impl ModuleEvaluator<'_> {
                             let prev_vals = self.sim.prev_values.borrow();
                             match arg.as_ref() {
                                 Expr::Var(off, _) => prev_vals[self.off + *off],
+                                // builtins_visitor rewrites non-scalar PREVIOUS args
+                                // through helper auxes, so only Var nodes should
+                                // reach here in practice.  If one slips through,
+                                // evaluating the current value is the safe fallback.
                                 _ => {
                                     drop(prev_vals);
                                     self.eval(arg)

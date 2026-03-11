@@ -157,7 +157,7 @@ pub(crate) fn compute_composite_ports(project: &Project) -> CompositePortMap {
         if !model.implicit {
             continue;
         }
-        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+        if classify_module_for_ltm(model) != ModuleLtmRole::DynamicModule {
             continue;
         }
         let graph = match CausalGraph::from_model(model, project) {
@@ -248,7 +248,7 @@ fn generate_ltm_variables_inner(
         if !model.implicit {
             continue;
         }
-        if classify_module_for_ltm(model_name, model) != ModuleLtmRole::DynamicModule {
+        if classify_module_for_ltm(model) != ModuleLtmRole::DynamicModule {
             continue;
         }
         let module_vars = generate_module_internal_ltm_variables(model_name, model, project);
