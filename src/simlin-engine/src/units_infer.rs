@@ -518,11 +518,12 @@ impl UnitInferer<'_> {
                 BuiltinFn::AllocateAvailable(req, _, _) => {
                     self.gen_constraints(req, prefix, current_var, constraints)
                 }
-                // Previous(x, init) and Init(x) preserve the units of the
+                // Previous(x, fallback) and Init(x) preserve the units of the
                 // lagged/current argument; the fallback must be compatible.
                 BuiltinFn::Previous(a, b) => {
-                    self.gen_constraints(a, prefix, current_var, constraints)?;
-                    self.gen_constraints(b, prefix, current_var, constraints)
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
+                    self.gen_constraints(b, prefix, current_var, constraints)?;
+                    Ok(a_units)
                 }
                 BuiltinFn::Init(a) => self.gen_constraints(a, prefix, current_var, constraints),
             },
@@ -1145,6 +1146,63 @@ pub(crate) fn infer(
     };
 
     units.infer(model)
+}
+
+/// PREVIOUS(x) desugars to PREVIOUS(x, 0). The inferred units should
+/// come from x, not the fallback 0 constant.
+#[test]
+fn test_previous_infers_units_from_lagged_arg() {
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+
+    // position has explicit units "widget". prev_pos has no declared
+    // units; inference should propagate "widget" from position
+    // through PREVIOUS(position, 0).
+    let test_case: &[(crate::datamodel::Variable, &str)] = &[
+        (x_aux("position", "10", Some("widget")), "widget"),
+        (x_aux("prev_pos", "PREVIOUS(position)", None), "widget"),
+    ];
+
+    let expected = test_case
+        .iter()
+        .map(|(var, units)| (var.get_ident(), *units))
+        .collect::<HashMap<&str, &str>>();
+    let vars = test_case
+        .iter()
+        .map(|(var, _)| var)
+        .cloned()
+        .collect::<Vec<_>>();
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    for _ in 0..64 {
+        let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+        let _project = crate::project::Project::from_salsa(
+            project_datamodel.clone(),
+            &db,
+            sync.project,
+            |models, units_ctx, model| {
+                results = infer(models, units_ctx, model);
+            },
+        );
+        let results = results.unwrap();
+        for (ident, expected_units) in expected.iter() {
+            let expected_units: UnitMap =
+                crate::units::parse_units(&units_ctx, Some(expected_units))
+                    .unwrap()
+                    .unwrap();
+            if let Some(computed_units) = results.get(&*canonicalize(ident)) {
+                assert_eq!(
+                    expected_units, *computed_units,
+                    "variable '{ident}': expected {expected_units:?} but got {computed_units:?}"
+                );
+            } else {
+                panic!("inference results don't contain variable '{ident}'");
+            }
+        }
+    }
 }
 
 #[test]
