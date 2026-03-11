@@ -788,9 +788,9 @@ pub(super) fn compile_ltm_equation_fragment(
     let inputs = BTreeSet::new();
     let mut module_models = model_module_map(db, model, project).clone();
 
-    // Merge LTM implicit module references from LTM equation parsing into
-    // the module_models map so the compiler
-    // context can resolve module_var_name -> sub_model_name lookups.
+    // Merge LTM implicit module references from LTM equation parsing into the
+    // module_models map so the compiler context can resolve module_var_name ->
+    // sub_model_name lookups.
     if !implicit_module_refs.is_empty() {
         let current_model_modules = module_models.entry(model_name_ident.clone()).or_default();
         for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
