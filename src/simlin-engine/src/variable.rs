@@ -517,7 +517,8 @@ where
 
 /// Like `parse_var` but accepts a set of module variable identifiers from
 /// the parent model. When provided, `PREVIOUS(module_var)` in equations will
-/// fall through to module expansion instead of compiling to LoadPrev.
+/// synthesize a scalar helper aux instead of compiling `LoadPrev` directly
+/// against a multi-slot module.
 pub fn parse_var_with_module_context<MI, F>(
     dimensions: &[datamodel::Dimension],
     v: &datamodel::Variable,
@@ -823,11 +824,14 @@ impl ClassifyVisitor<'_> {
                 });
                 if !is_dimension {
                     self.all.insert(id.clone());
+                    if self.in_init && !self.in_previous {
+                        self.init_referenced.insert(id.to_string());
+                    }
                 }
                 self.record_ident(id.as_str());
             }
             Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Previous(arg) => {
+                BuiltinFn::Previous(arg, fallback) => {
                     if let Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) = arg.as_ref()
                     {
                         self.previous_referenced.insert(ident.to_string());
@@ -837,12 +841,13 @@ impl ClassifyVisitor<'_> {
                     self.in_previous = true;
                     self.walk(arg);
                     self.in_previous = old;
+
+                    let old = self.in_init;
+                    self.in_init = true;
+                    self.walk(fallback);
+                    self.in_init = old;
                 }
                 BuiltinFn::Init(arg) => {
-                    if let Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) = arg.as_ref()
-                    {
-                        self.init_referenced.insert(ident.to_string());
-                    }
                     let old = self.in_init;
                     self.in_init = true;
                     self.walk(arg);
@@ -859,6 +864,9 @@ impl ClassifyVisitor<'_> {
             },
             Expr2::Subscript(id, args, _, _) => {
                 self.all.insert(id.clone());
+                if self.in_init && !self.in_previous {
+                    self.init_referenced.insert(id.to_string());
+                }
                 self.record_ident(id.as_str());
                 args.iter().for_each(|arg| self.walk_index(arg));
             }
@@ -1049,6 +1057,7 @@ fn test_classify_dependencies_matrix() {
 
     let loc = Loc::new(0, 1);
     let const_one = Expr2::Const("1".to_string(), 1.0, loc);
+    let const_zero = Expr2::Const("0".to_string(), 0.0, loc);
 
     let module_inputs_with_input: BTreeSet<Ident<Canonical>> =
         [Ident::new("input")].into_iter().collect();
@@ -1166,7 +1175,10 @@ fn test_classify_dependencies_matrix() {
             ast: Ast::ApplyToAll(
                 vec![dim1.clone()],
                 Expr2::App(
-                    BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    BuiltinFn::Previous(
+                        Box::new(Expr2::Var(Ident::new("b"), None, loc)),
+                        Box::new(const_zero.clone()),
+                    ),
                     None,
                     loc,
                 ),
@@ -1197,7 +1209,10 @@ fn test_classify_dependencies_matrix() {
                 vec![IndexExpr2::Range(
                     const_one.clone(),
                     Expr2::App(
-                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("lagged"), None, loc))),
+                        BuiltinFn::Previous(
+                            Box::new(Expr2::Var(Ident::new("lagged"), None, loc)),
+                            Box::new(const_zero.clone()),
+                        ),
                         None,
                         loc,
                     ),
@@ -1308,7 +1323,10 @@ fn test_classify_dependencies_matrix() {
             label: "mixed_prev_current_a2a",
             ast: Ast::ApplyToAll(vec![dim1.clone()], {
                 let prev = Expr2::App(
-                    BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    BuiltinFn::Previous(
+                        Box::new(Expr2::Var(Ident::new("b"), None, loc)),
+                        Box::new(const_zero.clone()),
+                    ),
                     None,
                     loc,
                 );
@@ -1349,7 +1367,10 @@ fn test_classify_dependencies_matrix() {
                 Ident::new("arr"),
                 vec![IndexExpr2::Range(
                     Expr2::App(
-                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                        BuiltinFn::Previous(
+                            Box::new(Expr2::Var(Ident::new("b"), None, loc)),
+                            Box::new(const_zero.clone()),
+                        ),
                         None,
                         loc,
                     ),
@@ -1399,7 +1420,10 @@ fn test_classify_dependencies_matrix() {
             label: "both_lagged_a2a",
             ast: Ast::ApplyToAll(vec![dim1.clone()], {
                 let prev = Expr2::App(
-                    BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
+                    BuiltinFn::Previous(
+                        Box::new(Expr2::Var(Ident::new("b"), None, loc)),
+                        Box::new(const_zero.clone()),
+                    ),
                     None,
                     loc,
                 );
@@ -1449,7 +1473,10 @@ fn test_classify_dependencies_matrix() {
                 Ident::new("arr"),
                 vec![IndexExpr2::Range(
                     Expr2::App(
-                        BuiltinFn::Previous(Box::new(Expr2::Var(Ident::new("x"), None, loc))),
+                        BuiltinFn::Previous(
+                            Box::new(Expr2::Var(Ident::new("x"), None, loc)),
+                            Box::new(const_zero.clone()),
+                        ),
                         None,
                         loc,
                     ),

@@ -722,7 +722,9 @@ impl Context<'_> {
                 Box::new(self.lower_pass0(c)),
             ),
             // Single expression builtins replacing stdlib modules
-            Previous(e) => Previous(Box::new(self.lower_pass0(e))),
+            Previous(a, b) => {
+                Previous(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
+            }
             Init(e) => Init(Box::new(self.lower_pass0(e))),
         }
     }
@@ -2016,7 +2018,10 @@ impl Context<'_> {
                     Box::new(self.lower_from_expr3(avail)?),
                 )
             }
-            BFn::Previous(a) => BuiltinFn::Previous(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Previous(a, b) => BuiltinFn::Previous(
+                Box::new(self.lower_from_expr3(a)?),
+                Box::new(self.lower_from_expr3(b)?),
+            ),
             BFn::Init(a) => BuiltinFn::Init(Box::new(self.lower_from_expr3(a)?)),
         })
     }

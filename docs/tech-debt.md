@@ -159,15 +159,6 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-22
 
-### 20. parse_source_variable Missing module_idents Context
-
-- **Component**: simlin-engine (src/simlin-engine/src/db.rs)
-- **Severity**: low
-- **Description**: `parse_source_variable` calls `parse_var` (module_idents = None) rather than `parse_var_with_module_context`. Computing module_idents requires a model-level view (knowing which sibling variables are module-expanded), but salsa tracks individual variables. The consequence: `PREVIOUS(x)` where `x` is a user-written stdlib-call aux (e.g., `x = SMTH1(...)`) will compile to LoadPrev via the salsa-cached path instead of falling through to module expansion. The U+205A composite-identifier check in builtins_visitor.rs catches already-expanded names (the common case after a full compile), so this gap only affects the raw user-facing variable name at incremental-parse time. A fix would require computing a `module_idents` salsa input (set of user-written stdlib-call aux/flow names) at the model level and threading it into per-variable parse.
-- **Measure**: Write a test: model with `x = SMTH1(input, 1)` and `y = PREVIOUS(x)`, verify y compiles to module expansion (not LoadPrev) via the salsa incremental path.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-03-01
-
 ### 19. Flaky Hypothesis Tests in pysimlin Due to Slow Input Generation
 
 - **Component**: pysimlin (src/pysimlin/tests/test_json_types.py)

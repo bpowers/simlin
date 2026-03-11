@@ -693,40 +693,25 @@ impl<'module> Compiler<'module> {
                     return Ok(Some(()));
                 };
 
-                // PREVIOUS(x) and INIT(x) compile to dedicated opcodes that
+                // PREVIOUS(x, init) and INIT(x) compile to dedicated opcodes that
                 // read from curr[] (previous timestep) or the initial-value
                 // buffer, respectively.  Handle them before the general
                 // builtin dispatch because they do not use CallBuiltin.
                 match builtin {
-                    BuiltinFn::Previous(arg) => {
-                        // Only simple PREVIOUS(var) reaches the builtin path;
-                        // the builtins_visitor routes nested PREVIOUS,
-                        // PREVIOUS(TIME), and 2-arg forms through module
-                        // expansion.
-                        //
-                        // At Expr0 level, the arg was a plain Var, but during
-                        // lowering inside a submodule context (e.g. LTM-augmented
-                        // SMOOTH), the variable may resolve to a ModuleInput
-                        // instead of a Var. Module inputs don't have slots in
-                        // the flat curr[] buffer, so we can't use LoadPrev. We
-                        // fall back to LoadModuleInput which reads the current
-                        // value -- the PREVIOUS delay is already applied at the
-                        // call site by the parent module.
+                    BuiltinFn::Previous(arg, fallback) => {
+                        self.walk_expr(fallback)?.unwrap();
                         match arg.as_ref() {
                             Expr::Var(off, _) => {
                                 self.push(Opcode::LoadPrev {
                                     off: *off as VariableOffset,
                                 });
                             }
-                            Expr::ModuleInput(off, _) => {
-                                self.push(Opcode::LoadModuleInput {
-                                    input: *off as ModuleInputOffset,
-                                });
-                            }
                             _ => {
-                                // Unexpected argument type -- emit the
-                                // expression normally as a fallback.
-                                self.walk_expr(arg)?;
+                                return sim_err!(
+                                    NotSimulatable,
+                                    "PREVIOUS requires a variable reference after helper rewriting"
+                                        .to_string()
+                                );
                             }
                         }
                         return Ok(Some(()));
@@ -917,7 +902,7 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::PopView {});
                         return Ok(Some(()));
                     }
-                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                    BuiltinFn::Previous(_, _) | BuiltinFn::Init(_) => {
                         unreachable!(
                             "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
                         );
@@ -974,7 +959,7 @@ impl<'module> Compiler<'module> {
                     // Previous/Init are handled by the early-return path at the top
                     // of walk_builtin (LoadPrev/LoadInitial opcodes). Reaching here
                     // would be a logic error.
-                    BuiltinFn::Previous(_) | BuiltinFn::Init(_) => {
+                    BuiltinFn::Previous(_, _) | BuiltinFn::Init(_) => {
                         unreachable!(
                             "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
                         );
@@ -1366,8 +1351,12 @@ impl<'module> Compiler<'module> {
                 self.collect_iter_source_views_impl(b, views, seen);
                 self.collect_iter_source_views_impl(c, views, seen);
             }
-            // Single expression argument (non-array)
-            Previous(a) | Init(a) => {
+            // Scalar lag/initial builtins
+            Previous(a, b) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
+            }
+            Init(a) => {
                 self.collect_iter_source_views_impl(a, views, seen);
             }
             // Constants/no-arg builtins

@@ -152,11 +152,9 @@ impl Project {
                 .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix));
             let model_name = src_model.name(db);
             let src_vars = src_model.variables(db);
-            // For stdlib models, ALL variable names must be module idents
-            // so PREVIOUS(module_input) uses module expansion instead of
-            // LoadPrev. Inside a submodule, module inputs are passed via a
-            // transient array with no persistent slot in prev_values;
-            // LoadPrev would return the current value, not the previous one.
+            // For stdlib models, ALL variable names must be module idents so
+            // PREVIOUS(module_input) rewrites through a scalar helper aux
+            // instead of reading a transient module-input slot directly.
             let extra_module_idents: Vec<String> = if is_stdlib {
                 src_vars.keys().cloned().collect()
             } else {

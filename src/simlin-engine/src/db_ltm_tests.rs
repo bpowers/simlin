@@ -6,19 +6,28 @@ use super::compile_ltm_equation_fragment;
 use crate::datamodel;
 use crate::db::{SimlinDb, sync_from_datamodel};
 
-fn phase_has_sym_load_prev(phase: &Option<crate::compiler::symbolic::PerVarBytecodes>) -> bool {
-    phase.as_ref().is_some_and(|bc| {
-        bc.symbolic.code.iter().any(|op| {
-            matches!(
-                op,
-                crate::compiler::symbolic::SymbolicOpcode::SymLoadPrev { .. }
-            )
+fn phase_sym_load_prev_names(
+    phase: &Option<crate::compiler::symbolic::PerVarBytecodes>,
+) -> Vec<&str> {
+    phase
+        .as_ref()
+        .map(|bc| {
+            bc.symbolic
+                .code
+                .iter()
+                .filter_map(|op| match op {
+                    crate::compiler::symbolic::SymbolicOpcode::SymLoadPrev { var } => {
+                        Some(var.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect()
         })
-    })
+        .unwrap_or_default()
 }
 
 #[test]
-fn test_ltm_previous_module_var_uses_module_expansion() {
+fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let project = datamodel::Project {
         name: "ltm_prev_module_regression".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
@@ -77,16 +86,22 @@ fn test_ltm_previous_module_var_uses_module_expansion() {
     )
     .expect("LTM equation should compile");
 
+    let initial_prev_names = phase_sym_load_prev_names(&fragment.fragment.initial_bytecodes);
+    let flow_prev_names = phase_sym_load_prev_names(&fragment.fragment.flow_bytecodes);
+    let stock_prev_names = phase_sym_load_prev_names(&fragment.fragment.stock_bytecodes);
+
     assert!(
-        !phase_has_sym_load_prev(&fragment.fragment.initial_bytecodes),
+        initial_prev_names.is_empty(),
         "initial phase should not use SymLoadPrev for PREVIOUS(module_var)",
     );
     assert!(
-        !phase_has_sym_load_prev(&fragment.fragment.flow_bytecodes),
-        "flow phase should not use SymLoadPrev for PREVIOUS(module_var)",
+        flow_prev_names
+            .iter()
+            .all(|name| name.starts_with("$⁚$⁚ltm⁚test_prev_module⁚0⁚arg0")),
+        "flow phase should use SymLoadPrev only for the synthesized helper arg, got {flow_prev_names:?}",
     );
     assert!(
-        !phase_has_sym_load_prev(&fragment.fragment.stock_bytecodes),
+        stock_prev_names.is_empty(),
         "stock phase should not use SymLoadPrev for PREVIOUS(module_var)",
     );
 }

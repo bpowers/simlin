@@ -222,8 +222,25 @@ impl UnitEvaluator<'_> {
                     BuiltinFn::VectorElmMap(source, _) => self.check(source),
                     BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
                     BuiltinFn::AllocateAvailable(req, _, _) => self.check(req),
-                    // Previous(x) and Init(x) preserve the units of their argument
-                    BuiltinFn::Previous(a) | BuiltinFn::Init(a) => self.check(a),
+                    // Previous(x, init) preserves the units of x and requires
+                    // the fallback to be compatible with it.
+                    BuiltinFn::Previous(a, b) => {
+                        let units = self.check(a)?;
+                        let fallback_units = self.check(b)?;
+                        if !fallback_units.equals(&units) {
+                            return Err(ConsistencyError(
+                                ErrorCode::UnitMismatch,
+                                b.get_loc(),
+                                Some(format!(
+                                    "PREVIOUS fallback has units '{}' but expected '{}'",
+                                    fallback_units.to_unit_map(),
+                                    units.to_unit_map()
+                                )),
+                            ));
+                        }
+                        Ok(units)
+                    }
+                    BuiltinFn::Init(a) => self.check(a),
                 }
             }
             Expr2::Subscript(base_name, _, _, loc) => {

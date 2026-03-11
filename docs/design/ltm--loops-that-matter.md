@@ -242,7 +242,7 @@ For a link from `x` to `z` where `z = f(x, y, ...)`:
    replacing `x` inside `x_rate`, or corrupting function names like `MAX`).
 4. The link score is:
    ```
-   if (TIME = PREVIOUS(TIME)) then 0
+   if (TIME = INITIAL_TIME) then 0
    else if ((z - PREVIOUS(z)) = 0) OR ((x - PREVIOUS(x)) = 0) then 0
    else ABS(SAFEDIV((partial_eq - PREVIOUS(z)), (z - PREVIOUS(z)), 0))
       * SIGN(SAFEDIV((partial_eq - PREVIOUS(z)), (x - PREVIOUS(x)), 0))
@@ -267,7 +267,7 @@ The ratio is wrapped in `ABS()` because flow-to-stock polarity is structural:
 inflows always contribute positively (+1), outflows negatively (-1). The sign
 is applied outside the absolute value. This equation returns 0 for the first
 two timesteps (insufficient history for second-order differences), guarded by
-`TIME = PREVIOUS(TIME)` and `PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))`.
+`TIME = INITIAL_TIME` and `PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME`.
 
 ### Stock-to-Flow Links
 
@@ -540,11 +540,10 @@ computational interval" strategy.
    module-internal stocks to loop stock lists) is an implementation-specific
    extension that enables correct cycle partitioning.
 
-4. **PREVIOUS via stdlib module**: The `PREVIOUS()` function used in link score
-   equations is implemented as a standard library module (`stdlib/previous.stmx`)
-   using a stock-and-flow structure, not as a built-in function. This affects
-   initial-timestep behavior: `TIME = PREVIOUS(TIME)` is used to detect the first
-   timestep and return 0.
+4. **PREVIOUS is intrinsic**: The `PREVIOUS()` function used in link score
+   equations is compiled as an intrinsic two-argument builtin. Unary syntax is
+   desugared to `PREVIOUS(x, 0)`. LTM first-timestep behavior is handled
+   explicitly with `TIME = INITIAL_TIME`.
 
 5. **Relative loop score formula**: The implementation uses
    `SAFEDIV(loop_score, sum_of_abs_scores, 0)` with explicit division-by-zero

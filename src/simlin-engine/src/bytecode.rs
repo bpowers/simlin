@@ -560,11 +560,10 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
-    /// Load the previous-timestep value of a variable from the prev_values
-    /// snapshot. Pushes `prev_values[module_off + off]` (or falls back to
-    /// `curr[]` during initials). Only simple PREVIOUS(var) compiles to
-    /// this opcode; nested PREVIOUS, PREVIOUS(TIME), and 2-arg forms use
-    /// module expansion instead.
+    /// Resolve PREVIOUS(var, fallback) for a direct scalar variable.
+    /// Pops the already-evaluated fallback from the stack, then pushes either
+    /// `prev_values[module_off + off]` or that fallback when `TIME ==
+    /// INITIAL_TIME`.
     LoadPrev {
         off: VariableOffset,
     },
