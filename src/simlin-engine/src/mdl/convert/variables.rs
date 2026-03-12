@@ -433,6 +433,7 @@ impl<'input> ConversionContext<'input> {
                     &exp_eq.eq.equation,
                     info.var_type == VariableType::Stock,
                     &empty_ctx,
+                    &[],
                 )?;
                 default_equation = Some(raw_eq);
             }
@@ -462,11 +463,22 @@ impl<'input> ConversionContext<'input> {
                     }
                 };
 
+                // Compute element offsets for arrayed GET DIRECT resolution.
+                // Use the LHS subscript dimensions (not the parent dims) so
+                // that sub-dimensions like SubA produce offsets relative to
+                // their own element list, not the parent dimension's.
+                let element_offsets: Vec<usize> = element_parts
+                    .iter()
+                    .zip(exp_eq.lhs_subscripts.iter())
+                    .map(|(elem, sub)| self.element_index_in_dimension(elem, sub).unwrap_or(0))
+                    .collect();
+
                 let (eq_str, initial_eq, gf) = self.build_equation_rhs_with_context(
                     name,
                     &exp_eq.eq.equation,
                     info.var_type == VariableType::Stock,
                     &ctx,
+                    &element_offsets,
                 )?;
 
                 element_map.insert(key.clone(), (eq_str, initial_eq, gf));
@@ -545,12 +557,16 @@ impl<'input> ConversionContext<'input> {
 
     /// Build the equation RHS string with per-element substitution context.
     /// Dimension references in the equation are substituted with specific element names.
+    ///
+    /// `element_offsets` provides the 0-based position within each dimension
+    /// for arrayed variables, used to adjust GET DIRECT cell references.
     fn build_equation_rhs_with_context(
         &self,
         var_name: &str,
         eq: &MdlEquation<'_>,
         is_stock: bool,
         ctx: &crate::mdl::xmile_compat::ElementContext,
+        element_offsets: &[usize],
     ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
     {
         match eq {
@@ -572,7 +588,7 @@ impl<'input> ConversionContext<'input> {
                 // as Regular rather than Data. Detect the opaque reference
                 // and resolve it through the data provider.
                 if super::external_data::is_get_direct_ref(&eq_str) {
-                    return self.try_resolve_data_equation(&eq_str);
+                    return self.try_resolve_data_equation(&eq_str, element_offsets);
                 }
                 Ok((eq_str, None, None))
             }
@@ -596,7 +612,7 @@ impl<'input> ConversionContext<'input> {
                     .as_ref()
                     .map(|e| self.formatter.format_expr_with_context(e, ctx))
                     .unwrap_or_default();
-                self.try_resolve_data_equation(&eq_str)
+                self.try_resolve_data_equation(&eq_str, element_offsets)
             }
             MdlEquation::TabbedArray(_, _) | MdlEquation::NumberList(_, _) => {
                 // Per-element expansion is handled by make_array_equation at the
@@ -844,7 +860,7 @@ impl<'input> ConversionContext<'input> {
                 // data provider.
                 if super::external_data::is_get_direct_ref(&eq_str) {
                     let (resolved_eq, _resolved_compat, gf) =
-                        self.try_resolve_data_equation(&eq_str)?;
+                        self.try_resolve_data_equation(&eq_str, &[])?;
                     let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
                     compat.data_source = self.extract_get_direct_data_source(&eq_str);
                     return Ok((equation, compat, gf));
@@ -879,7 +895,7 @@ impl<'input> ConversionContext<'input> {
                     .map(|e| self.formatter.format_expr(e))
                     .unwrap_or_default();
                 let (resolved_eq, _resolved_compat, gf) =
-                    self.try_resolve_data_equation(&eq_str)?;
+                    self.try_resolve_data_equation(&eq_str, &[])?;
                 let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
                 compat.data_source = self.extract_get_direct_data_source(&eq_str);
                 Ok((equation, compat, gf))
@@ -898,14 +914,23 @@ impl<'input> ConversionContext<'input> {
     /// Try to resolve a GET DIRECT reference in a Data equation expression.
     /// Returns (equation_string, initial_value, graphical_function) matching
     /// the tuple format used by build_equation_for_element.
+    ///
+    /// `element_offsets` provides the 0-based position within each dimension
+    /// for arrayed variables (empty for scalars).
     fn try_resolve_data_equation(
         &self,
         eq_str: &str,
+        element_offsets: &[usize],
     ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
     {
         use super::external_data::{ResolvedData, try_resolve_data_expr};
 
-        match try_resolve_data_expr(eq_str, self.data_provider, &self.file_aliases) {
+        match try_resolve_data_expr(
+            eq_str,
+            self.data_provider,
+            &self.file_aliases,
+            element_offsets,
+        ) {
             Some(Ok(ResolvedData::Lookup(eq, gf))) => Ok((eq, None, Some(gf))),
             Some(Ok(ResolvedData::Constant(value))) => Ok((format_number(value), None, None)),
             Some(Ok(ResolvedData::Subscript(_))) => {

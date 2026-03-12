@@ -1268,7 +1268,7 @@ fn incremental_compilation_covers_all_models() {
 
 // -- External data model tests (MDL path with FilesystemDataProvider) --
 
-// Ignored: requires Excel data support AND dimension equivalences (DimC <-> DimM)
+// Requires Excel data support (ext_data feature), out of scope
 #[cfg(feature = "ext_data")]
 #[test]
 #[ignore]
@@ -1276,23 +1276,17 @@ fn simulates_directdata_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directdata/directdata.mdl");
 }
 
-// Ignored: requires arrayed GET DIRECT CONSTANTS (B2* pattern) and EXCEPT support
 #[test]
-#[ignore]
 fn simulates_directconst_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directconst/directconst.mdl");
 }
 
-// Ignored: requires arrayed GET DIRECT LOOKUPS with row-oriented addressing
 #[test]
-#[ignore]
 fn simulates_directlookups_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directlookups/directlookups.mdl");
 }
 
-// Ignored: requires cross-dimension mapping (DimA -> DimB, DimC)
 #[test]
-#[ignore]
 fn simulates_directsubs_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directsubs/directsubs.mdl");
 }

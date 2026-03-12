@@ -355,6 +355,21 @@ impl<'input> ConversionContext<'input> {
         None
     }
 
+    /// Find the 0-based index of an element within a dimension's element list.
+    /// Used to compute offsets for arrayed GET DIRECT cell reference adjustment.
+    pub(super) fn element_index_in_dimension(
+        &self,
+        element: &str,
+        dim_formatted: &str,
+    ) -> Option<usize> {
+        let dim_canonical = canonical_name(dim_formatted);
+        let elem_canonical = canonical_name(element);
+        let elements = self.dimension_elements.get(&dim_canonical)?;
+        elements
+            .iter()
+            .position(|e| canonical_name(e) == elem_canonical)
+    }
+
     /// Get the formatted dimension name (space_to_underbar) from a canonical name.
     pub(super) fn get_formatted_dimension_name(&self, canonical: &str) -> String {
         // Find the original dimension name and format it
