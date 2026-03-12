@@ -579,7 +579,7 @@ impl ModuleEvaluator<'_> {
     fn array_mean(&mut self, expr: &Expr) -> f64 {
         let size = self.get_array_size(expr);
         if size == 0 {
-            return 0.0;
+            return f64::NAN;
         }
 
         let sum = self.reduce_array(expr, 0.0, |acc, val| acc + val);
@@ -589,6 +589,9 @@ impl ModuleEvaluator<'_> {
     /// Helper to calculate standard deviation of an array
     fn array_stddev(&mut self, expr: &Expr) -> f64 {
         let size = self.get_array_size(expr);
+        if size == 0 {
+            return f64::NAN;
+        }
         if size <= 1 {
             return 0.0;
         }
@@ -1013,14 +1016,14 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Min(a, b) => {
                         // Check if this is array min or scalar min
                         if b.is_none() {
-                            // Single argument - must be an array
-                            self.reduce_array(
-                                a,
-                                f64::INFINITY,
-                                |acc, val| {
+                            let size = self.get_array_size(a);
+                            if size == 0 {
+                                f64::NAN
+                            } else {
+                                self.reduce_array(a, f64::INFINITY, |acc, val| {
                                     if val < acc { val } else { acc }
-                                },
-                            )
+                                })
+                            }
                         } else {
                             // Two scalar arguments
                             let a = self.eval(a);
@@ -1043,10 +1046,14 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Max(a, b) => {
                         // Check if this is array max or scalar max
                         if b.is_none() {
-                            // Single argument - must be an array
-                            self.reduce_array(a, f64::NEG_INFINITY, |acc, val| {
-                                if val > acc { val } else { acc }
-                            })
+                            let size = self.get_array_size(a);
+                            if size == 0 {
+                                f64::NAN
+                            } else {
+                                self.reduce_array(a, f64::NEG_INFINITY, |acc, val| {
+                                    if val > acc { val } else { acc }
+                                })
+                            }
                         } else {
                             // Two scalar arguments
                             let a = self.eval(a);
