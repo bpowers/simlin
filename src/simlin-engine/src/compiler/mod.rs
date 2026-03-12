@@ -785,6 +785,7 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
         Expr::App(
             BuiltinFn::VectorElmMap(_, _)
                 | BuiltinFn::VectorSortOrder(_, _)
+                | BuiltinFn::Rank(_, _)
                 | BuiltinFn::AllocateAvailable(_, _, _),
             _
         )

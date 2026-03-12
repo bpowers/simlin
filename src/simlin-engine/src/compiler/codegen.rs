@@ -881,7 +881,10 @@ impl<'module> Compiler<'module> {
                         return Ok(Some(()));
                     }
                     BuiltinFn::Rank(_, _) => {
-                        return sim_err!(TodoArrayBuiltin, "RANK not yet supported".to_owned());
+                        return sim_err!(
+                            TodoArrayBuiltin,
+                            "array-producing builtin outside AssignTemp context".to_owned()
+                        );
                     }
                     BuiltinFn::Size(arg) => {
                         return self.emit_array_reduce(arg, Opcode::ArraySize {});
@@ -954,7 +957,10 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::StartTime
                     | BuiltinFn::FinalTime => unreachable!(),
                     BuiltinFn::Rank(_, _) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                        return sim_err!(
+                            TodoArrayBuiltin,
+                            "array-producing builtin outside AssignTemp context".to_owned()
+                        );
                     }
                     // Previous/Init are handled by the early-return path at the top
                     // of walk_builtin (LoadPrev/LoadInitial opcodes). Reaching here
@@ -1089,6 +1095,21 @@ impl<'module> Compiler<'module> {
                             self.walk_expr_as_view(array)?;
                             self.walk_expr(direction)?.unwrap();
                             self.push(Opcode::VectorSortOrder {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        BuiltinFn::Rank(array, rest) => {
+                            self.walk_expr_as_view(array)?;
+                            // Direction argument (default 1 = ascending)
+                            if let Some((direction, _)) = rest {
+                                self.walk_expr(direction)?.unwrap();
+                            } else {
+                                let id = self.curr_code.intern_literal(1.0);
+                                self.push(Opcode::LoadConstant { id });
+                            }
+                            self.push(Opcode::Rank {
                                 write_temp_id: *id as TempId,
                             });
                             self.push(Opcode::PopView {});

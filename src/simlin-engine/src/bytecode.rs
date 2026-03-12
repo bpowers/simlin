@@ -822,6 +822,13 @@ pub(crate) enum Opcode {
         write_temp_id: TempId,
     },
 
+    /// Produces an array of ranks (ordinal positions in sorted order); writes to temp_storage.
+    /// Pops 1 scalar (direction: 1=ascending, 0=descending) from the arithmetic stack.
+    /// Reads 1 view from the view stack.
+    Rank {
+        write_temp_id: TempId,
+    },
+
     /// Priority-based allocation; writes result array to temp_storage.
     AllocateAvailable {
         write_temp_id: TempId,
@@ -980,10 +987,11 @@ impl Opcode {
             // VectorSelect pops 2 scalars (max_value, action), pushes 1 result
             Opcode::VectorSelect {} => (2, 1),
             // VectorElmMap writes to temp_storage without touching the arithmetic stack.
-            // VectorSortOrder/AllocateAvailable pop 1 scalar each (direction and avail
-            // respectively) and write their result arrays to temp_storage.
+            // VectorSortOrder/Rank/AllocateAvailable pop 1 scalar each (direction/avail)
+            // and write their result arrays to temp_storage.
             Opcode::VectorElmMap { .. } => (0, 0),
             Opcode::VectorSortOrder { .. } => (1, 0),
+            Opcode::Rank { .. } => (1, 0),
             Opcode::AllocateAvailable { .. } => (1, 0),
 
             // Broadcasting
@@ -1574,6 +1582,8 @@ mod tests {
             (Opcode::VectorSortOrder { write_temp_id: 0 }).stack_effect(),
             (1, 0)
         );
+        // Rank: pops 1 scalar (direction), writes to temp_storage
+        assert_eq!((Opcode::Rank { write_temp_id: 0 }).stack_effect(), (1, 0));
         // AllocateAvailable: pops 1 scalar (avail), writes to temp_storage
         assert_eq!(
             (Opcode::AllocateAvailable { write_temp_id: 0 }).stack_effect(),

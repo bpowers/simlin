@@ -213,6 +213,9 @@ pub(crate) enum SymbolicOpcode {
     VectorSortOrder {
         write_temp_id: TempId,
     },
+    Rank {
+        write_temp_id: TempId,
+    },
     AllocateAvailable {
         write_temp_id: TempId,
     },
@@ -621,6 +624,9 @@ pub(crate) fn symbolize_opcode(
         Opcode::VectorSortOrder { write_temp_id } => Ok(SymbolicOpcode::VectorSortOrder {
             write_temp_id: *write_temp_id,
         }),
+        Opcode::Rank { write_temp_id } => Ok(SymbolicOpcode::Rank {
+            write_temp_id: *write_temp_id,
+        }),
         Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
             write_temp_id: *write_temp_id,
         }),
@@ -918,6 +924,9 @@ pub(crate) fn resolve_opcode(
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
+            write_temp_id: *write_temp_id,
+        }),
+        SymbolicOpcode::Rank { write_temp_id } => Ok(Opcode::Rank {
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::AllocateAvailable { write_temp_id } => Ok(Opcode::AllocateAvailable {
@@ -1338,6 +1347,9 @@ pub(crate) fn renumber_opcode(
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::VectorSortOrder { write_temp_id } => SymbolicOpcode::VectorSortOrder {
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+        },
+        SymbolicOpcode::Rank { write_temp_id } => SymbolicOpcode::Rank {
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::AllocateAvailable { write_temp_id } => SymbolicOpcode::AllocateAvailable {
