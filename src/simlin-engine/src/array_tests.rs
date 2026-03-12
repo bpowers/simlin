@@ -1407,13 +1407,34 @@ mod combined_operations_tests {
     #[test]
     #[ignore] // Enable when all operations are implemented
     fn transpose_and_slice() {
-        // Combine transpose with slicing
-        TestProject::new("combined_transpose_slice")
+        // Combine transpose with slicing via an intermediate transposed
+        // variable. The parser handles subscripts on identifiers only,
+        // so matrix'[1:3, *] cannot be parsed as a single expression.
+        // Instead, we create an explicit transposed intermediate.
+        //
+        // matrix[Row(3), Col(4)] = Row*10 + Col.
+        // transposed = matrix' => dims [Col(4), Row(3)].
+        // result = transposed[1:3, *] selects cols 1-3 and all rows.
+        //
+        // transposed[col, row] = matrix[row, col] = row*10 + col
+        // transposed[1,*] = [11, 21, 31]  (col=1, row=1,2,3)
+        // transposed[2,*] = [12, 22, 32]  (col=2, row=1,2,3)
+        // transposed[3,*] = [13, 23, 33]  (col=3, row=1,2,3)
+        // Row-major: [11, 21, 31, 12, 22, 32, 13, 23, 33]
+        let project = TestProject::new("combined_transpose_slice")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 4)
+            .indexed_dimension("SliceCol", 3)
+            .array_aux("transposed[Col, Row]", "matrix'")
             .array_aux("matrix[Row,Col]", "Row * 10 + Col")
-            .array_aux("result", "matrix'[1:3, *]") // Transpose then slice
-            .assert_interpreter_result("result", &[1.0, 11.0, 21.0, 2.0, 12.0, 22.0]);
+            .array_aux("result[SliceCol, Row]", "transposed[1:3, *]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "result",
+            &[11.0, 21.0, 31.0, 12.0, 22.0, 32.0, 13.0, 23.0, 33.0],
+        );
     }
 
     #[test]
