@@ -417,23 +417,30 @@ impl From<project_io::variable::Equation> for Equation {
             project_io::variable::equation::Equation::ApplyToAll(a2a) => {
                 Equation::ApplyToAll(a2a.dimension_names, a2a.equation)
             }
-            project_io::variable::equation::Equation::Arrayed(arrayed) => Equation::Arrayed(
-                arrayed.dimension_names,
-                arrayed
-                    .elements
-                    .into_iter()
-                    .map(|e| {
-                        (
-                            e.subscript,
-                            e.equation,
-                            e.initial_equation,
-                            e.gf.map(GraphicalFunction::from),
-                        )
-                    })
-                    .collect(),
-                arrayed.default_equation,
-                arrayed.has_except_default.unwrap_or(false),
-            ),
+            project_io::variable::equation::Equation::Arrayed(arrayed) => {
+                // Infer from default_equation presence for legacy protos
+                // that predate the has_except_default field.
+                let has_except = arrayed
+                    .has_except_default
+                    .unwrap_or(arrayed.default_equation.is_some());
+                Equation::Arrayed(
+                    arrayed.dimension_names,
+                    arrayed
+                        .elements
+                        .into_iter()
+                        .map(|e| {
+                            (
+                                e.subscript,
+                                e.equation,
+                                e.initial_equation,
+                                e.gf.map(GraphicalFunction::from),
+                            )
+                        })
+                        .collect(),
+                    arrayed.default_equation,
+                    has_except,
+                )
+            }
         }
     }
 }
@@ -505,6 +512,38 @@ fn test_has_except_default_absent_defaults_to_false() {
     match eq {
         Equation::Arrayed(_, _, _, has_except_default) => {
             assert!(!has_except_default, "absent field should default to false");
+        }
+        _ => panic!("expected Arrayed"),
+    }
+}
+
+#[test]
+fn test_legacy_proto_with_default_equation_infers_has_except() {
+    // Old protos that predate has_except_default but contain default_equation
+    // should infer has_except_default = true, matching the JSON loader behavior.
+    let proto = project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::Arrayed(
+            project_io::variable::ArrayedEquation {
+                dimension_names: vec!["dim_a".to_string()],
+                elements: vec![project_io::variable::arrayed_equation::Element {
+                    subscript: "a1".to_string(),
+                    equation: "5".to_string(),
+                    initial_equation: None,
+                    gf: None,
+                }],
+                has_except_default: None,
+                default_equation: Some("10".to_string()),
+            },
+        )),
+    };
+    let eq = Equation::from(proto);
+    match eq {
+        Equation::Arrayed(_, _, default_eq, has_except_default) => {
+            assert_eq!(default_eq.as_deref(), Some("10"));
+            assert!(
+                has_except_default,
+                "legacy proto with default_equation should infer has_except_default = true"
+            );
         }
         _ => panic!("expected Arrayed"),
     }

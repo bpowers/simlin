@@ -1803,10 +1803,22 @@ impl Context<'_> {
                     // In multi-dimensional A2A contexts (e.g. target[DimA, DimB]
                     // = data[start:end] where data is indexed by DimB), the source
                     // dimension may not be active_dims[0].
+                    //
+                    // Match order: exact name, then subdimension/mapping relationships.
                     let dim = &dims[0];
+                    let dim_cn = dim.canonical_name();
                     let match_idx = active_dims
                         .iter()
                         .position(|ad| ad.name() == dim.name())
+                        .or_else(|| {
+                            active_dims.iter().position(|ad| {
+                                let ad_cn = ad.canonical_name();
+                                self.dimensions_ctx.is_subdimension_of(dim_cn, ad_cn)
+                                    || self.dimensions_ctx.is_subdimension_of(ad_cn, dim_cn)
+                                    || self.dimensions_ctx.has_mapping_to(dim_cn, ad_cn)
+                                    || self.dimensions_ctx.has_mapping_to(ad_cn, dim_cn)
+                            })
+                        })
                         .unwrap_or(0);
                     let target_dim = &active_dims[match_idx];
                     let subscript = &active_subscripts[match_idx];
