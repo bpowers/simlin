@@ -1733,6 +1733,7 @@ impl Vm {
                 // =========================================================
                 // ARRAY REDUCTIONS
                 // =========================================================
+                // Empty views return 0.0 for SUM (the additive identity)
                 Opcode::ArraySum {} => {
                     let view = view_stack.last().unwrap();
                     let sum =
@@ -1742,57 +1743,85 @@ impl Vm {
 
                 Opcode::ArrayMax {} => {
                     let view = view_stack.last().unwrap();
-                    let max = Self::reduce_view(
-                        temp_storage,
-                        view,
-                        curr,
-                        context,
-                        |acc, v| if v > acc { v } else { acc },
-                        f64::NEG_INFINITY,
-                    );
-                    stack.push(max);
+                    if view.size() == 0 {
+                        stack.push(f64::NAN);
+                    } else {
+                        let max = Self::reduce_view(
+                            temp_storage,
+                            view,
+                            curr,
+                            context,
+                            |acc, v| if v > acc { v } else { acc },
+                            f64::NEG_INFINITY,
+                        );
+                        stack.push(max);
+                    }
                 }
 
                 Opcode::ArrayMin {} => {
                     let view = view_stack.last().unwrap();
-                    let min = Self::reduce_view(
-                        temp_storage,
-                        view,
-                        curr,
-                        context,
-                        |acc, v| if v < acc { v } else { acc },
-                        f64::INFINITY,
-                    );
-                    stack.push(min);
+                    if view.size() == 0 {
+                        stack.push(f64::NAN);
+                    } else {
+                        let min = Self::reduce_view(
+                            temp_storage,
+                            view,
+                            curr,
+                            context,
+                            |acc, v| if v < acc { v } else { acc },
+                            f64::INFINITY,
+                        );
+                        stack.push(min);
+                    }
                 }
 
                 Opcode::ArrayMean {} => {
                     let view = view_stack.last().unwrap();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
-                    let count = view.size() as f64;
-                    stack.push(sum / count);
+                    if view.size() == 0 {
+                        stack.push(f64::NAN);
+                    } else {
+                        let sum = Self::reduce_view(
+                            temp_storage,
+                            view,
+                            curr,
+                            context,
+                            |acc, v| acc + v,
+                            0.0,
+                        );
+                        let count = view.size() as f64;
+                        stack.push(sum / count);
+                    }
                 }
 
                 Opcode::ArrayStddev {} => {
                     let view = view_stack.last().unwrap();
                     let size = view.size();
-                    let sum =
-                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
-                    let fsize = size as f64;
-                    let mean = sum / fsize;
+                    if size == 0 {
+                        stack.push(f64::NAN);
+                    } else {
+                        let sum = Self::reduce_view(
+                            temp_storage,
+                            view,
+                            curr,
+                            context,
+                            |acc, v| acc + v,
+                            0.0,
+                        );
+                        let fsize = size as f64;
+                        let mean = sum / fsize;
 
-                    // Second pass for variance
-                    let variance_sum = Self::reduce_view(
-                        temp_storage,
-                        view,
-                        curr,
-                        context,
-                        |acc, v| acc + (v - mean).powf(2.0),
-                        0.0,
-                    );
-                    let stddev = (variance_sum / fsize).sqrt();
-                    stack.push(stddev);
+                        // Second pass for variance
+                        let variance_sum = Self::reduce_view(
+                            temp_storage,
+                            view,
+                            curr,
+                            context,
+                            |acc, v| acc + (v - mean).powf(2.0),
+                            0.0,
+                        );
+                        let stddev = (variance_sum / fsize).sqrt();
+                        stack.push(stddev);
+                    }
                 }
 
                 Opcode::ArraySize {} => {
