@@ -499,12 +499,11 @@ impl UnitInferer<'_> {
 
                     Ok(units)
                 }
-                BuiltinFn::Rank(a, _rest) => {
+                BuiltinFn::Rank(a, _) => {
                     let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
 
-                    // from the spec, I don't think there are any constraints on the optional args:
-                    // RANK(A, SIZE) gives index of MAX value in array A (i.e., final ranked, ascending order)
-                    // RANK(A, 3, B) gives index of third smallest value in array A, breaking any ties between same-valued elements in A by comparing the corresponding elements in array B
+                    // The direction argument is unitless control input; RANK's
+                    // result keeps the array's units for now.
 
                     Ok(a_units)
                 }

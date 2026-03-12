@@ -192,12 +192,9 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         Box::new(c.strip_loc()),
                     ),
-                    BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
-                        Box::new(a.strip_loc()),
-                        rest.map(|(b, c)| {
-                            (Box::new(b.strip_loc()), c.map(|c| Box::new(c.strip_loc())))
-                        }),
-                    ),
+                    BuiltinFn::Rank(a, direction) => {
+                        BuiltinFn::Rank(Box::new(a.strip_loc()), Box::new(direction.strip_loc()))
+                    }
                     BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.strip_loc())),
                     BuiltinFn::Stddev(a) => BuiltinFn::Stddev(Box::new(a.strip_loc())),
                     BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.strip_loc())),

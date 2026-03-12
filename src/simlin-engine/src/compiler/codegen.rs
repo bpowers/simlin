@@ -1100,19 +1100,9 @@ impl<'module> Compiler<'module> {
                             self.push(Opcode::PopView {});
                             return Ok(None);
                         }
-                        BuiltinFn::Rank(array, rest) => {
+                        BuiltinFn::Rank(array, direction) => {
                             self.walk_expr_as_view(array)?;
-                            // Direction argument (default 1 = ascending).
-                            // TODO: the optional 3rd tiebreak arg is lowered
-                            // in context.rs but not yet emitted here; models
-                            // using VECTOR RANK(a, dir, tiebreak) will ignore
-                            // the tiebreak parameter.
-                            if let Some((direction, _tiebreak)) = rest {
-                                self.walk_expr(direction)?.unwrap();
-                            } else {
-                                let id = self.curr_code.intern_literal(1.0);
-                                self.push(Opcode::LoadConstant { id });
-                            }
+                            self.walk_expr(direction)?.unwrap();
                             self.push(Opcode::Rank {
                                 write_temp_id: *id as TempId,
                             });
@@ -1350,15 +1340,9 @@ impl<'module> Compiler<'module> {
             Sum(a) | Stddev(a) | Size(a) => {
                 self.collect_iter_source_views_impl(a, views, seen);
             }
-            // Rank has a complex optional argument structure
-            Rank(a, opt_args) => {
+            Rank(a, direction) => {
                 self.collect_iter_source_views_impl(a, views, seen);
-                if let Some((b, opt_c)) = opt_args {
-                    self.collect_iter_source_views_impl(b, views, seen);
-                    if let Some(c) = opt_c {
-                        self.collect_iter_source_views_impl(c, views, seen);
-                    }
-                }
+                self.collect_iter_source_views_impl(direction, views, seen);
             }
             VectorSelect(a, b, c, d, e) => {
                 self.collect_iter_source_views_impl(a, views, seen);

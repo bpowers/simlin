@@ -1222,7 +1222,7 @@ fn replace_nested_builtins_for_element(
                         NestedBuiltinArgMode::ArrayValue,
                     )])
                 }
-                BuiltinFn::Rank(arg, opt) => BuiltinFn::Rank(
+                BuiltinFn::Rank(arg, direction) => BuiltinFn::Rank(
                     Box::new(replace_nested_builtins_for_element(
                         *arg,
                         var_idx,
@@ -1232,30 +1232,15 @@ fn replace_nested_builtins_for_element(
                         collect_hoisted,
                         NestedBuiltinArgMode::ArrayValue,
                     )),
-                    opt.map(|(a, b)| {
-                        (
-                            Box::new(replace_nested_builtins_for_element(
-                                *a,
-                                var_idx,
-                                var_view,
-                                temp_id,
-                                hoisted,
-                                collect_hoisted,
-                                scalar_child_mode,
-                            )),
-                            b.map(|c| {
-                                Box::new(replace_nested_builtins_for_element(
-                                    *c,
-                                    var_idx,
-                                    var_view,
-                                    temp_id,
-                                    hoisted,
-                                    collect_hoisted,
-                                    scalar_child_mode,
-                                ))
-                            }),
-                        )
-                    }),
+                    Box::new(replace_nested_builtins_for_element(
+                        *direction,
+                        var_idx,
+                        var_view,
+                        temp_id,
+                        hoisted,
+                        collect_hoisted,
+                        scalar_child_mode,
+                    )),
                 ),
                 BuiltinFn::VectorSelect(selection, expr, max_value, action, error_handling) => {
                     BuiltinFn::VectorSelect(
@@ -2143,14 +2128,9 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
             extract_temp_sizes(b, temp_sizes_map);
             extract_temp_sizes(c, temp_sizes_map);
         }
-        BuiltinFn::Rank(a, opt) => {
+        BuiltinFn::Rank(a, direction) => {
             extract_temp_sizes(a, temp_sizes_map);
-            if let Some((b, c)) = opt {
-                extract_temp_sizes(b, temp_sizes_map);
-                if let Some(c) = c {
-                    extract_temp_sizes(c, temp_sizes_map);
-                }
-            }
+            extract_temp_sizes(direction, temp_sizes_map);
         }
         BuiltinFn::Step(a, b) => {
             extract_temp_sizes(a, temp_sizes_map);

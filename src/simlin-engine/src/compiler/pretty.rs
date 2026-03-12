@@ -184,17 +184,7 @@ pub fn pretty(expr: &Expr) -> String {
                 format!("step({}, {})", pretty(a), pretty(b))
             }
             BuiltinFn::Tan(l) => format!("tan({})", pretty(l)),
-            BuiltinFn::Rank(a, b) => {
-                if let Some((b, c)) = b {
-                    if let Some(c) = c {
-                        format!("rank({}, {}, {})", pretty(a), pretty(b), pretty(c))
-                    } else {
-                        format!("rank({}, {})", pretty(a), pretty(b))
-                    }
-                } else {
-                    format!("rank({})", pretty(a))
-                }
-            }
+            BuiltinFn::Rank(a, direction) => format!("rank({}, {})", pretty(a), pretty(direction)),
             BuiltinFn::Size(a) => format!("size({})", pretty(a)),
             BuiltinFn::Stddev(a) => format!("stddev({})", pretty(a)),
             BuiltinFn::Sum(a) => format!("sum({})", pretty(a)),

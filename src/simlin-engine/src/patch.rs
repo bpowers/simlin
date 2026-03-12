@@ -673,15 +673,9 @@ fn rename_builtin(
         BuiltinFn::TimeStep => BuiltinFn::TimeStep,
         BuiltinFn::StartTime => BuiltinFn::StartTime,
         BuiltinFn::FinalTime => BuiltinFn::FinalTime,
-        BuiltinFn::Rank(expr, opts) => BuiltinFn::Rank(
+        BuiltinFn::Rank(expr, direction) => BuiltinFn::Rank(
             Box::new(rename_expr(expr, old_ident, new_ident)),
-            opts.as_ref().map(|(a, b)| {
-                (
-                    Box::new(rename_expr(a, old_ident, new_ident)),
-                    b.as_ref()
-                        .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
-                )
-            }),
+            Box::new(rename_expr(direction, old_ident, new_ident)),
         ),
         BuiltinFn::Size(expr) => BuiltinFn::Size(Box::new(rename_expr(expr, old_ident, new_ident))),
         BuiltinFn::Stddev(expr) => {
@@ -878,16 +872,10 @@ pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn
         BuiltinFn::TimeStep => UntypedBuiltinFn("time_step".to_string(), vec![]),
         BuiltinFn::StartTime => UntypedBuiltinFn("initial_time".to_string(), vec![]),
         BuiltinFn::FinalTime => UntypedBuiltinFn("final_time".to_string(), vec![]),
-        BuiltinFn::Rank(expr, opts) => {
-            let mut args = vec![expr2_to_expr0(expr)];
-            if let Some((a, b)) = opts {
-                args.push(expr2_to_expr0(a));
-                if let Some(b) = b {
-                    args.push(expr2_to_expr0(b));
-                }
-            }
-            UntypedBuiltinFn("rank".to_string(), args)
-        }
+        BuiltinFn::Rank(expr, direction) => UntypedBuiltinFn(
+            "rank".to_string(),
+            vec![expr2_to_expr0(expr), expr2_to_expr0(direction)],
+        ),
         BuiltinFn::Size(expr) => UntypedBuiltinFn("size".to_string(), vec![expr2_to_expr0(expr)]),
         BuiltinFn::Stddev(expr) => {
             UntypedBuiltinFn("stddev".to_string(), vec![expr2_to_expr0(expr)])

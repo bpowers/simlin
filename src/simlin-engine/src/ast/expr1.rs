@@ -228,7 +228,7 @@ impl Expr1 {
                     "time_step" | "dt" => check_arity!(TimeStep, 0),
                     "initial_time" | "starttime" => check_arity!(StartTime, 0),
                     "final_time" | "stoptime" => check_arity!(FinalTime, 0),
-                    "rank" => check_arity!(Rank, 1, 3),
+                    "rank" => check_arity!(Rank, 2),
                     "size" => check_arity!(Size, 1),
                     "stddev" => check_arity!(Stddev, 1),
                     "sum" => check_arity!(Sum, 1),
@@ -400,14 +400,9 @@ impl Expr1 {
                         Box::new(b.constify_dimensions(scope)),
                         Box::new(c.constify_dimensions(scope)),
                     ),
-                    BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
+                    BuiltinFn::Rank(a, direction) => BuiltinFn::Rank(
                         Box::new(a.constify_dimensions(scope)),
-                        rest.map(|(b, c)| {
-                            (
-                                Box::new(b.constify_dimensions(scope)),
-                                c.map(|c| Box::new(c.constify_dimensions(scope))),
-                            )
-                        }),
+                        Box::new(direction.constify_dimensions(scope)),
                     ),
                     BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.constify_dimensions(scope))),
                     BuiltinFn::Stddev(a) => {

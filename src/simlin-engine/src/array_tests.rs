@@ -4667,7 +4667,33 @@ mod array_reducer_tests {
 /// direction=0: descending (largest element gets rank 1).
 #[cfg(test)]
 mod rank_tests {
+    use crate::common::ErrorCode;
+    use crate::db::{
+        DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+    };
+    use crate::open_vensim;
     use crate::test_common::TestProject;
+
+    fn assert_bad_rank_arity(project: &TestProject, var_name: &str) {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diags = collect_all_diagnostics(&db, &sync);
+
+        let has_bad_builtin_args = diags.iter().any(|d| {
+            d.variable.as_deref() == Some(var_name)
+                && d.severity == DiagnosticSeverity::Error
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Equation(err) if err.code == ErrorCode::BadBuiltinArgs
+                )
+        });
+
+        assert!(
+            has_bad_builtin_args,
+            "expected BadBuiltinArgs for {var_name}; got: {diags:?}"
+        );
+    }
 
     // -- 2-arg ascending: RANK(A, 1) --
 
@@ -4941,5 +4967,62 @@ mod rank_tests {
         // Sorted ascending: 10(idx1), 20(idx3), 30(idx4), 40(idx2), 50(idx0)
         // Ranks: idx0->5, idx1->1, idx2->4, idx3->2, idx4->3
         assert_eq!(interp, vec![5.0, 1.0, 4.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn rank_requires_direction_argument() {
+        let project = TestProject::new("rank_requires_direction")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(vals[D])");
+
+        assert_bad_rank_arity(&project, "result");
+    }
+
+    #[test]
+    fn rank_rejects_tiebreak_argument() {
+        let project = TestProject::new("rank_rejects_tiebreak")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "20")])
+            .array_with_ranges("tie[D]", vec![("1", "2"), ("2", "1"), ("3", "3")])
+            .array_aux("result[D]", "RANK(vals[D], 1, tie[D])");
+
+        assert_bad_rank_arity(&project, "result");
+    }
+
+    #[test]
+    fn vector_rank_rejects_tiebreak_argument_in_mdl() {
+        let mdl = "\
+{UTF-8}
+D: A1, A2, A3 ~~|
+vals[D] = 10, 10, 20 ~~|
+tie[D] = 2, 1, 3 ~~|
+result[D] = VECTOR RANK(vals[D], 1, tie[D]) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+        let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diags = collect_all_diagnostics(&db, &sync);
+
+        let has_bad_builtin_args = diags.iter().any(|d| {
+            d.variable.as_deref() == Some("result")
+                && d.severity == DiagnosticSeverity::Error
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Equation(err) if err.code == ErrorCode::BadBuiltinArgs
+                )
+        });
+
+        assert!(
+            has_bad_builtin_args,
+            "expected BadBuiltinArgs for result; got: {diags:?}"
+        );
     }
 }

@@ -90,7 +90,7 @@ pub enum BuiltinFn<Expr> {
     StartTime,
     FinalTime,
     // array-only builtins
-    Rank(Box<Expr>, Option<(Box<Expr>, Option<Box<Expr>>)>),
+    Rank(Box<Expr>, Box<Expr>),
     Size(Box<Expr>),
     Stddev(Box<Expr>),
     Sum(Box<Expr>),
@@ -226,16 +226,7 @@ impl<Expr> BuiltinFn<Expr> {
             TimeStep => TimeStep,
             StartTime => StartTime,
             FinalTime => FinalTime,
-            Rank(a, rest) => Rank(
-                Box::new(f(*a)?),
-                rest.map(|(b, c)| {
-                    Ok::<_, Err>((
-                        Box::new(f(*b)?),
-                        c.map(|c| f(*c)).transpose()?.map(Box::new),
-                    ))
-                })
-                .transpose()?,
-            ),
+            Rank(a, direction) => Rank(Box::new(f(*a)?), Box::new(f(*direction)?)),
             Size(a) => Size(Box::new(f(*a)?)),
             Stddev(a) => Stddev(Box::new(f(*a)?)),
             Sum(a) => Sum(Box::new(f(*a)?)),
@@ -317,14 +308,9 @@ impl<Expr> BuiltinFn<Expr> {
                 f(a);
                 f(b);
             }
-            Rank(a, rest) => {
+            Rank(a, direction) => {
                 f(a);
-                if let Some((b, c)) = rest {
-                    f(b);
-                    if let Some(c) = c {
-                        f(c);
-                    }
-                }
+                f(direction);
             }
             VectorSelect(a, b, c, d, e) => {
                 f(a);
@@ -493,14 +479,9 @@ where
             cb(BuiltinContents::Expr(b));
             cb(BuiltinContents::Expr(c));
         }
-        BuiltinFn::Rank(a, rest) => {
+        BuiltinFn::Rank(a, direction) => {
             cb(BuiltinContents::Expr(a));
-            if let Some((b, c)) = rest {
-                cb(BuiltinContents::Expr(b));
-                if let Some(c) = c {
-                    cb(BuiltinContents::Expr(c));
-                }
-            }
+            cb(BuiltinContents::Expr(direction));
         }
         BuiltinFn::VectorSelect(a, b, c, d, e) => {
             cb(BuiltinContents::Expr(a));

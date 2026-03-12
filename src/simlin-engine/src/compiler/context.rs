@@ -688,15 +688,9 @@ impl Context<'_> {
                 LookupBackward(name.clone(), Box::new(self.lower_pass0(e)), *loc)
             }
 
-            // Rank with complex signature
-            Rank(e, maybe_tuple) => Rank(
+            Rank(e, direction) => Rank(
                 Box::new(self.lower_pass0(e)),
-                maybe_tuple.as_ref().map(|(a, b)| {
-                    (
-                        Box::new(self.lower_pass0(a)),
-                        b.as_ref().map(|e| Box::new(self.lower_pass0(e))),
-                    )
-                }),
+                Box::new(self.lower_pass0(direction)),
             ),
 
             // 0-arity builtins (no expressions to transform)
@@ -2177,21 +2171,11 @@ impl Context<'_> {
             BFn::TimeStep => BuiltinFn::TimeStep,
             BFn::StartTime => BuiltinFn::StartTime,
             BFn::FinalTime => BuiltinFn::FinalTime,
-            BFn::Rank(arr, rest) => {
+            BFn::Rank(arr, direction) => {
                 let ctx = self.with_vector_builtin_wildcards();
                 let lowered_arr = Box::new(ctx.lower_from_expr3(arr)?);
-                let lowered_rest = match rest {
-                    Some((dir, tiebreak)) => {
-                        let lowered_dir = Box::new(self.lower_from_expr3(dir)?);
-                        let lowered_tiebreak = match tiebreak {
-                            Some(tb) => Some(Box::new(self.lower_from_expr3(tb)?)),
-                            None => None,
-                        };
-                        Some((lowered_dir, lowered_tiebreak))
-                    }
-                    None => None,
-                };
-                BuiltinFn::Rank(lowered_arr, lowered_rest)
+                let lowered_direction = Box::new(self.lower_from_expr3(direction)?);
+                BuiltinFn::Rank(lowered_arr, lowered_direction)
             }
             BFn::Size(a) => {
                 // Preserve wildcards for array iteration

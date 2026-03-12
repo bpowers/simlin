@@ -721,18 +721,9 @@ impl Expr2 {
                     TimeStep => TimeStep,
                     StartTime => StartTime,
                     FinalTime => FinalTime,
-                    Rank(e, opt) => Rank(
+                    Rank(e, direction) => Rank(
                         Box::new(Expr2::from(*e, ctx)?),
-                        opt.map(|(e1, opt_e2)| {
-                            Ok::<_, crate::common::EquationError>((
-                                Box::new(Expr2::from(*e1, ctx)?),
-                                opt_e2
-                                    .map(|e2| Expr2::from(*e2, ctx))
-                                    .transpose()?
-                                    .map(Box::new),
-                            ))
-                        })
-                        .transpose()?,
+                        Box::new(Expr2::from(*direction, ctx)?),
                     ),
                     Size(e) => {
                         // Special case: SIZE(DimensionName) returns the element count of the dimension.

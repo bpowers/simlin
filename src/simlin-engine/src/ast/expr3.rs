@@ -209,12 +209,8 @@ impl Expr3 {
                     Quantum(a, b) | Step(a, b) => {
                         a.references_a2a_dimension() || b.references_a2a_dimension()
                     }
-                    Rank(e, opt) => {
-                        e.references_a2a_dimension()
-                            || opt.as_ref().is_some_and(|(a, b)| {
-                                a.references_a2a_dimension()
-                                    || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
-                            })
+                    Rank(e, direction) => {
+                        e.references_a2a_dimension() || direction.references_a2a_dimension()
                     }
                     VectorSelect(a, b, c, d, e) => {
                         a.references_a2a_dimension()
@@ -904,23 +900,13 @@ impl<'a> Pass1Context<'a> {
                     a_has_a2a || b_has_a2a || c_has_a2a,
                 )
             }
-            Rank(e, opt) => {
+            Rank(e, direction) => {
                 let (new_e, e_has_a2a) = self.transform_inner(*e);
-                let (new_opt, opt_has_a2a) = match opt {
-                    Some((a, b)) => {
-                        let (new_a, a_has_a2a) = self.transform_inner(*a);
-                        let (new_b, b_has_a2a) = match b {
-                            Some(e) => {
-                                let (new_e, has_a2a) = self.transform_inner(*e);
-                                (Some(Box::new(new_e)), has_a2a)
-                            }
-                            None => (None, false),
-                        };
-                        (Some((Box::new(new_a), new_b)), a_has_a2a || b_has_a2a)
-                    }
-                    None => (None, false),
-                };
-                (Rank(Box::new(new_e), new_opt), e_has_a2a || opt_has_a2a)
+                let (new_direction, direction_has_a2a) = self.transform_inner(*direction);
+                (
+                    Rank(Box::new(new_e), Box::new(new_direction)),
+                    e_has_a2a || direction_has_a2a,
+                )
             }
 
             VectorSelect(sel, expr, max_val, action, err) => {

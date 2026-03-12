@@ -339,8 +339,8 @@ impl ModuleEvaluator<'_> {
                             source_values[raw as usize]
                         }
                     }
-                    BuiltinFn::Rank(array_expr, rest) => {
-                        let ranks = self.compute_rank(array_expr, rest);
+                    BuiltinFn::Rank(array_expr, direction_expr) => {
+                        let ranks = self.compute_rank(array_expr, direction_expr);
                         if index < ranks.len() {
                             ranks[index]
                         } else {
@@ -640,15 +640,8 @@ impl ModuleEvaluator<'_> {
     /// VECTOR RANK(A, direction) assigns each element of A its ordinal position
     /// in the sorted order. direction=1 means ascending (smallest gets rank 1),
     /// direction=0 means descending (largest gets rank 1).
-    fn compute_rank(
-        &mut self,
-        array_expr: &Expr,
-        rest: &Option<(Box<Expr>, Option<Box<Expr>>)>,
-    ) -> Vec<f64> {
-        let direction = rest
-            .as_ref()
-            .map(|(d, _)| self.eval(d).round() as i32)
-            .unwrap_or(1);
+    fn compute_rank(&mut self, array_expr: &Expr, direction_expr: &Expr) -> Vec<f64> {
+        let direction = self.eval(direction_expr).round() as i32;
 
         let mut values = Vec::new();
         self.iter_array_elements(array_expr, |val| {
@@ -1306,8 +1299,8 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Stddev(arg) => self.array_stddev(arg),
                     BuiltinFn::Size(arg) => self.get_array_size(arg) as f64,
-                    BuiltinFn::Rank(array_expr, rest) => {
-                        let ranks = self.compute_rank(array_expr, rest);
+                    BuiltinFn::Rank(array_expr, direction_expr) => {
+                        let ranks = self.compute_rank(array_expr, direction_expr);
                         if ranks.is_empty() { f64::NAN } else { ranks[0] }
                     }
                     BuiltinFn::VectorSelect(
@@ -1510,8 +1503,8 @@ impl ModuleEvaluator<'_> {
                 // Array-producing builtins need whole-array evaluation rather than
                 // the per-element eval_at_index loop. Detect and handle them first.
                 let whole_array_values: Option<Vec<f64>> = match rhs.as_ref() {
-                    Expr::App(BuiltinFn::Rank(array_expr, rest), _) => {
-                        Some(self.compute_rank(array_expr, rest))
+                    Expr::App(BuiltinFn::Rank(array_expr, direction_expr), _) => {
+                        Some(self.compute_rank(array_expr, direction_expr))
                     }
                     Expr::App(BuiltinFn::VectorSortOrder(array_expr, direction_expr), _) => {
                         let direction = self.eval(direction_expr).round() as i32;
