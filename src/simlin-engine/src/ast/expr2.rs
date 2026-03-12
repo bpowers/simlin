@@ -186,6 +186,13 @@ pub trait Expr2Context {
         // Default implementation for contexts that don't support this
         false
     }
+
+    /// Check if a dimension has a mapping to (or from) a target dimension.
+    /// Used by find_matching_dimension to match cross-dimension references
+    /// (e.g., DimD maps to DimA via element-level correspondences).
+    fn has_mapping_to(&self, _dim_name: &str, _target: &str) -> bool {
+        false
+    }
 }
 
 impl Expr2 {
@@ -508,6 +515,13 @@ impl Expr2 {
                 if ctx.is_indexed_dimension(sec_name) && size == sec_size {
                     return Some((sec_name.as_str(), sec_size));
                 }
+            }
+        }
+
+        // Third: try dimension mapping match (e.g., DimD maps to DimA)
+        for (sec_name, &sec_size) in secondary_names.iter().zip(secondary_dims.iter()) {
+            if ctx.has_mapping_to(sec_name, name) || ctx.has_mapping_to(name, sec_name) {
+                return Some((sec_name.as_str(), sec_size));
             }
         }
 

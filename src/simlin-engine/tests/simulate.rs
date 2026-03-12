@@ -610,20 +610,12 @@ fn simulates_except_xmile() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
 }
 
-// Ignored: the except/except2 models use cross-dimension subscript mappings
-// (DimD -> DimA) causing "output missing variable" errors -- the simulation
-// completes but output variable names don't match the expected .dat names
-// due to unresolved dimension mapping. EXCEPT parsing and compilation work;
-// the basic EXCEPT test (simulates_except_basic_mdl) verifies correctness.
 #[test]
-#[ignore]
 fn simulates_except() {
     simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except/except.mdl");
 }
 
-// Ignored: same cross-dimension mapping issue as simulates_except.
 #[test]
-#[ignore]
 fn simulates_except2() {
     simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except2/except2.mdl");
 }

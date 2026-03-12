@@ -208,6 +208,14 @@ impl<'a> Expr2Context for ArrayContext<'a> {
         self.allow_dimension_union = allow;
         prev
     }
+
+    fn has_mapping_to(&self, dim_name: &str, target: &str) -> bool {
+        let dim_canonical = crate::common::CanonicalDimensionName::from_raw(dim_name);
+        let target_canonical = crate::common::CanonicalDimensionName::from_raw(target);
+        self.scope
+            .dimensions
+            .has_mapping_to(&dim_canonical, &target_canonical)
+    }
 }
 
 pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {

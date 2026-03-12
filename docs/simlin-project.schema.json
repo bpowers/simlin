@@ -240,6 +240,12 @@
           "items": {
             "$ref": "#/$defs/ElementEquation"
           }
+        },
+        "hasExceptDefault": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [

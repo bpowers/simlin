@@ -280,6 +280,7 @@ impl<'input> ConversionContext<'input> {
         let mut parent_dims: Option<Vec<String>> = None;
         let mut has_subscripted_eq = false;
         let mut has_except_eq = false;
+        let mut has_non_except_eq = false;
 
         for eq in &valid_eqs {
             if let Some(lhs) = get_lhs(&eq.equation) {
@@ -376,6 +377,9 @@ impl<'input> ConversionContext<'input> {
                     element_keys.retain(|k| !excepted_keys.contains(k));
                 }
 
+                if !eq_has_except && !element_keys.is_empty() {
+                    has_non_except_eq = true;
+                }
                 expanded_eqs.push(ExpandedEquation {
                     eq,
                     element_keys,
@@ -488,11 +492,16 @@ impl<'input> ConversionContext<'input> {
             .map(|d| self.get_formatted_dimension_name(d))
             .collect();
 
+        // has_except_default: the default equation should fill missing elements
+        // only when EXCEPT equations coexist with separate override equations.
+        // When EXCEPT is the sole source of elements, excepted elements should
+        // remain at 0 (undefined) rather than receiving the default.
+        let has_except_default = has_except_eq && has_non_except_eq;
         let equation = Equation::Arrayed(
             formatted_dims.clone(),
             elements,
             default_equation,
-            has_except_eq,
+            has_except_default,
         );
 
         // Build the variable
@@ -609,6 +618,9 @@ impl<'input> ConversionContext<'input> {
         lhs_subscripts: &[String],
         element_parts: &[&str],
     ) -> crate::mdl::xmile_compat::ElementContext {
+        use crate::common::CanonicalDimensionName;
+        use crate::common::CanonicalElementName;
+        use crate::dimensions::DimensionsContext;
         use crate::mdl::xmile_compat::ElementContext;
 
         debug_assert_eq!(
@@ -631,6 +643,38 @@ impl<'input> ConversionContext<'input> {
 
         // Build subrange mappings for dimensions not directly on the LHS
         let subrange_mappings = self.build_subrange_mappings(&substitutions);
+
+        // Build cross-dimension mapping substitutions: for dimensions that
+        // have a `maps_to` relationship with a LHS dimension, resolve the
+        // specific element via the mapping. For example, if DimD maps to
+        // DimA and we're iterating at DimA=A2, then DimD -> D1 (where
+        // D1 is the DimD element that maps to A2).
+        let dims_ctx = DimensionsContext::from(self.dimensions.as_slice());
+        for dim_canonical in self.dimension_elements.keys() {
+            if substitutions.contains_key(dim_canonical)
+                || subrange_mappings.contains_key(dim_canonical)
+            {
+                continue;
+            }
+
+            let dim_name = CanonicalDimensionName::from_raw(dim_canonical);
+            for (lhs_dim, lhs_elem) in &substitutions {
+                let lhs_dim_name = CanonicalDimensionName::from_raw(lhs_dim);
+                if !dims_ctx.has_mapping_to(&dim_name, &lhs_dim_name)
+                    && !dims_ctx.has_mapping_to(&lhs_dim_name, &dim_name)
+                {
+                    continue;
+                }
+
+                let lhs_elem_canonical = CanonicalElementName::from_raw(lhs_elem);
+                if let Some(mapped_elem) =
+                    dims_ctx.translate_via_mapping(&dim_name, &lhs_dim_name, &lhs_elem_canonical)
+                {
+                    substitutions.insert(dim_canonical.clone(), mapped_elem.as_str().to_string());
+                    break;
+                }
+            }
+        }
 
         ElementContext {
             lhs_var_canonical: var_canonical.to_string(),
