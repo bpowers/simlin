@@ -990,13 +990,7 @@ fn simulates_quantum_mdl() {
 
 #[test]
 fn simulates_vector_simple_mdl() {
-    // Interpreter-only: the incremental VM path produces incorrect values
-    // for VECTOR ELM MAP with cross-dimension source indexing (m[a3] = 0
-    // instead of 2). This is a pre-existing incremental compiler limitation,
-    // not a regression from this migration.
-    simulate_mdl_path_interpreter_only(
-        "../../test/sdeverywhere/models/vector_simple/vector_simple.mdl",
-    );
+    simulate_mdl_path("../../test/sdeverywhere/models/vector_simple/vector_simple.mdl");
 }
 
 #[test]
