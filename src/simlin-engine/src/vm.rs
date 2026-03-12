@@ -2022,6 +2022,9 @@ impl Vm {
                     }
                 }
 
+                // VectorElmMap uses 0-based offset indexing: offset 0 means "element at
+                // position 0 of the source array." This matches Vensim's VECTOR ELM MAP
+                // semantics where the offset array contains zero-based indices.
                 Opcode::VectorElmMap { write_temp_id } => {
                     let offset_view = &view_stack[view_stack.len() - 1];
                     let source_view = &view_stack[view_stack.len() - 2];
@@ -2076,6 +2079,10 @@ impl Vm {
                     }
                 }
 
+                // VectorSortOrder returns 1-based rank indices: rank 1 means "this element
+                // is first in sort order." This matches Vensim's VECTOR SORT ORDER semantics.
+                // The 1-based convention is intentional and differs from VectorElmMap's 0-based
+                // offsets; the asymmetry reflects Vensim's original API design.
                 Opcode::VectorSortOrder { write_temp_id } => {
                     let direction = stack.pop().round() as i32;
 
