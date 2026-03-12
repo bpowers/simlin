@@ -135,6 +135,7 @@ impl ModuleEvaluator<'_> {
                 // Array-producing: output has same dims as offset_array
                 BuiltinFn::VectorElmMap(_, offset) => Self::find_array_dims(offset),
                 // Array-producing: output has same dims as input array
+                BuiltinFn::Rank(arr, _) => Self::find_array_dims(arr),
                 BuiltinFn::VectorSortOrder(arr, _) => Self::find_array_dims(arr),
                 // Array-producing: output has same dims as request
                 BuiltinFn::AllocateAvailable(req, _, _) => Self::find_array_dims(req),
@@ -336,6 +337,14 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         } else {
                             source_values[raw as usize]
+                        }
+                    }
+                    BuiltinFn::Rank(array_expr, rest) => {
+                        let ranks = self.compute_rank(array_expr, rest);
+                        if index < ranks.len() {
+                            ranks[index]
+                        } else {
+                            f64::NAN
                         }
                     }
                     BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
@@ -624,6 +633,48 @@ impl ModuleEvaluator<'_> {
             .values()
             .find(|(base, size)| offset >= *base && offset < *base + *size)
             .copied()
+    }
+
+    /// Compute VECTOR RANK for the entire array, returning a Vec of 1-based ranks.
+    ///
+    /// VECTOR RANK(A, direction) assigns each element of A its ordinal position
+    /// in the sorted order. direction=1 means ascending (smallest gets rank 1),
+    /// direction=0 means descending (largest gets rank 1).
+    fn compute_rank(
+        &mut self,
+        array_expr: &Expr,
+        rest: &Option<(Box<Expr>, Option<Box<Expr>>)>,
+    ) -> Vec<f64> {
+        let direction = rest
+            .as_ref()
+            .map(|(d, _)| self.eval(d).round() as i32)
+            .unwrap_or(1);
+
+        let mut values = Vec::new();
+        self.iter_array_elements(array_expr, |val| {
+            values.push(val);
+        });
+
+        if values.is_empty() {
+            return Vec::new();
+        }
+
+        // Create (original_index, value) pairs and sort
+        let mut indexed: Vec<(usize, f64)> =
+            values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        if direction == 1 {
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // Build ranks: position in sorted order -> rank for each original index
+        let mut ranks = vec![0.0f64; values.len()];
+        for (rank_0based, (orig_idx, _)) in indexed.iter().enumerate() {
+            ranks[*orig_idx] = (rank_0based + 1) as f64;
+        }
+
+        ranks
     }
 
     // NOTE: This function is called once per array element during evaluation (O(N^2) total)
@@ -1255,8 +1306,9 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Stddev(arg) => self.array_stddev(arg),
                     BuiltinFn::Size(arg) => self.get_array_size(arg) as f64,
-                    BuiltinFn::Rank(_, _) => {
-                        unreachable!();
+                    BuiltinFn::Rank(array_expr, rest) => {
+                        let ranks = self.compute_rank(array_expr, rest);
+                        if ranks.is_empty() { f64::NAN } else { ranks[0] }
                     }
                     BuiltinFn::VectorSelect(
                         selection_array,
@@ -1458,6 +1510,9 @@ impl ModuleEvaluator<'_> {
                 // Array-producing builtins need whole-array evaluation rather than
                 // the per-element eval_at_index loop. Detect and handle them first.
                 let whole_array_values: Option<Vec<f64>> = match rhs.as_ref() {
+                    Expr::App(BuiltinFn::Rank(array_expr, rest), _) => {
+                        Some(self.compute_rank(array_expr, rest))
+                    }
                     Expr::App(BuiltinFn::VectorSortOrder(array_expr, direction_expr), _) => {
                         let direction = self.eval(direction_expr).round() as i32;
                         let mut values = Vec::new();
