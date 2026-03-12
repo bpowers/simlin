@@ -488,7 +488,7 @@ impl<'input> ConversionContext<'input> {
             .map(|d| self.get_formatted_dimension_name(d))
             .collect();
 
-        let equation = Equation::Arrayed(formatted_dims.clone(), elements, default_equation);
+        let equation = Equation::Arrayed(formatted_dims.clone(), elements, default_equation, false);
 
         // Build the variable
         let ident = quoted_space_to_underbar(name);
@@ -1124,7 +1124,7 @@ impl<'input> ConversionContext<'input> {
                 .collect::<Vec<_>>()
                 .join(",");
             let element_eqs = vec![(key, format_number(values[0]), None, None)];
-            return (Equation::Arrayed(dims, element_eqs, None), None);
+            return (Equation::Arrayed(dims, element_eqs, None, false), None);
         }
 
         // Cartesian product of free dimension elements as Vec<Vec<String>>
@@ -1177,7 +1177,7 @@ impl<'input> ConversionContext<'input> {
                 })
                 .collect();
 
-        (Equation::Arrayed(dims, element_eqs, None), None)
+        (Equation::Arrayed(dims, element_eqs, None, false), None)
     }
 
     /// Extract the initial value expression from an INTEG call.
@@ -1468,7 +1468,7 @@ x[DimA] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     // All elements have the same equation "5"
@@ -1534,7 +1534,7 @@ x[DimA] = 1, 2, 3
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     assert_eq!(elements[0].0, "a1");
@@ -1712,7 +1712,7 @@ x[DimA, DimB] = 1, 2, 3, 4
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 4, "Should have 4 elements");
                     // Check row-major order: a1,b1=1, a1,b2=2, a2,b1=3, a2,b2=4
@@ -1753,7 +1753,7 @@ x[DimA] = 1, 2, 3
             .find(|v| v.get_ident() == "x");
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     assert_eq!(elements[0].0, "a1");
@@ -1793,7 +1793,7 @@ x[a1] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 1);
                     assert_eq!(elements[0].0, "a1");
@@ -1832,7 +1832,7 @@ x[a1] = 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
 
@@ -1882,7 +1882,7 @@ x[a1, DimB] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimB"]);
                     // a1 * (b1, b2) = 2 elements
                     assert_eq!(elements.len(), 2);
@@ -1923,7 +1923,7 @@ v[DimA, B1] = 1, 2, 3
 
         if let Some(Variable::Aux(a)) = v {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     // B1 is an element of DimB, so the dims list contains the parent: DimB
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 3);
@@ -1965,7 +1965,7 @@ w[A1, DimB] = 1, 2, 3
 
         if let Some(Variable::Aux(a)) = w {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     // A1 is an element of DimA, so the dims list contains the parent: DimA
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 3);
@@ -2041,7 +2041,7 @@ x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100)
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     // Single apply-to-all: all elements have the same expression
@@ -2097,7 +2097,7 @@ x[a2] = ACTIVE INITIAL(y * 2, 20)
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2, "Should have 2 elements");
 
@@ -2344,7 +2344,7 @@ x[a2]( (0,0),(2,2) )
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                     for (_, eq, _, _) in elements {
@@ -2424,7 +2424,7 @@ x[DimA] = y[DimA] * 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                     for (_, eq, _, _) in elements {
@@ -2466,7 +2466,7 @@ x[a1] = 10
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
 
@@ -2519,7 +2519,7 @@ x[a1, b1] = 99
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 4);
 
@@ -2581,7 +2581,7 @@ x[bottom] = 0
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["layers"]);
                     assert_eq!(elements.len(), 4);
 
@@ -2637,7 +2637,7 @@ x[bottom] = 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(
                         dims,
                         &["layers"],
@@ -2744,7 +2744,7 @@ x[a2] := y[a2] * 3
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                     let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
@@ -2790,7 +2790,7 @@ g[A1] = 10
 
         if let Some(Variable::Aux(a)) = g {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert!(
                         default_eq.is_some(),
@@ -2841,7 +2841,7 @@ h[DimA] :EXCEPT: [SubA] = 8 ~~|
 
         if let Some(Variable::Aux(a)) = h {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(default_eq.as_deref(), Some("8"));
                     // Only A1 should have the default equation.
@@ -2881,7 +2881,7 @@ k[A1] = 10
 
         if let Some(Variable::Aux(a)) = k {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     // default_equation captures the unsubstituted form
                     assert!(default_eq.is_some());
@@ -2929,7 +2929,7 @@ p[DimA, DimC] :EXCEPT: [A1, C1] = 10 ~~|
 
         if let Some(Variable::Aux(a)) = p {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimC"]);
                     assert_eq!(default_eq.as_deref(), Some("10"));
                     // 3x3=9 combinations, minus 1 excepted = 8 elements
@@ -2976,7 +2976,7 @@ s[SubA] :EXCEPT: [A3] = 14
 
         if let Some(Variable::Aux(a)) = s {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(default_eq.as_deref(), Some("14"));
 

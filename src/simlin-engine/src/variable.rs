@@ -332,7 +332,7 @@ fn build_tables(
     let mut errors = Vec::new();
 
     // Check for per-element gfs in arrayed equation
-    if let datamodel::Equation::Arrayed(_, elements, _) = equation {
+    if let datamodel::Equation::Arrayed(_, elements, _, _) = equation {
         let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
         if has_element_gfs {
             for (_, _, _, elem_gf) in elements {
@@ -451,7 +451,12 @@ fn parse_equation(
         }
         // Preserve the default equation (EXCEPT semantics) so sparse array
         // definitions can apply it to omitted elements during lowering.
-        datamodel::Equation::Arrayed(dimension_names, elements, default_eq) => {
+        datamodel::Equation::Arrayed(
+            dimension_names,
+            elements,
+            default_eq,
+            _has_except_default,
+        ) => {
             let mut errors: Vec<EquationError> = vec![];
             let apply_default_to_missing =
                 should_apply_default_to_missing(dimension_names, dimensions, elements, default_eq);
@@ -1673,6 +1678,7 @@ fn test_parse_equation_arrayed_preserves_default_expression() {
         vec!["dim".to_string()],
         vec![("a".to_string(), "1".to_string(), None, None)],
         Some("2 + 3".to_string()),
+        true,
     );
 
     let (ast, errors) = parse_equation(&equation, &dimensions, false, None);
@@ -1703,6 +1709,7 @@ fn test_parse_equation_arrayed_applies_default_when_element_matches_default() {
             ("b".to_string(), "10".to_string(), None, None),
         ],
         Some("7".to_string()),
+        true,
     );
 
     let (ast, errors) = parse_equation(&equation, &dimensions, false, None);

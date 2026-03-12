@@ -284,6 +284,7 @@ pub enum SourceEquation {
         Vec<String>,
         Vec<SourceArrayedEquationElement>,
         Option<String>,
+        bool,
     ),
 }
 
@@ -401,19 +402,22 @@ impl From<&datamodel::Equation> for SourceEquation {
             datamodel::Equation::ApplyToAll(dims, s) => {
                 SourceEquation::ApplyToAll(dims.clone(), s.clone())
             }
-            datamodel::Equation::Arrayed(dims, elements, default_eq) => SourceEquation::Arrayed(
-                dims.clone(),
-                elements
-                    .iter()
-                    .map(|(subscript, eq, gf_eq, gf)| SourceArrayedEquationElement {
-                        subscript: subscript.clone(),
-                        equation: eq.clone(),
-                        gf_equation: gf_eq.clone(),
-                        gf: gf.as_ref().map(SourceGraphicalFunction::from),
-                    })
-                    .collect(),
-                default_eq.clone(),
-            ),
+            datamodel::Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
+                SourceEquation::Arrayed(
+                    dims.clone(),
+                    elements
+                        .iter()
+                        .map(|(subscript, eq, gf_eq, gf)| SourceArrayedEquationElement {
+                            subscript: subscript.clone(),
+                            equation: eq.clone(),
+                            gf_equation: gf_eq.clone(),
+                            gf: gf.as_ref().map(SourceGraphicalFunction::from),
+                        })
+                        .collect(),
+                    default_eq.clone(),
+                    *has_except_default,
+                )
+            }
         }
     }
 }
@@ -574,21 +578,24 @@ fn source_equation_to_datamodel(eq: &SourceEquation) -> datamodel::Equation {
         SourceEquation::ApplyToAll(dims, s) => {
             datamodel::Equation::ApplyToAll(dims.clone(), s.clone())
         }
-        SourceEquation::Arrayed(dims, elements, default_eq) => datamodel::Equation::Arrayed(
-            dims.clone(),
-            elements
-                .iter()
-                .map(|e| {
-                    (
-                        e.subscript.clone(),
-                        e.equation.clone(),
-                        e.gf_equation.clone(),
-                        e.gf.as_ref().map(source_gf_to_datamodel),
-                    )
-                })
-                .collect(),
-            default_eq.clone(),
-        ),
+        SourceEquation::Arrayed(dims, elements, default_eq, has_except_default) => {
+            datamodel::Equation::Arrayed(
+                dims.clone(),
+                elements
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.subscript.clone(),
+                            e.equation.clone(),
+                            e.gf_equation.clone(),
+                            e.gf.as_ref().map(source_gf_to_datamodel),
+                        )
+                    })
+                    .collect(),
+                default_eq.clone(),
+                *has_except_default,
+            )
+        }
     }
 }
 
@@ -2948,7 +2955,7 @@ pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSe
     match var.equation(db) {
         SourceEquation::Scalar(_) => BTreeSet::new(),
         SourceEquation::ApplyToAll(dim_names, _) => dim_names.iter().cloned().collect(),
-        SourceEquation::Arrayed(dim_names, _, _) => dim_names.iter().cloned().collect(),
+        SourceEquation::Arrayed(dim_names, _, _, _) => dim_names.iter().cloned().collect(),
     }
 }
 
@@ -3116,7 +3123,7 @@ fn extract_tables_from_source_var(
     // For arrayed equations with per-element graphical functions, build one
     // table per element (matching variable.rs build_tables).  Elements without
     // a GF get an empty placeholder so that table[element_offset] stays aligned.
-    if let SourceEquation::Arrayed(_, elements, _) = eq {
+    if let SourceEquation::Arrayed(_, elements, _, _) = eq {
         let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
         if has_element_gfs {
             return elements
@@ -5935,11 +5942,12 @@ mod conversion_tests {
             vec!["DimA".to_string()],
             vec![("A1".to_string(), "5".to_string(), None, None)],
             Some("default_val".to_string()),
+            true,
         );
         let source = SourceEquation::from(&eq);
         let roundtripped = source_equation_to_datamodel(&source);
         match &roundtripped {
-            datamodel::Equation::Arrayed(_, _, default_eq) => {
+            datamodel::Equation::Arrayed(_, _, default_eq, _) => {
                 assert_eq!(
                     default_eq.as_deref(),
                     Some("default_val"),

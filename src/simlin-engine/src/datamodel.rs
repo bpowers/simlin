@@ -203,6 +203,10 @@ pub enum Equation {
         // Default equation for elements not explicitly listed (EXCEPT semantics).
         // When Some, this equation applies to all elements not in the Vec above.
         Option<String>,
+        // True when this arrayed equation was derived from EXCEPT syntax during
+        // MDL conversion. Drives `apply_default_to_missing` in the AST layer,
+        // replacing the old text-comparison heuristic.
+        bool,
     ),
 }
 

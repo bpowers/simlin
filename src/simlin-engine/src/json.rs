@@ -746,6 +746,7 @@ impl From<Stock> for datamodel::Stock {
                             })
                             .collect(),
                         arrayed.equation,
+                        false,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -825,6 +826,7 @@ impl From<Flow> for datamodel::Flow {
                             })
                             .collect(),
                         arrayed.equation,
+                        false,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -899,6 +901,7 @@ impl From<Auxiliary> for datamodel::Aux {
                             })
                             .collect(),
                         arrayed.equation,
+                        false,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -1404,7 +1407,7 @@ impl From<datamodel::Stock> for Stock {
                     elements: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, _has_except_default) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1467,7 +1470,7 @@ impl From<datamodel::Flow> for Flow {
                     elements: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, _has_except_default) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1529,7 +1532,7 @@ impl From<datamodel::Aux> for Auxiliary {
                     elements: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, _has_except_default) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -3468,7 +3471,7 @@ mod tests {
         };
         let dm_flow: datamodel::Flow = flow.into();
         match &dm_flow.equation {
-            datamodel::Equation::Arrayed(_, elems, _) => {
+            datamodel::Equation::Arrayed(_, elems, _, _) => {
                 assert_eq!(elems[0].2, None);
             }
             _ => panic!("expected Arrayed equation"),
@@ -3589,7 +3592,7 @@ mod tests {
 
         let dm_aux: datamodel::Aux = json_aux.into();
         match &dm_aux.equation {
-            datamodel::Equation::Arrayed(dims, elements, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elements, default_eq, _) => {
                 assert_eq!(dims, &["Region"]);
                 assert_eq!(elements.len(), 1);
                 assert_eq!(elements[0].0, "north");

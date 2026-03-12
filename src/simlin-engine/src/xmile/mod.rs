@@ -846,7 +846,7 @@ fn validate_for_xmile(project: &datamodel::Project) -> Result<()> {
                     continue;
                 }
             };
-            if let Equation::Arrayed(_, _, Some(_)) = eqn {
+            if let Equation::Arrayed(_, _, Some(_), _) = eqn {
                 return Err(unsupported(&format!(
                     "variable '{}': XMILE serialization does not support EXCEPT \
                      (default_equation) in Equation::Arrayed -- use sd.json for full fidelity",
@@ -929,6 +929,7 @@ fn test_xmile_rejects_except_equation() {
                     vec!["dim_a".to_string()],
                     vec![("a1".to_string(), "10".to_string(), None, None)],
                     Some("default_eq".to_string()),
+                    true,
                 ),
                 documentation: String::new(),
                 units: None,

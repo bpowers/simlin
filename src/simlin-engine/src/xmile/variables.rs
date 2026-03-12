@@ -135,7 +135,7 @@ macro_rules! convert_equation(
                 let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
                 (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
-            datamodel::Equation::Arrayed(dimensions, elements, None)
+            datamodel::Equation::Arrayed(dimensions, elements, None, false)
         } else if let Some(dimensions) = $var.dimensions {
             let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default())
@@ -258,7 +258,7 @@ impl From<datamodel::Stock> for Stock {
                             .collect(),
                     ),
                 }),
-                Equation::Arrayed(dims, _, _) => Some(VarDimensions {
+                Equation::Arrayed(dims, _, _, _) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -269,7 +269,7 @@ impl From<datamodel::Stock> for Stock {
             elements: match stock.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(..) => None,
-                Equation::Arrayed(_, elements, _) => Some(
+                Equation::Arrayed(_, elements, _, _) => Some(
                     elements
                         .into_iter()
                         .map(|(subscript, eqn, _, gf)| VarElement {
@@ -398,7 +398,7 @@ impl From<datamodel::Flow> for Flow {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, _) => None,
+                Equation::Arrayed(_, _, _, _) => None,
             },
             initial_eqn: flow.compat.active_initial,
             doc: if flow.documentation.is_empty() {
@@ -422,7 +422,7 @@ impl From<datamodel::Flow> for Flow {
                             .collect(),
                     ),
                 }),
-                Equation::Arrayed(dims, _, _) => Some(VarDimensions {
+                Equation::Arrayed(dims, _, _, _) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -433,7 +433,7 @@ impl From<datamodel::Flow> for Flow {
             elements: match flow.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(..) => None,
-                Equation::Arrayed(_, elements, _) => Some(
+                Equation::Arrayed(_, elements, _, _) => Some(
                     elements
                         .into_iter()
                         .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
@@ -557,7 +557,7 @@ impl From<datamodel::Aux> for Aux {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, _) => None,
+                Equation::Arrayed(_, _, _, _) => None,
             },
             initial_eqn: aux.compat.active_initial,
             doc: if aux.documentation.is_empty() {
@@ -576,7 +576,7 @@ impl From<datamodel::Aux> for Aux {
                             .collect(),
                     ),
                 }),
-                Equation::Arrayed(dims, _, _) => Some(VarDimensions {
+                Equation::Arrayed(dims, _, _, _) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -587,7 +587,7 @@ impl From<datamodel::Aux> for Aux {
             elements: match aux.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(..) => None,
-                Equation::Arrayed(_, elements, _) => Some(
+                Equation::Arrayed(_, elements, _, _) => Some(
                     elements
                         .into_iter()
                         .map(|(subscript, eqn, initial_eqn, gf)| VarElement {

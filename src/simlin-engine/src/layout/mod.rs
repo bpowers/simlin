@@ -1896,7 +1896,7 @@ fn extract_equation_deps(var: &datamodel::Variable, all_idents: &HashSet<String>
     let equation_texts: Vec<&str> = match equation {
         datamodel::Equation::Scalar(text) => vec![text.as_str()],
         datamodel::Equation::ApplyToAll(_, text) => vec![text.as_str()],
-        datamodel::Equation::Arrayed(_, entries, _) => entries
+        datamodel::Equation::Arrayed(_, entries, _, _) => entries
             .iter()
             .map(|(_, text, _, _)| text.as_str())
             .collect(),
@@ -3111,6 +3111,7 @@ mod tests {
                     ("b".to_string(), "bar".to_string(), None, None),
                 ],
                 None,
+                false,
             ),
             documentation: String::new(),
             units: None,

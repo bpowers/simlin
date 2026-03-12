@@ -447,7 +447,7 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
             *main = expr2_to_string(expr);
         }
         (
-            datamodel::Equation::Arrayed(_, elements, default_eq),
+            datamodel::Equation::Arrayed(_, elements, default_eq, _),
             Ast::Arrayed(_, exprs, default_expr, _),
         ) => {
             for (element_name, equation, _, _) in elements.iter_mut() {
@@ -470,7 +470,7 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
         (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
             // active_initial now lives in Compat, not in Equation
         }
-        (datamodel::Equation::Arrayed(_, elements, _), Ast::Arrayed(_, exprs, _, _)) => {
+        (datamodel::Equation::Arrayed(_, elements, _, _), Ast::Arrayed(_, exprs, _, _)) => {
             for (element_name, _, initial, _) in elements.iter_mut() {
                 if let Some(initial_value) = initial.as_mut() {
                     let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
@@ -1582,6 +1582,7 @@ mod tests {
                                 ),
                             ],
                             None,
+                            false,
                         ),
                         documentation: String::new(),
                         units: None,
@@ -1615,7 +1616,7 @@ mod tests {
 
         match model.get_variable("regional_growth").unwrap() {
             Variable::Aux(aux) => match &aux.equation {
-                datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
+                datamodel::Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &vec!["Region".to_string()]);
                     assert_eq!(elements[0].0, "North");
                     assert_eq!(elements[0].1, "initial_value * 1.5");
@@ -1634,6 +1635,7 @@ mod tests {
             vec!["region".to_string()],
             vec![("north".to_string(), "old".to_string(), None, None)],
             Some("legacy_default".to_string()),
+            true,
         );
         let mut exprs = std::collections::HashMap::new();
         exprs.insert(
@@ -1645,7 +1647,7 @@ mod tests {
         apply_ast_to_equation_main(&mut equation, &ast);
 
         match equation {
-            datamodel::Equation::Arrayed(_, elements, default_eq) => {
+            datamodel::Equation::Arrayed(_, elements, default_eq, _) => {
                 assert_eq!(elements[0].1, "2");
                 assert_eq!(default_eq, None);
             }

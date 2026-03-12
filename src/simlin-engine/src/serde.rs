@@ -292,7 +292,7 @@ impl From<Equation> for project_io::variable::Equation {
                         },
                     )
                 }
-                Equation::Arrayed(dimension_names, elements, _default_eq) => {
+                Equation::Arrayed(dimension_names, elements, _default_eq, _has_except_default) => {
                     project_io::variable::equation::Equation::Arrayed(
                         project_io::variable::ArrayedEquation {
                             dimension_names,
@@ -349,6 +349,7 @@ impl From<project_io::variable::Equation> for Equation {
                     })
                     .collect(),
                 None,
+                false,
             ),
         }
     }
@@ -371,6 +372,7 @@ fn test_equation_roundtrip() {
                 ),
             ],
             None,
+            false,
         ),
     ];
     for expected in cases {
@@ -2236,7 +2238,7 @@ fn unsupported_err(detail: &str) -> Error {
 }
 
 fn validate_equation_for_protobuf(var_ident: &str, eqn: &Equation) -> Result<()> {
-    if let Equation::Arrayed(_, _, Some(_)) = eqn {
+    if let Equation::Arrayed(_, _, Some(_), _) = eqn {
         return Err(unsupported_err(&format!(
             "variable '{}': protobuf serialization does not support EXCEPT \
              (default_equation) in Equation::Arrayed -- use sd.json for full fidelity",
@@ -2359,6 +2361,7 @@ fn test_protobuf_rejects_except_equation() {
                 vec!["dim_a".to_string()],
                 vec![("a1".to_string(), "10".to_string(), None, None)],
                 Some("default_eq".to_string()),
+                true,
             ),
             documentation: String::new(),
             units: None,
@@ -2493,6 +2496,7 @@ fn test_protobuf_accepts_arrayed_without_default() {
                 vec!["dim_a".to_string()],
                 vec![("a1".to_string(), "10".to_string(), None, None)],
                 None,
+                false,
             ),
             documentation: String::new(),
             units: None,
