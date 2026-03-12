@@ -4186,6 +4186,143 @@ mod vector_op_invalid_view_tests {
 /// each element must be hoisted with its own AssignTemp (per-element hoisting).
 /// Without this, the first element's scalar value is reused for all elements.
 #[cfg(test)]
+mod flag_split_tests {
+    use crate::test_common::TestProject;
+
+    /// Reducer builtins (SUM, MEAN, etc.) should NOT promote ActiveDimRef to
+    /// Wildcard.  When `row_sum[DimA] = SUM(matrix[DimA, *])`, the `DimA`
+    /// subscript is an ActiveDimRef that should resolve to a concrete element
+    /// offset so SUM iterates only over DimB for each row, NOT over the
+    /// entire matrix.
+    #[test]
+    fn reducer_does_not_promote_active_dim_ref_interpreter() {
+        // matrix is 2x3:
+        //   row 1: [1, 2, 3]  -> row_sum[1] = 6
+        //   row 2: [10, 20, 30] -> row_sum[2] = 60
+        let project = TestProject::new("reducer_no_promote_interp")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_sum[DimA]", "SUM(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // Each row_sum should be the sum of that row, not the entire matrix
+        project.assert_interpreter_result("row_sum", &[6.0, 60.0]);
+    }
+
+    #[test]
+    fn reducer_does_not_promote_active_dim_ref_vm() {
+        let project = TestProject::new("reducer_no_promote_vm")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_sum[DimA]", "SUM(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("row_sum", &[6.0, 60.0]);
+    }
+
+    /// Vector builtins (VECTOR SORT ORDER, etc.) should promote ActiveDimRef
+    /// to Wildcard so the full array view is available.  This is a focused
+    /// unit test documenting the intent (also covered by compiler_vector.rs).
+    #[test]
+    fn vector_builtin_promotes_active_dim_ref_interpreter() {
+        // vals = [30, 10, 20]
+        // VECTOR SORT ORDER ascending: [2, 3, 1] (rank by sorted position)
+        let project = TestProject::new("vector_promotes_interp")
+            .indexed_dimension("DimA", 3)
+            .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn vector_builtin_promotes_active_dim_ref_vm() {
+        let project = TestProject::new("vector_promotes_vm")
+            .indexed_dimension("DimA", 3)
+            .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[2.0, 3.0, 1.0]);
+    }
+
+    /// Partial MEAN should reduce over one dimension while the other iterates.
+    #[test]
+    fn mean_partial_reduction_interpreter() {
+        let project = TestProject::new("mean_partial_interp")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "3"),
+                    ("1,2", "6"),
+                    ("1,3", "9"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_mean[DimA]", "MEAN(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // row 1 mean: (3+6+9)/3 = 6.0
+        // row 2 mean: (10+20+30)/3 = 20.0
+        project.assert_interpreter_result("row_mean", &[6.0, 20.0]);
+    }
+
+    #[test]
+    fn mean_partial_reduction_vm() {
+        let project = TestProject::new("mean_partial_vm")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "3"),
+                    ("1,2", "6"),
+                    ("1,3", "9"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_mean[DimA]", "MEAN(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("row_mean", &[6.0, 20.0]);
+    }
+}
+
 mod dimension_dependent_scalar_arg_tests {
     use crate::test_common::TestProject;
 
