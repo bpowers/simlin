@@ -1754,7 +1754,6 @@ mod star_range_subdimension_tests {
         project.assert_scalar_result("total", 50.0);
     }
 
-    // TODO: Indexed subdimensions deferred - datamodel lacks parent mapping metadata.
     #[test]
     fn star_to_indexed_subdimension() {
         // SubIndex(3) is a subdimension of Index(5), mapping to the first 3
