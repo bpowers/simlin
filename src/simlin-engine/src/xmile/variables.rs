@@ -324,7 +324,16 @@ impl From<datamodel::Stock> for Stock {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, default_eq, _) => default_eq.clone(),
+                // Only write the default equation to <eqn> when it's an active
+                // EXCEPT default; otherwise the XMILE importer would infer
+                // has_except_default=true on reimport and change model behavior.
+                Equation::Arrayed(_, _, default_eq, has_except) => {
+                    if *has_except {
+                        default_eq.clone()
+                    } else {
+                        None
+                    }
+                }
             },
             doc: if stock.documentation.is_empty() {
                 None
@@ -509,7 +518,16 @@ impl From<datamodel::Flow> for Flow {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, default_eq, _) => default_eq.clone(),
+                // Only write the default equation to <eqn> when it's an active
+                // EXCEPT default; otherwise the XMILE importer would infer
+                // has_except_default=true on reimport and change model behavior.
+                Equation::Arrayed(_, _, default_eq, has_except) => {
+                    if *has_except {
+                        default_eq.clone()
+                    } else {
+                        None
+                    }
+                }
             },
             initial_eqn: flow.compat.active_initial,
             doc: if flow.documentation.is_empty() {
@@ -681,7 +699,16 @@ impl From<datamodel::Aux> for Aux {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, default_eq, _) => default_eq.clone(),
+                // Only write the default equation to <eqn> when it's an active
+                // EXCEPT default; otherwise the XMILE importer would infer
+                // has_except_default=true on reimport and change model behavior.
+                Equation::Arrayed(_, _, default_eq, has_except) => {
+                    if *has_except {
+                        default_eq.clone()
+                    } else {
+                        None
+                    }
+                }
             },
             initial_eqn: aux.compat.active_initial,
             doc: if aux.documentation.is_empty() {

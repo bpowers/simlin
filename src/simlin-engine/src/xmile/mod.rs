@@ -883,17 +883,81 @@ fn test_xmile_roundtrips_except_equation() {
     let var = &roundtripped.models[0].variables[0];
     if let Variable::Aux(aux) = var {
         match &aux.equation {
-            Equation::Arrayed(dims, elements, default_eq, _) => {
+            Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
                 assert_eq!(dims, &["dim_a"]);
                 assert_eq!(elements[0].0, "a1");
                 assert_eq!(elements[0].1, "10");
                 assert_eq!(default_eq.as_deref(), Some("default_eq"));
+                assert!(
+                    *has_except_default,
+                    "has_except_default must survive XMILE round-trip"
+                );
             }
             other => panic!("expected Arrayed equation, got {:?}", other),
         }
     } else {
         panic!("expected Aux variable");
     }
+}
+
+#[test]
+fn test_xmile_roundtrips_indexed_subdimension_parent() {
+    use crate::datamodel::{DimensionElements, Dt, SimMethod, SimSpecs};
+    use std::io::BufReader;
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![
+            datamodel::Dimension {
+                name: "parent_dim".to_string(),
+                elements: DimensionElements::Named(vec![
+                    "p1".to_string(),
+                    "p2".to_string(),
+                    "p3".to_string(),
+                ]),
+                mappings: vec![],
+                parent: None,
+            },
+            datamodel::Dimension {
+                name: "child_dim".to_string(),
+                elements: DimensionElements::Indexed(2),
+                mappings: vec![],
+                parent: Some("parent_dim".to_string()),
+            },
+        ],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let xml = project_to_xmile(&project).unwrap();
+    let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+
+    let child = roundtripped
+        .dimensions
+        .iter()
+        .find(|d| d.name == "child_dim")
+        .expect("child_dim must survive round-trip");
+    assert_eq!(
+        child.parent.as_deref(),
+        Some("parent_dim"),
+        "parent must survive XMILE round-trip"
+    );
 }
 
 #[test]

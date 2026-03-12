@@ -1102,8 +1102,12 @@ impl<'module> Compiler<'module> {
                         }
                         BuiltinFn::Rank(array, rest) => {
                             self.walk_expr_as_view(array)?;
-                            // Direction argument (default 1 = ascending)
-                            if let Some((direction, _)) = rest {
+                            // Direction argument (default 1 = ascending).
+                            // TODO: the optional 3rd tiebreak arg is lowered
+                            // in context.rs but not yet emitted here; models
+                            // using VECTOR RANK(a, dir, tiebreak) will ignore
+                            // the tiebreak parameter.
+                            if let Some((direction, _tiebreak)) = rest {
                                 self.walk_expr(direction)?.unwrap();
                             } else {
                                 let id = self.curr_code.intern_literal(1.0);

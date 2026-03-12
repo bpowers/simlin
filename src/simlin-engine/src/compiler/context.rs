@@ -1326,6 +1326,10 @@ impl Context<'_> {
                             .iter()
                             .any(|op| matches!(op, IndexOp::ActiveDimRef(_)));
 
+                        // Inside array-producing builtins, source arrays may live in a
+                        // different dimension space than the output; ActiveDimRef ops
+                        // should be preserved as full-array wildcards rather than
+                        // resolved to concrete offsets.
                         let preserve_for_iteration = self.preserve_wildcards_for_iteration
                             && (has_wildcard_ops
                                 || (self.promote_active_dim_ref && has_active_dim_ref));

@@ -464,12 +464,18 @@ impl<'input> ConversionContext<'input> {
                 };
 
                 // Compute element offsets for arrayed GET DIRECT resolution.
-                // Use the LHS subscript dimensions (not the parent dims) so
-                // that sub-dimensions like SubA produce offsets relative to
-                // their own element list, not the parent dimension's.
+                // Only include varying dimensions (where the LHS subscript is
+                // a dimension name), not pinned subscripts (specific element
+                // names like "B1"). adjust_call_for_element maps the last two
+                // offsets to row/col, so including pinned dims would shift the
+                // varying-dimension offsets to the wrong positions.
                 let element_offsets: Vec<usize> = element_parts
                     .iter()
                     .zip(exp_eq.lhs_subscripts.iter())
+                    .filter(|(_, sub)| {
+                        let canonical = canonical_name(sub);
+                        self.dimension_elements.contains_key(&canonical)
+                    })
                     .map(|(elem, sub)| self.element_index_in_dimension(elem, sub).unwrap_or(0))
                     .collect();
 

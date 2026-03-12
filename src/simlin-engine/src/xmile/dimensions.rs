@@ -57,6 +57,10 @@ pub struct Dimension {
     /// Serde rename uses local name without prefix (quick-xml strips namespace prefixes).
     #[serde(rename = "mapping", default)]
     pub mappings: Option<Vec<MappingElement>>,
+    /// Vendor extension for indexed subdimension parent.
+    /// Serialized as `<simlin:parent>ParentDim</simlin:parent>`.
+    #[serde(rename = "parent", default)]
+    pub parent: Option<String>,
 }
 
 impl ToXml<XmlWriter> for Dimension {
@@ -97,6 +101,11 @@ impl ToXml<XmlWriter> for Dimension {
                 }
                 write_tag_end(writer, "simlin:mapping")?;
             }
+        }
+
+        // Write indexed subdimension parent as vendor extension
+        if let Some(ref parent) = self.parent {
+            write_tag(writer, "simlin:parent", parent)?;
         }
 
         super::write_tag_end(writer, "dim")
@@ -150,11 +159,13 @@ impl From<Dimension> for datamodel::Dimension {
             vec![]
         };
 
+        let parent = dimension.parent.map(|p| canonicalize(&p).into_owned());
+
         datamodel::Dimension {
             name,
             elements,
             mappings,
-            parent: None,
+            parent,
         }
     }
 }
@@ -196,6 +207,7 @@ impl From<datamodel::Dimension> for Dimension {
             Some(vendor_mappings)
         };
 
+        let parent = dimension.parent;
         match dimension.elements {
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dimension.name,
@@ -203,6 +215,7 @@ impl From<datamodel::Dimension> for Dimension {
                 elements: None,
                 maps_to,
                 mappings,
+                parent,
             },
             datamodel::DimensionElements::Named(elements) => Dimension {
                 name: dimension.name,
@@ -210,6 +223,7 @@ impl From<datamodel::Dimension> for Dimension {
                 elements: Some(elements.into_iter().map(|i| Index { name: i }).collect()),
                 maps_to,
                 mappings,
+                parent,
             },
         }
     }
@@ -459,6 +473,7 @@ fn test_dimension_with_maps_to_parsing() {
         ]),
         maps_to: Some("DimB".to_string()),
         mappings: None,
+        parent: None,
     };
 
     use quick_xml::de;

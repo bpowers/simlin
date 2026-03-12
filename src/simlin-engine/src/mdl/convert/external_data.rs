@@ -186,7 +186,9 @@ pub(super) fn resolve_file_alias(file: &str, aliases: &HashMap<String, String>) 
 /// When a variable is arrayed and its equation uses a GET DIRECT function,
 /// each element of the array needs a different cell from the external file.
 /// The `element_offsets` slice gives the 0-based position within each
-/// dimension (e.g., `[1, 2]` means second element of dim 0, third of dim 1).
+/// **varying** dimension (e.g., `[1, 2]` means second element of dim 0, third
+/// of dim 1). Callers must exclude pinned (singleton) dimensions from the
+/// offsets; this function uses the last two entries as row/col indices.
 ///
 /// For Constants:
 ///   - Star pattern (`B2*`): iterate rows, each element bumps the row index
@@ -209,17 +211,22 @@ pub(super) fn adjust_call_for_element(
             let has_star = row_or_cell.contains('*');
             let base_cell = row_or_cell.trim_end_matches('*');
 
-            // Parse the base cell reference to get starting row and column
+            // Parse the base cell reference to get starting row and column.
+            // Two forms: A1-style ("B2") or 4-arg numeric row + col letter
+            // ("2" with col="B"). Try A1-style first, then fall back to the
+            // 4-arg form where row_or_cell is a plain row number.
             let (base_row, base_col) = match parse_cell_ref_simple(base_cell) {
                 Some(rc) => rc,
-                None => return call.clone(),
+                None => match parse_row_col_separate(base_cell, col) {
+                    Some(rc) => rc,
+                    None => return call.clone(),
+                },
             };
 
-            // Map dimension offsets to row/col positions in the data file.
-            // A GET DIRECT CONSTANTS cell reference addresses a 2D grid.
-            // Only the last two variable dimensions participate in the grid;
-            // earlier dimensions (like a pinned element D1) are always offset 0
-            // and are ignored.
+            // Map varying-dimension offsets to row/col positions in the data file.
+            // A GET DIRECT CONSTANTS cell reference addresses a 2D grid, so
+            // at most 2 offsets are meaningful. Callers pre-filter to exclude
+            // pinned (singleton) dimensions.
             //
             // Without star: first dim -> rows, second dim -> columns
             // With star: first dim -> columns, second dim -> rows (transposed)
@@ -278,6 +285,27 @@ pub(super) fn adjust_call_for_element(
         // Data and Subscript calls are not adjusted per-element
         _ => call.clone(),
     }
+}
+
+/// Parse the 4-arg form where row_or_cell is a plain number and col
+/// is a separate column letter reference. Returns 0-based (row, col).
+/// ("2", "B") -> Some((1, 1))
+fn parse_row_col_separate(row_str: &str, col_str: &str) -> Option<(usize, usize)> {
+    let row_1based: usize = row_str.trim().parse().ok()?;
+    if row_1based == 0 {
+        return None;
+    }
+    let col_str = col_str.trim();
+    if col_str.is_empty() || !col_str.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    let col: usize = col_str
+        .bytes()
+        .fold(0usize, |acc, b| {
+            acc * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize
+        })
+        .checked_sub(1)?;
+    Some((row_1based - 1, col))
 }
 
 /// Simple cell reference parser that returns 0-based (row, col).
@@ -801,15 +829,17 @@ mod tests {
     }
 
     #[test]
-    fn test_adjust_call_constants_3d_pinned_first() {
+    fn test_adjust_call_constants_varying_dims_only() {
+        // Callers must pre-filter element_offsets to only varying dimensions.
+        // For a 3-dim variable x[Region, B1, Product] where B1 is pinned,
+        // the caller passes only the Region and Product offsets: [2, 1].
         let call = GetDirectCall::Constants {
             file: "c.csv".to_string(),
             tab: ",".to_string(),
             row_or_cell: "B2".to_string(),
             col: String::new(),
         };
-        // 3 dims: first pinned (offset 0), then row dim (offset 2), col dim (offset 1)
-        let adjusted = adjust_call_for_element(&call, &[0, 2, 1]);
+        let adjusted = adjust_call_for_element(&call, &[2, 1]);
         if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
             assert_eq!(row_or_cell, "C4");
         } else {
@@ -848,5 +878,52 @@ mod tests {
         } else {
             panic!("Expected Constants");
         }
+    }
+
+    #[test]
+    fn test_adjust_call_4arg_numeric_row() {
+        // 4-arg form: GET DIRECT CONSTANTS(file, tab, '2', 'B')
+        // row_or_cell = "2" (row number), col = "B" (column letter)
+        let call = GetDirectCall::Constants {
+            file: "a.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "2".to_string(),
+            col: "B".to_string(),
+        };
+        // Offset [1] means second element -> row 2+1=3, col B
+        let adjusted = adjust_call_for_element(&call, &[1]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "B3");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_4arg_2d() {
+        // 4-arg form with 2 varying dimensions
+        let call = GetDirectCall::Constants {
+            file: "a.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "2".to_string(),
+            col: "B".to_string(),
+        };
+        // [1, 2] -> row 2+1=3, col B+2=D
+        let adjusted = adjust_call_for_element(&call, &[1, 2]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "D3");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_parse_row_col_separate() {
+        assert_eq!(parse_row_col_separate("2", "B"), Some((1, 1)));
+        assert_eq!(parse_row_col_separate("1", "A"), Some((0, 0)));
+        assert_eq!(parse_row_col_separate("10", "C"), Some((9, 2)));
+        assert_eq!(parse_row_col_separate("0", "A"), None);
+        assert_eq!(parse_row_col_separate("abc", "A"), None);
+        assert_eq!(parse_row_col_separate("2", ""), None);
     }
 }
