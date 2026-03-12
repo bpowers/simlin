@@ -1346,7 +1346,6 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_basic() {
         // Test basic range subscript [1:3]
         // When a range produces fewer elements than the target dimension,
@@ -1375,7 +1374,6 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_with_expressions() {
         // Test range with dynamic variable bounds [start:end].
         // data[start:end] selects elements 2..5 (1-based), producing a
@@ -1405,7 +1403,6 @@ mod combined_operations_tests {
     use crate::test_common::TestProject;
 
     #[test]
-    #[ignore] // Enable when all operations are implemented
     fn transpose_and_slice() {
         // Combine transpose with slicing via an intermediate transposed
         // variable. The parser handles subscripts on identifiers only,
@@ -1470,7 +1467,6 @@ mod combined_operations_tests {
     }
 
     #[test]
-    #[ignore] // Enable when all operations are implemented
     fn complex_expression() {
         // Test complex array expression
         TestProject::new("complex_expr")
@@ -2465,10 +2461,8 @@ mod pass0_structural_lowering_tests {
 mod indexed_dimension_tests {
     use crate::test_common::TestProject;
 
-    // NOTE: Tests for different-named indexed dimensions broadcasting (e.g., a[DimA] + b[DimB])
-    // require additional compiler changes beyond the VM-level positional matching.
-    // The compiler's dimension matching occurs at multiple levels and all need updates.
-    // These tests are marked #[ignore] as future work.
+    // Tests for different-named indexed dimensions broadcasting (e.g., a[DimA] + b[DimB])
+    // and bounds checking for mismatched-size range assignments.
 
     #[test]
     fn different_indexed_dims_same_size_broadcast() {
@@ -2501,11 +2495,7 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn out_of_bounds_iteration_returns_nan() {
-        // TODO: This test requires bounds checking during A2A iteration.
-        // The VM changes are in place but the compiler needs to generate
-        // code that properly creates mismatched-size views for testing.
         let project = TestProject::new("oob_iteration")
             .indexed_dimension("Size5", 5)
             .array_aux("source[Size5]", "Size5 * 10") // [10, 20, 30, 40, 50]
@@ -2628,9 +2618,7 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn bounds_check_in_fast_path() {
-        // TODO: Requires compiler-level changes for different-sized array assignment.
         let project = TestProject::new("fast_path_bounds")
             .indexed_dimension("SmallDim", 3)
             .indexed_dimension("LargeDim", 5)
