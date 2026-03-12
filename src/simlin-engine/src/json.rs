@@ -110,6 +110,8 @@ pub struct ArrayedEquation {
     pub compat: Option<Compat>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub elements: Option<Vec<ElementEquation>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub has_except_default: Option<bool>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -746,7 +748,7 @@ impl From<Stock> for datamodel::Stock {
                             })
                             .collect(),
                         arrayed.equation,
-                        false,
+                        arrayed.has_except_default.unwrap_or(false),
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -826,7 +828,7 @@ impl From<Flow> for datamodel::Flow {
                             })
                             .collect(),
                         arrayed.equation,
-                        false,
+                        arrayed.has_except_default.unwrap_or(false),
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -901,7 +903,7 @@ impl From<Auxiliary> for datamodel::Aux {
                             })
                             .collect(),
                         arrayed.equation,
-                        false,
+                        arrayed.has_except_default.unwrap_or(false),
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -1405,9 +1407,10 @@ impl From<datamodel::Stock> for Stock {
                     equation: Some(eq),
                     compat: None,
                     elements: None,
+                    has_except_default: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq, _has_except_default) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1429,6 +1432,7 @@ impl From<datamodel::Stock> for Stock {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
+                        has_except_default: if has_except_default { Some(true) } else { None },
                     }),
                 )
             }
@@ -1468,9 +1472,10 @@ impl From<datamodel::Flow> for Flow {
                     equation: Some(eq),
                     compat: None,
                     elements: None,
+                    has_except_default: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq, _has_except_default) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1492,6 +1497,7 @@ impl From<datamodel::Flow> for Flow {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
+                        has_except_default: if has_except_default { Some(true) } else { None },
                     }),
                 )
             }
@@ -1530,9 +1536,10 @@ impl From<datamodel::Aux> for Auxiliary {
                     equation: Some(eq),
                     compat: None,
                     elements: None,
+                    has_except_default: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq, _has_except_default) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1554,6 +1561,7 @@ impl From<datamodel::Aux> for Auxiliary {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
+                        has_except_default: if has_except_default { Some(true) } else { None },
                     }),
                 )
             }
@@ -2082,6 +2090,7 @@ mod tests {
                         equation: Some("50".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         can_be_module_input: true,
@@ -2123,6 +2132,7 @@ mod tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         can_be_module_input: true,
@@ -2215,6 +2225,7 @@ mod tests {
                         equation: Some("orders / lead_time".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         active_initial: Some("initial_orders".to_string()),
@@ -2256,6 +2267,7 @@ mod tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         can_be_module_input: true,
@@ -2330,6 +2342,7 @@ mod tests {
                         equation: Some("base_capacity".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         active_initial: Some("initial_capacity".to_string()),
@@ -2370,6 +2383,7 @@ mod tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         is_public: true,
@@ -3344,6 +3358,7 @@ mod tests {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
             compat: Some(Compat {
                 active_initial: None,
@@ -3375,6 +3390,7 @@ mod tests {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
             compat: Some(Compat {
                 active_initial: None,
@@ -3405,6 +3421,7 @@ mod tests {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
             compat: Some(Compat {
                 active_initial: Some("correct".to_string()),
@@ -3463,6 +3480,7 @@ mod tests {
                     }),
                     graphical_function: None,
                 }]),
+                has_except_default: None,
             }),
             compat: None,
             non_negative: false,
@@ -3580,6 +3598,7 @@ mod tests {
                     compat: None,
                     graphical_function: None,
                 }]),
+                has_except_default: None,
             }),
             compat: None,
             can_be_module_input: false,

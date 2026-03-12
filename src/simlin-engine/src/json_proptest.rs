@@ -164,6 +164,7 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
         // Elements variant: has elements, no equation
         (
@@ -175,6 +176,7 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
                 equation: None,
                 compat: None,
                 elements: Some(elems),
+                has_except_default: None,
             }),
     ]
 }
@@ -1350,6 +1352,7 @@ mod protobuf_roundtrip_tests {
                         equation: Some("100".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: None,
                     non_negative: false,
@@ -1385,6 +1388,7 @@ mod protobuf_roundtrip_tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: None,
                     can_be_module_input: false,

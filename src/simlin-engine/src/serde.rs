@@ -292,7 +292,7 @@ impl From<Equation> for project_io::variable::Equation {
                         },
                     )
                 }
-                Equation::Arrayed(dimension_names, elements, _default_eq, _has_except_default) => {
+                Equation::Arrayed(dimension_names, elements, _default_eq, has_except_default) => {
                     project_io::variable::equation::Equation::Arrayed(
                         project_io::variable::ArrayedEquation {
                             dimension_names,
@@ -307,6 +307,7 @@ impl From<Equation> for project_io::variable::Equation {
                                     }
                                 })
                                 .collect(),
+                            has_except_default: if has_except_default { Some(true) } else { None },
                         },
                     )
                 }
@@ -349,7 +350,7 @@ impl From<project_io::variable::Equation> for Equation {
                     })
                     .collect(),
                 None,
-                false,
+                arrayed.has_except_default.unwrap_or(false),
             ),
         }
     }
@@ -379,6 +380,50 @@ fn test_equation_roundtrip() {
         let expected = expected.clone();
         let actual = Equation::from(project_io::variable::Equation::from(expected.clone()));
         assert_eq!(expected, actual);
+    }
+}
+
+#[test]
+fn test_has_except_default_proto_roundtrip() {
+    let eq = Equation::Arrayed(
+        vec!["dim_a".to_string()],
+        vec![("a1".to_string(), "10".to_string(), None, None)],
+        None,
+        true,
+    );
+    let proto = project_io::variable::Equation::from(eq.clone());
+    let arrayed = match &proto.equation {
+        Some(project_io::variable::equation::Equation::Arrayed(a)) => a,
+        _ => panic!("expected Arrayed proto"),
+    };
+    assert_eq!(arrayed.has_except_default, Some(true));
+
+    let roundtripped = Equation::from(proto);
+    assert_eq!(roundtripped, eq);
+}
+
+#[test]
+fn test_has_except_default_absent_defaults_to_false() {
+    let proto = project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::Arrayed(
+            project_io::variable::ArrayedEquation {
+                dimension_names: vec!["dim_a".to_string()],
+                elements: vec![project_io::variable::arrayed_equation::Element {
+                    subscript: "a1".to_string(),
+                    equation: "5".to_string(),
+                    initial_equation: None,
+                    gf: None,
+                }],
+                has_except_default: None,
+            },
+        )),
+    };
+    let eq = Equation::from(proto);
+    match eq {
+        Equation::Arrayed(_, _, _, has_except_default) => {
+            assert!(!has_except_default, "absent field should default to false");
+        }
+        _ => panic!("expected Arrayed"),
     }
 }
 

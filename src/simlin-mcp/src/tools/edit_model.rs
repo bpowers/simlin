@@ -339,6 +339,7 @@ fn convert_arrayed_equation(a: ArrayedEquationInput) -> ejson::ArrayedEquation {
                 })
                 .collect()
         }),
+        has_except_default: None,
     }
 }
 
