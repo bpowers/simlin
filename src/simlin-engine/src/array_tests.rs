@@ -1349,12 +1349,29 @@ mod range_tests {
     #[ignore]
     fn range_basic() {
         // Test basic range subscript [1:3]
-        TestProject::new("range_basic")
+        // When a range produces fewer elements than the target dimension,
+        // out-of-bounds positions are filled with NaN.
+        let project = TestProject::new("range_basic")
             .indexed_dimension("Periods", 5)
             .array_aux("source[Periods]", "Periods")
-            .array_aux("slice[Periods]", "source[1:3]")
-            // TODO: if you assign like `array[len(5)] = array[len(3)]` we should zero extend not extend the last element, or error out.
-            .assert_interpreter_result("slice", &[1.0, 2.0, 3.0, 3.0, 3.0]);
+            .array_aux("slice[Periods]", "source[1:3]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let result = project.interpreter_result("slice");
+        assert_eq!(result[0], 1.0);
+        assert_eq!(result[1], 2.0);
+        assert_eq!(result[2], 3.0);
+        assert!(
+            result[3].is_nan(),
+            "Element 4 should be NaN, got {}",
+            result[3]
+        );
+        assert!(
+            result[4].is_nan(),
+            "Element 5 should be NaN, got {}",
+            result[4]
+        );
     }
 
     #[test]

@@ -1469,6 +1469,29 @@ impl Context<'_> {
                                 return sim_err!(MismatchedDimensions, id.as_str().to_string());
                             }
 
+                            // Track which view dimensions came from Range operations
+                            // so we can allow size mismatches and emit NaN for
+                            // out-of-bounds elements.
+                            let range_view_dims: std::collections::HashSet<usize> = {
+                                let mut set = std::collections::HashSet::new();
+                                let mut view_dim_idx = 0;
+                                for op in &operations {
+                                    match op {
+                                        IndexOp::Single(_) | IndexOp::ActiveDimRef(_) => {
+                                            // These collapse a dimension, no view dim
+                                        }
+                                        IndexOp::Range(_, _) => {
+                                            set.insert(view_dim_idx);
+                                            view_dim_idx += 1;
+                                        }
+                                        _ => {
+                                            view_dim_idx += 1;
+                                        }
+                                    }
+                                }
+                                set
+                            };
+
                             // For positional matching, verify sizes match.
                             // Skip when preserving wildcards for iteration (SUM,
                             // MEAN, etc.): the view describes what the reduction
@@ -1481,6 +1504,12 @@ impl Context<'_> {
                                 for (view_idx, &view_dim) in view.dims.iter().enumerate() {
                                     if !use_name_matching[view_idx] && view_idx < active_dims.len()
                                     {
+                                        // Range-originated dimensions are allowed to be
+                                        // smaller than the target: out-of-bounds elements
+                                        // produce NaN at the per-element resolution step.
+                                        if range_view_dims.contains(&view_idx) {
+                                            continue;
+                                        }
                                         // Positional matching - sizes must match
                                         if view_dim != active_dims[view_idx].len() {
                                             return sim_err!(
@@ -1707,6 +1736,11 @@ impl Context<'_> {
                                     if let Some(rel_offset) = abs_offset.checked_sub(start_offset) {
                                         rel_offset
                                     } else {
+                                        // For range-originated dimensions, subscript before
+                                        // the range start is out-of-bounds -> NaN fill
+                                        if range_view_dims.contains(&view_idx) {
+                                            return Ok(Expr::Const(f64::NAN, *loc));
+                                        }
                                         return sim_err!(
                                             MismatchedDimensions,
                                             id.as_str().to_string()
@@ -1715,6 +1749,15 @@ impl Context<'_> {
                                 } else {
                                     abs_offset
                                 };
+
+                                // For range-originated dimensions, check if the
+                                // offset exceeds the range size -> NaN fill for
+                                // out-of-bounds elements.
+                                if range_view_dims.contains(&view_idx)
+                                    && rel_offset >= view.dims[view_idx]
+                                {
+                                    return Ok(Expr::Const(f64::NAN, *loc));
+                                }
 
                                 result_index += rel_offset * (*stride as usize);
                             }
