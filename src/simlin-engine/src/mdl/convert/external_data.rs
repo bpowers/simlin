@@ -255,7 +255,10 @@ pub(super) fn adjust_call_for_element(
                 file: file.clone(),
                 tab: tab.clone(),
                 row_or_cell: new_cell,
-                col: col.clone(),
+                // Clear col: the adjusted row_or_cell encodes both row and
+                // column in A1-style. A non-empty col would override the
+                // column downstream in load_constant.
+                col: String::new(),
             }
         }
         GetDirectCall::Lookups {
@@ -892,8 +895,15 @@ mod tests {
         };
         // Offset [1] means second element -> row 2+1=3, col B
         let adjusted = adjust_call_for_element(&call, &[1]);
-        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+        if let GetDirectCall::Constants {
+            row_or_cell, col, ..
+        } = adjusted
+        {
             assert_eq!(row_or_cell, "B3");
+            // col must be cleared: the adjusted row_or_cell now encodes both
+            // row and column in A1-style, so a non-empty col would override
+            // the column downstream in load_constant.
+            assert_eq!(col, "", "col must be cleared after 4-arg adjustment");
         } else {
             panic!("Expected Constants");
         }
@@ -910,8 +920,12 @@ mod tests {
         };
         // [1, 2] -> row 2+1=3, col B+2=D
         let adjusted = adjust_call_for_element(&call, &[1, 2]);
-        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+        if let GetDirectCall::Constants {
+            row_or_cell, col, ..
+        } = adjusted
+        {
             assert_eq!(row_or_cell, "D3");
+            assert_eq!(col, "", "col must be cleared after 4-arg adjustment");
         } else {
             panic!("Expected Constants");
         }

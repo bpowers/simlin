@@ -1799,15 +1799,18 @@ impl Context<'_> {
                     && let Some(active_subscripts) = &self.active_subscript
                     && let Some(active_dims) = &self.active_dimension
                 {
-                    // Determine the current element's 1-based position
+                    // Find the active dimension matching the source dimension.
+                    // In multi-dimensional A2A contexts (e.g. target[DimA, DimB]
+                    // = data[start:end] where data is indexed by DimB), the source
+                    // dimension may not be active_dims[0].
                     let dim = &dims[0];
-                    let target_dim = &active_dims[0];
-                    let subscript = &active_subscripts[0];
-                    let elem_pos_1based = if dim.name() == target_dim.name() {
-                        Self::subscript_to_index(dim, subscript)
-                    } else {
-                        Self::subscript_to_index(target_dim, subscript)
-                    };
+                    let match_idx = active_dims
+                        .iter()
+                        .position(|ad| ad.name() == dim.name())
+                        .unwrap_or(0);
+                    let target_dim = &active_dims[match_idx];
+                    let subscript = &active_subscripts[match_idx];
+                    let elem_pos_1based = Self::subscript_to_index(target_dim, subscript);
 
                     if let IndexExpr3::Range(start_expr, end_expr, _) = &indices[0] {
                         let start_lowered = self.lower_from_expr3(start_expr)?;

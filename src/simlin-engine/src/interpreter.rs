@@ -615,8 +615,8 @@ impl ModuleEvaluator<'_> {
             variance += diff * diff;
         });
 
-        // Sample standard deviation (n-1 divisor)
-        (variance / (size - 1) as f64).sqrt()
+        // Population standard deviation (N divisor), matching Vensim VSSTDEV
+        (variance / size as f64).sqrt()
     }
 
     /// Compute the ALLOCATE AVAILABLE result for all requesters.

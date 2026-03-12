@@ -1073,7 +1073,8 @@ mod range_tests {
 
         project.assert_compiles_incremental();
         project.assert_sim_builds();
-        project.assert_scalar_result("stddev_val", 1.0);
+        // Population stddev (N divisor): mean=3, var_sum=2, stddev=sqrt(2/3)
+        project.assert_scalar_result("stddev_val", (2.0_f64 / 3.0).sqrt());
     }
 
     #[test]
@@ -1089,8 +1090,9 @@ mod range_tests {
         project.assert_compiles_incremental();
         project.assert_sim_builds();
         // source[1:5] = [2, 4, 6, 8, 10] (inclusive range per XMILE spec)
-        // source[1:5] / 2 = [1, 2, 3, 4, 5], mean = 3, stddev = sqrt(2.5) ≈ 1.581
-        project.assert_scalar_result("stddev_val", 1.5811388300841898);
+        // source[1:5] / 2 = [1, 2, 3, 4, 5], mean = 3
+        // Population stddev (N divisor): var_sum=10, stddev=sqrt(10/5)=sqrt(2)
+        project.assert_scalar_result("stddev_val", (10.0_f64 / 5.0).sqrt());
     }
 
     #[test]
@@ -2174,13 +2176,41 @@ mod structural_lowering_tests {
             .scalar_const("start_idx", 2.0)
             .scalar_const("end_idx", 4.0)
             // STDDEV(data[2:4]) for values [20, 30, 40]:
-            // mean = 30, variance = ((20-30)^2 + (30-30)^2 + (40-30)^2) / 2 = (100 + 0 + 100) / 2 = 100
-            // stddev = sqrt(100) = 10
+            // mean = 30, var_sum = (20-30)^2 + (30-30)^2 + (40-30)^2 = 200
+            // Population stddev (N divisor): sqrt(200/3)
             .scalar_aux("result", "STDDEV(data[start_idx:end_idx])");
 
         project.assert_compiles_incremental();
         project.assert_sim_builds();
-        project.assert_scalar_result("result", 10.0);
+        project.assert_scalar_result("result", (200.0_f64 / 3.0).sqrt());
+    }
+
+    #[test]
+    fn dynamic_range_a2a_uses_correct_dimension() {
+        // When target[DimA, DimB] = data[start:end], the dynamic range
+        // should resolve using DimB's position (matching data's dimension),
+        // not DimA's position (the first active dimension).
+        let project = TestProject::new("dyn_range_2d_dim_match")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("DimA", 3)
+            .indexed_dimension("DimB", 5)
+            .array_aux("data[DimB]", "DimB * 10") // [10, 20, 30, 40, 50]
+            .scalar_const("range_start", 1.0)
+            .scalar_const("range_end", 5.0)
+            .array_aux("target[DimA, DimB]", "data[range_start:range_end]")
+            .scalar_aux("total", "SUM(target[*,*])");
+
+        project.assert_compiles_incremental();
+        // Correct: each DimA row gets [10,20,30,40,50], total = 3*150 = 450
+        // Bug (using DimA position): rows get [10,10,10,10,10],[20,...],[30,...],
+        // total = 5*60 = 300
+        let vals = project.vm_result_incremental("total");
+        assert_eq!(vals.len(), 1);
+        assert!(
+            (vals[0] - 450.0).abs() < 1e-6,
+            "SUM should be 450 (3 DimA rows * 150 each), got {}",
+            vals[0]
+        );
     }
 
     #[test]
@@ -4575,30 +4605,30 @@ mod array_reducer_tests {
 
     #[test]
     fn stddev_interpreter() {
-        // Interpreter uses sample stddev (n-1 divisor):
-        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/3) = 12.909944...
+        // Vensim VSSTDEV uses population stddev (N divisor):
+        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
         let project = make_reducer_project("stddev_interp", "STDDEV");
         let vals = project.interpreter_result("result");
         assert_eq!(vals.len(), 1);
-        let expected_sample = (500.0_f64 / 3.0).sqrt();
+        let expected = (500.0_f64 / 4.0).sqrt();
         assert!(
-            (vals[0] - expected_sample).abs() < 1e-6,
-            "STDDEV should be ~{expected_sample}, got {}",
+            (vals[0] - expected).abs() < 1e-6,
+            "STDDEV should be ~{expected}, got {}",
             vals[0]
         );
     }
 
     #[test]
     fn stddev_vm() {
-        // VM uses population stddev (n divisor):
+        // Vensim VSSTDEV uses population stddev (N divisor):
         // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
         let project = make_reducer_project("stddev_vm", "STDDEV");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 1);
-        let expected_pop = (500.0_f64 / 4.0).sqrt();
+        let expected = (500.0_f64 / 4.0).sqrt();
         assert!(
-            (vals[0] - expected_pop).abs() < 1e-6,
-            "STDDEV should be ~{expected_pop}, got {}",
+            (vals[0] - expected).abs() < 1e-6,
+            "STDDEV should be ~{expected}, got {}",
             vals[0]
         );
     }
