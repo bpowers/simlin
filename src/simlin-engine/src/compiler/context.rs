@@ -43,6 +43,11 @@ pub(crate) struct Context<'a> {
     /// When true, wildcards should always be preserved for iteration (inside SUM, etc.)
     /// rather than being collapsed based on active_dimension matching.
     pub(crate) preserve_wildcards_for_iteration: bool,
+    /// When true, ActiveDimRef subscripts are promoted to Wildcard so the full
+    /// dimension view is preserved.  This is needed for array-producing builtins
+    /// (VectorSortOrder, VectorElmMap, etc.) but NOT for array reducers (SUM,
+    /// MEAN, etc.) where ActiveDimRef should resolve to a concrete offset.
+    pub(crate) promote_active_dim_ref: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -80,6 +85,7 @@ impl Context<'_> {
             active_subscript: None,
             is_initial,
             preserve_wildcards_for_iteration: false,
+            promote_active_dim_ref: false,
         }
     }
 
@@ -95,6 +101,7 @@ impl Context<'_> {
             active_subscript,
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: self.preserve_wildcards_for_iteration,
+            promote_active_dim_ref: self.promote_active_dim_ref,
         }
     }
 
@@ -984,7 +991,10 @@ impl Context<'_> {
     }
 
     /// Create a context that preserves wildcards for array iteration.
-    /// Used for array reduction builtins (SUM, MAX, MIN, MEAN, STDDEV, SIZE).
+    /// Used for array reducer builtins (SUM, MAX, MIN, MEAN, STDDEV, SIZE).
+    /// ActiveDimRef subscripts are NOT promoted -- they resolve to a concrete
+    /// element offset, so `SUM(matrix[DimA, DimB])` sums over one dimension
+    /// while the other iterates.
     fn with_preserved_wildcards(&self) -> Self {
         Context {
             core: self.core,
@@ -993,6 +1003,24 @@ impl Context<'_> {
             active_subscript: self.active_subscript.clone(),
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: true,
+            promote_active_dim_ref: false,
+        }
+    }
+
+    /// Create a context for array-producing vector builtins (VectorSortOrder,
+    /// VectorElmMap, VectorSelect, AllocateAvailable).  Like
+    /// `with_preserved_wildcards`, but also promotes ActiveDimRef to Wildcard so
+    /// references like `vals[DimA]` inside these builtins keep their full array
+    /// view.
+    fn with_vector_builtin_wildcards(&self) -> Self {
+        Context {
+            core: self.core,
+            ident: self.ident,
+            active_dimension: self.active_dimension.clone(),
+            active_subscript: self.active_subscript.clone(),
+            is_initial: self.is_initial,
+            preserve_wildcards_for_iteration: true,
+            promote_active_dim_ref: true,
         }
     }
 
@@ -1277,33 +1305,37 @@ impl Context<'_> {
                             .iter()
                             .any(|op| matches!(op, IndexOp::DimPosition(_)));
 
-                        // Check for operations that preserve dimensions for iteration.
-                        // ActiveDimRef is included because inside array-producing
-                        // builtins (VectorSortOrder, VectorElmMap etc.) dimension
-                        // references like h[DimA] must keep their full array view
-                        // rather than collapsing to a single element.
-                        let has_iteration_preserving_ops = operations.iter().any(|op| {
+                        // Wildcard, SparseRange, and Range always preserve
+                        // dimensions for iteration inside any array builtin.
+                        let has_wildcard_ops = operations.iter().any(|op| {
                             matches!(
                                 op,
-                                IndexOp::Wildcard
-                                    | IndexOp::SparseRange(_)
-                                    | IndexOp::Range(_, _)
-                                    | IndexOp::ActiveDimRef(_)
+                                IndexOp::Wildcard | IndexOp::SparseRange(_) | IndexOp::Range(_, _)
                             )
                         });
+                        // ActiveDimRef should only be promoted to Wildcard inside
+                        // array-producing builtins (VectorSortOrder, VectorElmMap,
+                        // etc.).  For reducers (SUM, MEAN, etc.) ActiveDimRef
+                        // resolves to a concrete offset via build_view_from_ops.
+                        let has_active_dim_ref = operations
+                            .iter()
+                            .any(|op| matches!(op, IndexOp::ActiveDimRef(_)));
 
-                        let preserve_for_iteration =
-                            self.preserve_wildcards_for_iteration && has_iteration_preserving_ops;
+                        let preserve_for_iteration = self.preserve_wildcards_for_iteration
+                            && (has_wildcard_ops
+                                || (self.promote_active_dim_ref && has_active_dim_ref));
 
                         if has_dim_positions {
                             // Fall through to dynamic handling at the end
                         } else if preserve_for_iteration {
-                            // Rebuild view with ActiveDimRef treated as Wildcard
-                            // so the full dimension is preserved for array iteration
+                            // Rebuild view, only promoting ActiveDimRef to Wildcard
+                            // when inside an array-producing builtin context
                             let preserved_ops: Vec<IndexOp> = operations
                                 .iter()
                                 .map(|op| match op {
-                                    IndexOp::ActiveDimRef(_) => IndexOp::Wildcard,
+                                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref => {
+                                        IndexOp::Wildcard
+                                    }
                                     other => other.clone(),
                                 })
                                 .collect();
@@ -1979,7 +2011,7 @@ impl Context<'_> {
                 BuiltinFn::Sum(Box::new(a))
             }
             BFn::VectorSelect(sel, expr, max_val, action, err) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 BuiltinFn::VectorSelect(
                     Box::new(ctx.lower_from_expr3(sel)?),
                     Box::new(ctx.lower_from_expr3(expr)?),
@@ -1989,21 +2021,21 @@ impl Context<'_> {
                 )
             }
             BFn::VectorElmMap(src, offs) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 BuiltinFn::VectorElmMap(
                     Box::new(ctx.lower_from_expr3(src)?),
                     Box::new(ctx.lower_from_expr3(offs)?),
                 )
             }
             BFn::VectorSortOrder(arr, dir) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 BuiltinFn::VectorSortOrder(
                     Box::new(ctx.lower_from_expr3(arr)?),
                     Box::new(self.lower_from_expr3(dir)?),
                 )
             }
             BFn::AllocateAvailable(req, pp, avail) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 let lowered_req = ctx.lower_from_expr3(req)?;
                 // The pp argument needs the full 2D array (requester_dim x XPriority).
                 // In Vensim, pp[region, ptype] means "priority_vector starting from ptype",
