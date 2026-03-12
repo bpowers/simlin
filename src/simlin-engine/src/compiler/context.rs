@@ -1042,7 +1042,12 @@ impl Context<'_> {
             }
 
             Expr3::AssignTemp(id, inner, view) => {
-                let lowered_inner = self.lower_from_expr3(inner)?;
+                // AssignTemp content was hoisted out of an array reducer
+                // (SUM, MEAN, etc.) by Pass 1.  It may contain
+                // cross-dimension wildcards (e.g. c[*] with DimA in a
+                // DimB context) that must be preserved, so lower in a
+                // wildcard-preserving context.
+                let lowered_inner = self.with_preserved_wildcards().lower_from_expr3(inner)?;
                 Ok(Expr::AssignTemp(*id, Box::new(lowered_inner), view.clone()))
             }
 
@@ -1464,15 +1469,25 @@ impl Context<'_> {
                                 return sim_err!(MismatchedDimensions, id.as_str().to_string());
                             }
 
-                            // For positional matching, verify sizes match
-                            for (view_idx, &view_dim) in view.dims.iter().enumerate() {
-                                if !use_name_matching[view_idx] && view_idx < active_dims.len() {
-                                    // Positional matching - sizes must match
-                                    if view_dim != active_dims[view_idx].len() {
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
-                                        );
+                            // For positional matching, verify sizes match.
+                            // Skip when preserving wildcards for iteration (SUM,
+                            // MEAN, etc.): the view describes what the reduction
+                            // iterates over and is independent of the active
+                            // (output) dimensions.  Cross-dimension wildcards
+                            // like SUM(c[*]) in a DimB context are valid -- the
+                            // reduction iterates over c's DimA regardless of the
+                            // output's DimB.
+                            if !self.preserve_wildcards_for_iteration {
+                                for (view_idx, &view_dim) in view.dims.iter().enumerate() {
+                                    if !use_name_matching[view_idx] && view_idx < active_dims.len()
+                                    {
+                                        // Positional matching - sizes must match
+                                        if view_dim != active_dims[view_idx].len() {
+                                            return sim_err!(
+                                                MismatchedDimensions,
+                                                id.as_str().to_string()
+                                            );
+                                        }
                                     }
                                 }
                             }

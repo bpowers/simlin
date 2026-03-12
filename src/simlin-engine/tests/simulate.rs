@@ -871,12 +871,11 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // array_tests::sum_of_conditional_tests.
     // "test/sdeverywhere/models/sumif/sumif.xmile",
     //
-    // VECTOR ELM MAP with cross-dimension source: `VECTOR ELM MAP(b[B1], a[DimA])`
-    // uses b[B1] (a single-element B-subscript slice) as the source array in a DimA
-    // context. The compiler cannot resolve the dimension mismatch because b's DimB
-    // dimension has no mapping to DimA. Fixing requires either element-level subscript
-    // flattening or a new cross-dimension indexing strategy.
-    // The vector_simple subset (no cross-dim indexing) passes via simulates_vector_simple_mdl.
+    // VECTOR ELM MAP cross-dimension source: partially fixed (cross-dim subscripts,
+    // SUM wildcards, AssignTemp wildcards), but several variables still fail:
+    //   - y[DimA] = VECTOR ELM MAP(x[three], (DimA-1)) fails in VM incremental path
+    //   - Additional VECTOR SELECT cross-dimension patterns need compiler work
+    // The vector_simple subset passes via simulates_vector_simple_mdl.
     // "test/sdeverywhere/models/vector/vector.xmile",
     //
     // --- Permanently excluded (not test models) ---
