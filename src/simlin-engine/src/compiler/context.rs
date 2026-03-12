@@ -1348,6 +1348,34 @@ impl Context<'_> {
                             return Ok(Expr::StaticSubscript(off, preserved_result.view, *loc));
                         } else {
                             if view.dims.is_empty() {
+                                // Inside array-producing builtins, a fully-collapsed
+                                // subscript like b[B1] should be promoted back to the
+                                // full source array. The Single ops came from named
+                                // element subscripts (not ActiveDimRef resolution), so
+                                // promoting them to Wildcard restores the array view
+                                // that VectorElmMap/VectorSortOrder expect.
+                                let has_single_ops = self.promote_active_dim_ref
+                                    && operations.iter().any(|op| matches!(op, IndexOp::Single(_)));
+                                if has_single_ops {
+                                    let promoted_ops: Vec<IndexOp> = operations
+                                        .iter()
+                                        .map(|op| match op {
+                                            IndexOp::Single(_) => IndexOp::Wildcard,
+                                            other => other.clone(),
+                                        })
+                                        .collect();
+                                    let promoted_result = build_view_from_ops(
+                                        &promoted_ops,
+                                        &orig_dims,
+                                        &orig_strides,
+                                        &view_config,
+                                    )?;
+                                    return Ok(Expr::StaticSubscript(
+                                        off,
+                                        promoted_result.view,
+                                        *loc,
+                                    ));
+                                }
                                 return Ok(Expr::Var(off + view.offset, *loc));
                             }
 
@@ -1424,9 +1452,15 @@ impl Context<'_> {
 
                             let all_name_matching = use_name_matching.iter().all(|&b| b);
 
-                            // If all dimensions use name matching, allow broadcasting (fewer dims)
-                            // Otherwise, dimension counts must match for positional matching
-                            if !all_name_matching && view.dims.len() != active_dims.len() {
+                            // If all dimensions use name matching, allow broadcasting (fewer dims).
+                            // Inside array-producing builtins (promote_active_dim_ref), dimension
+                            // mismatches are expected: the source array lives in a different
+                            // dimension space than the output (e.g. d[DimA,B1] partially
+                            // collapses to DimA-only, which differs from a DimA x DimB output).
+                            if !all_name_matching
+                                && !self.promote_active_dim_ref
+                                && view.dims.len() != active_dims.len()
+                            {
                                 return sim_err!(MismatchedDimensions, id.as_str().to_string());
                             }
 
