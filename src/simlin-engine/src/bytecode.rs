@@ -541,7 +541,6 @@ pub(crate) enum Op2 {
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Array opcodes not yet emitted by compiler
 pub(crate) enum Opcode {
     // === ARITHMETIC & LOGIC ===
     Op2 {
@@ -1076,7 +1075,6 @@ pub struct ByteCodeContext {
     /// Module declarations for nested modules
     pub(crate) modules: Vec<ModuleDeclaration>,
     /// Legacy array definitions (deprecated, use dimensions instead)
-    #[allow(dead_code)]
     pub(crate) arrays: Vec<ArrayDefinition>,
 
     // === New array support fields ===
@@ -1085,7 +1083,6 @@ pub struct ByteCodeContext {
     /// Subdimension relationships for star ranges
     pub(crate) subdim_relations: Vec<SubdimensionRelation>,
     /// Interned names table (dimension names, element names)
-    #[allow(dead_code)] // Used by array bytecode not yet emitted
     pub(crate) names: Vec<String>,
     /// Pre-computed static views (indexed by ViewId)
     pub(crate) static_views: Vec<StaticArrayView>,
@@ -1102,7 +1099,10 @@ pub struct ByteCodeContext {
     pub(crate) dim_lists: Vec<(u8, [u16; 4])>,
 }
 
-#[allow(dead_code)] // Methods used by array bytecode not yet emitted
+// ByteCodeCompiler (codegen.rs) builds these tables directly and transfers
+// them into ByteCodeContext, so these convenience methods are unused in
+// production but useful for testing.
+#[allow(dead_code)]
 impl ByteCodeContext {
     /// Intern a name (dimension or element name) and return its NameId.
     /// If the name already exists, returns the existing ID.

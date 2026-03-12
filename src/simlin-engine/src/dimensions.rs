@@ -47,7 +47,6 @@ impl NamedDimension {
 
 /// Relationship between a subdimension and parent dimension.
 /// Maps each subdim element index to its offset in the parent.
-#[allow(dead_code)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq)]
 pub struct SubdimensionRelation {
@@ -56,7 +55,6 @@ pub struct SubdimensionRelation {
     pub parent_offsets: Vec<usize>,
 }
 
-#[allow(dead_code)]
 impl SubdimensionRelation {
     /// Check if parent offsets are contiguous (can use range instead of sparse iteration)
     pub fn is_contiguous(&self) -> bool {
@@ -80,7 +78,6 @@ impl SubdimensionRelation {
 /// Cache for subdimension relationships. Uses Mutex for thread-safe O(1) lookup after first computation.
 /// The cache key is (child_name, parent_name), and the value is the relation if child is
 /// a subdimension of parent, or None if we've determined it's not a subdimension.
-#[allow(dead_code)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Default)]
 struct RelationshipCache {
@@ -528,7 +525,6 @@ impl DimensionsContext {
     /// Check if child is a subdimension of parent.
     /// For named dimensions, checks element containment. For indexed dimensions,
     /// uses the declared `parent` field.
-    #[allow(dead_code)]
     pub fn is_subdimension_of(
         &self,
         child: &CanonicalDimensionName,
@@ -543,7 +539,6 @@ impl DimensionsContext {
     ///
     /// For named dimensions, checks element containment. For indexed dimensions,
     /// uses the declared `parent` field on the datamodel Dimension.
-    #[allow(dead_code)]
     pub fn get_subdimension_relation(
         &self,
         child: &CanonicalDimensionName,

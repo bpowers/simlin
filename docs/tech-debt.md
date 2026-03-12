@@ -97,21 +97,21 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: 58 `#[allow(dead_code)]` attributes across 23 files. Heaviest in bytecode.rs (11), dimensions.rs (10), expr3.rs (5), compiler/dimensions.rs (4). Most are scaffolding for incomplete array features (bytecode opcodes not yet emitted, dimension matching helpers). These should be cleaned up as array features land, and remaining ones should have justification comments.
+- **Description**: 49 `#[allow(dead_code)]` attributes across 24 files. Heaviest in bytecode.rs (8), expr3.rs (5), dimensions.rs (4), compiler/context.rs (3), test_common.rs (3). Remaining suppressions fall into three categories: (1) ByteCodeContext builder methods unused in production because ByteCodeCompiler builds tables directly, (2) expr3 variants and methods reserved for pass 2, (3) scaffolding types (DimensionRange, DimensionVec, StridedDimension) for future strided array views. The stale Opcode-level suppression and reachable dimensions.rs code were cleaned up in the close-array-gaps work.
 - **Measure**: `rg '#\[allow\(dead_code\)\]' --type rust src/simlin-engine/src/ -c`
-- **Count**: 58 occurrences across 23 files (as of 2026-02-15)
+- **Count**: 49 occurrences across 24 files (as of 2026-03-12)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-02-15
+- **Last reviewed**: 2026-03-12
 
 ### 13. Ignored Rust Tests
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: 36 tests are marked `#[ignore]`. 16 are in tests/simulate.rs (tracked individually by GitHub issues: #345 EXCEPT+cross-dimension mapping [4 tests], #346 DELAY FIXED ring-buffer [4 tests], #347 GET DATA BETWEEN TIMES+implicit .dat loading [2 tests], #348 directdata/directconst/directlookups/directsubs [4 tests], #349 C-LEARN macro expansion [1 test], plus 1 basic EXCEPT test). 8 are in array_tests.rs (deferred array features: range operations, transpose, star-to-indexed subdimensions, bounds checking). 8 are in vdf.rs (VDF binary format tests). 2 are in json_sdai_proptest.rs (file system writes). 1 is in tests/mdl_equivalence.rs (tracked by item 1). 1 is in tests/mdl_roundtrip.rs.
+- **Description**: 23 tests are marked `#[ignore]`. 11 are in tests/simulate.rs (tracked individually by GitHub issues: #346 DELAY FIXED ring-buffer [4 tests], #347 GET DATA BETWEEN TIMES+implicit .dat loading [2 tests], #348 directdata/directconst/directlookups/directsubs [4 tests], #349 C-LEARN macro expansion [1 test]). 8 are in vdf.rs (VDF binary format tests). 2 are in json_sdai_proptest.rs (file system writes). 1 is in tests/mdl_equivalence.rs (tracked by item 1). 1 is in tests/mdl_roundtrip.rs. The close-array-gaps work enabled all 8 array_tests.rs tests plus 5 simulate.rs tests (#345 EXCEPT tests and the basic EXCEPT test).
 - **Measure**: `rg '#\[ignore\]' --type rust src/simlin-engine/ -c`
-- **Count**: 36 ignored tests across 6 files (as of 2026-02-27)
+- **Count**: 23 ignored tests across 5 files (as of 2026-03-12)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-02-27
+- **Last reviewed**: 2026-03-12
 
 ### 14. TypeScript Test Coverage Gaps
 
