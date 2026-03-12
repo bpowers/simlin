@@ -1426,6 +1426,13 @@ impl From<datamodel::Stock> for Stock {
                 }),
             ),
             datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                // Only serialize has_except_default when a default equation
+                // exists; the flag is meaningless without one.
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1447,7 +1454,7 @@ impl From<datamodel::Stock> for Stock {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
-                        has_except_default: if has_except_default { Some(true) } else { None },
+                        has_except_default: has_except_flag,
                     }),
                 )
             }
@@ -1491,6 +1498,11 @@ impl From<datamodel::Flow> for Flow {
                 }),
             ),
             datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1512,7 +1524,7 @@ impl From<datamodel::Flow> for Flow {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
-                        has_except_default: if has_except_default { Some(true) } else { None },
+                        has_except_default: has_except_flag,
                     }),
                 )
             }
@@ -1555,6 +1567,11 @@ impl From<datamodel::Aux> for Auxiliary {
                 }),
             ),
             datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1576,7 +1593,7 @@ impl From<datamodel::Aux> for Auxiliary {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
-                        has_except_default: if has_except_default { Some(true) } else { None },
+                        has_except_default: has_except_flag,
                     }),
                 )
             }
