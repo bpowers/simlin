@@ -52,6 +52,7 @@ message Variable {
     repeated string dimension_names = 1;
     repeated Element elements = 2;
     optional bool has_except_default = 3;
+    optional string default_equation = 4;
   };
 
   message Equation {
@@ -62,11 +63,26 @@ message Variable {
     }
   };
 
+  message DataSource {
+    enum Kind {
+      DATA = 0;
+      CONSTANTS = 1;
+      LOOKUPS = 2;
+      SUBSCRIPT = 3;
+    };
+    Kind kind = 1;
+    string file = 2;
+    string tab_or_delimiter = 3;
+    string row_or_col = 4;
+    string cell = 5;
+  };
+
   message Compat {
     optional string active_initial = 1;
     optional bool non_negative = 2;
     optional bool can_be_module_input = 3;
     optional Visibility visibility = 4;
+    optional DataSource data_source = 5;
   };
 
   message Stock {
@@ -321,6 +337,14 @@ message Dimension {
   message DimensionSize {
     uint32 size = 1;
   };
+  message DimensionMapping {
+    message ElementMapEntry {
+      string from_element = 1;
+      string to_element = 2;
+    };
+    string target = 1;
+    repeated ElementMapEntry entries = 2;
+  };
   string name = 1;
   repeated string obsolete_elements = 2;
   oneof dimension {
@@ -333,6 +357,7 @@ message Dimension {
   // A1<->B1, A2<->B2, A3<->B3. This is used when a variable indexed
   // by DimB references variables indexed by DimA.
   optional string maps_to = 5;
+  repeated DimensionMapping mappings = 6;
 };
 
 message Unit {

@@ -798,75 +798,7 @@ fn test_sim_specs_parsing() {
     assert_eq!(roundtripped, actual);
 }
 
-fn validate_for_xmile(project: &datamodel::Project) -> Result<()> {
-    use crate::common::{Error, ErrorCode, ErrorKind};
-    use datamodel::{Equation, Variable};
-
-    let unsupported = |detail: &str| -> Error {
-        Error::new(
-            ErrorKind::Model,
-            ErrorCode::UnsupportedForSerialization,
-            Some(detail.to_owned()),
-        )
-    };
-
-    for dim in &project.dimensions {
-        if dim.mappings.len() > 1 {
-            return Err(unsupported(&format!(
-                "dimension '{}': XMILE serialization does not support \
-                 multiple dimension mappings -- use sd.json for full fidelity",
-                dim.name
-            )));
-        }
-        for mapping in &dim.mappings {
-            if !mapping.element_map.is_empty() {
-                return Err(unsupported(&format!(
-                    "dimension '{}': XMILE serialization does not support \
-                     element-level dimension mappings -- use sd.json for full fidelity",
-                    dim.name
-                )));
-            }
-        }
-    }
-
-    for model in &project.models {
-        for var in &model.variables {
-            let (ident, eqn, compat) = match var {
-                Variable::Stock(s) => (&s.ident, &s.equation, &s.compat),
-                Variable::Flow(f) => (&f.ident, &f.equation, &f.compat),
-                Variable::Aux(a) => (&a.ident, &a.equation, &a.compat),
-                Variable::Module(m) => {
-                    if m.compat.data_source.is_some() {
-                        return Err(unsupported(&format!(
-                            "variable '{}': XMILE serialization does not support \
-                             DataSource metadata -- use sd.json for full fidelity",
-                            m.ident
-                        )));
-                    }
-                    continue;
-                }
-            };
-            if let Equation::Arrayed(_, _, Some(_), _) = eqn {
-                return Err(unsupported(&format!(
-                    "variable '{}': XMILE serialization does not support EXCEPT \
-                     (default_equation) in Equation::Arrayed -- use sd.json for full fidelity",
-                    ident
-                )));
-            }
-            if compat.data_source.is_some() {
-                return Err(unsupported(&format!(
-                    "variable '{}': XMILE serialization does not support \
-                     DataSource metadata -- use sd.json for full fidelity",
-                    ident
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
-    validate_for_xmile(project)?;
     let file: File = project.clone().into();
 
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
@@ -905,8 +837,9 @@ pub fn convert_file_to_project(file: File) -> datamodel::Project {
 }
 
 #[test]
-fn test_xmile_rejects_except_equation() {
+fn test_xmile_roundtrips_except_equation() {
     use crate::datamodel::{Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
+    use std::io::BufReader;
 
     let project = datamodel::Project {
         name: "test".to_string(),
@@ -945,19 +878,28 @@ fn test_xmile_rejects_except_equation() {
         source: Default::default(),
         ai_information: None,
     };
-    let result = project_to_xmile(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
-    assert!(err.details.unwrap().contains("EXCEPT"));
+    let xml = project_to_xmile(&project).unwrap();
+    let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+    let var = &roundtripped.models[0].variables[0];
+    if let Variable::Aux(aux) = var {
+        match &aux.equation {
+            Equation::Arrayed(dims, elements, default_eq, _) => {
+                assert_eq!(dims, &["dim_a"]);
+                assert_eq!(elements[0].0, "a1");
+                assert_eq!(elements[0].1, "10");
+                assert_eq!(default_eq.as_deref(), Some("default_eq"));
+            }
+            other => panic!("expected Arrayed equation, got {:?}", other),
+        }
+    } else {
+        panic!("expected Aux variable");
+    }
 }
 
 #[test]
-fn test_xmile_rejects_element_level_dimension_mapping() {
+fn test_xmile_roundtrips_element_level_dimension_mapping() {
     use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+    use std::io::BufReader;
 
     let project = datamodel::Project {
         name: "test".to_string(),
@@ -992,19 +934,27 @@ fn test_xmile_rejects_element_level_dimension_mapping() {
         source: Default::default(),
         ai_information: None,
     };
-    let result = project_to_xmile(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let xml = project_to_xmile(&project).unwrap();
+    let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+    let dim = &roundtripped.dimensions[0];
+    assert_eq!(dim.name, "dim_a");
+    assert_eq!(dim.mappings.len(), 1);
+    assert_eq!(dim.mappings[0].target, "dim_b");
+    assert_eq!(dim.mappings[0].element_map.len(), 2);
     assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
+        dim.mappings[0].element_map[0],
+        ("a1".to_string(), "b2".to_string())
     );
-    assert!(err.details.unwrap().contains("element-level"));
+    assert_eq!(
+        dim.mappings[0].element_map[1],
+        ("a2".to_string(), "b1".to_string())
+    );
 }
 
 #[test]
-fn test_xmile_rejects_multi_target_positional_mapping() {
+fn test_xmile_roundtrips_multi_target_mappings() {
     use crate::datamodel::{DimensionElements, DimensionMapping, Dt, SimMethod, SimSpecs};
+    use std::io::BufReader;
 
     let project = datamodel::Project {
         name: "test".to_string(),
@@ -1042,20 +992,23 @@ fn test_xmile_rejects_multi_target_positional_mapping() {
         source: Default::default(),
         ai_information: None,
     };
-    let result = project_to_xmile(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
+    let xml = project_to_xmile(&project).unwrap();
+    let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+    let dim = &roundtripped.dimensions[0];
+    assert_eq!(dim.name, "dim_a");
+    assert_eq!(dim.mappings.len(), 2);
+    assert_eq!(dim.mappings[0].target, "dim_b");
+    assert!(dim.mappings[0].element_map.is_empty());
+    assert_eq!(dim.mappings[1].target, "dim_c");
+    assert!(dim.mappings[1].element_map.is_empty());
 }
 
 #[test]
-fn test_xmile_rejects_data_source() {
+fn test_xmile_roundtrips_data_source() {
     use crate::datamodel::{
         Aux, Compat, DataSource, DataSourceKind, Dt, Equation, SimMethod, SimSpecs, Variable,
     };
+    use std::io::BufReader;
 
     let project = datamodel::Project {
         name: "test".to_string(),
@@ -1098,12 +1051,21 @@ fn test_xmile_rejects_data_source() {
         source: Default::default(),
         ai_information: None,
     };
-    let result = project_to_xmile(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
-    assert!(err.details.unwrap().contains("DataSource"));
+    let xml = project_to_xmile(&project).unwrap();
+    let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+    let var = &roundtripped.models[0].variables[0];
+    if let Variable::Aux(aux) = var {
+        let ds = aux
+            .compat
+            .data_source
+            .as_ref()
+            .expect("expected data_source");
+        assert_eq!(ds.kind, DataSourceKind::Data);
+        assert_eq!(ds.file, "test.xlsx");
+        assert_eq!(ds.tab_or_delimiter, "Sheet1");
+        assert_eq!(ds.row_or_col, "A");
+        assert_eq!(ds.cell, "B2");
+    } else {
+        panic!("expected Aux variable");
+    }
 }

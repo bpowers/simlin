@@ -4,12 +4,12 @@
 
 use float_cmp::approx_eq;
 
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
+use crate::common::Result;
 use crate::datamodel::{
-    Aux, Compat, Dimension, DimensionElements, Dt, Equation, Extension, Flow, GraphicalFunction,
-    GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, Model, ModelGroup, Module,
-    ModuleReference, Project, Rect, SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable,
-    View, ViewElement, Visibility, view_element,
+    Aux, Compat, DataSource, DataSourceKind, Dimension, DimensionElements, DimensionMapping, Dt,
+    Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+    LoopMetadata, Model, ModelGroup, Module, ModuleReference, Project, Rect, SimMethod, SimSpecs,
+    Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
 };
 use crate::project_io;
 
@@ -273,6 +273,87 @@ fn test_graphical_function_roundtrip() {
     }
 }
 
+fn data_source_to_proto(ds: &DataSource) -> project_io::variable::DataSource {
+    let kind = match ds.kind {
+        DataSourceKind::Data => project_io::variable::data_source::Kind::Data,
+        DataSourceKind::Constants => project_io::variable::data_source::Kind::Constants,
+        DataSourceKind::Lookups => project_io::variable::data_source::Kind::Lookups,
+        DataSourceKind::Subscript => project_io::variable::data_source::Kind::Subscript,
+    };
+    project_io::variable::DataSource {
+        kind: kind as i32,
+        file: ds.file.clone(),
+        tab_or_delimiter: ds.tab_or_delimiter.clone(),
+        row_or_col: ds.row_or_col.clone(),
+        cell: ds.cell.clone(),
+    }
+}
+
+fn data_source_from_proto(ds: project_io::variable::DataSource) -> DataSource {
+    let kind = match project_io::variable::data_source::Kind::try_from(ds.kind) {
+        Ok(project_io::variable::data_source::Kind::Data) => DataSourceKind::Data,
+        Ok(project_io::variable::data_source::Kind::Constants) => DataSourceKind::Constants,
+        Ok(project_io::variable::data_source::Kind::Lookups) => DataSourceKind::Lookups,
+        Ok(project_io::variable::data_source::Kind::Subscript) => DataSourceKind::Subscript,
+        Err(_) => DataSourceKind::Data,
+    };
+    DataSource {
+        kind,
+        file: ds.file,
+        tab_or_delimiter: ds.tab_or_delimiter,
+        row_or_col: ds.row_or_col,
+        cell: ds.cell,
+    }
+}
+
+fn compat_to_proto(compat: &Compat) -> Option<project_io::variable::Compat> {
+    if compat.is_empty() {
+        return None;
+    }
+    Some(project_io::variable::Compat {
+        active_initial: compat.active_initial.clone(),
+        non_negative: Some(compat.non_negative),
+        can_be_module_input: Some(compat.can_be_module_input),
+        visibility: Some(project_io::variable::Visibility::from(compat.visibility) as i32),
+        data_source: compat.data_source.as_ref().map(data_source_to_proto),
+    })
+}
+
+fn compat_from_proto(
+    proto_compat: Option<project_io::variable::Compat>,
+    legacy_ai: Option<String>,
+    legacy_nn: bool,
+    legacy_cbmi: bool,
+    legacy_vis: i32,
+) -> Compat {
+    match proto_compat {
+        Some(c) => Compat {
+            active_initial: c.active_initial.or(legacy_ai),
+            non_negative: c.non_negative.unwrap_or(legacy_nn),
+            can_be_module_input: c.can_be_module_input.unwrap_or(legacy_cbmi),
+            visibility: c
+                .visibility
+                .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
+                .map(Visibility::from)
+                .unwrap_or_else(|| {
+                    Visibility::from(
+                        project_io::variable::Visibility::try_from(legacy_vis).unwrap_or_default(),
+                    )
+                }),
+            data_source: c.data_source.map(data_source_from_proto),
+        },
+        None => Compat {
+            active_initial: legacy_ai,
+            non_negative: legacy_nn,
+            can_be_module_input: legacy_cbmi,
+            visibility: Visibility::from(
+                project_io::variable::Visibility::try_from(legacy_vis).unwrap_or_default(),
+            ),
+            data_source: None,
+        },
+    }
+}
+
 impl From<Equation> for project_io::variable::Equation {
     fn from(eqn: Equation) -> Self {
         project_io::variable::Equation {
@@ -292,7 +373,7 @@ impl From<Equation> for project_io::variable::Equation {
                         },
                     )
                 }
-                Equation::Arrayed(dimension_names, elements, _default_eq, has_except_default) => {
+                Equation::Arrayed(dimension_names, elements, default_eq, has_except_default) => {
                     project_io::variable::equation::Equation::Arrayed(
                         project_io::variable::ArrayedEquation {
                             dimension_names,
@@ -308,6 +389,7 @@ impl From<Equation> for project_io::variable::Equation {
                                 })
                                 .collect(),
                             has_except_default: if has_except_default { Some(true) } else { None },
+                            default_equation: default_eq,
                         },
                     )
                 }
@@ -349,7 +431,7 @@ impl From<project_io::variable::Equation> for Equation {
                         )
                     })
                     .collect(),
-                None,
+                arrayed.default_equation,
                 arrayed.has_except_default.unwrap_or(false),
             ),
         }
@@ -415,6 +497,7 @@ fn test_has_except_default_absent_defaults_to_false() {
                     gf: None,
                 }],
                 has_except_default: None,
+                default_equation: None,
             },
         )),
     };
@@ -481,18 +564,7 @@ fn test_visibility_roundtrip() {
 
 impl From<Stock> for project_io::variable::Stock {
     fn from(stock: Stock) -> Self {
-        let compat = if stock.compat.is_empty() {
-            None
-        } else {
-            Some(project_io::variable::Compat {
-                active_initial: stock.compat.active_initial,
-                non_negative: Some(stock.compat.non_negative),
-                can_be_module_input: Some(stock.compat.can_be_module_input),
-                visibility: Some(
-                    project_io::variable::Visibility::from(stock.compat.visibility) as i32,
-                ),
-            })
-        };
+        let compat = compat_to_proto(&stock.compat);
         project_io::variable::Stock {
             ident: stock.ident,
             equation: Some(stock.equation.into()),
@@ -515,31 +587,13 @@ impl From<project_io::variable::Stock> for Stock {
             .equation
             .as_ref()
             .and_then(extract_legacy_initial_equation);
-        let (compat_ai, compat_nn, compat_cbmi, compat_vis) = match stock.compat {
-            Some(c) => (
-                c.active_initial.or(legacy_ai),
-                c.non_negative.unwrap_or(stock.non_negative),
-                c.can_be_module_input.unwrap_or(stock.can_be_module_input),
-                c.visibility
-                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
-                    .map(Visibility::from)
-                    .unwrap_or_else(|| {
-                        Visibility::from(
-                            project_io::variable::Visibility::try_from(stock.visibility)
-                                .unwrap_or_default(),
-                        )
-                    }),
-            ),
-            None => (
-                legacy_ai,
-                stock.non_negative,
-                stock.can_be_module_input,
-                Visibility::from(
-                    project_io::variable::Visibility::try_from(stock.visibility)
-                        .unwrap_or_default(),
-                ),
-            ),
-        };
+        let compat = compat_from_proto(
+            stock.compat,
+            legacy_ai,
+            stock.non_negative,
+            stock.can_be_module_input,
+            stock.visibility,
+        );
         Stock {
             ident: stock.ident,
             equation: stock.equation.unwrap().into(),
@@ -551,13 +605,7 @@ impl From<project_io::variable::Stock> for Stock {
             },
             inflows: stock.inflows,
             outflows: stock.outflows,
-            compat: Compat {
-                active_initial: compat_ai,
-                non_negative: compat_nn,
-                can_be_module_input: compat_cbmi,
-                visibility: compat_vis,
-                ..Default::default()
-            },
+            compat,
             ai_state: None,
             uid: if stock.uid == 0 {
                 None
@@ -662,18 +710,7 @@ fn test_stock_proto_legacy_only_deserialization() {
 
 impl From<Flow> for project_io::variable::Flow {
     fn from(flow: Flow) -> Self {
-        let compat = if flow.compat.is_empty() {
-            None
-        } else {
-            Some(project_io::variable::Compat {
-                active_initial: flow.compat.active_initial,
-                non_negative: Some(flow.compat.non_negative),
-                can_be_module_input: Some(flow.compat.can_be_module_input),
-                visibility: Some(
-                    project_io::variable::Visibility::from(flow.compat.visibility) as i32,
-                ),
-            })
-        };
+        let compat = compat_to_proto(&flow.compat);
         project_io::variable::Flow {
             ident: flow.ident,
             equation: Some(flow.equation.into()),
@@ -695,30 +732,13 @@ impl From<project_io::variable::Flow> for Flow {
             .equation
             .as_ref()
             .and_then(extract_legacy_initial_equation);
-        let (compat_ai, compat_nn, compat_cbmi, compat_vis) = match flow.compat {
-            Some(c) => (
-                c.active_initial.or(legacy_ai),
-                c.non_negative.unwrap_or(flow.non_negative),
-                c.can_be_module_input.unwrap_or(flow.can_be_module_input),
-                c.visibility
-                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
-                    .map(Visibility::from)
-                    .unwrap_or_else(|| {
-                        Visibility::from(
-                            project_io::variable::Visibility::try_from(flow.visibility)
-                                .unwrap_or_default(),
-                        )
-                    }),
-            ),
-            None => (
-                legacy_ai,
-                flow.non_negative,
-                flow.can_be_module_input,
-                Visibility::from(
-                    project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
-                ),
-            ),
-        };
+        let compat = compat_from_proto(
+            flow.compat,
+            legacy_ai,
+            flow.non_negative,
+            flow.can_be_module_input,
+            flow.visibility,
+        );
         Flow {
             ident: flow.ident,
             equation: flow.equation.unwrap().into(),
@@ -729,13 +749,7 @@ impl From<project_io::variable::Flow> for Flow {
                 Some(flow.units)
             },
             gf: flow.gf.map(GraphicalFunction::from),
-            compat: Compat {
-                active_initial: compat_ai,
-                non_negative: compat_nn,
-                can_be_module_input: compat_cbmi,
-                visibility: compat_vis,
-                ..Default::default()
-            },
+            compat,
             ai_state: None,
             uid: if flow.uid == 0 { None } else { Some(flow.uid) },
         }
@@ -794,18 +808,7 @@ fn test_flow_roundtrip() {
 
 impl From<Aux> for project_io::variable::Aux {
     fn from(aux: Aux) -> Self {
-        let compat = if aux.compat.is_empty() {
-            None
-        } else {
-            Some(project_io::variable::Compat {
-                active_initial: aux.compat.active_initial,
-                non_negative: None,
-                can_be_module_input: Some(aux.compat.can_be_module_input),
-                visibility: Some(
-                    project_io::variable::Visibility::from(aux.compat.visibility) as i32,
-                ),
-            })
-        };
+        let compat = compat_to_proto(&aux.compat);
         project_io::variable::Aux {
             ident: aux.ident,
             equation: Some(aux.equation.into()),
@@ -826,28 +829,13 @@ impl From<project_io::variable::Aux> for Aux {
             .equation
             .as_ref()
             .and_then(extract_legacy_initial_equation);
-        let (compat_ai, compat_cbmi, compat_vis) = match aux.compat {
-            Some(c) => (
-                c.active_initial.or(legacy_ai),
-                c.can_be_module_input.unwrap_or(aux.can_be_module_input),
-                c.visibility
-                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
-                    .map(Visibility::from)
-                    .unwrap_or_else(|| {
-                        Visibility::from(
-                            project_io::variable::Visibility::try_from(aux.visibility)
-                                .unwrap_or_default(),
-                        )
-                    }),
-            ),
-            None => (
-                legacy_ai,
-                aux.can_be_module_input,
-                Visibility::from(
-                    project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
-                ),
-            ),
-        };
+        let compat = compat_from_proto(
+            aux.compat,
+            legacy_ai,
+            false,
+            aux.can_be_module_input,
+            aux.visibility,
+        );
         Aux {
             ident: aux.ident,
             equation: aux.equation.unwrap().into(),
@@ -858,12 +846,7 @@ impl From<project_io::variable::Aux> for Aux {
                 Some(aux.units)
             },
             gf: aux.gf.map(GraphicalFunction::from),
-            compat: Compat {
-                active_initial: compat_ai,
-                can_be_module_input: compat_cbmi,
-                visibility: compat_vis,
-                ..Default::default()
-            },
+            compat,
             ai_state: None,
             uid: if aux.uid == 0 { None } else { Some(aux.uid) },
         }
@@ -955,18 +938,7 @@ fn test_module_reference_roundtrip() {
 
 impl From<Module> for project_io::variable::Module {
     fn from(module: Module) -> Self {
-        let compat = if module.compat.is_empty() {
-            None
-        } else {
-            Some(project_io::variable::Compat {
-                active_initial: None,
-                non_negative: None,
-                can_be_module_input: Some(module.compat.can_be_module_input),
-                visibility: Some(
-                    project_io::variable::Visibility::from(module.compat.visibility) as i32,
-                ),
-            })
-        };
+        let compat = compat_to_proto(&module.compat);
         project_io::variable::Module {
             ident: module.ident,
             model_name: module.model_name,
@@ -987,27 +959,13 @@ impl From<Module> for project_io::variable::Module {
 
 impl From<project_io::variable::Module> for Module {
     fn from(module: project_io::variable::Module) -> Self {
-        let (cbmi, vis) = match module.compat {
-            Some(c) => (
-                c.can_be_module_input.unwrap_or(module.can_be_module_input),
-                c.visibility
-                    .and_then(|v| project_io::variable::Visibility::try_from(v).ok())
-                    .map(Visibility::from)
-                    .unwrap_or_else(|| {
-                        Visibility::from(
-                            project_io::variable::Visibility::try_from(module.visibility)
-                                .unwrap_or_default(),
-                        )
-                    }),
-            ),
-            None => (
-                module.can_be_module_input,
-                Visibility::from(
-                    project_io::variable::Visibility::try_from(module.visibility)
-                        .unwrap_or_default(),
-                ),
-            ),
-        };
+        let compat = compat_from_proto(
+            module.compat,
+            None,
+            false,
+            module.can_be_module_input,
+            module.visibility,
+        );
         Module {
             ident: module.ident,
             model_name: module.model_name,
@@ -1028,11 +986,7 @@ impl From<project_io::variable::Module> for Module {
             } else {
                 Some(module.uid)
             },
-            compat: Compat {
-                can_be_module_input: cbmi,
-                visibility: vis,
-                ..Default::default()
-            },
+            compat,
         }
     }
 }
@@ -2118,7 +2072,25 @@ fn test_model_with_groups_roundtrip() {
 
 impl From<Dimension> for project_io::Dimension {
     fn from(dimension: Dimension) -> Self {
+        // Keep maps_to for backward compat with simple positional mappings
         let maps_to = dimension.maps_to().map(|s| s.to_owned());
+        let mappings = dimension
+            .mappings
+            .iter()
+            .map(|m| project_io::dimension::DimensionMapping {
+                target: m.target.clone(),
+                entries: m
+                    .element_map
+                    .iter()
+                    .map(
+                        |(from, to)| project_io::dimension::dimension_mapping::ElementMapEntry {
+                            from_element: from.clone(),
+                            to_element: to.clone(),
+                        },
+                    )
+                    .collect(),
+            })
+            .collect();
         let dim = match dimension.elements {
             DimensionElements::Indexed(size) => {
                 project_io::dimension::Dimension::Size(project_io::dimension::DimensionSize {
@@ -2134,6 +2106,7 @@ impl From<Dimension> for project_io::Dimension {
             obsolete_elements: vec![],
             dimension: Some(dim),
             maps_to,
+            mappings,
         }
     }
 }
@@ -2153,15 +2126,36 @@ impl From<project_io::Dimension> for Dimension {
             // originally we ignored dimensions with only indexes -- treat that as a fallback
             DimensionElements::Named(dimension.obsolete_elements)
         };
-        let mut result = Dimension {
+
+        // Prefer the new `mappings` repeated field; fall back to the legacy
+        // `maps_to` scalar for backward compatibility with old protos.
+        let mappings = if !dimension.mappings.is_empty() {
+            dimension
+                .mappings
+                .into_iter()
+                .map(|m| DimensionMapping {
+                    target: m.target,
+                    element_map: m
+                        .entries
+                        .into_iter()
+                        .map(|e| (e.from_element, e.to_element))
+                        .collect(),
+                })
+                .collect()
+        } else if let Some(target) = dimension.maps_to {
+            vec![DimensionMapping {
+                target,
+                element_map: vec![],
+            }]
+        } else {
+            vec![]
+        };
+
+        Dimension {
             name: dimension.name,
             elements,
-            mappings: vec![],
-        };
-        if let Some(target) = dimension.maps_to {
-            result.set_maps_to(target);
+            mappings,
         }
-        result
     }
 }
 
@@ -2274,86 +2268,7 @@ impl From<project_io::Project> for Project {
     }
 }
 
-fn unsupported_err(detail: &str) -> Error {
-    Error::new(
-        ErrorKind::Model,
-        ErrorCode::UnsupportedForSerialization,
-        Some(detail.to_owned()),
-    )
-}
-
-fn validate_equation_for_protobuf(var_ident: &str, eqn: &Equation) -> Result<()> {
-    if let Equation::Arrayed(_, _, Some(_), _) = eqn {
-        return Err(unsupported_err(&format!(
-            "variable '{}': protobuf serialization does not support EXCEPT \
-             (default_equation) in Equation::Arrayed -- use sd.json for full fidelity",
-            var_ident
-        )));
-    }
-    Ok(())
-}
-
-fn validate_compat_for_protobuf(var_ident: &str, compat: &Compat) -> Result<()> {
-    if compat.data_source.is_some() {
-        return Err(unsupported_err(&format!(
-            "variable '{}': protobuf serialization does not support DataSource \
-             metadata -- use sd.json for full fidelity",
-            var_ident
-        )));
-    }
-    Ok(())
-}
-
-fn validate_dimension_for_protobuf(dim: &Dimension) -> Result<()> {
-    if dim.mappings.len() > 1 {
-        return Err(unsupported_err(&format!(
-            "dimension '{}': protobuf serialization does not support \
-             multiple dimension mappings -- use sd.json for full fidelity",
-            dim.name
-        )));
-    }
-    for mapping in &dim.mappings {
-        if !mapping.element_map.is_empty() {
-            return Err(unsupported_err(&format!(
-                "dimension '{}': protobuf serialization does not support \
-                 element-level dimension mappings -- use sd.json for full fidelity",
-                dim.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_for_protobuf(project: &Project) -> Result<()> {
-    for dim in &project.dimensions {
-        validate_dimension_for_protobuf(dim)?;
-    }
-    for model in &project.models {
-        for var in &model.variables {
-            match var {
-                Variable::Stock(s) => {
-                    validate_equation_for_protobuf(&s.ident, &s.equation)?;
-                    validate_compat_for_protobuf(&s.ident, &s.compat)?;
-                }
-                Variable::Flow(f) => {
-                    validate_equation_for_protobuf(&f.ident, &f.equation)?;
-                    validate_compat_for_protobuf(&f.ident, &f.compat)?;
-                }
-                Variable::Aux(a) => {
-                    validate_equation_for_protobuf(&a.ident, &a.equation)?;
-                    validate_compat_for_protobuf(&a.ident, &a.compat)?;
-                }
-                Variable::Module(m) => {
-                    validate_compat_for_protobuf(&m.ident, &m.compat)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn serialize(project: &Project) -> Result<project_io::Project> {
-    validate_for_protobuf(project)?;
     Ok(project_io::Project::from(project.clone()))
 }
 
@@ -2398,7 +2313,7 @@ fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Pr
 }
 
 #[test]
-fn test_protobuf_rejects_except_equation() {
+fn test_protobuf_roundtrips_except_equation() {
     let project = make_test_project(
         vec![Variable::Aux(Aux {
             ident: "test_var".to_string(),
@@ -2417,24 +2332,19 @@ fn test_protobuf_rejects_except_equation() {
         })],
         vec![],
     );
-    let result = serialize(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
-    assert!(err.details.unwrap().contains("EXCEPT"));
+    let pb = serialize(&project).unwrap();
+    let roundtripped = deserialize(pb);
+    assert_eq!(project, roundtripped);
 }
 
 #[test]
-fn test_protobuf_rejects_element_level_dimension_mapping() {
+fn test_protobuf_roundtrips_element_level_dimension_mapping() {
     let project = make_test_project(
         vec![],
         vec![Dimension {
             name: "dim_a".to_string(),
             elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
-            mappings: vec![crate::datamodel::DimensionMapping {
+            mappings: vec![DimensionMapping {
                 target: "dim_b".to_string(),
                 element_map: vec![
                     ("a1".to_string(), "b2".to_string()),
@@ -2443,18 +2353,13 @@ fn test_protobuf_rejects_element_level_dimension_mapping() {
             }],
         }],
     );
-    let result = serialize(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
-    assert!(err.details.unwrap().contains("element-level"));
+    let pb = serialize(&project).unwrap();
+    let roundtripped = deserialize(pb);
+    assert_eq!(project, roundtripped);
 }
 
 #[test]
-fn test_protobuf_rejects_data_source() {
+fn test_protobuf_roundtrips_data_source() {
     let project = make_test_project(
         vec![Variable::Aux(Aux {
             ident: "data_var".to_string(),
@@ -2463,8 +2368,8 @@ fn test_protobuf_rejects_data_source() {
             units: None,
             gf: None,
             compat: Compat {
-                data_source: Some(crate::datamodel::DataSource {
-                    kind: crate::datamodel::DataSourceKind::Data,
+                data_source: Some(DataSource {
+                    kind: DataSourceKind::Data,
                     file: "test.xlsx".to_string(),
                     tab_or_delimiter: "Sheet1".to_string(),
                     row_or_col: "A".to_string(),
@@ -2477,59 +2382,108 @@ fn test_protobuf_rejects_data_source() {
         })],
         vec![],
     );
-    let result = serialize(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
-    assert!(err.details.unwrap().contains("DataSource"));
+    let pb = serialize(&project).unwrap();
+    let roundtripped = deserialize(pb);
+    assert_eq!(project, roundtripped);
 }
 
 #[test]
-fn test_protobuf_accepts_simple_dimension_mapping() {
+fn test_protobuf_roundtrips_simple_dimension_mapping() {
     let project = make_test_project(
         vec![],
         vec![Dimension {
             name: "dim_a".to_string(),
             elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
-            mappings: vec![crate::datamodel::DimensionMapping {
+            mappings: vec![DimensionMapping {
                 target: "dim_b".to_string(),
                 element_map: vec![],
             }],
         }],
     );
-    let result = serialize(&project);
-    assert!(result.is_ok());
+    let pb = serialize(&project).unwrap();
+    let roundtripped = deserialize(pb);
+    assert_eq!(project, roundtripped);
 }
 
 #[test]
-fn test_protobuf_rejects_multi_target_positional_mappings() {
+fn test_protobuf_roundtrips_multi_target_mappings() {
     let project = make_test_project(
         vec![],
         vec![Dimension {
             name: "dim_a".to_string(),
             elements: DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
             mappings: vec![
-                crate::datamodel::DimensionMapping {
+                DimensionMapping {
                     target: "dim_b".to_string(),
                     element_map: vec![],
                 },
-                crate::datamodel::DimensionMapping {
+                DimensionMapping {
                     target: "dim_c".to_string(),
                     element_map: vec![],
                 },
             ],
         }],
     );
-    let result = serialize(&project);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(
-        err.code,
-        crate::common::ErrorCode::UnsupportedForSerialization
-    );
+    let pb = serialize(&project).unwrap();
+    let roundtripped = deserialize(pb);
+    assert_eq!(project, roundtripped);
+}
+
+#[test]
+fn test_protobuf_backward_compat_old_protos() {
+    // Simulate an old proto without the new fields -- they should default correctly.
+    let proto = project_io::variable::Equation {
+        equation: Some(project_io::variable::equation::Equation::Arrayed(
+            project_io::variable::ArrayedEquation {
+                dimension_names: vec!["dim_a".to_string()],
+                elements: vec![project_io::variable::arrayed_equation::Element {
+                    subscript: "a1".to_string(),
+                    equation: "5".to_string(),
+                    initial_equation: None,
+                    gf: None,
+                }],
+                has_except_default: None,
+                default_equation: None,
+            },
+        )),
+    };
+    let eq = Equation::from(proto);
+    match eq {
+        Equation::Arrayed(_, _, default_eq, has_except) => {
+            assert_eq!(default_eq, None);
+            assert!(!has_except);
+        }
+        _ => panic!("expected Arrayed"),
+    }
+
+    // Old Compat without data_source
+    let old_compat = project_io::variable::Compat {
+        active_initial: Some("init".to_string()),
+        non_negative: Some(true),
+        can_be_module_input: Some(false),
+        visibility: Some(0),
+        data_source: None,
+    };
+    let compat = compat_from_proto(Some(old_compat), None, false, false, 0);
+    assert_eq!(compat.data_source, None);
+    assert_eq!(compat.active_initial, Some("init".to_string()));
+
+    // Old Dimension with maps_to but no mappings
+    let old_dim = project_io::Dimension {
+        name: "dim_a".to_string(),
+        obsolete_elements: vec![],
+        maps_to: Some("dim_b".to_string()),
+        mappings: vec![],
+        dimension: Some(project_io::dimension::Dimension::Elements(
+            project_io::dimension::DimensionElements {
+                elements: vec!["a1".to_string(), "a2".to_string()],
+            },
+        )),
+    };
+    let dim = Dimension::from(old_dim);
+    assert_eq!(dim.mappings.len(), 1);
+    assert_eq!(dim.mappings[0].target, "dim_b");
+    assert!(dim.mappings[0].element_map.is_empty());
 }
 
 #[test]
