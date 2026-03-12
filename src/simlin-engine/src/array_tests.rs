@@ -1377,18 +1377,26 @@ mod range_tests {
     #[test]
     #[ignore]
     fn range_with_expressions() {
-        // Test range with expressions [start:end]
-        TestProject::new("range_expr")
+        // Test range with dynamic variable bounds [start:end].
+        // data[start:end] selects elements 2..5 (1-based), producing a
+        // 4-element view.  Assigned to a 10-element target, the first 4
+        // elements are 1.0 and the remaining 6 are NaN.
+        let project = TestProject::new("range_expr")
             .indexed_dimension("Index", 10)
             .scalar_const("start", 2.0)
             .scalar_const("end", 5.0)
             .array_const("data[Index]", 1.0)
-            .array_aux("slice[Index]", "data[start:end]")
-            // TODO: zero extend
-            .assert_interpreter_result(
-                "slice",
-                &[2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
-            );
+            .array_aux("slice[Index]", "data[start:end]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let result = project.interpreter_result("slice");
+        for (i, &val) in result.iter().enumerate().take(4) {
+            assert_eq!(val, 1.0, "Element {} should be 1.0, got {}", i, val);
+        }
+        for (i, &val) in result.iter().enumerate().take(10).skip(4) {
+            assert!(val.is_nan(), "Element {} should be NaN, got {}", i, val);
+        }
     }
 }
 

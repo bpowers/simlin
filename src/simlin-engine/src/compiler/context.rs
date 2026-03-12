@@ -1775,8 +1775,78 @@ impl Context<'_> {
                     }
                 }
 
-                // Fall back to dynamic subscript handling for Expr3
-                // This handles cases where normalize_subscripts3 returned None
+                // Fall back to dynamic subscript handling for Expr3.
+                // This handles cases where normalize_subscripts3 returned None.
+                //
+                // In A2A context with dynamic Range subscripts (e.g. data[start:end]
+                // where start/end are variables), the Range can't be used as a scalar
+                // subscript. Instead, resolve to a conditional per-element access:
+                // if the current element position is within [start, end], load the
+                // element; otherwise produce NaN.
+                let has_dynamic_range = indices
+                    .iter()
+                    .any(|idx| matches!(idx, IndexExpr3::Range(..)));
+
+                if has_dynamic_range
+                    && indices.len() == 1
+                    && dims.len() == 1
+                    && let Some(active_subscripts) = &self.active_subscript
+                    && let Some(active_dims) = &self.active_dimension
+                {
+                    // Determine the current element's 1-based position
+                    let dim = &dims[0];
+                    let target_dim = &active_dims[0];
+                    let subscript = &active_subscripts[0];
+                    let elem_pos_1based = if dim.name() == target_dim.name() {
+                        Self::subscript_to_index(dim, subscript)
+                    } else {
+                        Self::subscript_to_index(target_dim, subscript)
+                    };
+
+                    if let IndexExpr3::Range(start_expr, end_expr, _) = &indices[0] {
+                        let start_lowered = self.lower_from_expr3(start_expr)?;
+                        let end_lowered = self.lower_from_expr3(end_expr)?;
+
+                        // P is the 1-based position of the current target element.
+                        // i = P - 1 is the 0-based target index.
+                        // Range [start:end] selects source positions start..end (1-based).
+                        // range_view[i] = data[start + i] (1-based).
+                        // Valid when i < end - start + 1, i.e., start + i <= end.
+                        let i_0based = elem_pos_1based - 1.0;
+
+                        // Computed 1-based index into the source: start + i
+                        let computed_index = Expr::Op2(
+                            BinaryOp::Add,
+                            Box::new(start_lowered.clone()),
+                            Box::new(Expr::Const(i_0based, *loc)),
+                            *loc,
+                        );
+                        // Bounds check: start + i <= end
+                        let in_bounds = Expr::Op2(
+                            BinaryOp::Lte,
+                            Box::new(computed_index.clone()),
+                            Box::new(end_lowered),
+                            *loc,
+                        );
+
+                        // Load the element via dynamic single subscript
+                        let load_elem = Expr::Subscript(
+                            off,
+                            vec![SubscriptIndex::Single(computed_index)],
+                            vec![dims[0].len()],
+                            *loc,
+                        );
+                        let nan_val = Expr::Const(f64::NAN, *loc);
+
+                        return Ok(Expr::If(
+                            Box::new(in_bounds),
+                            Box::new(load_elem),
+                            Box::new(nan_val),
+                            *loc,
+                        ));
+                    }
+                }
+
                 let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                 let args: Result<Vec<_>> = indices
                     .iter()
