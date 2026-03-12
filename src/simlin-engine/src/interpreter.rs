@@ -2906,3 +2906,123 @@ mod compile_project_tests {
         assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
     }
 }
+
+/// Tests for interpreter empty-view behavior on array reducers.
+///
+/// Zero-element dimensions cannot currently arise through the model compilation
+/// pipeline, so these tests construct ModuleEvaluator directly using a real
+/// minimal Simulation (for valid module/sim references) with a synthetic
+/// StaticSubscript expression whose ArrayView has dims=[0].  The early-exit
+/// guards in array_mean, array_stddev, Min, and Max are the code paths under
+/// test; they all return before accessing curr/next, so the dummy buffer is
+/// never read.
+#[cfg(test)]
+mod interpreter_empty_view_tests {
+    use std::sync::Arc;
+
+    use crate::ast::{ArrayView, Loc};
+    use crate::compiler::{BuiltinFn, Expr};
+    use crate::test_common::TestProject;
+    use crate::vm::StepPart;
+
+    /// Build the smallest valid Simulation we can make (one scalar aux).
+    fn make_minimal_sim() -> (Arc<crate::project::Project>, super::Simulation) {
+        let tp = TestProject::new("interp_empty_view")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("x", "1", None);
+        let project = Arc::new(crate::project::Project::from(tp.build_datamodel()));
+        let sim = super::Simulation::new(&project, "main").expect("minimal project should compile");
+        (project, sim)
+    }
+
+    /// Create a StaticSubscript expression whose ArrayView has zero total elements.
+    fn empty_static_subscript() -> Expr {
+        Expr::StaticSubscript(0, ArrayView::contiguous(vec![0]), Loc::default())
+    }
+
+    #[test]
+    fn array_mean_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        assert!(eval.array_mean(&expr).is_nan());
+    }
+
+    #[test]
+    fn array_stddev_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        assert!(eval.array_stddev(&expr).is_nan());
+    }
+
+    #[test]
+    fn min_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        // Single-argument Min -- array reduce path
+        let result = eval.eval(&Expr::App(
+            BuiltinFn::Min(Box::new(expr), None),
+            Loc::default(),
+        ));
+        assert!(result.is_nan());
+    }
+
+    #[test]
+    fn max_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        // Single-argument Max -- array reduce path
+        let result = eval.eval(&Expr::App(
+            BuiltinFn::Max(Box::new(expr), None),
+            Loc::default(),
+        ));
+        assert!(result.is_nan());
+    }
+}

@@ -5695,20 +5695,43 @@ mod empty_view_reduce_tests {
     }
 
     // -- MEAN: opcode guard should return NaN for size==0 (AC2.1) --
+    //
+    // reduce_view returns the accumulator's init value for empty views (0.0 for sum).
+    // Without the guard, the ArrayMean opcode would compute 0.0 / 0.0, which is NaN
+    // by IEEE 754. The explicit guard makes the intent clear and is consistent with the
+    // other reducers that have non-obvious implicit behavior (Max returns NEG_INFINITY,
+    // Min returns INFINITY).
     #[test]
-    fn mean_empty_view_guard() {
+    fn mean_empty_view_reduce_returns_zero_sum() {
         let view = empty_view();
+        let curr: [f64; 0] = [];
+        let temp: [f64; 0] = [];
+        let ctx = empty_context();
+        // reduce_view returns the sum init value (0.0) for empty views;
+        // the ArrayMean opcode guards view.size()==0 before dividing by count
+        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        assert_eq!(sum, 0.0);
         assert_eq!(view.size(), 0);
-        // The ArrayMean opcode checks view.size() == 0 and pushes NaN
-        // before computing sum/count, preventing division by zero
+        // Without the guard: sum / count = 0.0 / 0.0 = NaN (IEEE); guard makes it explicit
+        assert!((sum / view.size() as f64).is_nan());
     }
 
     // -- STDDEV: opcode guard should return NaN for size==0 (AC2.1) --
+    //
+    // reduce_view returns the sum init value (0.0) for empty views. Without the guard,
+    // the ArrayStddev opcode would attempt `size - 1` on a usize of 0, which is an
+    // arithmetic overflow (panic in debug builds). The guard is safety-critical.
     #[test]
-    fn stddev_empty_view_guard() {
+    fn stddev_empty_view_reduce_returns_zero_sum() {
         let view = empty_view();
+        let curr: [f64; 0] = [];
+        let temp: [f64; 0] = [];
+        let ctx = empty_context();
+        // reduce_view returns the sum init value (0.0) for empty views;
+        // the ArrayStddev opcode guards size==0 before computing (size-1) divisor
+        let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
+        assert_eq!(sum, 0.0);
         assert_eq!(view.size(), 0);
-        // The ArrayStddev opcode checks size == 0 and pushes NaN
-        // before computing mean and variance passes
+        // Without the guard: `size - 1` on usize(0) would overflow/panic in debug builds
     }
 }
