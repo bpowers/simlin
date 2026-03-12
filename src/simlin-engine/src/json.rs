@@ -735,6 +735,11 @@ impl From<Stock> for datamodel::Stock {
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
+                    // Legacy JSON without has_except_default: infer true when
+                    // a default equation is present, preserving pre-flag behavior.
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
                     datamodel::Equation::Arrayed(
                         arrayed.dimensions,
                         elements
@@ -751,7 +756,7 @@ impl From<Stock> for datamodel::Stock {
                             })
                             .collect(),
                         arrayed.equation,
-                        arrayed.has_except_default.unwrap_or(false),
+                        has_except,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -815,6 +820,9 @@ impl From<Flow> for datamodel::Flow {
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
                     datamodel::Equation::Arrayed(
                         arrayed.dimensions,
                         elements
@@ -831,7 +839,7 @@ impl From<Flow> for datamodel::Flow {
                             })
                             .collect(),
                         arrayed.equation,
-                        arrayed.has_except_default.unwrap_or(false),
+                        has_except,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -890,6 +898,9 @@ impl From<Auxiliary> for datamodel::Aux {
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
                     datamodel::Equation::Arrayed(
                         arrayed.dimensions,
                         elements
@@ -906,7 +917,7 @@ impl From<Auxiliary> for datamodel::Aux {
                             })
                             .collect(),
                         arrayed.equation,
-                        arrayed.has_except_default.unwrap_or(false),
+                        has_except,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -3811,5 +3822,53 @@ mod tests {
             !dm_dim.mappings.iter().any(|m| m.target == "stale_target"),
             "stale maps_to target should not be injected into mappings"
         );
+    }
+
+    #[test]
+    fn test_legacy_json_arrayed_with_default_eq_infers_has_except_default() {
+        // Legacy JSON without has_except_default but with a default equation
+        // should infer has_except_default=true to preserve old behavior.
+        let json_str = r#"{
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0, "endTime": 10, "dt": "1"
+            },
+            "models": [{
+                "name": "main",
+                "auxiliaries": [{
+                    "name": "x",
+                    "arrayedEquation": {
+                        "dimensions": ["DimA"],
+                        "equation": "default_val",
+                        "elements": [
+                            {"subscript": "a1", "equation": "10"}
+                        ]
+                    }
+                }],
+                "views": []
+            }]
+        }"#;
+        let project: Project = serde_json::from_str(json_str).unwrap();
+        let dm_project = datamodel::Project::from(project);
+
+        let x = dm_project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x")
+            .unwrap();
+        if let datamodel::Variable::Aux(a) = x {
+            match &a.equation {
+                datamodel::Equation::Arrayed(_, _, default_eq, has_except_default) => {
+                    assert_eq!(default_eq.as_deref(), Some("default_val"));
+                    assert!(
+                        *has_except_default,
+                        "legacy JSON with default equation should infer has_except_default=true"
+                    );
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
     }
 }
