@@ -110,6 +110,8 @@ pub struct ArrayedEquation {
     pub compat: Option<Compat>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub elements: Option<Vec<ElementEquation>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub has_except_default: Option<bool>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -513,6 +515,9 @@ pub struct Dimension {
     /// Takes precedence over maps_to during deserialization.
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub mappings: Vec<JsonDimensionMapping>,
+    /// For indexed subdimensions, the name of the parent dimension.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent: Option<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -730,6 +735,11 @@ impl From<Stock> for datamodel::Stock {
         let equation = match stock.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
+                    // Legacy JSON without has_except_default: infer true when
+                    // a default equation is present, preserving pre-flag behavior.
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
                     datamodel::Equation::Arrayed(
                         arrayed.dimensions,
                         elements
@@ -746,6 +756,7 @@ impl From<Stock> for datamodel::Stock {
                             })
                             .collect(),
                         arrayed.equation,
+                        has_except,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -809,6 +820,9 @@ impl From<Flow> for datamodel::Flow {
         let equation = match flow.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
                     datamodel::Equation::Arrayed(
                         arrayed.dimensions,
                         elements
@@ -825,6 +839,7 @@ impl From<Flow> for datamodel::Flow {
                             })
                             .collect(),
                         arrayed.equation,
+                        has_except,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -883,6 +898,9 @@ impl From<Auxiliary> for datamodel::Aux {
         let equation = match aux.arrayed_equation {
             Some(arrayed) => {
                 if let Some(elements) = arrayed.elements {
+                    let has_except = arrayed
+                        .has_except_default
+                        .unwrap_or(arrayed.equation.is_some());
                     datamodel::Equation::Arrayed(
                         arrayed.dimensions,
                         elements
@@ -899,6 +917,7 @@ impl From<Auxiliary> for datamodel::Aux {
                             })
                             .collect(),
                         arrayed.equation,
+                        has_except,
                     )
                 } else {
                     datamodel::Equation::ApplyToAll(
@@ -1193,6 +1212,7 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::Dimension::named(dim.name, vec![])
         };
+        result.parent = dim.parent;
         // Reconstruct mappings: if the richer `mappings` array is present,
         // use it exclusively (it may include the maps_to target). Otherwise
         // fall back to the legacy `maps_to` field for backward compatibility.
@@ -1402,9 +1422,17 @@ impl From<datamodel::Stock> for Stock {
                     equation: Some(eq),
                     compat: None,
                     elements: None,
+                    has_except_default: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                // Only serialize has_except_default when a default equation
+                // exists; the flag is meaningless without one.
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1426,6 +1454,7 @@ impl From<datamodel::Stock> for Stock {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
+                        has_except_default: has_except_flag,
                     }),
                 )
             }
@@ -1465,9 +1494,15 @@ impl From<datamodel::Flow> for Flow {
                     equation: Some(eq),
                     compat: None,
                     elements: None,
+                    has_except_default: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1489,6 +1524,7 @@ impl From<datamodel::Flow> for Flow {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
+                        has_except_default: has_except_flag,
                     }),
                 )
             }
@@ -1527,9 +1563,15 @@ impl From<datamodel::Aux> for Auxiliary {
                     equation: Some(eq),
                     compat: None,
                     elements: None,
+                    has_except_default: None,
                 }),
             ),
-            datamodel::Equation::Arrayed(dims, elems, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elems, default_eq, has_except_default) => {
+                let has_except_flag = if default_eq.is_some() {
+                    Some(has_except_default)
+                } else {
+                    None
+                };
                 let ees = elems
                     .into_iter()
                     .map(
@@ -1551,6 +1593,7 @@ impl From<datamodel::Aux> for Auxiliary {
                         equation: default_eq,
                         compat: None,
                         elements: Some(ees),
+                        has_except_default: has_except_flag,
                     }),
                 )
             }
@@ -1838,6 +1881,7 @@ impl From<datamodel::Dimension> for Dimension {
                 size: 0,
                 maps_to,
                 mappings,
+                parent: dim.parent,
             },
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dim.name,
@@ -1845,6 +1889,7 @@ impl From<datamodel::Dimension> for Dimension {
                 size: size as i32,
                 maps_to,
                 mappings,
+                parent: dim.parent,
             },
         }
     }
@@ -2079,6 +2124,7 @@ mod tests {
                         equation: Some("50".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         can_be_module_input: true,
@@ -2120,6 +2166,7 @@ mod tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         can_be_module_input: true,
@@ -2212,6 +2259,7 @@ mod tests {
                         equation: Some("orders / lead_time".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         active_initial: Some("initial_orders".to_string()),
@@ -2253,6 +2301,7 @@ mod tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         can_be_module_input: true,
@@ -2327,6 +2376,7 @@ mod tests {
                         equation: Some("base_capacity".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         active_initial: Some("initial_capacity".to_string()),
@@ -2367,6 +2417,7 @@ mod tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: Some(Compat {
                         is_public: true,
@@ -2759,6 +2810,7 @@ mod tests {
                 size: 0,
                 maps_to: None,
                 mappings: vec![],
+                parent: None,
             }],
             units: vec![Unit {
                 name: "people".to_string(),
@@ -2801,6 +2853,7 @@ mod tests {
                     size: 0,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
             ),
             (
@@ -2811,6 +2864,7 @@ mod tests {
                     size: 10,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
             ),
             (
@@ -2821,6 +2875,7 @@ mod tests {
                     size: 0,
                     maps_to: Some("DimB".to_string()),
                     mappings: vec![],
+                    parent: None,
                 },
             ),
         ];
@@ -2883,6 +2938,7 @@ mod tests {
             size: 0,
             maps_to: None,
             mappings: vec![],
+            parent: None,
         };
 
         let serialized = serde_json::to_string(&dim).unwrap();
@@ -3341,6 +3397,7 @@ mod tests {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
             compat: Some(Compat {
                 active_initial: None,
@@ -3372,6 +3429,7 @@ mod tests {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
             compat: Some(Compat {
                 active_initial: None,
@@ -3402,6 +3460,7 @@ mod tests {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
             compat: Some(Compat {
                 active_initial: Some("correct".to_string()),
@@ -3460,6 +3519,7 @@ mod tests {
                     }),
                     graphical_function: None,
                 }]),
+                has_except_default: None,
             }),
             compat: None,
             non_negative: false,
@@ -3468,7 +3528,7 @@ mod tests {
         };
         let dm_flow: datamodel::Flow = flow.into();
         match &dm_flow.equation {
-            datamodel::Equation::Arrayed(_, elems, _) => {
+            datamodel::Equation::Arrayed(_, elems, _, _) => {
                 assert_eq!(elems[0].2, None);
             }
             _ => panic!("expected Arrayed equation"),
@@ -3577,6 +3637,7 @@ mod tests {
                     compat: None,
                     graphical_function: None,
                 }]),
+                has_except_default: None,
             }),
             compat: None,
             can_be_module_input: false,
@@ -3589,7 +3650,7 @@ mod tests {
 
         let dm_aux: datamodel::Aux = json_aux.into();
         match &dm_aux.equation {
-            datamodel::Equation::Arrayed(dims, elements, default_eq) => {
+            datamodel::Equation::Arrayed(dims, elements, default_eq, _) => {
                 assert_eq!(dims, &["Region"]);
                 assert_eq!(elements.len(), 1);
                 assert_eq!(elements[0].0, "north");
@@ -3624,6 +3685,7 @@ mod tests {
                     },
                 ],
             }],
+            parent: None,
         };
 
         let json_str = serde_json::to_string(&json_dim).unwrap();
@@ -3653,6 +3715,7 @@ mod tests {
             size: 0,
             maps_to: Some("DimB".to_string()),
             mappings: vec![],
+            parent: None,
         };
 
         let json_str = serde_json::to_string(&json_dim).unwrap();
@@ -3732,6 +3795,7 @@ mod tests {
                     element_map: vec![],
                 },
             ],
+            parent: None,
         };
 
         let json_dim: Dimension = dim.clone().into();
@@ -3775,5 +3839,53 @@ mod tests {
             !dm_dim.mappings.iter().any(|m| m.target == "stale_target"),
             "stale maps_to target should not be injected into mappings"
         );
+    }
+
+    #[test]
+    fn test_legacy_json_arrayed_with_default_eq_infers_has_except_default() {
+        // Legacy JSON without has_except_default but with a default equation
+        // should infer has_except_default=true to preserve old behavior.
+        let json_str = r#"{
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0, "endTime": 10, "dt": "1"
+            },
+            "models": [{
+                "name": "main",
+                "auxiliaries": [{
+                    "name": "x",
+                    "arrayedEquation": {
+                        "dimensions": ["DimA"],
+                        "equation": "default_val",
+                        "elements": [
+                            {"subscript": "a1", "equation": "10"}
+                        ]
+                    }
+                }],
+                "views": []
+            }]
+        }"#;
+        let project: Project = serde_json::from_str(json_str).unwrap();
+        let dm_project = datamodel::Project::from(project);
+
+        let x = dm_project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x")
+            .unwrap();
+        if let datamodel::Variable::Aux(a) = x {
+            match &a.equation {
+                datamodel::Equation::Arrayed(_, _, default_eq, has_except_default) => {
+                    assert_eq!(default_eq.as_deref(), Some("default_val"));
+                    assert!(
+                        *has_except_default,
+                        "legacy JSON with default equation should infer has_except_default=true"
+                    );
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
     }
 }

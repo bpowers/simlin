@@ -135,6 +135,7 @@ impl ModuleEvaluator<'_> {
                 // Array-producing: output has same dims as offset_array
                 BuiltinFn::VectorElmMap(_, offset) => Self::find_array_dims(offset),
                 // Array-producing: output has same dims as input array
+                BuiltinFn::Rank(arr, _) => Self::find_array_dims(arr),
                 BuiltinFn::VectorSortOrder(arr, _) => Self::find_array_dims(arr),
                 // Array-producing: output has same dims as request
                 BuiltinFn::AllocateAvailable(req, _, _) => Self::find_array_dims(req),
@@ -336,6 +337,14 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         } else {
                             source_values[raw as usize]
+                        }
+                    }
+                    BuiltinFn::Rank(array_expr, rest) => {
+                        let ranks = self.compute_rank(array_expr, rest);
+                        if index < ranks.len() {
+                            ranks[index]
+                        } else {
+                            f64::NAN
                         }
                     }
                     BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
@@ -579,7 +588,7 @@ impl ModuleEvaluator<'_> {
     fn array_mean(&mut self, expr: &Expr) -> f64 {
         let size = self.get_array_size(expr);
         if size == 0 {
-            return 0.0;
+            return f64::NAN;
         }
 
         let sum = self.reduce_array(expr, 0.0, |acc, val| acc + val);
@@ -589,6 +598,9 @@ impl ModuleEvaluator<'_> {
     /// Helper to calculate standard deviation of an array
     fn array_stddev(&mut self, expr: &Expr) -> f64 {
         let size = self.get_array_size(expr);
+        if size == 0 {
+            return f64::NAN;
+        }
         if size <= 1 {
             return 0.0;
         }
@@ -603,8 +615,8 @@ impl ModuleEvaluator<'_> {
             variance += diff * diff;
         });
 
-        // Sample standard deviation (n-1 divisor)
-        (variance / (size - 1) as f64).sqrt()
+        // Population standard deviation (N divisor), matching Vensim VSSTDEV
+        (variance / size as f64).sqrt()
     }
 
     /// Compute the ALLOCATE AVAILABLE result for all requesters.
@@ -621,6 +633,48 @@ impl ModuleEvaluator<'_> {
             .values()
             .find(|(base, size)| offset >= *base && offset < *base + *size)
             .copied()
+    }
+
+    /// Compute VECTOR RANK for the entire array, returning a Vec of 1-based ranks.
+    ///
+    /// VECTOR RANK(A, direction) assigns each element of A its ordinal position
+    /// in the sorted order. direction=1 means ascending (smallest gets rank 1),
+    /// direction=0 means descending (largest gets rank 1).
+    fn compute_rank(
+        &mut self,
+        array_expr: &Expr,
+        rest: &Option<(Box<Expr>, Option<Box<Expr>>)>,
+    ) -> Vec<f64> {
+        let direction = rest
+            .as_ref()
+            .map(|(d, _)| self.eval(d).round() as i32)
+            .unwrap_or(1);
+
+        let mut values = Vec::new();
+        self.iter_array_elements(array_expr, |val| {
+            values.push(val);
+        });
+
+        if values.is_empty() {
+            return Vec::new();
+        }
+
+        // Create (original_index, value) pairs and sort
+        let mut indexed: Vec<(usize, f64)> =
+            values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        if direction == 1 {
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // Build ranks: position in sorted order -> rank for each original index
+        let mut ranks = vec![0.0f64; values.len()];
+        for (rank_0based, (orig_idx, _)) in indexed.iter().enumerate() {
+            ranks[*orig_idx] = (rank_0based + 1) as f64;
+        }
+
+        ranks
     }
 
     // NOTE: This function is called once per array element during evaluation (O(N^2) total)
@@ -1013,14 +1067,14 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Min(a, b) => {
                         // Check if this is array min or scalar min
                         if b.is_none() {
-                            // Single argument - must be an array
-                            self.reduce_array(
-                                a,
-                                f64::INFINITY,
-                                |acc, val| {
+                            let size = self.get_array_size(a);
+                            if size == 0 {
+                                f64::NAN
+                            } else {
+                                self.reduce_array(a, f64::INFINITY, |acc, val| {
                                     if val < acc { val } else { acc }
-                                },
-                            )
+                                })
+                            }
                         } else {
                             // Two scalar arguments
                             let a = self.eval(a);
@@ -1043,10 +1097,14 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Max(a, b) => {
                         // Check if this is array max or scalar max
                         if b.is_none() {
-                            // Single argument - must be an array
-                            self.reduce_array(a, f64::NEG_INFINITY, |acc, val| {
-                                if val > acc { val } else { acc }
-                            })
+                            let size = self.get_array_size(a);
+                            if size == 0 {
+                                f64::NAN
+                            } else {
+                                self.reduce_array(a, f64::NEG_INFINITY, |acc, val| {
+                                    if val > acc { val } else { acc }
+                                })
+                            }
                         } else {
                             // Two scalar arguments
                             let a = self.eval(a);
@@ -1248,8 +1306,9 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Stddev(arg) => self.array_stddev(arg),
                     BuiltinFn::Size(arg) => self.get_array_size(arg) as f64,
-                    BuiltinFn::Rank(_, _) => {
-                        unreachable!();
+                    BuiltinFn::Rank(array_expr, rest) => {
+                        let ranks = self.compute_rank(array_expr, rest);
+                        if ranks.is_empty() { f64::NAN } else { ranks[0] }
                     }
                     BuiltinFn::VectorSelect(
                         selection_array,
@@ -1451,6 +1510,9 @@ impl ModuleEvaluator<'_> {
                 // Array-producing builtins need whole-array evaluation rather than
                 // the per-element eval_at_index loop. Detect and handle them first.
                 let whole_array_values: Option<Vec<f64>> = match rhs.as_ref() {
+                    Expr::App(BuiltinFn::Rank(array_expr, rest), _) => {
+                        Some(self.compute_rank(array_expr, rest))
+                    }
                     Expr::App(BuiltinFn::VectorSortOrder(array_expr, direction_expr), _) => {
                         let direction = self.eval(direction_expr).round() as i32;
                         let mut values = Vec::new();
@@ -2365,6 +2427,7 @@ fn test_arrays() {
                                 ("c".to_owned(), "5".to_owned(), None, None),
                             ],
                             None,
+                            false,
                         ),
                         documentation: "".to_owned(),
                         units: None,
@@ -2805,6 +2868,7 @@ mod compile_project_tests {
                     vec!["DimA".to_string()],
                     vec![("A1".to_string(), "8".to_string(), None, None)],
                     Some("8".to_string()),
+                    false,
                 ),
                 documentation: String::new(),
                 units: None,
@@ -2841,6 +2905,7 @@ mod compile_project_tests {
                     vec!["DimA".to_string()],
                     vec![("A1".to_string(), "10".to_string(), None, None)],
                     Some("7".to_string()),
+                    true,
                 ),
                 documentation: String::new(),
                 units: None,
@@ -2880,6 +2945,7 @@ mod compile_project_tests {
                         ("A3".to_string(), "0".to_string(), None, None),
                     ],
                     None,
+                    false,
                 ),
                 documentation: String::new(),
                 units: None,
@@ -2897,5 +2963,125 @@ mod compile_project_tests {
         assert!((step0[results.offsets[&Ident::new("h[a1]")]] - 8.0).abs() < 1e-10);
         assert!((step0[results.offsets[&Ident::new("h[a2]")]] - 0.0).abs() < 1e-10);
         assert!((step0[results.offsets[&Ident::new("h[a3]")]] - 0.0).abs() < 1e-10);
+    }
+}
+
+/// Tests for interpreter empty-view behavior on array reducers.
+///
+/// Zero-element dimensions cannot currently arise through the model compilation
+/// pipeline, so these tests construct ModuleEvaluator directly using a real
+/// minimal Simulation (for valid module/sim references) with a synthetic
+/// StaticSubscript expression whose ArrayView has dims=[0].  The early-exit
+/// guards in array_mean, array_stddev, Min, and Max are the code paths under
+/// test; they all return before accessing curr/next, so the dummy buffer is
+/// never read.
+#[cfg(test)]
+mod interpreter_empty_view_tests {
+    use std::sync::Arc;
+
+    use crate::ast::{ArrayView, Loc};
+    use crate::compiler::{BuiltinFn, Expr};
+    use crate::test_common::TestProject;
+    use crate::vm::StepPart;
+
+    /// Build the smallest valid Simulation we can make (one scalar aux).
+    fn make_minimal_sim() -> (Arc<crate::project::Project>, super::Simulation) {
+        let tp = TestProject::new("interp_empty_view")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("x", "1", None);
+        let project = Arc::new(crate::project::Project::from(tp.build_datamodel()));
+        let sim = super::Simulation::new(&project, "main").expect("minimal project should compile");
+        (project, sim)
+    }
+
+    /// Create a StaticSubscript expression whose ArrayView has zero total elements.
+    fn empty_static_subscript() -> Expr {
+        Expr::StaticSubscript(0, ArrayView::contiguous(vec![0]), Loc::default())
+    }
+
+    #[test]
+    fn array_mean_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        assert!(eval.array_mean(&expr).is_nan());
+    }
+
+    #[test]
+    fn array_stddev_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        assert!(eval.array_stddev(&expr).is_nan());
+    }
+
+    #[test]
+    fn min_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        // Single-argument Min -- array reduce path
+        let result = eval.eval(&Expr::App(
+            BuiltinFn::Min(Box::new(expr), None),
+            Loc::default(),
+        ));
+        assert!(result.is_nan());
+    }
+
+    #[test]
+    fn max_returns_nan_for_empty_view() {
+        let (_project, sim) = make_minimal_sim();
+        let module = &sim.modules[&sim.root];
+        let mut buf = vec![0.0f64; module.n_slots.max(1) + 1];
+        let (curr, next) = buf.split_at_mut(module.n_slots.max(1));
+        let mut eval = super::ModuleEvaluator {
+            step_part: StepPart::Flows,
+            off: 0,
+            inputs: &[],
+            curr,
+            next,
+            module,
+            sim: &sim,
+        };
+        let expr = empty_static_subscript();
+        // Single-argument Max -- array reduce path
+        let result = eval.eval(&Expr::App(
+            BuiltinFn::Max(Box::new(expr), None),
+            Loc::default(),
+        ));
+        assert!(result.is_nan());
     }
 }

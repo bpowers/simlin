@@ -420,7 +420,7 @@ fn extract_equation_string(eq: &datamodel::Equation) -> String {
     match eq {
         datamodel::Equation::Scalar(s) => s.clone(),
         datamodel::Equation::ApplyToAll(_, s) => s.clone(),
-        datamodel::Equation::Arrayed(_, elems, _) => {
+        datamodel::Equation::Arrayed(_, elems, _, _) => {
             if let Some((_, s, _, _)) = elems.first() {
                 s.clone()
             } else {

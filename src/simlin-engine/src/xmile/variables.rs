@@ -16,6 +16,91 @@ use crate::xmile::{
 
 use super::model::{Module, NonNegative, access_from, can_be_module_input, visibility};
 
+/// Vendor extension element for external data source metadata.
+/// Serialized as `<simlin:data_source kind="..." file="..." .../>`.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DataSourceElement {
+    #[serde(rename = "@kind")]
+    pub kind: String,
+    #[serde(rename = "@file")]
+    pub file: String,
+    #[serde(rename = "@tab", default)]
+    pub tab: Option<String>,
+    #[serde(rename = "@row_or_col", default)]
+    pub row_or_col: Option<String>,
+    #[serde(rename = "@cell", default)]
+    pub cell: Option<String>,
+}
+
+impl DataSourceElement {
+    fn from_datamodel(ds: &datamodel::DataSource) -> Self {
+        let kind = match ds.kind {
+            datamodel::DataSourceKind::Data => "data",
+            datamodel::DataSourceKind::Constants => "constants",
+            datamodel::DataSourceKind::Lookups => "lookups",
+            datamodel::DataSourceKind::Subscript => "subscript",
+        };
+        DataSourceElement {
+            kind: kind.to_string(),
+            file: ds.file.clone(),
+            tab: if ds.tab_or_delimiter.is_empty() {
+                None
+            } else {
+                Some(ds.tab_or_delimiter.clone())
+            },
+            row_or_col: if ds.row_or_col.is_empty() {
+                None
+            } else {
+                Some(ds.row_or_col.clone())
+            },
+            cell: if ds.cell.is_empty() {
+                None
+            } else {
+                Some(ds.cell.clone())
+            },
+        }
+    }
+
+    fn to_datamodel(&self) -> datamodel::DataSource {
+        let kind = match self.kind.as_str() {
+            "constants" => datamodel::DataSourceKind::Constants,
+            "lookups" => datamodel::DataSourceKind::Lookups,
+            "subscript" => datamodel::DataSourceKind::Subscript,
+            _ => datamodel::DataSourceKind::Data,
+        };
+        datamodel::DataSource {
+            kind,
+            file: self.file.clone(),
+            tab_or_delimiter: self.tab.clone().unwrap_or_default(),
+            row_or_col: self.row_or_col.clone().unwrap_or_default(),
+            cell: self.cell.clone().unwrap_or_default(),
+        }
+    }
+}
+
+impl ToXml<XmlWriter> for DataSourceElement {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+        let mut attrs = vec![("kind", self.kind.as_str()), ("file", self.file.as_str())];
+        let tab_ref;
+        if let Some(ref tab) = self.tab {
+            tab_ref = tab.as_str();
+            attrs.push(("tab", tab_ref));
+        }
+        let roc_ref;
+        if let Some(ref roc) = self.row_or_col {
+            roc_ref = roc.as_str();
+            attrs.push(("row_or_col", roc_ref));
+        }
+        let cell_ref;
+        if let Some(ref cell) = self.cell {
+            cell_ref = cell.as_str();
+            attrs.push(("cell", cell_ref));
+        }
+        super::write_tag_with_attrs(writer, "simlin:data_source", "", &attrs)
+    }
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct VarElement {
@@ -62,6 +147,9 @@ pub struct Stock {
     pub access: Option<String>,
     #[serde(rename = "@ai_state")]
     pub ai_state: Option<String>,
+    // quick-xml strips namespace prefixes during deserialization
+    #[serde(rename = "data_source")]
+    pub data_source: Option<DataSourceElement>,
 }
 
 impl ToXml<XmlWriter> for Stock {
@@ -120,6 +208,10 @@ impl ToXml<XmlWriter> for Stock {
             write_tag(writer, "ai_state", ai_state)?;
         }
 
+        if let Some(ref ds) = self.data_source {
+            ds.write_xml(writer)?;
+        }
+
         write_tag_end(writer, "stock")
     }
 }
@@ -135,7 +227,11 @@ macro_rules! convert_equation(
                 let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).into_owned()).collect();
                 (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
-            datamodel::Equation::Arrayed(dimensions, elements, None)
+            // When a top-level <eqn> coexists with <element> entries, the
+            // top-level eqn is the EXCEPT default equation.
+            let default_equation = $var.eqn.filter(|s| !s.is_empty());
+            let has_except_default = default_equation.is_some();
+            datamodel::Equation::Arrayed(dimensions, elements, default_equation, has_except_default)
         } else if let Some(dimensions) = $var.dimensions {
             let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).into_owned()).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default())
@@ -188,6 +284,7 @@ impl From<Stock> for datamodel::Stock {
             .into_iter()
             .map(|id| canonicalize(&id).into_owned())
             .collect();
+        let data_source = stock.data_source.as_ref().map(|ds| ds.to_datamodel());
         datamodel::Stock {
             ident: stock.name.clone(),
             equation: convert_equation!(stock),
@@ -199,6 +296,7 @@ impl From<Stock> for datamodel::Stock {
                 non_negative: stock.non_negative.is_some(),
                 can_be_module_input: can_be_module_input(&stock.access),
                 visibility: visibility(&stock.access),
+                data_source,
                 ..datamodel::Compat::default()
             },
             ai_state: ai_state_from(stock.ai_state),
@@ -226,7 +324,16 @@ impl From<datamodel::Stock> for Stock {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(..) => None,
+                // Only write the default equation to <eqn> when it's an active
+                // EXCEPT default; otherwise the XMILE importer would infer
+                // has_except_default=true on reimport and change model behavior.
+                Equation::Arrayed(_, _, default_eq, has_except) => {
+                    if *has_except {
+                        default_eq.clone()
+                    } else {
+                        None
+                    }
+                }
             },
             doc: if stock.documentation.is_empty() {
                 None
@@ -258,7 +365,7 @@ impl From<datamodel::Stock> for Stock {
                             .collect(),
                     ),
                 }),
-                Equation::Arrayed(dims, _, _) => Some(VarDimensions {
+                Equation::Arrayed(dims, _, _, _) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -269,7 +376,7 @@ impl From<datamodel::Stock> for Stock {
             elements: match stock.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(..) => None,
-                Equation::Arrayed(_, elements, _) => Some(
+                Equation::Arrayed(_, elements, _, _) => Some(
                     elements
                         .into_iter()
                         .map(|(subscript, eqn, _, gf)| VarElement {
@@ -283,6 +390,11 @@ impl From<datamodel::Stock> for Stock {
             },
             access: access_from(stock.compat.visibility, stock.compat.can_be_module_input),
             ai_state: None, // TODO
+            data_source: stock
+                .compat
+                .data_source
+                .as_ref()
+                .map(DataSourceElement::from_datamodel),
         }
     }
 }
@@ -306,6 +418,9 @@ pub struct Flow {
     pub access: Option<String>,
     #[serde(rename = "@ai_state")]
     pub ai_state: Option<String>,
+    // quick-xml strips namespace prefixes during deserialization
+    #[serde(rename = "data_source")]
+    pub data_source: Option<DataSourceElement>,
 }
 
 impl ToXml<XmlWriter> for Flow {
@@ -358,6 +473,10 @@ impl ToXml<XmlWriter> for Flow {
             write_tag(writer, "ai_state", ai_state)?;
         }
 
+        if let Some(ref ds) = self.data_source {
+            ds.write_xml(writer)?;
+        }
+
         write_tag_end(writer, "flow")
     }
 }
@@ -366,6 +485,7 @@ impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         let mut compat = extract_compat!(flow, flow.access);
         compat.non_negative = flow.non_negative.is_some();
+        compat.data_source = flow.data_source.as_ref().map(|ds| ds.to_datamodel());
         datamodel::Flow {
             ident: flow.name.clone(),
             equation: convert_equation!(flow),
@@ -398,7 +518,16 @@ impl From<datamodel::Flow> for Flow {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, _) => None,
+                // Only write the default equation to <eqn> when it's an active
+                // EXCEPT default; otherwise the XMILE importer would infer
+                // has_except_default=true on reimport and change model behavior.
+                Equation::Arrayed(_, _, default_eq, has_except) => {
+                    if *has_except {
+                        default_eq.clone()
+                    } else {
+                        None
+                    }
+                }
             },
             initial_eqn: flow.compat.active_initial,
             doc: if flow.documentation.is_empty() {
@@ -422,7 +551,7 @@ impl From<datamodel::Flow> for Flow {
                             .collect(),
                     ),
                 }),
-                Equation::Arrayed(dims, _, _) => Some(VarDimensions {
+                Equation::Arrayed(dims, _, _, _) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -433,7 +562,7 @@ impl From<datamodel::Flow> for Flow {
             elements: match flow.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(..) => None,
-                Equation::Arrayed(_, elements, _) => Some(
+                Equation::Arrayed(_, elements, _, _) => Some(
                     elements
                         .into_iter()
                         .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
@@ -447,6 +576,11 @@ impl From<datamodel::Flow> for Flow {
             },
             access: access_from(flow.compat.visibility, flow.compat.can_be_module_input),
             ai_state: None, // TODO
+            data_source: flow
+                .compat
+                .data_source
+                .as_ref()
+                .map(DataSourceElement::from_datamodel),
         }
     }
 }
@@ -469,6 +603,9 @@ pub struct Aux {
     pub access: Option<String>,
     #[serde(rename = "@ai_state")]
     pub ai_state: Option<String>,
+    // quick-xml strips namespace prefixes during deserialization
+    #[serde(rename = "data_source")]
+    pub data_source: Option<DataSourceElement>,
 }
 
 impl ToXml<XmlWriter> for Aux {
@@ -518,13 +655,18 @@ impl ToXml<XmlWriter> for Aux {
             write_tag(writer, "ai_state", ai_state)?;
         }
 
+        if let Some(ref ds) = self.data_source {
+            ds.write_xml(writer)?;
+        }
+
         write_tag_end(writer, "aux")
     }
 }
 
 impl From<Aux> for datamodel::Aux {
     fn from(aux: Aux) -> Self {
-        let compat = extract_compat!(aux, aux.access);
+        let mut compat = extract_compat!(aux, aux.access);
+        compat.data_source = aux.data_source.as_ref().map(|ds| ds.to_datamodel());
         datamodel::Aux {
             ident: aux.name.clone(),
             equation: convert_equation!(aux),
@@ -557,7 +699,16 @@ impl From<datamodel::Aux> for Aux {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _, _) => None,
+                // Only write the default equation to <eqn> when it's an active
+                // EXCEPT default; otherwise the XMILE importer would infer
+                // has_except_default=true on reimport and change model behavior.
+                Equation::Arrayed(_, _, default_eq, has_except) => {
+                    if *has_except {
+                        default_eq.clone()
+                    } else {
+                        None
+                    }
+                }
             },
             initial_eqn: aux.compat.active_initial,
             doc: if aux.documentation.is_empty() {
@@ -576,7 +727,7 @@ impl From<datamodel::Aux> for Aux {
                             .collect(),
                     ),
                 }),
-                Equation::Arrayed(dims, _, _) => Some(VarDimensions {
+                Equation::Arrayed(dims, _, _, _) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -587,7 +738,7 @@ impl From<datamodel::Aux> for Aux {
             elements: match aux.equation {
                 Equation::Scalar(..) => None,
                 Equation::ApplyToAll(..) => None,
-                Equation::Arrayed(_, elements, _) => Some(
+                Equation::Arrayed(_, elements, _, _) => Some(
                     elements
                         .into_iter()
                         .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
@@ -601,6 +752,11 @@ impl From<datamodel::Aux> for Aux {
             },
             access: access_from(aux.compat.visibility, aux.compat.can_be_module_input),
             ai_state: None, // TODO
+            data_source: aux
+                .compat
+                .data_source
+                .as_ref()
+                .map(DataSourceElement::from_datamodel),
         }
     }
 }
@@ -682,6 +838,7 @@ fn test_canonicalize_stock_inflows() {
         elements: None,
         access: None,
         ai_state: None,
+        data_source: None,
     });
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
@@ -736,6 +893,7 @@ fn test_xml_stock_parsing() {
         elements: None,
         access: None,
         ai_state: None,
+        data_source: None,
     };
 
     use quick_xml::de;
@@ -764,6 +922,7 @@ fn test_xml_gt_parsing() {
         elements: None,
         access: None,
         ai_state: None,
+        data_source: None,
     };
 
     use quick_xml::de;
@@ -811,6 +970,7 @@ fn test_xml_gf_parsing() {
         elements: None,
         access: Some("input".to_owned()),
         ai_state: None,
+        data_source: None,
     };
 
     use quick_xml::de;

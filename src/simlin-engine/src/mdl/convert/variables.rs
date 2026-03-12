@@ -280,6 +280,7 @@ impl<'input> ConversionContext<'input> {
         let mut parent_dims: Option<Vec<String>> = None;
         let mut has_subscripted_eq = false;
         let mut has_except_eq = false;
+        let mut has_non_except_eq = false;
 
         for eq in &valid_eqs {
             if let Some(lhs) = get_lhs(&eq.equation) {
@@ -376,6 +377,9 @@ impl<'input> ConversionContext<'input> {
                     element_keys.retain(|k| !excepted_keys.contains(k));
                 }
 
+                if !eq_has_except && !element_keys.is_empty() {
+                    has_non_except_eq = true;
+                }
                 expanded_eqs.push(ExpandedEquation {
                     eq,
                     element_keys,
@@ -415,7 +419,7 @@ impl<'input> ConversionContext<'input> {
         // present (non-excepted elements need dimension references substituted).
         let needs_substitution = expanded_eqs.len() > 1 || has_except_eq;
 
-        for exp_eq in expanded_eqs {
+        for exp_eq in &expanded_eqs {
             // When this equation has EXCEPT, capture its unsubstituted RHS as the
             // default equation text (metadata for the Equation::Arrayed).
             if exp_eq.has_except {
@@ -429,6 +433,7 @@ impl<'input> ConversionContext<'input> {
                     &exp_eq.eq.equation,
                     info.var_type == VariableType::Stock,
                     &empty_ctx,
+                    &[],
                 )?;
                 default_equation = Some(raw_eq);
             }
@@ -458,11 +463,28 @@ impl<'input> ConversionContext<'input> {
                     }
                 };
 
+                // Compute element offsets for arrayed GET DIRECT resolution.
+                // Only include varying dimensions (where the LHS subscript is
+                // a dimension name), not pinned subscripts (specific element
+                // names like "B1"). adjust_call_for_element maps the last two
+                // offsets to row/col, so including pinned dims would shift the
+                // varying-dimension offsets to the wrong positions.
+                let element_offsets: Vec<usize> = element_parts
+                    .iter()
+                    .zip(exp_eq.lhs_subscripts.iter())
+                    .filter(|(_, sub)| {
+                        let canonical = canonical_name(sub);
+                        self.dimension_elements.contains_key(&canonical)
+                    })
+                    .map(|(elem, sub)| self.element_index_in_dimension(elem, sub).unwrap_or(0))
+                    .collect();
+
                 let (eq_str, initial_eq, gf) = self.build_equation_rhs_with_context(
                     name,
                     &exp_eq.eq.equation,
                     info.var_type == VariableType::Stock,
                     &ctx,
+                    &element_offsets,
                 )?;
 
                 element_map.insert(key.clone(), (eq_str, initial_eq, gf));
@@ -488,11 +510,41 @@ impl<'input> ConversionContext<'input> {
             .map(|d| self.get_formatted_dimension_name(d))
             .collect();
 
-        let equation = Equation::Arrayed(formatted_dims.clone(), elements, default_equation);
+        // has_except_default: the default equation should fill missing elements
+        // only when EXCEPT equations coexist with separate override equations.
+        // When EXCEPT is the sole source of elements, excepted elements should
+        // remain at 0 (undefined) rather than receiving the default.
+        let has_except_default = has_except_eq && has_non_except_eq;
+        let equation = Equation::Arrayed(
+            formatted_dims.clone(),
+            elements,
+            default_equation,
+            has_except_default,
+        );
 
         // Build the variable
         let ident = quoted_space_to_underbar(name);
         let (documentation, units) = extract_metadata(&info.equations);
+
+        // Extract GET DIRECT data_source from original equation for compat
+        // persistence. Arrayed GET DIRECT variables share the same data
+        // source across all elements; we extract it from the first equation.
+        let data_source = expanded_eqs.iter().find_map(|exp_eq| {
+            let eq_str = match &exp_eq.eq.equation {
+                MdlEquation::Regular(_, expr) => self.formatter.format_expr(expr),
+                MdlEquation::Data(_, Some(expr)) => self.formatter.format_expr(expr),
+                _ => return None,
+            };
+            if super::external_data::is_get_direct_ref(&eq_str) {
+                self.extract_get_direct_data_source(&eq_str)
+            } else {
+                None
+            }
+        });
+        let compat = datamodel::Compat {
+            data_source,
+            ..Default::default()
+        };
 
         match info.var_type {
             VariableType::Stock => Ok(Some(Variable::Stock(datamodel::Stock {
@@ -504,7 +556,7 @@ impl<'input> ConversionContext<'input> {
                 outflows: info.outflows.clone(),
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat,
             }))),
             VariableType::Flow => Ok(Some(Variable::Flow(datamodel::Flow {
                 ident,
@@ -514,7 +566,7 @@ impl<'input> ConversionContext<'input> {
                 gf: None,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat,
             }))),
             VariableType::Aux => Ok(Some(Variable::Aux(datamodel::Aux {
                 ident,
@@ -524,19 +576,23 @@ impl<'input> ConversionContext<'input> {
                 gf: None,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat,
             }))),
         }
     }
 
     /// Build the equation RHS string with per-element substitution context.
     /// Dimension references in the equation are substituted with specific element names.
+    ///
+    /// `element_offsets` provides the 0-based position within each dimension
+    /// for arrayed variables, used to adjust GET DIRECT cell references.
     fn build_equation_rhs_with_context(
         &self,
         var_name: &str,
         eq: &MdlEquation<'_>,
         is_stock: bool,
         ctx: &crate::mdl::xmile_compat::ElementContext,
+        element_offsets: &[usize],
     ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
     {
         match eq {
@@ -558,7 +614,7 @@ impl<'input> ConversionContext<'input> {
                 // as Regular rather than Data. Detect the opaque reference
                 // and resolve it through the data provider.
                 if super::external_data::is_get_direct_ref(&eq_str) {
-                    return self.try_resolve_data_equation(&eq_str);
+                    return self.try_resolve_data_equation(&eq_str, element_offsets);
                 }
                 Ok((eq_str, None, None))
             }
@@ -582,7 +638,7 @@ impl<'input> ConversionContext<'input> {
                     .as_ref()
                     .map(|e| self.formatter.format_expr_with_context(e, ctx))
                     .unwrap_or_default();
-                self.try_resolve_data_equation(&eq_str)
+                self.try_resolve_data_equation(&eq_str, element_offsets)
             }
             MdlEquation::TabbedArray(_, _) | MdlEquation::NumberList(_, _) => {
                 // Per-element expansion is handled by make_array_equation at the
@@ -604,6 +660,9 @@ impl<'input> ConversionContext<'input> {
         lhs_subscripts: &[String],
         element_parts: &[&str],
     ) -> crate::mdl::xmile_compat::ElementContext {
+        use crate::common::CanonicalDimensionName;
+        use crate::common::CanonicalElementName;
+        use crate::dimensions::DimensionsContext;
         use crate::mdl::xmile_compat::ElementContext;
 
         debug_assert_eq!(
@@ -626,6 +685,38 @@ impl<'input> ConversionContext<'input> {
 
         // Build subrange mappings for dimensions not directly on the LHS
         let subrange_mappings = self.build_subrange_mappings(&substitutions);
+
+        // Build cross-dimension mapping substitutions: for dimensions that
+        // have a `maps_to` relationship with a LHS dimension, resolve the
+        // specific element via the mapping. For example, if DimD maps to
+        // DimA and we're iterating at DimA=A2, then DimD -> D1 (where
+        // D1 is the DimD element that maps to A2).
+        let dims_ctx = DimensionsContext::from(self.dimensions.as_slice());
+        for dim_canonical in self.dimension_elements.keys() {
+            if substitutions.contains_key(dim_canonical)
+                || subrange_mappings.contains_key(dim_canonical)
+            {
+                continue;
+            }
+
+            let dim_name = CanonicalDimensionName::from_raw(dim_canonical);
+            for (lhs_dim, lhs_elem) in &substitutions {
+                let lhs_dim_name = CanonicalDimensionName::from_raw(lhs_dim);
+                if !dims_ctx.has_mapping_to(&dim_name, &lhs_dim_name)
+                    && !dims_ctx.has_mapping_to(&lhs_dim_name, &dim_name)
+                {
+                    continue;
+                }
+
+                let lhs_elem_canonical = CanonicalElementName::from_raw(lhs_elem);
+                if let Some(mapped_elem) =
+                    dims_ctx.translate_via_mapping(&dim_name, &lhs_dim_name, &lhs_elem_canonical)
+                {
+                    substitutions.insert(dim_canonical.clone(), mapped_elem.as_str().to_string());
+                    break;
+                }
+            }
+        }
 
         ElementContext {
             lhs_var_canonical: var_canonical.to_string(),
@@ -795,7 +886,7 @@ impl<'input> ConversionContext<'input> {
                 // data provider.
                 if super::external_data::is_get_direct_ref(&eq_str) {
                     let (resolved_eq, _resolved_compat, gf) =
-                        self.try_resolve_data_equation(&eq_str)?;
+                        self.try_resolve_data_equation(&eq_str, &[])?;
                     let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
                     compat.data_source = self.extract_get_direct_data_source(&eq_str);
                     return Ok((equation, compat, gf));
@@ -830,7 +921,7 @@ impl<'input> ConversionContext<'input> {
                     .map(|e| self.formatter.format_expr(e))
                     .unwrap_or_default();
                 let (resolved_eq, _resolved_compat, gf) =
-                    self.try_resolve_data_equation(&eq_str)?;
+                    self.try_resolve_data_equation(&eq_str, &[])?;
                 let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
                 compat.data_source = self.extract_get_direct_data_source(&eq_str);
                 Ok((equation, compat, gf))
@@ -849,14 +940,23 @@ impl<'input> ConversionContext<'input> {
     /// Try to resolve a GET DIRECT reference in a Data equation expression.
     /// Returns (equation_string, initial_value, graphical_function) matching
     /// the tuple format used by build_equation_for_element.
+    ///
+    /// `element_offsets` provides the 0-based position within each dimension
+    /// for arrayed variables (empty for scalars).
     fn try_resolve_data_equation(
         &self,
         eq_str: &str,
+        element_offsets: &[usize],
     ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
     {
         use super::external_data::{ResolvedData, try_resolve_data_expr};
 
-        match try_resolve_data_expr(eq_str, self.data_provider, &self.file_aliases) {
+        match try_resolve_data_expr(
+            eq_str,
+            self.data_provider,
+            &self.file_aliases,
+            element_offsets,
+        ) {
             Some(Ok(ResolvedData::Lookup(eq, gf))) => Ok((eq, None, Some(gf))),
             Some(Ok(ResolvedData::Constant(value))) => Ok((format_number(value), None, None)),
             Some(Ok(ResolvedData::Subscript(_))) => {
@@ -1124,7 +1224,7 @@ impl<'input> ConversionContext<'input> {
                 .collect::<Vec<_>>()
                 .join(",");
             let element_eqs = vec![(key, format_number(values[0]), None, None)];
-            return (Equation::Arrayed(dims, element_eqs, None), None);
+            return (Equation::Arrayed(dims, element_eqs, None, false), None);
         }
 
         // Cartesian product of free dimension elements as Vec<Vec<String>>
@@ -1177,7 +1277,7 @@ impl<'input> ConversionContext<'input> {
                 })
                 .collect();
 
-        (Equation::Arrayed(dims, element_eqs, None), None)
+        (Equation::Arrayed(dims, element_eqs, None, false), None)
     }
 
     /// Extract the initial value expression from an INTEG call.
@@ -1468,7 +1568,7 @@ x[DimA] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     // All elements have the same equation "5"
@@ -1534,7 +1634,7 @@ x[DimA] = 1, 2, 3
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     assert_eq!(elements[0].0, "a1");
@@ -1712,7 +1812,7 @@ x[DimA, DimB] = 1, 2, 3, 4
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 4, "Should have 4 elements");
                     // Check row-major order: a1,b1=1, a1,b2=2, a2,b1=3, a2,b2=4
@@ -1753,7 +1853,7 @@ x[DimA] = 1, 2, 3
             .find(|v| v.get_ident() == "x");
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     assert_eq!(elements[0].0, "a1");
@@ -1793,7 +1893,7 @@ x[a1] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 1);
                     assert_eq!(elements[0].0, "a1");
@@ -1832,7 +1932,7 @@ x[a1] = 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
 
@@ -1882,7 +1982,7 @@ x[a1, DimB] = 5
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimB"]);
                     // a1 * (b1, b2) = 2 elements
                     assert_eq!(elements.len(), 2);
@@ -1923,7 +2023,7 @@ v[DimA, B1] = 1, 2, 3
 
         if let Some(Variable::Aux(a)) = v {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     // B1 is an element of DimB, so the dims list contains the parent: DimB
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 3);
@@ -1965,7 +2065,7 @@ w[A1, DimB] = 1, 2, 3
 
         if let Some(Variable::Aux(a)) = w {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     // A1 is an element of DimA, so the dims list contains the parent: DimA
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 3);
@@ -2041,7 +2141,7 @@ x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100)
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
                     // Single apply-to-all: all elements have the same expression
@@ -2097,7 +2197,7 @@ x[a2] = ACTIVE INITIAL(y * 2, 20)
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2, "Should have 2 elements");
 
@@ -2344,7 +2444,7 @@ x[a2]( (0,0),(2,2) )
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                     for (_, eq, _, _) in elements {
@@ -2424,7 +2524,7 @@ x[DimA] = y[DimA] * 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                     for (_, eq, _, _) in elements {
@@ -2466,7 +2566,7 @@ x[a1] = 10
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 3);
 
@@ -2519,7 +2619,7 @@ x[a1, b1] = 99
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimB"]);
                     assert_eq!(elements.len(), 4);
 
@@ -2581,7 +2681,7 @@ x[bottom] = 0
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["layers"]);
                     assert_eq!(elements.len(), 4);
 
@@ -2637,7 +2737,7 @@ x[bottom] = 2
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(
                         dims,
                         &["layers"],
@@ -2744,7 +2844,7 @@ x[a2] := y[a2] * 3
 
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
-                Equation::Arrayed(dims, elements, _default_eq) => {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                     let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
@@ -2790,7 +2890,7 @@ g[A1] = 10
 
         if let Some(Variable::Aux(a)) = g {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert!(
                         default_eq.is_some(),
@@ -2841,7 +2941,7 @@ h[DimA] :EXCEPT: [SubA] = 8 ~~|
 
         if let Some(Variable::Aux(a)) = h {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(default_eq.as_deref(), Some("8"));
                     // Only A1 should have the default equation.
@@ -2881,7 +2981,7 @@ k[A1] = 10
 
         if let Some(Variable::Aux(a)) = k {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     // default_equation captures the unsubstituted form
                     assert!(default_eq.is_some());
@@ -2929,7 +3029,7 @@ p[DimA, DimC] :EXCEPT: [A1, C1] = 10 ~~|
 
         if let Some(Variable::Aux(a)) = p {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA", "DimC"]);
                     assert_eq!(default_eq.as_deref(), Some("10"));
                     // 3x3=9 combinations, minus 1 excepted = 8 elements
@@ -2976,7 +3076,7 @@ s[SubA] :EXCEPT: [A3] = 14
 
         if let Some(Variable::Aux(a)) = s {
             match &a.equation {
-                Equation::Arrayed(dims, elements, default_eq) => {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(default_eq.as_deref(), Some("14"));
 
@@ -2994,6 +3094,42 @@ s[SubA] :EXCEPT: [A3] = 14
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_arrayed_get_direct_constants_preserves_data_source() {
+        let mdl = "DimA: a1, a2, a3\n\
+                    ~ ~|\n\
+                    x[DimA] = GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')\n\
+                    ~ ~|\n\
+                    \\\\\\---///\n";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert!(
+                matches!(&a.equation, Equation::Arrayed(..)),
+                "Expected Arrayed equation"
+            );
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("Arrayed GET DIRECT should preserve data_source in compat");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(data_source.file, "data/a.csv");
+            assert_eq!(data_source.tab_or_delimiter, ",");
         } else {
             panic!("Expected Aux variable");
         }

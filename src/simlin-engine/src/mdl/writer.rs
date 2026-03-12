@@ -782,7 +782,7 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
                 effective_gf,
             );
         }
-        Equation::Arrayed(dims, elements, default_eq) => {
+        Equation::Arrayed(dims, elements, default_eq, _) => {
             write_arrayed_entries(buf, ident, dims, elements, default_eq, units, doc);
         }
     }
@@ -881,7 +881,7 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
                 &stock.documentation,
             );
         }
-        Equation::Arrayed(dims, elements, default_eq) => {
+        Equation::Arrayed(dims, elements, default_eq, _) => {
             write_arrayed_stock_entries(
                 buf,
                 &stock.ident,
@@ -2368,6 +2368,7 @@ mod tests {
                     ("south".to_owned(), "200".to_owned(), None, None),
                 ],
                 None,
+                false,
             ),
             documentation: "Stock by region".to_owned(),
             units: Some("widgets".to_owned()),
@@ -2562,6 +2563,7 @@ mod tests {
                     ("entry_3".to_owned(), "0.3".to_owned(), None, None),
                 ],
                 None,
+                false,
             ),
             documentation: String::new(),
             units: None,
@@ -2589,6 +2591,7 @@ mod tests {
                     ("south_america".to_owned(), "200".to_owned(), None, None),
                 ],
                 None,
+                false,
             ),
             documentation: String::new(),
             units: None,
@@ -2625,6 +2628,7 @@ mod tests {
                     ),
                 ],
                 None,
+                false,
             ),
             documentation: String::new(),
             units: None,
@@ -2662,6 +2666,7 @@ mod tests {
                     ("b".to_owned(), "5".to_owned(), None, None),
                 ],
                 None,
+                false,
             ),
             documentation: String::new(),
             units: None,
@@ -4121,6 +4126,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("south".to_string(), "base+2".to_string(), None, None),
                 ],
                 Some("base".to_string()),
+                true,
             ),
             documentation: String::new(),
             units: Some("dollars".to_string()),
@@ -4161,6 +4167,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("a2".to_string(), "b1".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4187,6 +4194,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     element_map: vec![],
                 },
             ],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4218,6 +4226,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("a2".to_string(), "b2".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4248,6 +4257,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("south".to_string(), "z2".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4278,6 +4288,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("south america".to_string(), "z2".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4305,6 +4316,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("b2".to_string(), "a3".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();

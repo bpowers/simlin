@@ -43,6 +43,11 @@ pub(crate) struct Context<'a> {
     /// When true, wildcards should always be preserved for iteration (inside SUM, etc.)
     /// rather than being collapsed based on active_dimension matching.
     pub(crate) preserve_wildcards_for_iteration: bool,
+    /// When true, ActiveDimRef subscripts are promoted to Wildcard so the full
+    /// dimension view is preserved.  This is needed for array-producing builtins
+    /// (VectorSortOrder, VectorElmMap, etc.) but NOT for array reducers (SUM,
+    /// MEAN, etc.) where ActiveDimRef should resolve to a concrete offset.
+    pub(crate) promote_active_dim_ref: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -80,6 +85,7 @@ impl Context<'_> {
             active_subscript: None,
             is_initial,
             preserve_wildcards_for_iteration: false,
+            promote_active_dim_ref: false,
         }
     }
 
@@ -95,6 +101,7 @@ impl Context<'_> {
             active_subscript,
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: self.preserve_wildcards_for_iteration,
+            promote_active_dim_ref: self.promote_active_dim_ref,
         }
     }
 
@@ -984,7 +991,10 @@ impl Context<'_> {
     }
 
     /// Create a context that preserves wildcards for array iteration.
-    /// Used for array reduction builtins (SUM, MAX, MIN, MEAN, STDDEV, SIZE).
+    /// Used for array reducer builtins (SUM, MAX, MIN, MEAN, STDDEV, SIZE).
+    /// ActiveDimRef subscripts are NOT promoted -- they resolve to a concrete
+    /// element offset, so `SUM(matrix[DimA, DimB])` sums over one dimension
+    /// while the other iterates.
     fn with_preserved_wildcards(&self) -> Self {
         Context {
             core: self.core,
@@ -993,6 +1003,24 @@ impl Context<'_> {
             active_subscript: self.active_subscript.clone(),
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: true,
+            promote_active_dim_ref: false,
+        }
+    }
+
+    /// Create a context for array-producing vector builtins (VectorSortOrder,
+    /// VectorElmMap, VectorSelect, AllocateAvailable).  Like
+    /// `with_preserved_wildcards`, but also promotes ActiveDimRef to Wildcard so
+    /// references like `vals[DimA]` inside these builtins keep their full array
+    /// view.
+    fn with_vector_builtin_wildcards(&self) -> Self {
+        Context {
+            core: self.core,
+            ident: self.ident,
+            active_dimension: self.active_dimension.clone(),
+            active_subscript: self.active_subscript.clone(),
+            is_initial: self.is_initial,
+            preserve_wildcards_for_iteration: true,
+            promote_active_dim_ref: true,
         }
     }
 
@@ -1014,7 +1042,12 @@ impl Context<'_> {
             }
 
             Expr3::AssignTemp(id, inner, view) => {
-                let lowered_inner = self.lower_from_expr3(inner)?;
+                // AssignTemp content was hoisted out of an array reducer
+                // (SUM, MEAN, etc.) by Pass 1.  It may contain
+                // cross-dimension wildcards (e.g. c[*] with DimA in a
+                // DimB context) that must be preserved, so lower in a
+                // wildcard-preserving context.
+                let lowered_inner = self.with_preserved_wildcards().lower_from_expr3(inner)?;
                 Ok(Expr::AssignTemp(*id, Box::new(lowered_inner), view.clone()))
             }
 
@@ -1277,33 +1310,41 @@ impl Context<'_> {
                             .iter()
                             .any(|op| matches!(op, IndexOp::DimPosition(_)));
 
-                        // Check for operations that preserve dimensions for iteration.
-                        // ActiveDimRef is included because inside array-producing
-                        // builtins (VectorSortOrder, VectorElmMap etc.) dimension
-                        // references like h[DimA] must keep their full array view
-                        // rather than collapsing to a single element.
-                        let has_iteration_preserving_ops = operations.iter().any(|op| {
+                        // Wildcard, SparseRange, and Range always preserve
+                        // dimensions for iteration inside any array builtin.
+                        let has_wildcard_ops = operations.iter().any(|op| {
                             matches!(
                                 op,
-                                IndexOp::Wildcard
-                                    | IndexOp::SparseRange(_)
-                                    | IndexOp::Range(_, _)
-                                    | IndexOp::ActiveDimRef(_)
+                                IndexOp::Wildcard | IndexOp::SparseRange(_) | IndexOp::Range(_, _)
                             )
                         });
+                        // ActiveDimRef should only be promoted to Wildcard inside
+                        // array-producing builtins (VectorSortOrder, VectorElmMap,
+                        // etc.).  For reducers (SUM, MEAN, etc.) ActiveDimRef
+                        // resolves to a concrete offset via build_view_from_ops.
+                        let has_active_dim_ref = operations
+                            .iter()
+                            .any(|op| matches!(op, IndexOp::ActiveDimRef(_)));
 
-                        let preserve_for_iteration =
-                            self.preserve_wildcards_for_iteration && has_iteration_preserving_ops;
+                        // Inside array-producing builtins, source arrays may live in a
+                        // different dimension space than the output; ActiveDimRef ops
+                        // should be preserved as full-array wildcards rather than
+                        // resolved to concrete offsets.
+                        let preserve_for_iteration = self.preserve_wildcards_for_iteration
+                            && (has_wildcard_ops
+                                || (self.promote_active_dim_ref && has_active_dim_ref));
 
                         if has_dim_positions {
                             // Fall through to dynamic handling at the end
                         } else if preserve_for_iteration {
-                            // Rebuild view with ActiveDimRef treated as Wildcard
-                            // so the full dimension is preserved for array iteration
+                            // Rebuild view, only promoting ActiveDimRef to Wildcard
+                            // when inside an array-producing builtin context
                             let preserved_ops: Vec<IndexOp> = operations
                                 .iter()
                                 .map(|op| match op {
-                                    IndexOp::ActiveDimRef(_) => IndexOp::Wildcard,
+                                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref => {
+                                        IndexOp::Wildcard
+                                    }
                                     other => other.clone(),
                                 })
                                 .collect();
@@ -1316,6 +1357,34 @@ impl Context<'_> {
                             return Ok(Expr::StaticSubscript(off, preserved_result.view, *loc));
                         } else {
                             if view.dims.is_empty() {
+                                // Inside array-producing builtins, a fully-collapsed
+                                // subscript like b[B1] should be promoted back to the
+                                // full source array. The Single ops came from named
+                                // element subscripts (not ActiveDimRef resolution), so
+                                // promoting them to Wildcard restores the array view
+                                // that VectorElmMap/VectorSortOrder expect.
+                                let has_single_ops = self.promote_active_dim_ref
+                                    && operations.iter().any(|op| matches!(op, IndexOp::Single(_)));
+                                if has_single_ops {
+                                    let promoted_ops: Vec<IndexOp> = operations
+                                        .iter()
+                                        .map(|op| match op {
+                                            IndexOp::Single(_) => IndexOp::Wildcard,
+                                            other => other.clone(),
+                                        })
+                                        .collect();
+                                    let promoted_result = build_view_from_ops(
+                                        &promoted_ops,
+                                        &orig_dims,
+                                        &orig_strides,
+                                        &view_config,
+                                    )?;
+                                    return Ok(Expr::StaticSubscript(
+                                        off,
+                                        promoted_result.view,
+                                        *loc,
+                                    ));
+                                }
                                 return Ok(Expr::Var(off + view.offset, *loc));
                             }
 
@@ -1392,21 +1461,66 @@ impl Context<'_> {
 
                             let all_name_matching = use_name_matching.iter().all(|&b| b);
 
-                            // If all dimensions use name matching, allow broadcasting (fewer dims)
-                            // Otherwise, dimension counts must match for positional matching
-                            if !all_name_matching && view.dims.len() != active_dims.len() {
+                            // If all dimensions use name matching, allow broadcasting (fewer dims).
+                            // Inside array-producing builtins (promote_active_dim_ref), dimension
+                            // mismatches are expected: the source array lives in a different
+                            // dimension space than the output (e.g. d[DimA,B1] partially
+                            // collapses to DimA-only, which differs from a DimA x DimB output).
+                            if !all_name_matching
+                                && !self.promote_active_dim_ref
+                                && view.dims.len() != active_dims.len()
+                            {
                                 return sim_err!(MismatchedDimensions, id.as_str().to_string());
                             }
 
-                            // For positional matching, verify sizes match
-                            for (view_idx, &view_dim) in view.dims.iter().enumerate() {
-                                if !use_name_matching[view_idx] && view_idx < active_dims.len() {
-                                    // Positional matching - sizes must match
-                                    if view_dim != active_dims[view_idx].len() {
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
-                                        );
+                            // Track which view dimensions came from Range operations
+                            // so we can allow size mismatches and emit NaN for
+                            // out-of-bounds elements.
+                            let range_view_dims: std::collections::HashSet<usize> = {
+                                let mut set = std::collections::HashSet::new();
+                                let mut view_dim_idx = 0;
+                                for op in &operations {
+                                    match op {
+                                        IndexOp::Single(_) | IndexOp::ActiveDimRef(_) => {
+                                            // These collapse a dimension, no view dim
+                                        }
+                                        IndexOp::Range(_, _) => {
+                                            set.insert(view_dim_idx);
+                                            view_dim_idx += 1;
+                                        }
+                                        _ => {
+                                            view_dim_idx += 1;
+                                        }
+                                    }
+                                }
+                                set
+                            };
+
+                            // For positional matching, verify sizes match.
+                            // Skip when preserving wildcards for iteration (SUM,
+                            // MEAN, etc.): the view describes what the reduction
+                            // iterates over and is independent of the active
+                            // (output) dimensions.  Cross-dimension wildcards
+                            // like SUM(c[*]) in a DimB context are valid -- the
+                            // reduction iterates over c's DimA regardless of the
+                            // output's DimB.
+                            if !self.preserve_wildcards_for_iteration {
+                                for (view_idx, &view_dim) in view.dims.iter().enumerate() {
+                                    if !use_name_matching[view_idx] && view_idx < active_dims.len()
+                                    {
+                                        // Range-originated dimensions are allowed to be
+                                        // smaller than the target: out-of-bounds elements
+                                        // produce NaN at the per-element resolution step.
+                                        if range_view_dims.contains(&view_idx) {
+                                            continue;
+                                        }
+                                        // Positional matching - sizes must match
+                                        if view_dim != active_dims[view_idx].len() {
+                                            return sim_err!(
+                                                MismatchedDimensions,
+                                                id.as_str().to_string()
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1490,9 +1604,11 @@ impl Context<'_> {
                                             );
                                         }
                                     }
-                                } else {
+                                } else if view_idx < active_subscripts.len() {
                                     // Positional matching
                                     (view_idx, &active_subscripts[view_idx])
+                                } else {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
                                 };
 
                                 let dim_idx = if let Some(dim_idx) =
@@ -1626,6 +1742,11 @@ impl Context<'_> {
                                     if let Some(rel_offset) = abs_offset.checked_sub(start_offset) {
                                         rel_offset
                                     } else {
+                                        // For range-originated dimensions, subscript before
+                                        // the range start is out-of-bounds -> NaN fill
+                                        if range_view_dims.contains(&view_idx) {
+                                            return Ok(Expr::Const(f64::NAN, *loc));
+                                        }
                                         return sim_err!(
                                             MismatchedDimensions,
                                             id.as_str().to_string()
@@ -1634,6 +1755,15 @@ impl Context<'_> {
                                 } else {
                                     abs_offset
                                 };
+
+                                // For range-originated dimensions, check if the
+                                // offset exceeds the range size -> NaN fill for
+                                // out-of-bounds elements.
+                                if range_view_dims.contains(&view_idx)
+                                    && rel_offset >= view.dims[view_idx]
+                                {
+                                    return Ok(Expr::Const(f64::NAN, *loc));
+                                }
 
                                 result_index += rel_offset * (*stride as usize);
                             }
@@ -1651,8 +1781,93 @@ impl Context<'_> {
                     }
                 }
 
-                // Fall back to dynamic subscript handling for Expr3
-                // This handles cases where normalize_subscripts3 returned None
+                // Fall back to dynamic subscript handling for Expr3.
+                // This handles cases where normalize_subscripts3 returned None.
+                //
+                // In A2A context with dynamic Range subscripts (e.g. data[start:end]
+                // where start/end are variables), the Range can't be used as a scalar
+                // subscript. Instead, resolve to a conditional per-element access:
+                // if the current element position is within [start, end], load the
+                // element; otherwise produce NaN.
+                let has_dynamic_range = indices
+                    .iter()
+                    .any(|idx| matches!(idx, IndexExpr3::Range(..)));
+
+                if has_dynamic_range
+                    && indices.len() == 1
+                    && dims.len() == 1
+                    && let Some(active_subscripts) = &self.active_subscript
+                    && let Some(active_dims) = &self.active_dimension
+                {
+                    // Find the active dimension matching the source dimension.
+                    // In multi-dimensional A2A contexts (e.g. target[DimA, DimB]
+                    // = data[start:end] where data is indexed by DimB), the source
+                    // dimension may not be active_dims[0].
+                    //
+                    // Match order: exact name, then subdimension/mapping relationships.
+                    let dim = &dims[0];
+                    let dim_cn = dim.canonical_name();
+                    let match_idx = active_dims
+                        .iter()
+                        .position(|ad| ad.name() == dim.name())
+                        .or_else(|| {
+                            active_dims.iter().position(|ad| {
+                                let ad_cn = ad.canonical_name();
+                                self.dimensions_ctx.is_subdimension_of(dim_cn, ad_cn)
+                                    || self.dimensions_ctx.is_subdimension_of(ad_cn, dim_cn)
+                                    || self.dimensions_ctx.has_mapping_to(dim_cn, ad_cn)
+                                    || self.dimensions_ctx.has_mapping_to(ad_cn, dim_cn)
+                            })
+                        })
+                        .unwrap_or(0);
+                    let target_dim = &active_dims[match_idx];
+                    let subscript = &active_subscripts[match_idx];
+                    let elem_pos_1based = Self::subscript_to_index(target_dim, subscript);
+
+                    if let IndexExpr3::Range(start_expr, end_expr, _) = &indices[0] {
+                        let start_lowered = self.lower_from_expr3(start_expr)?;
+                        let end_lowered = self.lower_from_expr3(end_expr)?;
+
+                        // P is the 1-based position of the current target element.
+                        // i = P - 1 is the 0-based target index.
+                        // Range [start:end] selects source positions start..end (1-based).
+                        // range_view[i] = data[start + i] (1-based).
+                        // Valid when i < end - start + 1, i.e., start + i <= end.
+                        let i_0based = elem_pos_1based - 1.0;
+
+                        // Computed 1-based index into the source: start + i
+                        let computed_index = Expr::Op2(
+                            BinaryOp::Add,
+                            Box::new(start_lowered.clone()),
+                            Box::new(Expr::Const(i_0based, *loc)),
+                            *loc,
+                        );
+                        // Bounds check: start + i <= end
+                        let in_bounds = Expr::Op2(
+                            BinaryOp::Lte,
+                            Box::new(computed_index.clone()),
+                            Box::new(end_lowered),
+                            *loc,
+                        );
+
+                        // Load the element via dynamic single subscript
+                        let load_elem = Expr::Subscript(
+                            off,
+                            vec![SubscriptIndex::Single(computed_index)],
+                            vec![dims[0].len()],
+                            *loc,
+                        );
+                        let nan_val = Expr::Const(f64::NAN, *loc);
+
+                        return Ok(Expr::If(
+                            Box::new(in_bounds),
+                            Box::new(load_elem),
+                            Box::new(nan_val),
+                            *loc,
+                        ));
+                    }
+                }
+
                 let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                 let args: Result<Vec<_>> = indices
                     .iter()
@@ -1962,8 +2177,21 @@ impl Context<'_> {
             BFn::TimeStep => BuiltinFn::TimeStep,
             BFn::StartTime => BuiltinFn::StartTime,
             BFn::FinalTime => BuiltinFn::FinalTime,
-            BFn::Rank(_, _) => {
-                return sim_err!(TodoArrayBuiltin, self.ident.to_string());
+            BFn::Rank(arr, rest) => {
+                let ctx = self.with_vector_builtin_wildcards();
+                let lowered_arr = Box::new(ctx.lower_from_expr3(arr)?);
+                let lowered_rest = match rest {
+                    Some((dir, tiebreak)) => {
+                        let lowered_dir = Box::new(self.lower_from_expr3(dir)?);
+                        let lowered_tiebreak = match tiebreak {
+                            Some(tb) => Some(Box::new(self.lower_from_expr3(tb)?)),
+                            None => None,
+                        };
+                        Some((lowered_dir, lowered_tiebreak))
+                    }
+                    None => None,
+                };
+                BuiltinFn::Rank(lowered_arr, lowered_rest)
             }
             BFn::Size(a) => {
                 // Preserve wildcards for array iteration
@@ -1979,7 +2207,7 @@ impl Context<'_> {
                 BuiltinFn::Sum(Box::new(a))
             }
             BFn::VectorSelect(sel, expr, max_val, action, err) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 BuiltinFn::VectorSelect(
                     Box::new(ctx.lower_from_expr3(sel)?),
                     Box::new(ctx.lower_from_expr3(expr)?),
@@ -1989,21 +2217,21 @@ impl Context<'_> {
                 )
             }
             BFn::VectorElmMap(src, offs) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 BuiltinFn::VectorElmMap(
                     Box::new(ctx.lower_from_expr3(src)?),
                     Box::new(ctx.lower_from_expr3(offs)?),
                 )
             }
             BFn::VectorSortOrder(arr, dir) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 BuiltinFn::VectorSortOrder(
                     Box::new(ctx.lower_from_expr3(arr)?),
                     Box::new(self.lower_from_expr3(dir)?),
                 )
             }
             BFn::AllocateAvailable(req, pp, avail) => {
-                let ctx = self.with_preserved_wildcards();
+                let ctx = self.with_vector_builtin_wildcards();
                 let lowered_req = ctx.lower_from_expr3(req)?;
                 // The pp argument needs the full 2D array (requester_dim x XPriority).
                 // In Vensim, pp[region, ptype] means "priority_vector starting from ptype",

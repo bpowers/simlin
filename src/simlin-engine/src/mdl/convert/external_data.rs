@@ -181,6 +181,173 @@ pub(super) fn resolve_file_alias(file: &str, aliases: &HashMap<String, String>) 
     file.to_string()
 }
 
+/// Adjust a GET DIRECT call's cell references for a specific array element.
+///
+/// When a variable is arrayed and its equation uses a GET DIRECT function,
+/// each element of the array needs a different cell from the external file.
+/// The `element_offsets` slice gives the 0-based position within each
+/// **varying** dimension (e.g., `[1, 2]` means second element of dim 0, third
+/// of dim 1). Callers must exclude pinned (singleton) dimensions from the
+/// offsets; this function uses the last two entries as row/col indices.
+///
+/// For Constants:
+///   - Star pattern (`B2*`): iterate rows, each element bumps the row index
+///   - 2D without star: rows = dim 0, cols = dim 1
+///   - 2D with star: star dimension iterates over columns
+///
+/// For Lookups:
+///   - Each element reads from a different row (same x-column and starting column)
+pub(super) fn adjust_call_for_element(
+    call: &GetDirectCall,
+    element_offsets: &[usize],
+) -> GetDirectCall {
+    match call {
+        GetDirectCall::Constants {
+            file,
+            tab,
+            row_or_cell,
+            col,
+        } => {
+            let has_star = row_or_cell.contains('*');
+            let base_cell = row_or_cell.trim_end_matches('*');
+
+            // Parse the base cell reference to get starting row and column.
+            // Two forms: A1-style ("B2") or 4-arg numeric row + col letter
+            // ("2" with col="B"). Try A1-style first, then fall back to the
+            // 4-arg form where row_or_cell is a plain row number.
+            let (base_row, base_col) = match parse_cell_ref_simple(base_cell) {
+                Some(rc) => rc,
+                None => match parse_row_col_separate(base_cell, col) {
+                    Some(rc) => rc,
+                    None => return call.clone(),
+                },
+            };
+
+            // Map varying-dimension offsets to row/col positions in the data file.
+            // A GET DIRECT CONSTANTS cell reference addresses a 2D grid, so
+            // at most 2 offsets are meaningful. Callers pre-filter to exclude
+            // pinned (singleton) dimensions.
+            //
+            // Without star: first dim -> rows, second dim -> columns
+            // With star: first dim -> columns, second dim -> rows (transposed)
+            let n = element_offsets.len();
+            let (new_row, new_col) = if n == 0 {
+                (base_row, base_col)
+            } else if n == 1 {
+                // Single dimension: iterate down rows
+                (base_row + element_offsets[0], base_col)
+            } else {
+                let first_offset = element_offsets[n - 2];
+                let second_offset = element_offsets[n - 1];
+                if has_star {
+                    // Star reverses the mapping: first dim -> cols, second dim -> rows
+                    (base_row + second_offset, base_col + first_offset)
+                } else {
+                    // Standard mapping: first dim -> rows, second dim -> cols
+                    (base_row + first_offset, base_col + second_offset)
+                }
+            };
+
+            // Reconstruct the cell reference
+            let new_cell = format_cell_ref(new_row, new_col);
+
+            GetDirectCall::Constants {
+                file: file.clone(),
+                tab: tab.clone(),
+                row_or_cell: new_cell,
+                // Clear col: the adjusted row_or_cell encodes both row and
+                // column in A1-style. A non-empty col would override the
+                // column downstream in load_constant.
+                col: String::new(),
+            }
+        }
+        GetDirectCall::Lookups {
+            file,
+            tab,
+            x_col,
+            y_cell,
+        } => {
+            // For lookups, each array element reads from a different row
+            if element_offsets.is_empty() {
+                return call.clone();
+            }
+            let (base_row, base_col) = match parse_cell_ref_simple(y_cell) {
+                Some(rc) => rc,
+                None => return call.clone(),
+            };
+            let new_row = base_row + element_offsets[0];
+            let new_cell = format_cell_ref(new_row, base_col);
+
+            GetDirectCall::Lookups {
+                file: file.clone(),
+                tab: tab.clone(),
+                x_col: x_col.clone(),
+                y_cell: new_cell,
+            }
+        }
+        // Data and Subscript calls are not adjusted per-element
+        _ => call.clone(),
+    }
+}
+
+/// Parse the 4-arg form where row_or_cell is a plain number and col
+/// is a separate column letter reference. Returns 0-based (row, col).
+/// ("2", "B") -> Some((1, 1))
+fn parse_row_col_separate(row_str: &str, col_str: &str) -> Option<(usize, usize)> {
+    let row_1based: usize = row_str.trim().parse().ok()?;
+    if row_1based == 0 {
+        return None;
+    }
+    let col_str = col_str.trim();
+    if col_str.is_empty() || !col_str.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    let col: usize = col_str
+        .bytes()
+        .fold(0usize, |acc, b| {
+            acc * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize
+        })
+        .checked_sub(1)?;
+    Some((row_1based - 1, col))
+}
+
+/// Simple cell reference parser that returns 0-based (row, col).
+/// "B2" -> Some((1, 1)), "A1" -> Some((0, 0))
+fn parse_cell_ref_simple(s: &str) -> Option<(usize, usize)> {
+    let s = s.trim().trim_end_matches('*');
+    let split = s.find(|c: char| c.is_ascii_digit())?;
+    if split == 0 {
+        return None;
+    }
+    let col_str = &s[..split];
+    let row_str = &s[split..];
+    let col: usize = col_str
+        .bytes()
+        .fold(0usize, |acc, b| {
+            acc * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize
+        })
+        .checked_sub(1)?;
+    let row_1based: usize = row_str.parse().ok()?;
+    if row_1based == 0 {
+        return None;
+    }
+    Some((row_1based - 1, col))
+}
+
+/// Format a 0-based (row, col) back into an A1-style cell reference.
+fn format_cell_ref(row: usize, col: usize) -> String {
+    let mut col_str = String::new();
+    let mut c = col;
+    loop {
+        col_str.insert(0, (b'A' + (c % 26) as u8) as char);
+        if c < 26 {
+            break;
+        }
+        c = c / 26 - 1;
+    }
+    format!("{}{}", col_str, row + 1)
+}
+
 /// Resolve a GET DIRECT call using a DataProvider.
 pub(super) fn resolve_get_direct(
     call: &GetDirectCall,
@@ -286,10 +453,14 @@ pub(super) fn is_get_direct_ref(expr_str: &str) -> bool {
 /// Try to resolve a GET DIRECT reference from an expression string.
 /// Returns None if the string isn't a GET DIRECT reference or if no DataProvider
 /// is configured.
+///
+/// When `element_offsets` is non-empty, the cell references in the GET DIRECT
+/// call are adjusted for the specific array element being resolved.
 pub(super) fn try_resolve_data_expr(
     expr_str: &str,
     data_provider: Option<&dyn DataProvider>,
     file_aliases: &HashMap<String, String>,
+    element_offsets: &[usize],
 ) -> Option<Result<ResolvedData>> {
     if !is_get_direct_ref(expr_str) {
         return None;
@@ -316,6 +487,12 @@ pub(super) fn try_resolve_data_expr(
                 )),
             )));
         }
+    };
+
+    let call = if element_offsets.is_empty() {
+        call
+    } else {
+        adjust_call_for_element(&call, element_offsets)
     };
 
     Some(resolve_get_direct(&call, provider, file_aliases))
@@ -475,7 +652,7 @@ mod tests {
     #[test]
     fn test_try_resolve_subscript_applies_prefix() {
         let expr = "{GET DIRECT SUBSCRIPT('b_subs.csv', ',', 'A2', 'A', 'A')}";
-        let result = try_resolve_data_expr(expr, Some(&StubProvider), &HashMap::new())
+        let result = try_resolve_data_expr(expr, Some(&StubProvider), &HashMap::new(), &[])
             .expect("GET DIRECT expression should be parsed")
             .expect("GET DIRECT expression should resolve");
         match result {
@@ -550,7 +727,7 @@ mod tests {
     #[test]
     fn test_try_resolve_without_provider() {
         let expr = "{GET DIRECT DATA('file.csv', ',', 'A', 'B2')}";
-        let result = try_resolve_data_expr(expr, None, &HashMap::new());
+        let result = try_resolve_data_expr(expr, None, &HashMap::new(), &[]);
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
     }
@@ -558,7 +735,7 @@ mod tests {
     #[test]
     fn test_try_resolve_non_get_direct() {
         let expr = "x + y";
-        let result = try_resolve_data_expr(expr, None, &HashMap::new());
+        let result = try_resolve_data_expr(expr, None, &HashMap::new(), &[]);
         assert!(result.is_none());
     }
 
@@ -581,5 +758,186 @@ mod tests {
             }
             _ => panic!("Expected Constants call"),
         }
+    }
+
+    #[test]
+    fn test_parse_cell_ref_simple() {
+        assert_eq!(parse_cell_ref_simple("A1"), Some((0, 0)));
+        assert_eq!(parse_cell_ref_simple("B2"), Some((1, 1)));
+        assert_eq!(parse_cell_ref_simple("C10"), Some((9, 2)));
+        assert_eq!(parse_cell_ref_simple("B2*"), Some((1, 1)));
+        assert_eq!(parse_cell_ref_simple("A0"), None);
+        assert_eq!(parse_cell_ref_simple(""), None);
+        assert_eq!(parse_cell_ref_simple("123"), None);
+    }
+
+    #[test]
+    fn test_format_cell_ref() {
+        assert_eq!(format_cell_ref(0, 0), "A1");
+        assert_eq!(format_cell_ref(1, 1), "B2");
+        assert_eq!(format_cell_ref(9, 2), "C10");
+        assert_eq!(format_cell_ref(0, 25), "Z1");
+        assert_eq!(format_cell_ref(0, 26), "AA1");
+    }
+
+    #[test]
+    fn test_adjust_call_constants_1d_star() {
+        let call = GetDirectCall::Constants {
+            file: "b.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "B2*".to_string(),
+            col: String::new(),
+        };
+        let adjusted = adjust_call_for_element(&call, &[2]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "B4");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_constants_2d_no_star() {
+        let call = GetDirectCall::Constants {
+            file: "c.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "B2".to_string(),
+            col: String::new(),
+        };
+        // [1, 0] = second row, first column from base cell B2
+        let adjusted = adjust_call_for_element(&call, &[1, 0]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "B3");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_constants_2d_star_transposes() {
+        let call = GetDirectCall::Constants {
+            file: "c.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "B2*".to_string(),
+            col: String::new(),
+        };
+        // Star pattern: first dim -> cols, second dim -> rows
+        // [1, 2] = second col offset, third row offset
+        let adjusted = adjust_call_for_element(&call, &[1, 2]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "C4");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_constants_varying_dims_only() {
+        // Callers must pre-filter element_offsets to only varying dimensions.
+        // For a 3-dim variable x[Region, B1, Product] where B1 is pinned,
+        // the caller passes only the Region and Product offsets: [2, 1].
+        let call = GetDirectCall::Constants {
+            file: "c.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "B2".to_string(),
+            col: String::new(),
+        };
+        let adjusted = adjust_call_for_element(&call, &[2, 1]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "C4");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_lookups() {
+        let call = GetDirectCall::Lookups {
+            file: "lookup.csv".to_string(),
+            tab: ",".to_string(),
+            x_col: "1".to_string(),
+            y_cell: "E2".to_string(),
+        };
+        let adjusted = adjust_call_for_element(&call, &[2]);
+        if let GetDirectCall::Lookups { y_cell, x_col, .. } = adjusted {
+            assert_eq!(y_cell, "E4");
+            assert_eq!(x_col, "1");
+        } else {
+            panic!("Expected Lookups");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_empty_offsets_is_noop() {
+        let call = GetDirectCall::Constants {
+            file: "a.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "B2".to_string(),
+            col: String::new(),
+        };
+        let adjusted = adjust_call_for_element(&call, &[]);
+        if let GetDirectCall::Constants { row_or_cell, .. } = adjusted {
+            assert_eq!(row_or_cell, "B2");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_4arg_numeric_row() {
+        // 4-arg form: GET DIRECT CONSTANTS(file, tab, '2', 'B')
+        // row_or_cell = "2" (row number), col = "B" (column letter)
+        let call = GetDirectCall::Constants {
+            file: "a.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "2".to_string(),
+            col: "B".to_string(),
+        };
+        // Offset [1] means second element -> row 2+1=3, col B
+        let adjusted = adjust_call_for_element(&call, &[1]);
+        if let GetDirectCall::Constants {
+            row_or_cell, col, ..
+        } = adjusted
+        {
+            assert_eq!(row_or_cell, "B3");
+            // col must be cleared: the adjusted row_or_cell now encodes both
+            // row and column in A1-style, so a non-empty col would override
+            // the column downstream in load_constant.
+            assert_eq!(col, "", "col must be cleared after 4-arg adjustment");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_adjust_call_4arg_2d() {
+        // 4-arg form with 2 varying dimensions
+        let call = GetDirectCall::Constants {
+            file: "a.csv".to_string(),
+            tab: ",".to_string(),
+            row_or_cell: "2".to_string(),
+            col: "B".to_string(),
+        };
+        // [1, 2] -> row 2+1=3, col B+2=D
+        let adjusted = adjust_call_for_element(&call, &[1, 2]);
+        if let GetDirectCall::Constants {
+            row_or_cell, col, ..
+        } = adjusted
+        {
+            assert_eq!(row_or_cell, "D3");
+            assert_eq!(col, "", "col must be cleared after 4-arg adjustment");
+        } else {
+            panic!("Expected Constants");
+        }
+    }
+
+    #[test]
+    fn test_parse_row_col_separate() {
+        assert_eq!(parse_row_col_separate("2", "B"), Some((1, 1)));
+        assert_eq!(parse_row_col_separate("1", "A"), Some((0, 0)));
+        assert_eq!(parse_row_col_separate("10", "C"), Some((9, 2)));
+        assert_eq!(parse_row_col_separate("0", "A"), None);
+        assert_eq!(parse_row_col_separate("abc", "A"), None);
+        assert_eq!(parse_row_col_separate("2", ""), None);
     }
 }

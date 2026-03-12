@@ -1073,7 +1073,8 @@ mod range_tests {
 
         project.assert_compiles_incremental();
         project.assert_sim_builds();
-        project.assert_scalar_result("stddev_val", 1.0);
+        // Population stddev (N divisor): mean=3, var_sum=2, stddev=sqrt(2/3)
+        project.assert_scalar_result("stddev_val", (2.0_f64 / 3.0).sqrt());
     }
 
     #[test]
@@ -1089,8 +1090,9 @@ mod range_tests {
         project.assert_compiles_incremental();
         project.assert_sim_builds();
         // source[1:5] = [2, 4, 6, 8, 10] (inclusive range per XMILE spec)
-        // source[1:5] / 2 = [1, 2, 3, 4, 5], mean = 3, stddev = sqrt(2.5) ≈ 1.581
-        project.assert_scalar_result("stddev_val", 1.5811388300841898);
+        // source[1:5] / 2 = [1, 2, 3, 4, 5], mean = 3
+        // Population stddev (N divisor): var_sum=10, stddev=sqrt(10/5)=sqrt(2)
+        project.assert_scalar_result("stddev_val", (10.0_f64 / 5.0).sqrt());
     }
 
     #[test]
@@ -1346,32 +1348,55 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_basic() {
         // Test basic range subscript [1:3]
-        TestProject::new("range_basic")
+        // When a range produces fewer elements than the target dimension,
+        // out-of-bounds positions are filled with NaN.
+        let project = TestProject::new("range_basic")
             .indexed_dimension("Periods", 5)
             .array_aux("source[Periods]", "Periods")
-            .array_aux("slice[Periods]", "source[1:3]")
-            // TODO: if you assign like `array[len(5)] = array[len(3)]` we should zero extend not extend the last element, or error out.
-            .assert_interpreter_result("slice", &[1.0, 2.0, 3.0, 3.0, 3.0]);
+            .array_aux("slice[Periods]", "source[1:3]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let result = project.interpreter_result("slice");
+        assert_eq!(result[0], 1.0);
+        assert_eq!(result[1], 2.0);
+        assert_eq!(result[2], 3.0);
+        assert!(
+            result[3].is_nan(),
+            "Element 4 should be NaN, got {}",
+            result[3]
+        );
+        assert!(
+            result[4].is_nan(),
+            "Element 5 should be NaN, got {}",
+            result[4]
+        );
     }
 
     #[test]
-    #[ignore]
     fn range_with_expressions() {
-        // Test range with expressions [start:end]
-        TestProject::new("range_expr")
+        // Test range with dynamic variable bounds [start:end].
+        // data[start:end] selects elements 2..5 (1-based), producing a
+        // 4-element view.  Assigned to a 10-element target, the first 4
+        // elements are 1.0 and the remaining 6 are NaN.
+        let project = TestProject::new("range_expr")
             .indexed_dimension("Index", 10)
             .scalar_const("start", 2.0)
             .scalar_const("end", 5.0)
             .array_const("data[Index]", 1.0)
-            .array_aux("slice[Index]", "data[start:end]")
-            // TODO: zero extend
-            .assert_interpreter_result(
-                "slice",
-                &[2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
-            );
+            .array_aux("slice[Index]", "data[start:end]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let result = project.interpreter_result("slice");
+        for (i, &val) in result.iter().enumerate().take(4) {
+            assert_eq!(val, 1.0, "Element {} should be 1.0, got {}", i, val);
+        }
+        for (i, &val) in result.iter().enumerate().take(10).skip(4) {
+            assert!(val.is_nan(), "Element {} should be NaN, got {}", i, val);
+        }
     }
 }
 
@@ -1380,15 +1405,35 @@ mod combined_operations_tests {
     use crate::test_common::TestProject;
 
     #[test]
-    #[ignore] // Enable when all operations are implemented
     fn transpose_and_slice() {
-        // Combine transpose with slicing
-        TestProject::new("combined_transpose_slice")
+        // Combine transpose with slicing via an intermediate transposed
+        // variable. The parser handles subscripts on identifiers only,
+        // so matrix'[1:3, *] cannot be parsed as a single expression.
+        // Instead, we create an explicit transposed intermediate.
+        //
+        // matrix[Row(3), Col(4)] = Row*10 + Col.
+        // transposed = matrix' => dims [Col(4), Row(3)].
+        // result = transposed[1:3, *] selects cols 1-3 and all rows.
+        //
+        // transposed[col, row] = matrix[row, col] = row*10 + col
+        // transposed[1,*] = [11, 21, 31]  (col=1, row=1,2,3)
+        // transposed[2,*] = [12, 22, 32]  (col=2, row=1,2,3)
+        // transposed[3,*] = [13, 23, 33]  (col=3, row=1,2,3)
+        // Row-major: [11, 21, 31, 12, 22, 32, 13, 23, 33]
+        let project = TestProject::new("combined_transpose_slice")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 4)
+            .indexed_dimension("SliceCol", 3)
+            .array_aux("transposed[Col, Row]", "matrix'")
             .array_aux("matrix[Row,Col]", "Row * 10 + Col")
-            .array_aux("result", "matrix'[1:3, *]") // Transpose then slice
-            .assert_interpreter_result("result", &[1.0, 11.0, 21.0, 2.0, 12.0, 22.0]);
+            .array_aux("result[SliceCol, Row]", "transposed[1:3, *]");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "result",
+            &[11.0, 21.0, 31.0, 12.0, 22.0, 32.0, 13.0, 23.0, 33.0],
+        );
     }
 
     #[test]
@@ -1424,7 +1469,6 @@ mod combined_operations_tests {
     }
 
     #[test]
-    #[ignore] // Enable when all operations are implemented
     fn complex_expression() {
         // Test complex array expression
         TestProject::new("complex_expr")
@@ -1712,23 +1756,19 @@ mod star_range_subdimension_tests {
         project.assert_scalar_result("total", 50.0);
     }
 
-    // TODO: Indexed subdimensions deferred - datamodel lacks parent mapping metadata.
-    // When the parent dimension for an indexed subdimension can be expressed in the
-    // datamodel, this test should be enabled.
     #[test]
-    #[ignore]
     fn star_to_indexed_subdimension() {
-        // Test star range with indexed dimensions
+        // SubIndex(3) is a subdimension of Index(5), mapping to the first 3
+        // elements (indices 1, 2, 3). The `parent` field on the datamodel
+        // Dimension enables compute_subdimension_relation for indexed dims.
         let project = TestProject::new("star_to_indexed_subdim")
             .indexed_dimension("Index", 5)
-            .indexed_dimension("SubIndex", 3) // Represents indices 2, 3, 4
+            .indexed_subdimension("SubIndex", 3, "Index")
             .array_const("arr[Index]", 10.0)
-            // *:SubIndex should resolve to 2:4
             .array_aux("slice[SubIndex]", "arr[*:SubIndex] * 2");
 
         project.assert_compiles_incremental();
         project.assert_sim_builds();
-        // Should get elements 2, 3, 4 multiplied by 2
         project.assert_interpreter_result("slice", &[20.0, 20.0, 20.0]);
     }
 
@@ -2136,13 +2176,41 @@ mod structural_lowering_tests {
             .scalar_const("start_idx", 2.0)
             .scalar_const("end_idx", 4.0)
             // STDDEV(data[2:4]) for values [20, 30, 40]:
-            // mean = 30, variance = ((20-30)^2 + (30-30)^2 + (40-30)^2) / 2 = (100 + 0 + 100) / 2 = 100
-            // stddev = sqrt(100) = 10
+            // mean = 30, var_sum = (20-30)^2 + (30-30)^2 + (40-30)^2 = 200
+            // Population stddev (N divisor): sqrt(200/3)
             .scalar_aux("result", "STDDEV(data[start_idx:end_idx])");
 
         project.assert_compiles_incremental();
         project.assert_sim_builds();
-        project.assert_scalar_result("result", 10.0);
+        project.assert_scalar_result("result", (200.0_f64 / 3.0).sqrt());
+    }
+
+    #[test]
+    fn dynamic_range_a2a_uses_correct_dimension() {
+        // When target[DimA, DimB] = data[start:end], the dynamic range
+        // should resolve using DimB's position (matching data's dimension),
+        // not DimA's position (the first active dimension).
+        let project = TestProject::new("dyn_range_2d_dim_match")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("DimA", 3)
+            .indexed_dimension("DimB", 5)
+            .array_aux("data[DimB]", "DimB * 10") // [10, 20, 30, 40, 50]
+            .scalar_const("range_start", 1.0)
+            .scalar_const("range_end", 5.0)
+            .array_aux("target[DimA, DimB]", "data[range_start:range_end]")
+            .scalar_aux("total", "SUM(target[*,*])");
+
+        project.assert_compiles_incremental();
+        // Correct: each DimA row gets [10,20,30,40,50], total = 3*150 = 450
+        // Bug (using DimA position): rows get [10,10,10,10,10],[20,...],[30,...],
+        // total = 5*60 = 300
+        let vals = project.vm_result_incremental("total");
+        assert_eq!(vals.len(), 1);
+        assert!(
+            (vals[0] - 450.0).abs() < 1e-6,
+            "SUM should be 450 (3 DimA rows * 150 each), got {}",
+            vals[0]
+        );
     }
 
     #[test]
@@ -2422,10 +2490,8 @@ mod pass0_structural_lowering_tests {
 mod indexed_dimension_tests {
     use crate::test_common::TestProject;
 
-    // NOTE: Tests for different-named indexed dimensions broadcasting (e.g., a[DimA] + b[DimB])
-    // require additional compiler changes beyond the VM-level positional matching.
-    // The compiler's dimension matching occurs at multiple levels and all need updates.
-    // These tests are marked #[ignore] as future work.
+    // Tests for different-named indexed dimensions broadcasting (e.g., a[DimA] + b[DimB])
+    // and bounds checking for mismatched-size range assignments.
 
     #[test]
     fn different_indexed_dims_same_size_broadcast() {
@@ -2458,11 +2524,7 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn out_of_bounds_iteration_returns_nan() {
-        // TODO: This test requires bounds checking during A2A iteration.
-        // The VM changes are in place but the compiler needs to generate
-        // code that properly creates mismatched-size views for testing.
         let project = TestProject::new("oob_iteration")
             .indexed_dimension("Size5", 5)
             .array_aux("source[Size5]", "Size5 * 10") // [10, 20, 30, 40, 50]
@@ -2585,9 +2647,7 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn bounds_check_in_fast_path() {
-        // TODO: Requires compiler-level changes for different-sized array assignment.
         let project = TestProject::new("fast_path_bounds")
             .indexed_dimension("SmallDim", 3)
             .indexed_dimension("LargeDim", 5)
@@ -4186,6 +4246,143 @@ mod vector_op_invalid_view_tests {
 /// each element must be hoisted with its own AssignTemp (per-element hoisting).
 /// Without this, the first element's scalar value is reused for all elements.
 #[cfg(test)]
+mod flag_split_tests {
+    use crate::test_common::TestProject;
+
+    /// Reducer builtins (SUM, MEAN, etc.) should NOT promote ActiveDimRef to
+    /// Wildcard.  When `row_sum[DimA] = SUM(matrix[DimA, *])`, the `DimA`
+    /// subscript is an ActiveDimRef that should resolve to a concrete element
+    /// offset so SUM iterates only over DimB for each row, NOT over the
+    /// entire matrix.
+    #[test]
+    fn reducer_does_not_promote_active_dim_ref_interpreter() {
+        // matrix is 2x3:
+        //   row 1: [1, 2, 3]  -> row_sum[1] = 6
+        //   row 2: [10, 20, 30] -> row_sum[2] = 60
+        let project = TestProject::new("reducer_no_promote_interp")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_sum[DimA]", "SUM(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // Each row_sum should be the sum of that row, not the entire matrix
+        project.assert_interpreter_result("row_sum", &[6.0, 60.0]);
+    }
+
+    #[test]
+    fn reducer_does_not_promote_active_dim_ref_vm() {
+        let project = TestProject::new("reducer_no_promote_vm")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_sum[DimA]", "SUM(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("row_sum", &[6.0, 60.0]);
+    }
+
+    /// Vector builtins (VECTOR SORT ORDER, etc.) should promote ActiveDimRef
+    /// to Wildcard so the full array view is available.  This is a focused
+    /// unit test documenting the intent (also covered by compiler_vector.rs).
+    #[test]
+    fn vector_builtin_promotes_active_dim_ref_interpreter() {
+        // vals = [30, 10, 20]
+        // VECTOR SORT ORDER ascending: [2, 3, 1] (rank by sorted position)
+        let project = TestProject::new("vector_promotes_interp")
+            .indexed_dimension("DimA", 3)
+            .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn vector_builtin_promotes_active_dim_ref_vm() {
+        let project = TestProject::new("vector_promotes_vm")
+            .indexed_dimension("DimA", 3)
+            .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[2.0, 3.0, 1.0]);
+    }
+
+    /// Partial MEAN should reduce over one dimension while the other iterates.
+    #[test]
+    fn mean_partial_reduction_interpreter() {
+        let project = TestProject::new("mean_partial_interp")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "3"),
+                    ("1,2", "6"),
+                    ("1,3", "9"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_mean[DimA]", "MEAN(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // row 1 mean: (3+6+9)/3 = 6.0
+        // row 2 mean: (10+20+30)/3 = 20.0
+        project.assert_interpreter_result("row_mean", &[6.0, 20.0]);
+    }
+
+    #[test]
+    fn mean_partial_reduction_vm() {
+        let project = TestProject::new("mean_partial_vm")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_with_ranges(
+                "matrix[DimA,DimB]",
+                vec![
+                    ("1,1", "3"),
+                    ("1,2", "6"),
+                    ("1,3", "9"),
+                    ("2,1", "10"),
+                    ("2,2", "20"),
+                    ("2,3", "30"),
+                ],
+            )
+            .array_aux("row_mean[DimA]", "MEAN(matrix[DimA, *])");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("row_mean", &[6.0, 20.0]);
+    }
+}
+
 mod dimension_dependent_scalar_arg_tests {
     use crate::test_common::TestProject;
 
@@ -4312,5 +4509,437 @@ mod dimension_dependent_scalar_arg_tests {
             "result[2] (asc): expected 2, got {}",
             vals[2]
         );
+    }
+}
+
+/// Tests verifying array reducer builtins produce correct values and that
+/// the interpreter and VM agree. Empty-view guard tests for the VM are in
+/// vm::empty_view_reduce_tests (zero-element dimensions cannot currently be
+/// constructed through the model compilation pipeline).
+#[cfg(test)]
+mod array_reducer_tests {
+    use crate::test_common::TestProject;
+
+    fn make_reducer_project(name: &str, reducer: &str) -> TestProject {
+        TestProject::new(name)
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .scalar_aux("result", &format!("{reducer}(vals[*])"))
+    }
+
+    // -- SUM --
+
+    #[test]
+    fn sum_interpreter() {
+        let project = make_reducer_project("sum_interp", "SUM");
+        project.assert_interpreter_result("result", &[100.0]);
+    }
+
+    #[test]
+    fn sum_vm() {
+        let project = make_reducer_project("sum_vm", "SUM");
+        project.assert_vm_result_incremental("result", &[100.0]);
+    }
+
+    // -- SIZE --
+
+    #[test]
+    fn size_interpreter() {
+        let project = make_reducer_project("size_interp", "SIZE");
+        project.assert_interpreter_result("result", &[4.0]);
+    }
+
+    #[test]
+    fn size_vm() {
+        let project = make_reducer_project("size_vm", "SIZE");
+        project.assert_vm_result_incremental("result", &[4.0]);
+    }
+
+    // -- MEAN --
+
+    #[test]
+    fn mean_interpreter() {
+        let project = make_reducer_project("mean_interp", "MEAN");
+        project.assert_interpreter_result("result", &[25.0]);
+    }
+
+    #[test]
+    fn mean_vm() {
+        let project = make_reducer_project("mean_vm", "MEAN");
+        project.assert_vm_result_incremental("result", &[25.0]);
+    }
+
+    // -- MIN --
+
+    #[test]
+    fn min_interpreter() {
+        let project = make_reducer_project("min_interp", "MIN");
+        project.assert_interpreter_result("result", &[10.0]);
+    }
+
+    #[test]
+    fn min_vm() {
+        let project = make_reducer_project("min_vm", "MIN");
+        project.assert_vm_result_incremental("result", &[10.0]);
+    }
+
+    // -- MAX --
+
+    #[test]
+    fn max_interpreter() {
+        let project = make_reducer_project("max_interp", "MAX");
+        project.assert_interpreter_result("result", &[40.0]);
+    }
+
+    #[test]
+    fn max_vm() {
+        let project = make_reducer_project("max_vm", "MAX");
+        project.assert_vm_result_incremental("result", &[40.0]);
+    }
+
+    // -- STDDEV --
+
+    #[test]
+    fn stddev_interpreter() {
+        // Vensim VSSTDEV uses population stddev (N divisor):
+        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
+        let project = make_reducer_project("stddev_interp", "STDDEV");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 1);
+        let expected = (500.0_f64 / 4.0).sqrt();
+        assert!(
+            (vals[0] - expected).abs() < 1e-6,
+            "STDDEV should be ~{expected}, got {}",
+            vals[0]
+        );
+    }
+
+    #[test]
+    fn stddev_vm() {
+        // Vensim VSSTDEV uses population stddev (N divisor):
+        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
+        let project = make_reducer_project("stddev_vm", "STDDEV");
+        let vals = project.vm_result_incremental("result");
+        assert_eq!(vals.len(), 1);
+        let expected = (500.0_f64 / 4.0).sqrt();
+        assert!(
+            (vals[0] - expected).abs() < 1e-6,
+            "STDDEV should be ~{expected}, got {}",
+            vals[0]
+        );
+    }
+
+    // -- Single-element arrays: verify reducers handle size==1 correctly --
+
+    #[test]
+    fn stddev_single_element_interpreter() {
+        let project = TestProject::new("stddev_single_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_with_ranges("vals[D]", vec![("1", "42")])
+            .scalar_aux("result", "STDDEV(vals[*])");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 1);
+        assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
+    }
+
+    #[test]
+    fn stddev_single_element_vm() {
+        let project = TestProject::new("stddev_single_vm")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_with_ranges("vals[D]", vec![("1", "42")])
+            .scalar_aux("result", "STDDEV(vals[*])");
+        let vals = project.vm_result_incremental("result");
+        assert_eq!(vals.len(), 1);
+        assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
+    }
+}
+
+/// Tests for the RANK builtin (Vensim VECTOR RANK).
+///
+/// RANK(A, direction) returns an array of 1-based ordinal positions.
+/// direction=1: ascending (smallest element gets rank 1).
+/// direction=0: descending (largest element gets rank 1).
+#[cfg(test)]
+mod rank_tests {
+    use crate::test_common::TestProject;
+
+    // -- 2-arg ascending: RANK(A, 1) --
+
+    fn make_rank_ascending(name: &str) -> TestProject {
+        // A = [30, 10, 20]
+        // Sorted ascending: 10(idx1), 20(idx2), 30(idx0)
+        // Ranks: idx0->3, idx1->1, idx2->2  =>  [3, 1, 2]
+        TestProject::new(name)
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(source[D], 1)")
+    }
+
+    #[test]
+    fn rank_ascending_interpreter() {
+        let project = make_rank_ascending("rank_asc_interp");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[3.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn rank_ascending_vm() {
+        let project = make_rank_ascending("rank_asc_vm");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[3.0, 1.0, 2.0]);
+    }
+
+    // -- 2-arg descending: RANK(A, 0) --
+
+    fn make_rank_descending(name: &str) -> TestProject {
+        // A = [30, 10, 20]
+        // Sorted descending: 30(idx0), 20(idx2), 10(idx1)
+        // Ranks: idx0->1, idx1->3, idx2->2  =>  [1, 3, 2]
+        TestProject::new(name)
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(source[D], 0)")
+    }
+
+    #[test]
+    fn rank_descending_interpreter() {
+        let project = make_rank_descending("rank_desc_interp");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn rank_descending_vm() {
+        let project = make_rank_descending("rank_desc_vm");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[1.0, 3.0, 2.0]);
+    }
+
+    // -- Ascending and descending are inverse: rank_asc + rank_desc = N+1 --
+
+    #[test]
+    fn rank_asc_desc_sum_to_n_plus_1() {
+        let project = TestProject::new("rank_sum_inv")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 5)
+            .array_with_ranges(
+                "source[D]",
+                vec![
+                    ("1", "50"),
+                    ("2", "10"),
+                    ("3", "40"),
+                    ("4", "20"),
+                    ("5", "30"),
+                ],
+            )
+            .array_aux("asc[D]", "RANK(source[D], 1)")
+            .array_aux("desc[D]", "RANK(source[D], 0)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let asc = project.interpreter_result("asc");
+        let desc = project.interpreter_result("desc");
+        assert_eq!(asc.len(), 5);
+        for i in 0..5 {
+            assert_eq!(
+                asc[i] + desc[i],
+                6.0,
+                "rank_asc[{i}] + rank_desc[{i}] should equal N+1=6"
+            );
+        }
+    }
+
+    // -- 5-element test with named dimensions --
+
+    #[test]
+    fn rank_named_dimension_interpreter() {
+        let project = TestProject::new("rank_named_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .named_dimension("Company", &["A", "B", "C", "D", "E"])
+            .array_with_ranges(
+                "revenue[Company]",
+                vec![
+                    ("A", "500"),
+                    ("B", "100"),
+                    ("C", "300"),
+                    ("D", "200"),
+                    ("E", "400"),
+                ],
+            )
+            .array_aux("ranking[Company]", "RANK(revenue[Company], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // Sorted ascending: 100(B), 200(D), 300(C), 400(E), 500(A)
+        // Ranks: A->5, B->1, C->3, D->2, E->4
+        project.assert_interpreter_result("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn rank_named_dimension_vm() {
+        let project = TestProject::new("rank_named_vm")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .named_dimension("Company", &["A", "B", "C", "D", "E"])
+            .array_with_ranges(
+                "revenue[Company]",
+                vec![
+                    ("A", "500"),
+                    ("B", "100"),
+                    ("C", "300"),
+                    ("D", "200"),
+                    ("E", "400"),
+                ],
+            )
+            .array_aux("ranking[Company]", "RANK(revenue[Company], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
+    }
+
+    // -- Already sorted input --
+
+    #[test]
+    fn rank_already_sorted_interpreter() {
+        let project = TestProject::new("rank_sorted_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    // -- Reverse sorted input --
+
+    #[test]
+    fn rank_reverse_sorted_interpreter() {
+        let project = TestProject::new("rank_rev_sorted_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "40"), ("2", "30"), ("3", "20"), ("4", "10")],
+            )
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[4.0, 3.0, 2.0, 1.0]);
+    }
+
+    // -- Single element --
+
+    #[test]
+    fn rank_single_element() {
+        let project = TestProject::new("rank_single")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_with_ranges("vals[D]", vec![("1", "42")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0]);
+        project.assert_vm_result_incremental("result", &[1.0]);
+    }
+
+    // -- Equal values (ties) --
+
+    #[test]
+    fn rank_equal_values_interpreter() {
+        // All equal: ranks are assigned by sort stability (position order)
+        let project = TestProject::new("rank_equal_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "10")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // Stable sort assigns consecutive ranks in original order
+        project.assert_interpreter_result("result", &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn rank_equal_values_vm() {
+        let project = TestProject::new("rank_equal_vm")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "10")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
+    }
+
+    // -- Partial ties --
+
+    #[test]
+    fn rank_partial_ties() {
+        // vals = [10, 10, 20]
+        // Ascending: 10(idx0), 10(idx1), 20(idx2)
+        // Ranks: idx0->1, idx1->2, idx2->3
+        let project = TestProject::new("rank_partial_ties")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 2.0, 3.0]);
+        project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
+    }
+
+    // -- Interpreter and VM agreement on a larger example --
+
+    #[test]
+    fn rank_interpreter_vm_agreement() {
+        let project = TestProject::new("rank_agreement")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 5)
+            .array_with_ranges(
+                "vals[D]",
+                vec![
+                    ("1", "50"),
+                    ("2", "10"),
+                    ("3", "40"),
+                    ("4", "20"),
+                    ("5", "30"),
+                ],
+            )
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let interp = project.interpreter_result("result");
+        let vm = project.vm_result_incremental("result");
+        assert_eq!(interp.len(), vm.len());
+        for i in 0..interp.len() {
+            assert_eq!(interp[i], vm[i], "interpreter and VM disagree at index {i}");
+        }
+        // Also verify the actual values
+        // Sorted ascending: 10(idx1), 20(idx3), 30(idx4), 40(idx2), 50(idx0)
+        // Ranks: idx0->5, idx1->1, idx2->4, idx3->2, idx4->3
+        assert_eq!(interp, vec![5.0, 1.0, 4.0, 2.0, 3.0]);
     }
 }

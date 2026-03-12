@@ -13,6 +13,32 @@ use crate::xmile::{
 
 use quick_xml::events::{BytesStart, Event};
 
+/// Element-level mapping entry within a `<simlin:mapping>` vendor extension.
+/// e.g., `<simlin:elem from="A1" to="B2"/>`
+/// Note: serde rename uses local name without prefix because quick-xml strips
+/// namespace prefixes during deserialization (same behavior as isee:maps_to).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MappingElem {
+    #[serde(rename = "@from")]
+    pub from: String,
+    #[serde(rename = "@to")]
+    pub to: String,
+}
+
+/// Vendor extension for element-level dimension mappings.
+/// e.g., `<simlin:mapping target="DimB"><simlin:elem from="A1" to="B2"/></simlin:mapping>`
+/// Note: serde rename uses local name without prefix because quick-xml strips
+/// namespace prefixes during deserialization (same behavior as isee:maps_to).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MappingElement {
+    #[serde(rename = "@target")]
+    pub target: String,
+    #[serde(rename = "elem", default)]
+    pub entries: Option<Vec<MappingElem>>,
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dimension {
@@ -27,6 +53,14 @@ pub struct Dimension {
     /// Note: Element in XML is <isee:maps_to> but quick-xml deserializes with local name only
     #[serde(rename = "maps_to")]
     pub maps_to: Option<String>,
+    /// Vendor extension for element-level dimension mappings.
+    /// Serde rename uses local name without prefix (quick-xml strips namespace prefixes).
+    #[serde(rename = "mapping", default)]
+    pub mappings: Option<Vec<MappingElement>>,
+    /// Vendor extension for indexed subdimension parent.
+    /// Serialized as `<simlin:parent>ParentDim</simlin:parent>`.
+    #[serde(rename = "parent", default)]
+    pub parent: Option<String>,
 }
 
 impl ToXml<XmlWriter> for Dimension {
@@ -48,9 +82,30 @@ impl ToXml<XmlWriter> for Dimension {
             }
         }
 
-        // Write dimension mapping if present
+        // Write simple positional mapping if present
         if let Some(ref maps_to) = self.maps_to {
             write_tag(writer, "isee:maps_to", maps_to)?;
+        }
+
+        // Write element-level mappings as vendor extensions
+        if let Some(ref mappings) = self.mappings {
+            for mapping in mappings {
+                let attrs = &[("target", mapping.target.as_str())];
+                write_tag_start_with_attrs(writer, "simlin:mapping", attrs)?;
+                if let Some(ref entries) = mapping.entries {
+                    for entry in entries {
+                        let elem_attrs =
+                            &[("from", entry.from.as_str()), ("to", entry.to.as_str())];
+                        super::write_tag_with_attrs(writer, "simlin:elem", "", elem_attrs)?;
+                    }
+                }
+                write_tag_end(writer, "simlin:mapping")?;
+            }
+        }
+
+        // Write indexed subdimension parent as vendor extension
+        if let Some(ref parent) = self.parent {
+            write_tag(writer, "simlin:parent", parent)?;
         }
 
         super::write_tag_end(writer, "dim")
@@ -71,33 +126,104 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::DimensionElements::Indexed(dimension.size.unwrap_or_default())
         };
-        let mut result = datamodel::Dimension {
+
+        // Prefer vendor extension mappings; fall back to simple maps_to
+        let mappings = if let Some(xmile_mappings) = dimension.mappings {
+            xmile_mappings
+                .into_iter()
+                .map(|m| {
+                    let target = canonicalize(&m.target).into_owned();
+                    let element_map = m
+                        .entries
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|e| {
+                            (
+                                canonicalize(&e.from).into_owned(),
+                                canonicalize(&e.to).into_owned(),
+                            )
+                        })
+                        .collect();
+                    datamodel::DimensionMapping {
+                        target,
+                        element_map,
+                    }
+                })
+                .collect()
+        } else if let Some(target) = maps_to {
+            vec![datamodel::DimensionMapping {
+                target,
+                element_map: vec![],
+            }]
+        } else {
+            vec![]
+        };
+
+        let parent = dimension.parent.map(|p| canonicalize(&p).into_owned());
+
+        datamodel::Dimension {
             name,
             elements,
-            mappings: vec![],
-        };
-        if let Some(target) = maps_to {
-            result.set_maps_to(target);
+            mappings,
+            parent,
         }
-        result
     }
 }
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dimension: datamodel::Dimension) -> Self {
+        // Single positional mapping uses <isee:maps_to> for XMILE compatibility.
+        // All other cases (element-level mappings, multiple targets) use vendor
+        // extension <simlin:mapping> elements.
         let maps_to = dimension.maps_to().map(|s| s.to_owned());
+        let needs_vendor_extension = maps_to.is_none() && !dimension.mappings.is_empty();
+        let vendor_mappings: Vec<_> = if needs_vendor_extension {
+            dimension
+                .mappings
+                .iter()
+                .map(|m| MappingElement {
+                    target: m.target.clone(),
+                    entries: if m.element_map.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            m.element_map
+                                .iter()
+                                .map(|(from, to)| MappingElem {
+                                    from: from.clone(),
+                                    to: to.clone(),
+                                })
+                                .collect(),
+                        )
+                    },
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        let mappings = if vendor_mappings.is_empty() {
+            None
+        } else {
+            Some(vendor_mappings)
+        };
+
+        let parent = dimension.parent;
         match dimension.elements {
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dimension.name,
                 size: Some(size),
                 elements: None,
                 maps_to,
+                mappings,
+                parent,
             },
             datamodel::DimensionElements::Named(elements) => Dimension {
                 name: dimension.name,
                 size: None,
                 elements: Some(elements.into_iter().map(|i| Index { name: i }).collect()),
                 maps_to,
+                mappings,
+                parent,
             },
         }
     }
@@ -346,6 +472,8 @@ fn test_dimension_with_maps_to_parsing() {
             },
         ]),
         maps_to: Some("DimB".to_string()),
+        mappings: None,
+        parent: None,
     };
 
     use quick_xml::de;

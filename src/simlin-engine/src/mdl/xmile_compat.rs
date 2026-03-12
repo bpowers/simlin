@@ -522,6 +522,7 @@ impl XmileFormatter {
             "vmin" => "MIN".to_string(),
             "forecast" => "FORCST".to_string(),
             "random pink noise" => "NORMALPINK".to_string(),
+            "vector rank" => "RANK".to_string(),
             "vector select" => "VECTOR SELECT".to_string(),
             "vector elm map" => "VECTOR ELM MAP".to_string(),
             "vector sort order" => "VECTOR SORT ORDER".to_string(),

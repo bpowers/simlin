@@ -240,6 +240,12 @@
           "items": {
             "$ref": "#/$defs/ElementEquation"
           }
+        },
+        "hasExceptDefault": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1152,6 +1158,13 @@
           "items": {
             "$ref": "#/$defs/JsonDimensionMapping"
           }
+        },
+        "parent": {
+          "description": "For indexed subdimensions, the name of the parent dimension.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

@@ -106,6 +106,7 @@ impl<'input> ConversionContext<'input> {
                     name: space_to_underbar(original_name),
                     elements: target_dim.elements.clone(),
                     mappings: vec![],
+                    parent: None,
                 };
                 alias.set_maps_to(dst.clone());
                 // Add alias to dimension_elements so expand_subscript can find it
@@ -136,6 +137,7 @@ impl<'input> ConversionContext<'input> {
             name: space_to_underbar(original_name),
             elements: DimensionElements::Named(elements),
             mappings,
+            parent: None,
         })
     }
 
@@ -353,6 +355,21 @@ impl<'input> ConversionContext<'input> {
         }
 
         None
+    }
+
+    /// Find the 0-based index of an element within a dimension's element list.
+    /// Used to compute offsets for arrayed GET DIRECT cell reference adjustment.
+    pub(super) fn element_index_in_dimension(
+        &self,
+        element: &str,
+        dim_formatted: &str,
+    ) -> Option<usize> {
+        let dim_canonical = canonical_name(dim_formatted);
+        let elem_canonical = canonical_name(element);
+        let elements = self.dimension_elements.get(&dim_canonical)?;
+        elements
+            .iter()
+            .position(|e| canonical_name(e) == elem_canonical)
     }
 
     /// Get the formatted dimension name (space_to_underbar) from a canonical name.
@@ -653,7 +670,7 @@ x[DimA] = 1
         // Should be recognized and processed correctly
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
+                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
                 }
@@ -688,7 +705,7 @@ x[b1] = 2
 
         if let Variable::Aux(a) = x {
             match &a.equation {
-                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq) => {
+                crate::datamodel::Equation::Arrayed(dims, elements, _default_eq, _) => {
                     assert_eq!(dims, &["DimA"]);
                     assert_eq!(elements.len(), 2);
 

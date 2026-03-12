@@ -164,6 +164,7 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
                     ..Default::default()
                 }),
                 elements: None,
+                has_except_default: None,
             }),
         // Elements variant: has elements, no equation
         (
@@ -175,6 +176,7 @@ fn arrayed_equation_strategy() -> impl Strategy<Value = ArrayedEquation> {
                 equation: None,
                 compat: None,
                 elements: Some(elems),
+                has_except_default: None,
             }),
     ]
 }
@@ -715,6 +717,7 @@ fn dimension_strategy() -> impl Strategy<Value = Dimension> {
                 size: 0,
                 maps_to,
                 mappings: vec![],
+                parent: None,
             }),
         // Indexed dimension: has size > 0, empty elements
         (
@@ -728,6 +731,7 @@ fn dimension_strategy() -> impl Strategy<Value = Dimension> {
                 size,
                 maps_to,
                 mappings: vec![],
+                parent: None,
             }),
     ]
 }
@@ -1300,6 +1304,7 @@ mod protobuf_roundtrip_tests {
                 size: 0,
                 maps_to: None,
                 mappings: vec![],
+                parent: None,
             }],
             units: vec![Unit {
                 name: "people".to_string(),
@@ -1350,6 +1355,7 @@ mod protobuf_roundtrip_tests {
                         equation: Some("100".to_string()),
                         compat: None,
                         elements: None,
+                        has_except_default: None,
                     }),
                     compat: None,
                     non_negative: false,
@@ -1385,6 +1391,7 @@ mod protobuf_roundtrip_tests {
                                 graphical_function: None,
                             },
                         ]),
+                        has_except_default: None,
                     }),
                     compat: None,
                     can_be_module_input: false,
@@ -1407,6 +1414,7 @@ mod protobuf_roundtrip_tests {
                     size: 0,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
                 Dimension {
                     name: "regions".to_string(),
@@ -1414,6 +1422,7 @@ mod protobuf_roundtrip_tests {
                     size: 0,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
             ],
             units: vec![],
@@ -1534,6 +1543,7 @@ mod protobuf_roundtrip_tests {
                     size: 0,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
                 Dimension {
                     name: "DimA".to_string(),
@@ -1541,6 +1551,7 @@ mod protobuf_roundtrip_tests {
                     size: 0,
                     maps_to: Some("DimB".to_string()),
                     mappings: vec![],
+                    parent: None,
                 },
             ],
             units: vec![],
@@ -1590,6 +1601,7 @@ mod protobuf_roundtrip_tests {
                 size: 10,
                 maps_to: None,
                 mappings: vec![],
+                parent: None,
             }],
             units: vec![],
             source: Default::default(),

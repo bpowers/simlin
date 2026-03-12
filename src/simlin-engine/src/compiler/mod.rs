@@ -785,6 +785,7 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
         Expr::App(
             BuiltinFn::VectorElmMap(_, _)
                 | BuiltinFn::VectorSortOrder(_, _)
+                | BuiltinFn::Rank(_, _)
                 | BuiltinFn::AllocateAvailable(_, _, _),
             _
         )
@@ -802,7 +803,9 @@ fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
         Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(view.clone()),
         Expr::App(builtin, _) => match builtin {
             BuiltinFn::VectorElmMap(_, offset) => find_expr_array_view(offset),
-            BuiltinFn::VectorSortOrder(arr, _) => find_expr_array_view(arr),
+            BuiltinFn::VectorSortOrder(arr, _) | BuiltinFn::Rank(arr, _) => {
+                find_expr_array_view(arr)
+            }
             BuiltinFn::AllocateAvailable(req, _, _) => find_expr_array_view(req),
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)

@@ -213,6 +213,9 @@ pub(crate) enum SymbolicOpcode {
     VectorSortOrder {
         write_temp_id: TempId,
     },
+    Rank {
+        write_temp_id: TempId,
+    },
     AllocateAvailable {
         write_temp_id: TempId,
     },
@@ -621,6 +624,9 @@ pub(crate) fn symbolize_opcode(
         Opcode::VectorSortOrder { write_temp_id } => Ok(SymbolicOpcode::VectorSortOrder {
             write_temp_id: *write_temp_id,
         }),
+        Opcode::Rank { write_temp_id } => Ok(SymbolicOpcode::Rank {
+            write_temp_id: *write_temp_id,
+        }),
         Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
             write_temp_id: *write_temp_id,
         }),
@@ -918,6 +924,9 @@ pub(crate) fn resolve_opcode(
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
+            write_temp_id: *write_temp_id,
+        }),
+        SymbolicOpcode::Rank { write_temp_id } => Ok(Opcode::Rank {
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::AllocateAvailable { write_temp_id } => Ok(Opcode::AllocateAvailable {
@@ -1333,6 +1342,18 @@ pub(crate) fn renumber_opcode(
         } => SymbolicOpcode::BeginBroadcastIter {
             n_sources: *n_sources,
             dest_temp_id: checked_add_u8(*dest_temp_id, temp_off_u8, "TempId")?,
+        },
+        SymbolicOpcode::VectorElmMap { write_temp_id } => SymbolicOpcode::VectorElmMap {
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+        },
+        SymbolicOpcode::VectorSortOrder { write_temp_id } => SymbolicOpcode::VectorSortOrder {
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+        },
+        SymbolicOpcode::Rank { write_temp_id } => SymbolicOpcode::Rank {
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+        },
+        SymbolicOpcode::AllocateAvailable { write_temp_id } => SymbolicOpcode::AllocateAvailable {
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
         // All other opcodes have no resource IDs to renumber
         other => other.clone(),
@@ -2663,6 +2684,38 @@ mod tests {
                 assert_eq!(*id, 1, "Temp base should be renumbered by temp_offset")
             }
             other => panic!("expected Temp base, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_renumber_vector_builtin_temp_ids() {
+        // VectorElmMap, VectorSortOrder, and AllocateAvailable each carry
+        // a write_temp_id that must be renumbered during fragment
+        // concatenation, just like LoadTempConst and BeginIter.
+        let temp_off: u32 = 5;
+
+        let elm_map = SymbolicOpcode::VectorElmMap { write_temp_id: 0 };
+        match renumber_opcode(&elm_map, 0, 0, 0, 0, temp_off, 0).unwrap() {
+            SymbolicOpcode::VectorElmMap { write_temp_id } => {
+                assert_eq!(write_temp_id, 5);
+            }
+            other => panic!("expected VectorElmMap, got {:?}", other),
+        }
+
+        let sort_order = SymbolicOpcode::VectorSortOrder { write_temp_id: 2 };
+        match renumber_opcode(&sort_order, 0, 0, 0, 0, temp_off, 0).unwrap() {
+            SymbolicOpcode::VectorSortOrder { write_temp_id } => {
+                assert_eq!(write_temp_id, 7);
+            }
+            other => panic!("expected VectorSortOrder, got {:?}", other),
+        }
+
+        let alloc = SymbolicOpcode::AllocateAvailable { write_temp_id: 1 };
+        match renumber_opcode(&alloc, 0, 0, 0, 0, temp_off, 0).unwrap() {
+            SymbolicOpcode::AllocateAvailable { write_temp_id } => {
+                assert_eq!(write_temp_id, 6);
+            }
+            other => panic!("expected AllocateAvailable, got {:?}", other),
         }
     }
 

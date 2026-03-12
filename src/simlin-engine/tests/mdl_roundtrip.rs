@@ -122,7 +122,7 @@ fn var_equation_text(var: &Variable) -> &str {
     match var.get_equation() {
         Some(datamodel::Equation::Scalar(s)) => s.as_str(),
         Some(datamodel::Equation::ApplyToAll(_, s)) => s.as_str(),
-        Some(datamodel::Equation::Arrayed(_, _, _)) => "<arrayed>",
+        Some(datamodel::Equation::Arrayed(_, _, _, _)) => "<arrayed>",
         None => "",
     }
 }

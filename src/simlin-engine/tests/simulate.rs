@@ -610,20 +610,12 @@ fn simulates_except_xmile() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
 }
 
-// Ignored: the except/except2 models use cross-dimension subscript mappings
-// (DimD -> DimA) causing "output missing variable" errors -- the simulation
-// completes but output variable names don't match the expected .dat names
-// due to unresolved dimension mapping. EXCEPT parsing and compilation work;
-// the basic EXCEPT test (simulates_except_basic_mdl) verifies correctness.
 #[test]
-#[ignore]
 fn simulates_except() {
     simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except/except.mdl");
 }
 
-// Ignored: same cross-dimension mapping issue as simulates_except.
 #[test]
-#[ignore]
 fn simulates_except2() {
     simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except2/except2.mdl");
 }
@@ -879,12 +871,11 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // array_tests::sum_of_conditional_tests.
     // "test/sdeverywhere/models/sumif/sumif.xmile",
     //
-    // VECTOR ELM MAP with cross-dimension source: `VECTOR ELM MAP(b[B1], a[DimA])`
-    // uses b[B1] (a single-element B-subscript slice) as the source array in a DimA
-    // context. The compiler cannot resolve the dimension mismatch because b's DimB
-    // dimension has no mapping to DimA. Fixing requires either element-level subscript
-    // flattening or a new cross-dimension indexing strategy.
-    // The vector_simple subset (no cross-dim indexing) passes via simulates_vector_simple_mdl.
+    // VECTOR ELM MAP cross-dimension source: partially fixed (cross-dim subscripts,
+    // SUM wildcards, AssignTemp wildcards), but several variables still fail:
+    //   - y[DimA] = VECTOR ELM MAP(x[three], (DimA-1)) fails in VM incremental path
+    //   - Additional VECTOR SELECT cross-dimension patterns need compiler work
+    // The vector_simple subset passes via simulates_vector_simple_mdl.
     // "test/sdeverywhere/models/vector/vector.xmile",
     //
     // --- Permanently excluded (not test models) ---
@@ -998,13 +989,7 @@ fn simulates_quantum_mdl() {
 
 #[test]
 fn simulates_vector_simple_mdl() {
-    // Interpreter-only: the incremental VM path produces incorrect values
-    // for VECTOR ELM MAP with cross-dimension source indexing (m[a3] = 0
-    // instead of 2). This is a pre-existing incremental compiler limitation,
-    // not a regression from this migration.
-    simulate_mdl_path_interpreter_only(
-        "../../test/sdeverywhere/models/vector_simple/vector_simple.mdl",
-    );
+    simulate_mdl_path("../../test/sdeverywhere/models/vector_simple/vector_simple.mdl");
 }
 
 #[test]
@@ -1283,7 +1268,7 @@ fn incremental_compilation_covers_all_models() {
 
 // -- External data model tests (MDL path with FilesystemDataProvider) --
 
-// Ignored: requires Excel data support AND dimension equivalences (DimC <-> DimM)
+// Requires Excel data support (ext_data feature), out of scope
 #[cfg(feature = "ext_data")]
 #[test]
 #[ignore]
@@ -1291,23 +1276,17 @@ fn simulates_directdata_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directdata/directdata.mdl");
 }
 
-// Ignored: requires arrayed GET DIRECT CONSTANTS (B2* pattern) and EXCEPT support
 #[test]
-#[ignore]
 fn simulates_directconst_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directconst/directconst.mdl");
 }
 
-// Ignored: requires arrayed GET DIRECT LOOKUPS with row-oriented addressing
 #[test]
-#[ignore]
 fn simulates_directlookups_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directlookups/directlookups.mdl");
 }
 
-// Ignored: requires cross-dimension mapping (DimA -> DimB, DimC)
 #[test]
-#[ignore]
 fn simulates_directsubs_mdl() {
     simulate_mdl_path_with_data("../../test/sdeverywhere/models/directsubs/directsubs.mdl");
 }

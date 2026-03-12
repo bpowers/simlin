@@ -541,7 +541,6 @@ pub(crate) enum Op2 {
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Array opcodes not yet emitted by compiler
 pub(crate) enum Opcode {
     // === ARITHMETIC & LOGIC ===
     Op2 {
@@ -822,6 +821,13 @@ pub(crate) enum Opcode {
         write_temp_id: TempId,
     },
 
+    /// Produces an array of ranks (ordinal positions in sorted order); writes to temp_storage.
+    /// Pops 1 scalar (direction: 1=ascending, 0=descending) from the arithmetic stack.
+    /// Reads 1 view from the view stack.
+    Rank {
+        write_temp_id: TempId,
+    },
+
     /// Priority-based allocation; writes result array to temp_storage.
     AllocateAvailable {
         write_temp_id: TempId,
@@ -980,10 +986,11 @@ impl Opcode {
             // VectorSelect pops 2 scalars (max_value, action), pushes 1 result
             Opcode::VectorSelect {} => (2, 1),
             // VectorElmMap writes to temp_storage without touching the arithmetic stack.
-            // VectorSortOrder/AllocateAvailable pop 1 scalar each (direction and avail
-            // respectively) and write their result arrays to temp_storage.
+            // VectorSortOrder/Rank/AllocateAvailable pop 1 scalar each (direction/avail)
+            // and write their result arrays to temp_storage.
             Opcode::VectorElmMap { .. } => (0, 0),
             Opcode::VectorSortOrder { .. } => (1, 0),
+            Opcode::Rank { .. } => (1, 0),
             Opcode::AllocateAvailable { .. } => (1, 0),
 
             // Broadcasting
@@ -1068,7 +1075,6 @@ pub struct ByteCodeContext {
     /// Module declarations for nested modules
     pub(crate) modules: Vec<ModuleDeclaration>,
     /// Legacy array definitions (deprecated, use dimensions instead)
-    #[allow(dead_code)]
     pub(crate) arrays: Vec<ArrayDefinition>,
 
     // === New array support fields ===
@@ -1077,7 +1083,6 @@ pub struct ByteCodeContext {
     /// Subdimension relationships for star ranges
     pub(crate) subdim_relations: Vec<SubdimensionRelation>,
     /// Interned names table (dimension names, element names)
-    #[allow(dead_code)] // Used by array bytecode not yet emitted
     pub(crate) names: Vec<String>,
     /// Pre-computed static views (indexed by ViewId)
     pub(crate) static_views: Vec<StaticArrayView>,
@@ -1094,7 +1099,10 @@ pub struct ByteCodeContext {
     pub(crate) dim_lists: Vec<(u8, [u16; 4])>,
 }
 
-#[allow(dead_code)] // Methods used by array bytecode not yet emitted
+// ByteCodeCompiler (codegen.rs) builds these tables directly and transfers
+// them into ByteCodeContext, so these convenience methods are unused in
+// production but useful for testing.
+#[allow(dead_code)]
 impl ByteCodeContext {
     /// Intern a name (dimension or element name) and return its NameId.
     /// If the name already exists, returns the existing ID.
@@ -1574,6 +1582,8 @@ mod tests {
             (Opcode::VectorSortOrder { write_temp_id: 0 }).stack_effect(),
             (1, 0)
         );
+        // Rank: pops 1 scalar (direction), writes to temp_storage
+        assert_eq!((Opcode::Rank { write_temp_id: 0 }).stack_effect(), (1, 0));
         // AllocateAvailable: pops 1 scalar (avail), writes to temp_storage
         assert_eq!(
             (Opcode::AllocateAvailable { write_temp_id: 0 }).stack_effect(),

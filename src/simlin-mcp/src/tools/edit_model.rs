@@ -325,6 +325,13 @@ fn build_patch(
 /// Convert a curated `ArrayedEquationInput` to an `ejson::ArrayedEquation`,
 /// filling in `compat: None` for the excluded field.
 fn convert_arrayed_equation(a: ArrayedEquationInput) -> ejson::ArrayedEquation {
+    // EXCEPT semantics: a default equation with per-element overrides.
+    // When both are present, the default applies to unspecified elements.
+    let has_except_default = if a.equation.is_some() && a.elements.is_some() {
+        Some(true)
+    } else {
+        None
+    };
     ejson::ArrayedEquation {
         dimensions: a.dimensions,
         equation: a.equation,
@@ -339,6 +346,7 @@ fn convert_arrayed_equation(a: ArrayedEquationInput) -> ejson::ArrayedEquation {
                 })
                 .collect()
         }),
+        has_except_default,
     }
 }
 
@@ -405,6 +413,44 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
 mod tests {
     use super::*;
     use crate::tool::Tool;
+
+    #[test]
+    fn test_convert_arrayed_equation_infers_except_default() {
+        let input = ArrayedEquationInput {
+            dimensions: vec!["DimA".to_string()],
+            equation: Some("default_eq".to_string()),
+            elements: Some(vec![ElementEquationInput {
+                subscript: "A1".to_string(),
+                equation: "override_eq".to_string(),
+                graphical_function: None,
+            }]),
+        };
+        let result = convert_arrayed_equation(input);
+        assert_eq!(result.has_except_default, Some(true));
+    }
+
+    #[test]
+    fn test_convert_arrayed_equation_no_except_without_both() {
+        // equation only, no elements -> not EXCEPT
+        let input = ArrayedEquationInput {
+            dimensions: vec!["DimA".to_string()],
+            equation: Some("eq".to_string()),
+            elements: None,
+        };
+        assert_eq!(convert_arrayed_equation(input).has_except_default, None);
+
+        // elements only, no default equation -> not EXCEPT
+        let input = ArrayedEquationInput {
+            dimensions: vec!["DimA".to_string()],
+            equation: None,
+            elements: Some(vec![ElementEquationInput {
+                subscript: "A1".to_string(),
+                equation: "eq".to_string(),
+                graphical_function: None,
+            }]),
+        };
+        assert_eq!(convert_arrayed_equation(input).has_except_default, None);
+    }
 
     fn call_tool(input: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         tool().call(input)

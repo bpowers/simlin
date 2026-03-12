@@ -314,6 +314,7 @@ static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "elmcount",
         "vector select",
         "vector elm map",
+        "vector rank",
         "vector sort order",
         "vector reorder",
         "vector lookup",
@@ -696,6 +697,22 @@ mod tests {
         ));
         assert!(matches!(
             classify_symbol("RANDOM UNIFORM"),
+            SymbolClass::Builtin
+        ));
+    }
+
+    #[test]
+    fn test_vector_rank_is_builtin() {
+        assert!(matches!(
+            classify_symbol("VECTOR RANK"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("VECTOR_RANK"),
+            SymbolClass::Builtin
+        ));
+        assert!(matches!(
+            classify_symbol("vector rank"),
             SymbolClass::Builtin
         ));
     }
