@@ -1759,22 +1759,19 @@ mod star_range_subdimension_tests {
     }
 
     // TODO: Indexed subdimensions deferred - datamodel lacks parent mapping metadata.
-    // When the parent dimension for an indexed subdimension can be expressed in the
-    // datamodel, this test should be enabled.
     #[test]
-    #[ignore]
     fn star_to_indexed_subdimension() {
-        // Test star range with indexed dimensions
+        // SubIndex(3) is a subdimension of Index(5), mapping to the first 3
+        // elements (indices 1, 2, 3). The `parent` field on the datamodel
+        // Dimension enables compute_subdimension_relation for indexed dims.
         let project = TestProject::new("star_to_indexed_subdim")
             .indexed_dimension("Index", 5)
-            .indexed_dimension("SubIndex", 3) // Represents indices 2, 3, 4
+            .indexed_subdimension("SubIndex", 3, "Index")
             .array_const("arr[Index]", 10.0)
-            // *:SubIndex should resolve to 2:4
             .array_aux("slice[SubIndex]", "arr[*:SubIndex] * 2");
 
         project.assert_compiles_incremental();
         project.assert_sim_builds();
-        // Should get elements 2, 3, 4 multiplied by 2
         project.assert_interpreter_result("slice", &[20.0, 20.0, 20.0]);
     }
 

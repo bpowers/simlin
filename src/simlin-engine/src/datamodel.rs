@@ -800,6 +800,12 @@ pub struct Dimension {
     /// indexed dimensions. Additionally, both dimensions in a mapping must have
     /// the same number of elements for valid positional correspondence.
     pub mappings: Vec<DimensionMapping>,
+    /// For indexed subdimensions, the name of the parent dimension this
+    /// subdimension belongs to. For example, if `SubIndex(3)` is a
+    /// subdimension of `FullIndex(5)`, then `parent = Some("FullIndex")`.
+    /// This enables `compute_subdimension_relation` to resolve Indexed/Indexed
+    /// pairs that share a parent-child relationship.
+    pub parent: Option<String>,
 }
 
 impl Dimension {
@@ -809,6 +815,7 @@ impl Dimension {
             name,
             elements: DimensionElements::Indexed(size),
             mappings: vec![],
+            parent: None,
         }
     }
 
@@ -818,6 +825,7 @@ impl Dimension {
             name,
             elements: DimensionElements::Named(elements),
             mappings: vec![],
+            parent: None,
         }
     }
 

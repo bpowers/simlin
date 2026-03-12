@@ -105,6 +105,14 @@ impl TestProject {
         self
     }
 
+    /// Add an indexed subdimension that is a subset of a parent indexed dimension.
+    pub fn indexed_subdimension(mut self, name: &str, size: u32, parent: &str) -> Self {
+        let mut dim = Dimension::indexed(name.to_string(), size);
+        dim.parent = Some(parent.to_string());
+        self.dimensions.push(dim);
+        self
+    }
+
     /// Add a named dimension with specific elements
     pub fn named_dimension(mut self, name: &str, elements: &[&str]) -> Self {
         self.dimensions.push(Dimension::named(

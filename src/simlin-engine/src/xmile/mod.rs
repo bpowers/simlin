@@ -921,6 +921,7 @@ fn test_xmile_roundtrips_element_level_dimension_mapping() {
                     ("a2".to_string(), "b1".to_string()),
                 ],
             }],
+            parent: None,
         }],
         units: vec![],
         models: vec![datamodel::Model {
@@ -979,6 +980,7 @@ fn test_xmile_roundtrips_multi_target_mappings() {
                     element_map: vec![],
                 },
             ],
+            parent: None,
         }],
         units: vec![],
         models: vec![datamodel::Model {

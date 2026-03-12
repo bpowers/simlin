@@ -358,6 +358,10 @@ message Dimension {
   // by DimB references variables indexed by DimA.
   optional string maps_to = 5;
   repeated DimensionMapping mappings = 6;
+  // For indexed subdimensions, the name of the parent dimension.
+  // e.g., SubIndex(3) with parent="FullIndex" means SubIndex is a
+  // subdimension of FullIndex(5).
+  string parent = 7;
 };
 
 message Unit {

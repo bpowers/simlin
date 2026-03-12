@@ -2107,6 +2107,7 @@ impl From<Dimension> for project_io::Dimension {
             dimension: Some(dim),
             maps_to,
             mappings,
+            parent: dimension.parent.unwrap_or_default(),
         }
     }
 }
@@ -2151,10 +2152,17 @@ impl From<project_io::Dimension> for Dimension {
             vec![]
         };
 
+        let parent = if dimension.parent.is_empty() {
+            None
+        } else {
+            Some(dimension.parent)
+        };
+
         Dimension {
             name: dimension.name,
             elements,
             mappings,
+            parent,
         }
     }
 }
@@ -2351,6 +2359,7 @@ fn test_protobuf_roundtrips_element_level_dimension_mapping() {
                     ("a2".to_string(), "b1".to_string()),
                 ],
             }],
+            parent: None,
         }],
     );
     let pb = serialize(&project).unwrap();
@@ -2398,6 +2407,7 @@ fn test_protobuf_roundtrips_simple_dimension_mapping() {
                 target: "dim_b".to_string(),
                 element_map: vec![],
             }],
+            parent: None,
         }],
     );
     let pb = serialize(&project).unwrap();
@@ -2422,6 +2432,7 @@ fn test_protobuf_roundtrips_multi_target_mappings() {
                     element_map: vec![],
                 },
             ],
+            parent: None,
         }],
     );
     let pb = serialize(&project).unwrap();
@@ -2479,6 +2490,7 @@ fn test_protobuf_backward_compat_old_protos() {
                 elements: vec!["a1".to_string(), "a2".to_string()],
             },
         )),
+        parent: String::new(),
     };
     let dim = Dimension::from(old_dim);
     assert_eq!(dim.mappings.len(), 1);

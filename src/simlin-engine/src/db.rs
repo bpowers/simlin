@@ -512,6 +512,7 @@ pub fn source_dims_to_datamodel(dims: &[SourceDimension]) -> Vec<datamodel::Dime
                 name: sd.name.clone(),
                 elements,
                 mappings,
+                parent: None,
             }
         })
         .collect()
@@ -5901,6 +5902,7 @@ mod conversion_tests {
                     ("a2".to_string(), "b1".to_string()),
                 ],
             }],
+            parent: None,
         };
         let source: SourceDimension = SourceDimension::from(&dim);
         let roundtripped = source_dims_to_datamodel(&[source]);
@@ -5925,6 +5927,7 @@ mod conversion_tests {
                     element_map: vec![],
                 },
             ],
+            parent: None,
         };
         let source: SourceDimension = SourceDimension::from(&dim);
         let roundtripped = source_dims_to_datamodel(&[source]);

@@ -515,6 +515,9 @@ pub struct Dimension {
     /// Takes precedence over maps_to during deserialization.
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub mappings: Vec<JsonDimensionMapping>,
+    /// For indexed subdimensions, the name of the parent dimension.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent: Option<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1198,6 +1201,7 @@ impl From<Dimension> for datamodel::Dimension {
         } else {
             datamodel::Dimension::named(dim.name, vec![])
         };
+        result.parent = dim.parent;
         // Reconstruct mappings: if the richer `mappings` array is present,
         // use it exclusively (it may include the maps_to target). Otherwise
         // fall back to the legacy `maps_to` field for backward compatibility.
@@ -1849,6 +1853,7 @@ impl From<datamodel::Dimension> for Dimension {
                 size: 0,
                 maps_to,
                 mappings,
+                parent: dim.parent,
             },
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dim.name,
@@ -1856,6 +1861,7 @@ impl From<datamodel::Dimension> for Dimension {
                 size: size as i32,
                 maps_to,
                 mappings,
+                parent: dim.parent,
             },
         }
     }
@@ -2776,6 +2782,7 @@ mod tests {
                 size: 0,
                 maps_to: None,
                 mappings: vec![],
+                parent: None,
             }],
             units: vec![Unit {
                 name: "people".to_string(),
@@ -2818,6 +2825,7 @@ mod tests {
                     size: 0,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
             ),
             (
@@ -2828,6 +2836,7 @@ mod tests {
                     size: 10,
                     maps_to: None,
                     mappings: vec![],
+                    parent: None,
                 },
             ),
             (
@@ -2838,6 +2847,7 @@ mod tests {
                     size: 0,
                     maps_to: Some("DimB".to_string()),
                     mappings: vec![],
+                    parent: None,
                 },
             ),
         ];
@@ -2900,6 +2910,7 @@ mod tests {
             size: 0,
             maps_to: None,
             mappings: vec![],
+            parent: None,
         };
 
         let serialized = serde_json::to_string(&dim).unwrap();
@@ -3646,6 +3657,7 @@ mod tests {
                     },
                 ],
             }],
+            parent: None,
         };
 
         let json_str = serde_json::to_string(&json_dim).unwrap();
@@ -3675,6 +3687,7 @@ mod tests {
             size: 0,
             maps_to: Some("DimB".to_string()),
             mappings: vec![],
+            parent: None,
         };
 
         let json_str = serde_json::to_string(&json_dim).unwrap();
@@ -3754,6 +3767,7 @@ mod tests {
                     element_map: vec![],
                 },
             ],
+            parent: None,
         };
 
         let json_dim: Dimension = dim.clone().into();

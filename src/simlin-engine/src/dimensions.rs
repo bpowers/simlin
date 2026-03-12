@@ -211,13 +211,15 @@ impl From<datamodel::Dimension> for Dimension {
 #[derive(Clone, Default)]
 pub struct DimensionsContext {
     dimensions: HashMap<CanonicalDimensionName, Dimension>,
+    /// For indexed subdimensions, maps child dimension name to its declared parent.
+    indexed_parents: HashMap<CanonicalDimensionName, CanonicalDimensionName>,
     relationship_cache: RelationshipCache,
 }
 
 // Manual PartialEq implementation that ignores the cache (caches don't affect equality)
 impl PartialEq for DimensionsContext {
     fn eq(&self, other: &Self) -> bool {
-        self.dimensions == other.dimensions
+        self.dimensions == other.dimensions && self.indexed_parents == other.indexed_parents
     }
 }
 
@@ -239,6 +241,18 @@ impl DimensionsContext {
             }
         }
 
+        let indexed_parents: HashMap<CanonicalDimensionName, CanonicalDimensionName> = dimensions
+            .iter()
+            .filter_map(|dim| {
+                dim.parent.as_ref().map(|parent_name| {
+                    (
+                        CanonicalDimensionName::from_raw(dim.name()),
+                        CanonicalDimensionName::from_raw(parent_name),
+                    )
+                })
+            })
+            .collect();
+
         DimensionsContext {
             dimensions: dimensions
                 .iter()
@@ -249,6 +263,7 @@ impl DimensionsContext {
                     )
                 })
                 .collect(),
+            indexed_parents,
             relationship_cache: RelationshipCache::default(),
         }
     }
@@ -510,8 +525,9 @@ impl DimensionsContext {
         None
     }
 
-    /// Check if child is a subdimension of parent (all child elements exist in parent).
-    /// Only Named dimensions can have subdimension relationships.
+    /// Check if child is a subdimension of parent.
+    /// For named dimensions, checks element containment. For indexed dimensions,
+    /// uses the declared `parent` field.
     #[allow(dead_code)]
     pub fn is_subdimension_of(
         &self,
@@ -525,9 +541,8 @@ impl DimensionsContext {
     /// Returns Some(SubdimensionRelation) if child is a subdimension of parent,
     /// or None if it's not. Results are cached for O(1) lookup on subsequent calls.
     ///
-    /// Note: Indexed dimension subdimensions are not currently supported.
-    /// The datamodel lacks metadata to express which range of parent indices
-    /// the child maps to. This returns None for indexed dimensions.
+    /// For named dimensions, checks element containment. For indexed dimensions,
+    /// uses the declared `parent` field on the datamodel Dimension.
     #[allow(dead_code)]
     pub fn get_subdimension_relation(
         &self,
@@ -577,9 +592,19 @@ impl DimensionsContext {
                 }
                 Some(SubdimensionRelation { parent_offsets })
             }
-            (Dimension::Indexed(_, _), Dimension::Indexed(_, _)) => {
-                // TODO: Indexed subdimensions deferred - datamodel lacks parent mapping metadata.
-                // Would need to express which range of parent indices the child maps to.
+            (Dimension::Indexed(_, child_size), Dimension::Indexed(_, parent_size)) => {
+                // Indexed subdimensions: if child declares this parent via the
+                // `parent` field, the child maps to the first child_size elements
+                // of the parent (0-based offsets 0..child_size).
+                if *child_size > *parent_size {
+                    return None;
+                }
+                if let Some(declared_parent) = self.indexed_parents.get(child)
+                    && declared_parent == parent
+                {
+                    let parent_offsets = (0..*child_size as usize).collect();
+                    return Some(SubdimensionRelation { parent_offsets });
+                }
                 None
             }
             _ => None, // Mixed types cannot be subdimensions of each other

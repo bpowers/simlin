@@ -106,6 +106,7 @@ impl<'input> ConversionContext<'input> {
                     name: space_to_underbar(original_name),
                     elements: target_dim.elements.clone(),
                     mappings: vec![],
+                    parent: None,
                 };
                 alias.set_maps_to(dst.clone());
                 // Add alias to dimension_elements so expand_subscript can find it
@@ -136,6 +137,7 @@ impl<'input> ConversionContext<'input> {
             name: space_to_underbar(original_name),
             elements: DimensionElements::Named(elements),
             mappings,
+            parent: None,
         })
     }
 

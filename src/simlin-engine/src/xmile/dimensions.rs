@@ -154,6 +154,7 @@ impl From<Dimension> for datamodel::Dimension {
             name,
             elements,
             mappings,
+            parent: None,
         }
     }
 }

@@ -4167,6 +4167,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("a2".to_string(), "b1".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4193,6 +4194,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     element_map: vec![],
                 },
             ],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4224,6 +4226,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("a2".to_string(), "b2".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4254,6 +4257,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("south".to_string(), "z2".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4284,6 +4288,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("south america".to_string(), "z2".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
@@ -4311,6 +4316,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     ("b2".to_string(), "a3".to_string()),
                 ],
             }],
+            parent: None,
         };
 
         let mut buf = String::new();
