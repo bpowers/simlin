@@ -2043,8 +2043,21 @@ impl Context<'_> {
             BFn::TimeStep => BuiltinFn::TimeStep,
             BFn::StartTime => BuiltinFn::StartTime,
             BFn::FinalTime => BuiltinFn::FinalTime,
-            BFn::Rank(_, _) => {
-                return sim_err!(TodoArrayBuiltin, self.ident.to_string());
+            BFn::Rank(arr, rest) => {
+                let ctx = self.with_vector_builtin_wildcards();
+                let lowered_arr = Box::new(ctx.lower_from_expr3(arr)?);
+                let lowered_rest = match rest {
+                    Some((dir, tiebreak)) => {
+                        let lowered_dir = Box::new(self.lower_from_expr3(dir)?);
+                        let lowered_tiebreak = match tiebreak {
+                            Some(tb) => Some(Box::new(self.lower_from_expr3(tb)?)),
+                            None => None,
+                        };
+                        Some((lowered_dir, lowered_tiebreak))
+                    }
+                    None => None,
+                };
+                BuiltinFn::Rank(lowered_arr, lowered_rest)
             }
             BFn::Size(a) => {
                 // Preserve wildcards for array iteration

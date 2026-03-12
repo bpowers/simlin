@@ -4599,3 +4599,287 @@ mod array_reducer_tests {
         assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
     }
 }
+
+/// Tests for the RANK builtin (Vensim VECTOR RANK).
+///
+/// RANK(A, direction) returns an array of 1-based ordinal positions.
+/// direction=1: ascending (smallest element gets rank 1).
+/// direction=0: descending (largest element gets rank 1).
+#[cfg(test)]
+mod rank_tests {
+    use crate::test_common::TestProject;
+
+    // -- 2-arg ascending: RANK(A, 1) --
+
+    fn make_rank_ascending(name: &str) -> TestProject {
+        // A = [30, 10, 20]
+        // Sorted ascending: 10(idx1), 20(idx2), 30(idx0)
+        // Ranks: idx0->3, idx1->1, idx2->2  =>  [3, 1, 2]
+        TestProject::new(name)
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(source[D], 1)")
+    }
+
+    #[test]
+    fn rank_ascending_interpreter() {
+        let project = make_rank_ascending("rank_asc_interp");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[3.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn rank_ascending_vm() {
+        let project = make_rank_ascending("rank_asc_vm");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[3.0, 1.0, 2.0]);
+    }
+
+    // -- 2-arg descending: RANK(A, 0) --
+
+    fn make_rank_descending(name: &str) -> TestProject {
+        // A = [30, 10, 20]
+        // Sorted descending: 30(idx0), 20(idx2), 10(idx1)
+        // Ranks: idx0->1, idx1->3, idx2->2  =>  [1, 3, 2]
+        TestProject::new(name)
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("source[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(source[D], 0)")
+    }
+
+    #[test]
+    fn rank_descending_interpreter() {
+        let project = make_rank_descending("rank_desc_interp");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn rank_descending_vm() {
+        let project = make_rank_descending("rank_desc_vm");
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[1.0, 3.0, 2.0]);
+    }
+
+    // -- Ascending and descending are inverse: rank_asc + rank_desc = N+1 --
+
+    #[test]
+    fn rank_asc_desc_sum_to_n_plus_1() {
+        let project = TestProject::new("rank_sum_inv")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 5)
+            .array_with_ranges(
+                "source[D]",
+                vec![
+                    ("1", "50"),
+                    ("2", "10"),
+                    ("3", "40"),
+                    ("4", "20"),
+                    ("5", "30"),
+                ],
+            )
+            .array_aux("asc[D]", "RANK(source[D], 1)")
+            .array_aux("desc[D]", "RANK(source[D], 0)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let asc = project.interpreter_result("asc");
+        let desc = project.interpreter_result("desc");
+        assert_eq!(asc.len(), 5);
+        for i in 0..5 {
+            assert_eq!(
+                asc[i] + desc[i],
+                6.0,
+                "rank_asc[{i}] + rank_desc[{i}] should equal N+1=6"
+            );
+        }
+    }
+
+    // -- 5-element test with named dimensions --
+
+    #[test]
+    fn rank_named_dimension_interpreter() {
+        let project = TestProject::new("rank_named_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .named_dimension("Company", &["A", "B", "C", "D", "E"])
+            .array_with_ranges(
+                "revenue[Company]",
+                vec![
+                    ("A", "500"),
+                    ("B", "100"),
+                    ("C", "300"),
+                    ("D", "200"),
+                    ("E", "400"),
+                ],
+            )
+            .array_aux("ranking[Company]", "RANK(revenue[Company], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // Sorted ascending: 100(B), 200(D), 300(C), 400(E), 500(A)
+        // Ranks: A->5, B->1, C->3, D->2, E->4
+        project.assert_interpreter_result("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn rank_named_dimension_vm() {
+        let project = TestProject::new("rank_named_vm")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .named_dimension("Company", &["A", "B", "C", "D", "E"])
+            .array_with_ranges(
+                "revenue[Company]",
+                vec![
+                    ("A", "500"),
+                    ("B", "100"),
+                    ("C", "300"),
+                    ("D", "200"),
+                    ("E", "400"),
+                ],
+            )
+            .array_aux("ranking[Company]", "RANK(revenue[Company], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("ranking", &[5.0, 1.0, 3.0, 2.0, 4.0]);
+    }
+
+    // -- Already sorted input --
+
+    #[test]
+    fn rank_already_sorted_interpreter() {
+        let project = TestProject::new("rank_sorted_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    // -- Reverse sorted input --
+
+    #[test]
+    fn rank_reverse_sorted_interpreter() {
+        let project = TestProject::new("rank_rev_sorted_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "40"), ("2", "30"), ("3", "20"), ("4", "10")],
+            )
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[4.0, 3.0, 2.0, 1.0]);
+    }
+
+    // -- Single element --
+
+    #[test]
+    fn rank_single_element() {
+        let project = TestProject::new("rank_single")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_with_ranges("vals[D]", vec![("1", "42")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0]);
+        project.assert_vm_result_incremental("result", &[1.0]);
+    }
+
+    // -- Equal values (ties) --
+
+    #[test]
+    fn rank_equal_values_interpreter() {
+        // All equal: ranks are assigned by sort stability (position order)
+        let project = TestProject::new("rank_equal_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "10")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        // Stable sort assigns consecutive ranks in original order
+        project.assert_interpreter_result("result", &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn rank_equal_values_vm() {
+        let project = TestProject::new("rank_equal_vm")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "10")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
+    }
+
+    // -- Partial ties --
+
+    #[test]
+    fn rank_partial_ties() {
+        // vals = [10, 10, 20]
+        // Ascending: 10(idx0), 10(idx1), 20(idx2)
+        // Ranks: idx0->1, idx1->2, idx2->3
+        let project = TestProject::new("rank_partial_ties")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 3)
+            .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "20")])
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[1.0, 2.0, 3.0]);
+        project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
+    }
+
+    // -- Interpreter and VM agreement on a larger example --
+
+    #[test]
+    fn rank_interpreter_vm_agreement() {
+        let project = TestProject::new("rank_agreement")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 5)
+            .array_with_ranges(
+                "vals[D]",
+                vec![
+                    ("1", "50"),
+                    ("2", "10"),
+                    ("3", "40"),
+                    ("4", "20"),
+                    ("5", "30"),
+                ],
+            )
+            .array_aux("result[D]", "RANK(vals[D], 1)");
+
+        project.assert_compiles_incremental();
+        project.assert_sim_builds();
+        let interp = project.interpreter_result("result");
+        let vm = project.vm_result_incremental("result");
+        assert_eq!(interp.len(), vm.len());
+        for i in 0..interp.len() {
+            assert_eq!(interp[i], vm[i], "interpreter and VM disagree at index {i}");
+        }
+        // Also verify the actual values
+        // Sorted ascending: 10(idx1), 20(idx3), 30(idx4), 40(idx2), 50(idx0)
+        // Ranks: idx0->5, idx1->1, idx2->4, idx3->2, idx4->3
+        assert_eq!(interp, vec![5.0, 1.0, 4.0, 2.0, 3.0]);
+    }
+}

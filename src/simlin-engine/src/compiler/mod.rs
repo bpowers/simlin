@@ -803,7 +803,9 @@ fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
         Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(view.clone()),
         Expr::App(builtin, _) => match builtin {
             BuiltinFn::VectorElmMap(_, offset) => find_expr_array_view(offset),
-            BuiltinFn::VectorSortOrder(arr, _) => find_expr_array_view(arr),
+            BuiltinFn::VectorSortOrder(arr, _) | BuiltinFn::Rank(arr, _) => {
+                find_expr_array_view(arr)
+            }
             BuiltinFn::AllocateAvailable(req, _, _) => find_expr_array_view(req),
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)
