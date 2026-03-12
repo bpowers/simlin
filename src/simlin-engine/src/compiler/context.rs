@@ -1604,9 +1604,11 @@ impl Context<'_> {
                                             );
                                         }
                                     }
-                                } else {
+                                } else if view_idx < active_subscripts.len() {
                                     // Positional matching
                                     (view_idx, &active_subscripts[view_idx])
+                                } else {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
                                 };
 
                                 let dim_idx = if let Some(dim_idx) =

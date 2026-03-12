@@ -2107,7 +2107,7 @@ impl From<Dimension> for project_io::Dimension {
             dimension: Some(dim),
             maps_to,
             mappings,
-            parent: dimension.parent.unwrap_or_default(),
+            parent: dimension.parent,
         }
     }
 }
@@ -2152,11 +2152,7 @@ impl From<project_io::Dimension> for Dimension {
             vec![]
         };
 
-        let parent = if dimension.parent.is_empty() {
-            None
-        } else {
-            Some(dimension.parent)
-        };
+        let parent = dimension.parent;
 
         Dimension {
             name: dimension.name,
@@ -2490,7 +2486,7 @@ fn test_protobuf_backward_compat_old_protos() {
                 elements: vec!["a1".to_string(), "a2".to_string()],
             },
         )),
-        parent: String::new(),
+        parent: None,
     };
     let dim = Dimension::from(old_dim);
     assert_eq!(dim.mappings.len(), 1);

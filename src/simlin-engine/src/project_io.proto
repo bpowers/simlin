@@ -361,7 +361,7 @@ message Dimension {
   // For indexed subdimensions, the name of the parent dimension.
   // e.g., SubIndex(3) with parent="FullIndex" means SubIndex is a
   // subdimension of FullIndex(5).
-  string parent = 7;
+  optional string parent = 7;
 };
 
 message Unit {
