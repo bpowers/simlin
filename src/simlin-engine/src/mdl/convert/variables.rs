@@ -488,7 +488,12 @@ impl<'input> ConversionContext<'input> {
             .map(|d| self.get_formatted_dimension_name(d))
             .collect();
 
-        let equation = Equation::Arrayed(formatted_dims.clone(), elements, default_equation, false);
+        let equation = Equation::Arrayed(
+            formatted_dims.clone(),
+            elements,
+            default_equation,
+            has_except_eq,
+        );
 
         // Build the variable
         let ident = quoted_space_to_underbar(name);

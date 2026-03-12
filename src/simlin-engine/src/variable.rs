@@ -384,37 +384,6 @@ fn parse_equation(
     is_initial: bool,
     active_initial: Option<&str>,
 ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
-    fn should_apply_default_to_missing(
-        dimension_names: &[DimensionName],
-        dimensions: &[datamodel::Dimension],
-        elements: &[(
-            String,
-            String,
-            Option<String>,
-            Option<datamodel::GraphicalFunction>,
-        )],
-        default_eq: &Option<String>,
-    ) -> bool {
-        let Some(default_eq) = default_eq else {
-            return false;
-        };
-
-        let Ok(dims) = get_dimensions(dimensions, dimension_names) else {
-            return false;
-        };
-        let total_slots: usize = dims.iter().map(|d| d.len()).product();
-        if total_slots <= elements.len() {
-            return false;
-        }
-
-        // EXCEPT conversion produces sparse arrays where ALL explicit elements
-        // have the same equation as the default (the base equation).  Override-
-        // style sparse arrays have at least one element that differs.
-        !elements
-            .iter()
-            .all(|(_, eqn, _, _)| eqn.trim() == default_eq.trim())
-    }
-
     fn parse_inner(eqn: &str) -> (Option<Expr0>, Vec<EquationError>) {
         match Expr0::new(eqn, LexerType::Equation) {
             Ok(expr) => (expr, vec![]),
@@ -451,15 +420,9 @@ fn parse_equation(
         }
         // Preserve the default equation (EXCEPT semantics) so sparse array
         // definitions can apply it to omitted elements during lowering.
-        datamodel::Equation::Arrayed(
-            dimension_names,
-            elements,
-            default_eq,
-            _has_except_default,
-        ) => {
+        datamodel::Equation::Arrayed(dimension_names, elements, default_eq, has_except_default) => {
             let mut errors: Vec<EquationError> = vec![];
-            let apply_default_to_missing =
-                should_apply_default_to_missing(dimension_names, dimensions, elements, default_eq);
+            let apply_default_to_missing = *has_except_default;
             let elements: HashMap<_, _> = elements
                 .iter()
                 .map(|(subscript, eqn, init_eqn, _gf)| {
