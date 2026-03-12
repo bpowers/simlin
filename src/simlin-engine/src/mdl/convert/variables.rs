@@ -419,7 +419,7 @@ impl<'input> ConversionContext<'input> {
         // present (non-excepted elements need dimension references substituted).
         let needs_substitution = expanded_eqs.len() > 1 || has_except_eq;
 
-        for exp_eq in expanded_eqs {
+        for exp_eq in &expanded_eqs {
             // When this equation has EXCEPT, capture its unsubstituted RHS as the
             // default equation text (metadata for the Equation::Arrayed).
             if exp_eq.has_except {
@@ -526,6 +526,26 @@ impl<'input> ConversionContext<'input> {
         let ident = quoted_space_to_underbar(name);
         let (documentation, units) = extract_metadata(&info.equations);
 
+        // Extract GET DIRECT data_source from original equation for compat
+        // persistence. Arrayed GET DIRECT variables share the same data
+        // source across all elements; we extract it from the first equation.
+        let data_source = expanded_eqs.iter().find_map(|exp_eq| {
+            let eq_str = match &exp_eq.eq.equation {
+                MdlEquation::Regular(_, expr) => self.formatter.format_expr(expr),
+                MdlEquation::Data(_, Some(expr)) => self.formatter.format_expr(expr),
+                _ => return None,
+            };
+            if super::external_data::is_get_direct_ref(&eq_str) {
+                self.extract_get_direct_data_source(&eq_str)
+            } else {
+                None
+            }
+        });
+        let compat = datamodel::Compat {
+            data_source,
+            ..Default::default()
+        };
+
         match info.var_type {
             VariableType::Stock => Ok(Some(Variable::Stock(datamodel::Stock {
                 ident,
@@ -536,7 +556,7 @@ impl<'input> ConversionContext<'input> {
                 outflows: info.outflows.clone(),
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat,
             }))),
             VariableType::Flow => Ok(Some(Variable::Flow(datamodel::Flow {
                 ident,
@@ -546,7 +566,7 @@ impl<'input> ConversionContext<'input> {
                 gf: None,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat,
             }))),
             VariableType::Aux => Ok(Some(Variable::Aux(datamodel::Aux {
                 ident,
@@ -556,7 +576,7 @@ impl<'input> ConversionContext<'input> {
                 gf: None,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat,
             }))),
         }
     }
@@ -3074,6 +3094,42 @@ s[SubA] :EXCEPT: [A3] = 14
                 }
                 other => panic!("Expected Arrayed equation, got {:?}", other),
             }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_arrayed_get_direct_constants_preserves_data_source() {
+        let mdl = "DimA: a1, a2, a3\n\
+                    ~ ~|\n\
+                    x[DimA] = GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')\n\
+                    ~ ~|\n\
+                    \\\\\\---///\n";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert!(
+                matches!(&a.equation, Equation::Arrayed(..)),
+                "Expected Arrayed equation"
+            );
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("Arrayed GET DIRECT should preserve data_source in compat");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(data_source.file, "data/a.csv");
+            assert_eq!(data_source.tab_or_delimiter, ",");
         } else {
             panic!("Expected Aux variable");
         }

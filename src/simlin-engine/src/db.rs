@@ -268,6 +268,7 @@ pub struct SourceDimension {
     pub elements: SourceDimensionElements,
     pub maps_to: Option<String>,
     pub mappings: Vec<SourceDimensionMapping>,
+    pub parent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, salsa::Update)]
@@ -380,6 +381,7 @@ impl From<&datamodel::Dimension> for SourceDimension {
                     element_map: m.element_map.clone(),
                 })
                 .collect(),
+            parent: dim.parent.clone(),
         }
     }
 }
@@ -512,7 +514,7 @@ pub fn source_dims_to_datamodel(dims: &[SourceDimension]) -> Vec<datamodel::Dime
                 name: sd.name.clone(),
                 elements,
                 mappings,
-                parent: None,
+                parent: sd.parent.clone(),
             }
         })
         .collect()
@@ -5887,81 +5889,8 @@ pub fn compile_project_incremental(
 }
 
 #[cfg(test)]
-mod conversion_tests {
-    use super::*;
-
-    #[test]
-    fn source_dimension_preserves_element_level_mappings() {
-        let dim = datamodel::Dimension {
-            name: "dim_a".to_string(),
-            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
-            mappings: vec![datamodel::DimensionMapping {
-                target: "dim_b".to_string(),
-                element_map: vec![
-                    ("a1".to_string(), "b2".to_string()),
-                    ("a2".to_string(), "b1".to_string()),
-                ],
-            }],
-            parent: None,
-        };
-        let source: SourceDimension = SourceDimension::from(&dim);
-        let roundtripped = source_dims_to_datamodel(&[source]);
-        assert_eq!(roundtripped.len(), 1);
-        assert_eq!(roundtripped[0].mappings.len(), 1);
-        assert_eq!(roundtripped[0].mappings[0].target, "dim_b");
-        assert_eq!(roundtripped[0].mappings[0].element_map.len(), 2);
-    }
-
-    #[test]
-    fn source_dimension_preserves_multi_target_positional_mappings() {
-        let dim = datamodel::Dimension {
-            name: "dim_a".to_string(),
-            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
-            mappings: vec![
-                datamodel::DimensionMapping {
-                    target: "dim_b".to_string(),
-                    element_map: vec![],
-                },
-                datamodel::DimensionMapping {
-                    target: "dim_c".to_string(),
-                    element_map: vec![],
-                },
-            ],
-            parent: None,
-        };
-        let source: SourceDimension = SourceDimension::from(&dim);
-        let roundtripped = source_dims_to_datamodel(&[source]);
-        assert_eq!(roundtripped.len(), 1);
-        assert_eq!(
-            roundtripped[0].mappings.len(),
-            2,
-            "both positional mappings must survive DB round-trip"
-        );
-    }
-
-    #[test]
-    fn source_equation_preserves_default_equation() {
-        let eq = datamodel::Equation::Arrayed(
-            vec!["DimA".to_string()],
-            vec![("A1".to_string(), "5".to_string(), None, None)],
-            Some("default_val".to_string()),
-            true,
-        );
-        let source = SourceEquation::from(&eq);
-        let roundtripped = source_equation_to_datamodel(&source);
-        match &roundtripped {
-            datamodel::Equation::Arrayed(_, _, default_eq, _) => {
-                assert_eq!(
-                    default_eq.as_deref(),
-                    Some("default_val"),
-                    "default_equation must survive DB round-trip"
-                );
-            }
-            _ => panic!("Expected Arrayed equation"),
-        }
-    }
-}
-
+#[path = "db_conversion_tests.rs"]
+mod db_conversion_tests;
 #[cfg(test)]
 #[path = "db_diagnostic_tests.rs"]
 mod db_diagnostic_tests;
