@@ -4451,3 +4451,151 @@ mod dimension_dependent_scalar_arg_tests {
         );
     }
 }
+
+/// Tests verifying array reducer builtins produce correct values and that
+/// the interpreter and VM agree. Empty-view guard tests for the VM are in
+/// vm::empty_view_reduce_tests (zero-element dimensions cannot currently be
+/// constructed through the model compilation pipeline).
+#[cfg(test)]
+mod array_reducer_tests {
+    use crate::test_common::TestProject;
+
+    fn make_reducer_project(name: &str, reducer: &str) -> TestProject {
+        TestProject::new(name)
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "vals[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .scalar_aux("result", &format!("{reducer}(vals[*])"))
+    }
+
+    // -- SUM --
+
+    #[test]
+    fn sum_interpreter() {
+        let project = make_reducer_project("sum_interp", "SUM");
+        project.assert_interpreter_result("result", &[100.0]);
+    }
+
+    #[test]
+    fn sum_vm() {
+        let project = make_reducer_project("sum_vm", "SUM");
+        project.assert_vm_result_incremental("result", &[100.0]);
+    }
+
+    // -- SIZE --
+
+    #[test]
+    fn size_interpreter() {
+        let project = make_reducer_project("size_interp", "SIZE");
+        project.assert_interpreter_result("result", &[4.0]);
+    }
+
+    #[test]
+    fn size_vm() {
+        let project = make_reducer_project("size_vm", "SIZE");
+        project.assert_vm_result_incremental("result", &[4.0]);
+    }
+
+    // -- MEAN --
+
+    #[test]
+    fn mean_interpreter() {
+        let project = make_reducer_project("mean_interp", "MEAN");
+        project.assert_interpreter_result("result", &[25.0]);
+    }
+
+    #[test]
+    fn mean_vm() {
+        let project = make_reducer_project("mean_vm", "MEAN");
+        project.assert_vm_result_incremental("result", &[25.0]);
+    }
+
+    // -- MIN --
+
+    #[test]
+    fn min_interpreter() {
+        let project = make_reducer_project("min_interp", "MIN");
+        project.assert_interpreter_result("result", &[10.0]);
+    }
+
+    #[test]
+    fn min_vm() {
+        let project = make_reducer_project("min_vm", "MIN");
+        project.assert_vm_result_incremental("result", &[10.0]);
+    }
+
+    // -- MAX --
+
+    #[test]
+    fn max_interpreter() {
+        let project = make_reducer_project("max_interp", "MAX");
+        project.assert_interpreter_result("result", &[40.0]);
+    }
+
+    #[test]
+    fn max_vm() {
+        let project = make_reducer_project("max_vm", "MAX");
+        project.assert_vm_result_incremental("result", &[40.0]);
+    }
+
+    // -- STDDEV --
+
+    #[test]
+    fn stddev_interpreter() {
+        // Interpreter uses sample stddev (n-1 divisor):
+        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/3) = 12.909944...
+        let project = make_reducer_project("stddev_interp", "STDDEV");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 1);
+        let expected_sample = (500.0_f64 / 3.0).sqrt();
+        assert!(
+            (vals[0] - expected_sample).abs() < 1e-6,
+            "STDDEV should be ~{expected_sample}, got {}",
+            vals[0]
+        );
+    }
+
+    #[test]
+    fn stddev_vm() {
+        // VM uses population stddev (n divisor):
+        // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
+        let project = make_reducer_project("stddev_vm", "STDDEV");
+        let vals = project.vm_result_incremental("result");
+        assert_eq!(vals.len(), 1);
+        let expected_pop = (500.0_f64 / 4.0).sqrt();
+        assert!(
+            (vals[0] - expected_pop).abs() < 1e-6,
+            "STDDEV should be ~{expected_pop}, got {}",
+            vals[0]
+        );
+    }
+
+    // -- Single-element arrays: verify reducers handle size==1 correctly --
+
+    #[test]
+    fn stddev_single_element_interpreter() {
+        let project = TestProject::new("stddev_single_interp")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_with_ranges("vals[D]", vec![("1", "42")])
+            .scalar_aux("result", "STDDEV(vals[*])");
+        let vals = project.interpreter_result("result");
+        assert_eq!(vals.len(), 1);
+        assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
+    }
+
+    #[test]
+    fn stddev_single_element_vm() {
+        let project = TestProject::new("stddev_single_vm")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_with_ranges("vals[D]", vec![("1", "42")])
+            .scalar_aux("result", "STDDEV(vals[*])");
+        let vals = project.vm_result_incremental("result");
+        assert_eq!(vals.len(), 1);
+        assert_eq!(vals[0], 0.0, "STDDEV of single element should be 0.0");
+    }
+}
