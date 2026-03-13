@@ -310,14 +310,19 @@ fn dockerfile_pins_cargo_zigbuild_version() {
     );
 }
 
-// cross-build.sh must skip the execution smoke test on non-Linux hosts,
-// since the output binary targets Linux and cannot run on macOS/Windows.
+// cross-build.sh must skip the execution smoke test on non-x86_64-Linux hosts,
+// since the output binary targets x86_64-unknown-linux-musl and cannot run on
+// macOS, Windows, or arm64 Linux.
 #[test]
-fn cross_build_script_skips_smoke_on_non_linux() {
+fn cross_build_script_skips_smoke_on_incompatible_hosts() {
     let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cross-build.sh");
     let text = std::fs::read_to_string(&script_path).expect("read cross-build.sh");
     assert!(
-        text.contains("uname"),
-        "cross-build.sh should detect the host OS to skip smoke tests on non-Linux"
+        text.contains("uname -s"),
+        "cross-build.sh should check the host OS"
+    );
+    assert!(
+        text.contains("uname -m"),
+        "cross-build.sh should check the host CPU architecture (arm64 Linux cannot run x86_64 binaries)"
     );
 }

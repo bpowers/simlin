@@ -59,9 +59,9 @@ if ! echo "$FILE_OUTPUT" | grep -q "ELF.*executable"; then
     exit 1
 fi
 
-# The execution test only works on Linux hosts since the binary targets
-# x86_64-unknown-linux-musl.  On macOS (or other non-Linux), skip it.
-if [[ "$(uname -s)" == "Linux" ]]; then
+# The execution test only works on x86_64 Linux since the binary targets
+# x86_64-unknown-linux-musl.  Skip on macOS, Windows, and arm64 Linux.
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
     echo "==> Verifying binary executes..."
     # simlin-mcp is a stdio MCP server that waits for input, so feed it empty
     # input with a timeout.  timeout exits 124 when it kills a running process
@@ -77,7 +77,7 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     fi
     echo "Smoke test passed (binary executed, exit code $EXIT_CODE)"
 else
-    echo "==> Skipping execution smoke test (Linux binary cannot run on $(uname -s))"
+    echo "==> Skipping execution smoke test (x86_64-linux-musl binary cannot run on $(uname -s)/$(uname -m))"
 fi
 
 echo ""
