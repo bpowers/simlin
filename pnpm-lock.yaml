@@ -356,6 +356,9 @@ importers:
       helmet:
         specifier: ^8.1.0
         version: 8.1.0
+      jose:
+        specifier: ^4.15.9
+        version: 4.15.9
       node-fetch:
         specifier: ^3.3.2
         version: 3.3.2
