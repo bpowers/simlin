@@ -101,11 +101,11 @@ jobs:
 
       - name: Build (zigbuild)
         if: matrix.use-zigbuild
-        run: cargo zigbuild -p simlin-mcp --release --target ${{ matrix.target }}
+        run: cargo zigbuild -p simlin-mcp --locked --release --target ${{ matrix.target }}
 
       - name: Build (native)
         if: ${{ !matrix.use-zigbuild }}
-        run: cargo build -p simlin-mcp --release --target ${{ matrix.target }}
+        run: cargo build -p simlin-mcp --locked --release --target ${{ matrix.target }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
