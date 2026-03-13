@@ -310,6 +310,18 @@ fn dockerfile_pins_cargo_zigbuild_version() {
     );
 }
 
+// The build cache key must include rust-toolchain.toml so toolchain version
+// bumps invalidate cached artifacts.
+#[test]
+fn build_cache_key_includes_toolchain() {
+    let text = load_workflow_text();
+    assert!(
+        text.lines()
+            .any(|line| line.contains("hashFiles") && line.contains("rust-toolchain.toml")),
+        "build cache key must hash rust-toolchain.toml to invalidate on toolchain changes"
+    );
+}
+
 // Zig version in Dockerfile.cross must match the version in mcp-release.yml.
 #[test]
 fn dockerfile_zig_version_matches_workflow() {
