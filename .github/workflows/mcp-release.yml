@@ -147,19 +147,43 @@ jobs:
 
       - name: Publish @simlin/mcp-linux-x64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-linux-x64
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-linux-x64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-linux-x64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
 
       - name: Publish @simlin/mcp-linux-arm64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-linux-arm64
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-linux-arm64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-linux-arm64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
 
       - name: Publish @simlin/mcp-win32-x64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-win32-x64
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-win32-x64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-win32-x64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
 
       - name: Publish @simlin/mcp-darwin-arm64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-darwin-arm64
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-darwin-arm64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-darwin-arm64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
 
   publish-wrapper:
     name: Publish @simlin/mcp
@@ -194,4 +218,10 @@ jobs:
 
       - name: Publish @simlin/mcp
         working-directory: src/simlin-mcp
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi

@@ -188,11 +188,13 @@ fn ac4_2_js_launcher_windows_triple() {
     let contents = std::fs::read_to_string(&js_path).expect("read simlin-mcp.js");
     assert!(
         contents.contains("x86_64-pc-windows-gnu"),
-        "JS launcher should map Windows to x86_64-pc-windows-gnu"
+        "JS launcher should map Windows to x86_64-pc-windows-gnu for npm packages"
     );
+    // The dev vendor fallback should also try the msvc triple, since
+    // `cargo build` on Windows produces msvc binaries by default.
     assert!(
-        !contents.contains("x86_64-pc-windows-msvc"),
-        "JS launcher should not reference the msvc triple"
+        contents.contains("x86_64-pc-windows-msvc"),
+        "JS launcher dev fallback should also try the msvc triple for Windows"
     );
 }
 

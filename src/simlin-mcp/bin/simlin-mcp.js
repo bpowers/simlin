@@ -60,6 +60,17 @@ const vendorBinaryPath = path.join(
   binaryName,
 );
 
+// On Windows, `cargo build` defaults to the MSVC toolchain, but the npm
+// package ships the GNU-targeted binary.  Try the MSVC triple as a dev
+// fallback so developers don't need to cross-compile to GNU locally.
+const DEV_FALLBACK_TRIPLES = {
+  "x86_64-pc-windows-gnu": "x86_64-pc-windows-msvc",
+};
+const devFallbackTriple = DEV_FALLBACK_TRIPLES[platformInfo.triple];
+const devFallbackPath = devFallbackTriple
+  ? path.join(__dirname, "..", "vendor", devFallbackTriple, binaryName)
+  : null;
+
 let binaryPath = null;
 
 try {
@@ -78,6 +89,8 @@ try {
 if (!binaryPath) {
   if (existsSync(vendorBinaryPath)) {
     binaryPath = vendorBinaryPath;
+  } else if (devFallbackPath && existsSync(devFallbackPath)) {
+    binaryPath = devFallbackPath;
   } else {
     console.error(
       `simlin-mcp: could not find native binary for ${platformKey}`,

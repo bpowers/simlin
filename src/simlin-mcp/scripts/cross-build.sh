@@ -49,7 +49,7 @@ echo ""
 echo "Binaries:"
 ls -lh "$DIST_DIR"/*/simlin-mcp*
 
-# Smoke test: verify the Linux x64 binary is a valid static executable and runs
+# Smoke test: verify the Linux x64 binary is a valid static executable.
 echo ""
 echo "==> Smoke test: Linux x64 binary..."
 FILE_OUTPUT=$(file "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp")
@@ -59,20 +59,26 @@ if ! echo "$FILE_OUTPUT" | grep -q "ELF.*executable"; then
     exit 1
 fi
 
-echo "==> Verifying binary executes..."
-# simlin-mcp is a stdio MCP server that waits for input, so feed it empty input
-# with a timeout.  timeout exits 124 when it kills a running process (expected),
-# and the binary itself may exit with a small non-zero code on empty input.
-# Fatal failures are: 126 (cannot execute), 127 (not found), >= 128 (signal).
-set +e
-echo '' | timeout 2 "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp" 2>/dev/null
-EXIT_CODE=$?
-set -e
-if [ "$EXIT_CODE" -ge 126 ] && [ "$EXIT_CODE" -ne 124 ]; then
-    echo "FAIL: binary did not execute properly (exit code $EXIT_CODE)"
-    exit 1
+# The execution test only works on Linux hosts since the binary targets
+# x86_64-unknown-linux-musl.  On macOS (or other non-Linux), skip it.
+if [[ "$(uname -s)" == "Linux" ]]; then
+    echo "==> Verifying binary executes..."
+    # simlin-mcp is a stdio MCP server that waits for input, so feed it empty
+    # input with a timeout.  timeout exits 124 when it kills a running process
+    # (expected), and the binary itself may exit non-zero on empty input.
+    # Fatal failures are: 126 (cannot execute), 127 (not found), >= 128 (signal).
+    set +e
+    echo '' | timeout 2 "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp" 2>/dev/null
+    EXIT_CODE=$?
+    set -e
+    if [ "$EXIT_CODE" -ge 126 ] && [ "$EXIT_CODE" -ne 124 ]; then
+        echo "FAIL: binary did not execute properly (exit code $EXIT_CODE)"
+        exit 1
+    fi
+    echo "Smoke test passed (binary executed, exit code $EXIT_CODE)"
+else
+    echo "==> Skipping execution smoke test (Linux binary cannot run on $(uname -s))"
 fi
-echo "Smoke test passed (binary executed, exit code $EXIT_CODE)"
 
 echo ""
 echo "Done. Binaries in $DIST_DIR/"
