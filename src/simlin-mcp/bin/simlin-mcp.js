@@ -30,7 +30,7 @@ const PLATFORM_MAP = {
   },
   "win32-x64": {
     package: "@simlin/mcp-win32-x64",
-    triple: "x86_64-pc-windows-msvc",
+    triple: "x86_64-pc-windows-gnu",
   },
 };
 
