@@ -356,17 +356,19 @@ fn dockerfile_zig_version_matches_workflow() {
         .find_map(|line| line.strip_prefix("ARG ZIG_VERSION="))
         .expect("Dockerfile.cross must have ARG ZIG_VERSION=...");
 
-    let workflow = load_workflow_text();
-    // The workflow sets zig version like: version: '0.15.2'
-    let wf_zig = workflow
-        .lines()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            trimmed
-                .strip_prefix("version: '")
-                .and_then(|rest| rest.strip_suffix('\''))
-        })
-        .expect("workflow must have a zig version: '...' entry");
+    // Navigate the parsed YAML to find the Zig version in the setup-zig step,
+    // rather than doing fragile text matching on `version: '...'` lines.
+    let wf = load_workflow();
+    let steps = wf["jobs"]["build"]["steps"]
+        .as_sequence()
+        .expect("build.steps should be a sequence");
+    let zig_step = steps
+        .iter()
+        .find(|s| s["uses"].as_str().is_some_and(|u| u.contains("setup-zig")))
+        .expect("build steps should include a setup-zig action");
+    let wf_zig = zig_step["with"]["version"]
+        .as_str()
+        .expect("setup-zig step should have with.version");
 
     assert_eq!(
         docker_zig, wf_zig,
