@@ -39,7 +39,7 @@ docker run --rm \
         cd /src
         for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu; do
             echo "--- Building $target ---"
-            cargo zigbuild -p simlin-mcp --release --target "$target"
+            cargo zigbuild -p simlin-mcp --locked --release --target "$target"
             mkdir -p "/dist/$target"
             if [[ "$target" == *windows* ]]; then
                 cp "/tmp/target/$target/release/simlin-mcp.exe" "/dist/$target/"
