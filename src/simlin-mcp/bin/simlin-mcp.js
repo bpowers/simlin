@@ -98,10 +98,12 @@ if (!binaryPath) {
     console.error(
       `Install the platform package: npm install ${platformInfo.package}`,
     );
+    // For Windows, suggest the MSVC vendor path since cargo defaults to MSVC
+    const hintTriple = devFallbackTriple ?? platformInfo.triple;
     console.error(
       `Or for development, build with: cargo build -p simlin-mcp && ` +
-        `mkdir -p vendor/${platformInfo.triple} && ` +
-        `cp target/debug/simlin-mcp vendor/${platformInfo.triple}/simlin-mcp`,
+        `mkdir -p vendor/${hintTriple} && ` +
+        `cp target/debug/${binaryName} vendor/${hintTriple}/${binaryName}`,
     );
     process.exit(1);
   }

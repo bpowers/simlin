@@ -310,6 +310,40 @@ fn dockerfile_pins_cargo_zigbuild_version() {
     );
 }
 
+// Zig version in Dockerfile.cross must match the version in mcp-release.yml.
+#[test]
+fn dockerfile_zig_version_matches_workflow() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+
+    let dockerfile = std::fs::read_to_string(repo_root.join("src/simlin-mcp/Dockerfile.cross"))
+        .expect("read Dockerfile.cross");
+    let docker_zig = dockerfile
+        .lines()
+        .find_map(|line| line.strip_prefix("ARG ZIG_VERSION="))
+        .expect("Dockerfile.cross must have ARG ZIG_VERSION=...");
+
+    let workflow = load_workflow_text();
+    // The workflow sets zig version like: version: '0.15.2'
+    let wf_zig = workflow
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("version: '")
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
+        .expect("workflow must have a zig version: '...' entry");
+
+    assert_eq!(
+        docker_zig, wf_zig,
+        "Dockerfile.cross ZIG_VERSION ({docker_zig}) must match mcp-release.yml ({wf_zig})"
+    );
+}
+
 // cross-build.sh must skip the execution smoke test on non-x86_64-Linux hosts,
 // since the output binary targets x86_64-unknown-linux-musl and cannot run on
 // macOS, Windows, or arm64 Linux.
