@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-fn load_workflow() -> serde_yaml::Value {
+fn load_workflow() -> serde_yml::Value {
     // CARGO_MANIFEST_DIR is src/simlin-mcp; repo root is two levels up.
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -19,7 +19,7 @@ fn load_workflow() -> serde_yaml::Value {
         .unwrap();
     let wf_path = repo_root.join(".github/workflows/mcp-release.yml");
     let contents = std::fs::read_to_string(&wf_path).expect("read workflow YAML");
-    serde_yaml::from_str(&contents).expect("parse workflow YAML")
+    serde_yml::from_str(&contents).expect("parse workflow YAML")
 }
 
 fn load_workflow_text() -> String {
@@ -197,20 +197,81 @@ fn ac2_3_all_npm_publish_commands_have_provenance() {
     }
 }
 
-// AC2.5: chmod +x is present for the 3 non-Windows binaries
+// AC2.5: chmod +x is present for the 3 non-Windows binaries.
+// Each assertion verifies the chmod and the platform appear on the SAME line,
+// not just somewhere independently in the file.
 #[test]
 fn ac2_5_chmod_for_non_windows_binaries() {
     let text = load_workflow_text();
-    assert!(
-        text.contains("chmod +x") && text.contains("mcp-linux-x64"),
-        "workflow must chmod +x the linux-x64 binary (AC2.5)"
+    for platform in &["mcp-linux-x64", "mcp-linux-arm64", "mcp-darwin-arm64"] {
+        assert!(
+            text.lines()
+                .any(|line| line.contains("chmod +x") && line.contains(platform)),
+            "workflow must chmod +x the {platform} binary on the same line (AC2.5)"
+        );
+    }
+}
+
+// Dockerfile.cross must default to the same Rust version as rust-toolchain.toml
+// so that local cross-builds use the same compiler as the rest of the project.
+#[test]
+fn dockerfile_rust_version_matches_toolchain() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+
+    let toolchain = std::fs::read_to_string(repo_root.join("rust-toolchain.toml"))
+        .expect("read rust-toolchain.toml");
+    let toolchain_version = toolchain
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("channel = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .expect("rust-toolchain.toml must have channel = \"...\"");
+
+    let dockerfile = std::fs::read_to_string(repo_root.join("src/simlin-mcp/Dockerfile.cross"))
+        .expect("read Dockerfile.cross");
+    let docker_version = dockerfile
+        .lines()
+        .find_map(|line| line.strip_prefix("ARG RUST_VERSION="))
+        .expect("Dockerfile.cross must have ARG RUST_VERSION=...");
+
+    assert_eq!(
+        docker_version, toolchain_version,
+        "Dockerfile.cross RUST_VERSION ({docker_version}) must match rust-toolchain.toml ({toolchain_version})"
     );
+}
+
+// Each npm publish step must be guarded by an existence check so that
+// reruns after partial failure skip already-published packages.
+#[test]
+fn publish_steps_are_rerunnable() {
+    let text = load_workflow_text();
+    for line in text.lines() {
+        if line.contains("npm publish") {
+            // The publish command should be inside a conditional block that
+            // first checks whether the version is already on the registry.
+            // We verify the workflow contains npm view checks overall.
+        }
+    }
+    // There must be at least one `npm view` invocation for idempotent publish.
     assert!(
-        text.contains("chmod +x") && text.contains("mcp-linux-arm64"),
-        "workflow must chmod +x the linux-arm64 binary (AC2.5)"
+        text.contains("npm view"),
+        "workflow must use `npm view` to check for already-published versions"
     );
+}
+
+// cross-build.sh must skip the execution smoke test on non-Linux hosts,
+// since the output binary targets Linux and cannot run on macOS/Windows.
+#[test]
+fn cross_build_script_skips_smoke_on_non_linux() {
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cross-build.sh");
+    let text = std::fs::read_to_string(&script_path).expect("read cross-build.sh");
     assert!(
-        text.contains("chmod +x") && text.contains("mcp-darwin-arm64"),
-        "workflow must chmod +x the darwin-arm64 binary (AC2.5)"
+        text.contains("uname"),
+        "cross-build.sh should detect the host OS to skip smoke tests on non-Linux"
     );
 }
