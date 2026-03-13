@@ -12,6 +12,30 @@ MCP (Model Context Protocol) server exposing the Simlin simulation engine as too
 
 Tools are defined using `TypedTool<I>` where `I` implements `Deserialize + JsonSchema`. The JSON Schema for the tool input is automatically derived from the Rust type via `schemars`, so the full schema (including nested types like patch operations and variable definitions) is visible to MCP clients.
 
+## npm Distribution
+
+Published to npm as `@simlin/mcp` with platform-specific binary packages following the Node optional-dependency pattern (same approach as esbuild, turbo, etc.).
+
+- **Wrapper package**: `@simlin/mcp` -- entry point `bin/simlin-mcp.js` resolves the correct platform binary at runtime
+- **Platform packages**: `@simlin/mcp-{darwin-arm64,linux-arm64,linux-x64,win32-x64}` -- each contains a single native binary in `bin/`
+- **Version source of truth**: `Cargo.toml` -- `build-npm-packages.sh` reads it; CI validates tag matches
+- **Release trigger**: push a `mcp-v*` tag; the `mcp-release.yml` workflow builds, publishes platform packages, then publishes the wrapper
+
+### Supported Platforms
+
+| npm package | Rust target | Build method |
+|---|---|---|
+| `@simlin/mcp-linux-x64` | `x86_64-unknown-linux-musl` | cargo-zigbuild |
+| `@simlin/mcp-linux-arm64` | `aarch64-unknown-linux-musl` | cargo-zigbuild |
+| `@simlin/mcp-win32-x64` | `x86_64-pc-windows-gnu` | cargo-zigbuild |
+| `@simlin/mcp-darwin-arm64` | `aarch64-apple-darwin` | native (macOS runner) |
+
+### Scripts
+
+- `build-npm-packages.sh` -- generates platform `package.json` files in `npm/@simlin/mcp-*`
+- `scripts/cross-build.sh` -- local cross-compilation via Docker + cargo-zigbuild (outputs to dist/)
+- `Dockerfile.cross` -- toolchain image for cross-build.sh
+
 ## Build / Test
 
 ```sh

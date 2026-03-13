@@ -11,20 +11,20 @@ For documentation index, see [docs/README.md](/docs/README.md).
 
 ## Components
 
-| Component           | Language | Description                                      | Docs                                      |
-|---------------------|----------|--------------------------------------------------|-------------------------------------------|
-| `src/simlin-engine` | Rust | Compiles, type-checks, and simulates SD models   | [CLAUDE.md](/src/simlin-engine/CLAUDE.md) |
-| `src/libsimlin`     | Rust | Flat C FFI to simlin-engine (WASM, CGo, C/C++)   | [CLAUDE.md](/src/libsimlin/CLAUDE.md)     |
-| `src/simlin-mcp`    | Rust | MCP server for viewing and editing models        | [CLAUDE.md](/src/simlin-mcp/CLAUDE.md)    |
-| `src/engine`        | TypeScript | Promise-based TypeScript API for WASM engine     | [CLAUDE.md](/src/engine/CLAUDE.md)        |
-| `src/core`          | TypeScript | Shared data models and common utilities          | [CLAUDE.md](/src/core/CLAUDE.md)          |
-| `src/diagram`       | TypeScript | React model editor and visualization toolkit     | [CLAUDE.md](/src/diagram/CLAUDE.md)       |
-| `src/app`           | TypeScript | Full-featured SD application                     | [CLAUDE.md](/src/app/CLAUDE.md)           |
-| `src/server`        | TypeScript | Express.js backend (Firebase Auth, Firestore)    | [CLAUDE.md](/src/server/CLAUDE.md)        |
-| `src/xmutil`        | C++/Rust | Vensim-to-XMILE converter (test-only)            | --                                        |
-| `src/simlin-cli`    | Rust | CLI for simulation/conversion (testing/debugging) | [CLAUDE.md](/src/simlin-cli/CLAUDE.md)    |
-| `src/pysimlin`      | Python/Rust | Python bindings for the simulation engine        | [CLAUDE.md](/src/pysimlin/CLAUDE.md)      |
-| `website`           | TypeScript | Rspress-based documentation site                 | [CLAUDE.md](/website/CLAUDE.md)           |
+| Component           | Language    | Description                                       | Docs                                      |
+|---------------------|-------------|---------------------------------------------------|-------------------------------------------|
+| `src/simlin-engine` | Rust        | Compiles, type-checks, and simulates SD models    | [CLAUDE.md](/src/simlin-engine/CLAUDE.md) |
+| `src/libsimlin`     | Rust        | Flat C FFI to simlin-engine (WASM, CGo, C/C++)    | [CLAUDE.md](/src/libsimlin/CLAUDE.md)     |
+| `src/simlin-mcp`    | Rust/JS     | MCP server for AI assistants (`@simlin/mcp` npm)  | [CLAUDE.md](/src/simlin-mcp/CLAUDE.md)    |
+| `src/engine`        | TypeScript  | Promise-based TypeScript API for WASM engine      | [CLAUDE.md](/src/engine/CLAUDE.md)        |
+| `src/core`          | TypeScript  | Shared data models and common utilities           | [CLAUDE.md](/src/core/CLAUDE.md)          |
+| `src/diagram`       | TypeScript  | React model editor and visualization toolkit      | [CLAUDE.md](/src/diagram/CLAUDE.md)       |
+| `src/app`           | TypeScript  | Full-featured SD application                      | [CLAUDE.md](/src/app/CLAUDE.md)           |
+| `src/server`        | TypeScript  | Express.js backend (Firebase Auth, Firestore)     | [CLAUDE.md](/src/server/CLAUDE.md)        |
+| `src/xmutil`        | C++/Rust    | Vensim-to-XMILE converter (test-only)             | --                                        |
+| `src/simlin-cli`    | Rust        | CLI for simulation/conversion (testing/debugging) | [CLAUDE.md](/src/simlin-cli/CLAUDE.md)    |
+| `src/pysimlin`      | Python/Rust | Python bindings for the simulation engine         | [CLAUDE.md](/src/pysimlin/CLAUDE.md)      |
+| `website`           | TypeScript  | Rspress-based documentation site                  | [CLAUDE.md](/website/CLAUDE.md)           |
 
 ## Environment Setup
 
