@@ -2,10 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Integration test for build-npm-packages.sh (AC5.2).
+//! Integration test for build-npm-packages.sh (AC4).
 //!
 //! Runs the shell script in a temporary output directory and validates that each
-//! platform package.json contains the correct name, version, os, and cpu fields.
+//! platform package.json contains the correct name, version, os, cpu,
+//! publishConfig, and repository fields.
 
 use std::process::Command;
 
@@ -19,6 +20,11 @@ const PLATFORMS: &[Platform] = &[
     Platform {
         suffix: "darwin-arm64",
         os: "darwin",
+        cpu: "arm64",
+    },
+    Platform {
+        suffix: "linux-arm64",
+        os: "linux",
         cpu: "arm64",
     },
     Platform {
@@ -46,9 +52,9 @@ fn cargo_version() -> String {
     panic!("could not parse version from Cargo.toml");
 }
 
-// simlin-mcp.AC5.2: build-npm-packages.sh produces correct os/cpu/name/version fields
+// simlin-mcp.AC4: build-npm-packages.sh produces correct os/cpu/name/version/publishConfig/repository fields
 #[test]
-fn ac5_2_platform_packages_have_correct_fields() {
+fn ac4_platform_packages_have_correct_fields() {
     let tmp = tempfile::tempdir().expect("failed to create tempdir");
 
     // The script uses SCRIPT_DIR to locate Cargo.toml and to write into npm/.
@@ -136,6 +142,26 @@ fn ac5_2_platform_packages_have_correct_fields() {
         assert_eq!(
             cpu_arr[0], plat.cpu,
             "wrong cpu for platform {}",
+            plat.suffix
+        );
+
+        // AC4.4: publishConfig and repository
+        let publish_config = &pkg["publishConfig"];
+        assert_eq!(
+            publish_config["access"], "public",
+            "missing publishConfig.access for {}",
+            plat.suffix
+        );
+
+        let repo = &pkg["repository"];
+        assert_eq!(
+            repo["type"], "git",
+            "missing repository.type for {}",
+            plat.suffix
+        );
+        assert!(
+            repo["url"].as_str().unwrap_or("").contains("simlin"),
+            "repository.url should reference simlin for {}",
             plat.suffix
         );
     }
