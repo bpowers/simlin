@@ -21,7 +21,8 @@ RUN ARCH=$(uname -m) && \
         | tar -J -x -C /usr/local && \
     ln -s "/usr/local/${DIR}/zig" /usr/local/bin/zig
 
-RUN cargo install --locked cargo-zigbuild
+# Keep version in sync with .github/workflows/mcp-release.yml
+RUN cargo install --locked cargo-zigbuild@0.22
 
 RUN rustup target add \
     x86_64-unknown-linux-musl \

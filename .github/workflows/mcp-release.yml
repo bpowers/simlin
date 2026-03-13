@@ -66,9 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read Rust toolchain version
+        id: rust-version
+        run: echo "version=$(grep '^channel' rust-toolchain.toml | sed 's/channel = \"\(.*\)\"/\1/')" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo artifacts
@@ -114,7 +119,7 @@ jobs:
     name: Publish platform packages
     needs: [validate, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/mcp-v')
     permissions:
       contents: read
       id-token: write
@@ -189,7 +194,7 @@ jobs:
     name: Publish @simlin/mcp
     needs: [validate, publish-platform]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/mcp-v')
     permissions:
       contents: read
       id-token: write

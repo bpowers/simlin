@@ -247,20 +247,66 @@ fn dockerfile_rust_version_matches_toolchain() {
 
 // Each npm publish step must be guarded by an existence check so that
 // reruns after partial failure skip already-published packages.
+// We verify that `npm view` appears at least as many times as `npm publish`,
+// ensuring every publish is individually guarded.
 #[test]
 fn publish_steps_are_rerunnable() {
     let text = load_workflow_text();
-    for line in text.lines() {
-        if line.contains("npm publish") {
-            // The publish command should be inside a conditional block that
-            // first checks whether the version is already on the registry.
-            // We verify the workflow contains npm view checks overall.
-        }
-    }
-    // There must be at least one `npm view` invocation for idempotent publish.
+    let publish_count = text.lines().filter(|l| l.contains("npm publish")).count();
+    let view_count = text.lines().filter(|l| l.contains("npm view")).count();
     assert!(
-        text.contains("npm view"),
-        "workflow must use `npm view` to check for already-published versions"
+        publish_count > 0,
+        "workflow should have at least one npm publish command"
+    );
+    assert!(
+        view_count >= publish_count,
+        "each npm publish must be guarded by an npm view check ({view_count} views < {publish_count} publishes)"
+    );
+}
+
+// Publish jobs must guard on `refs/tags/mcp-v`, not just `refs/tags/`,
+// so that workflow_dispatch on an arbitrary tag cannot trigger publishing.
+#[test]
+fn publish_jobs_guard_on_mcp_v_tag() {
+    let wf = load_workflow();
+    for job_name in &["publish-platform", "publish-wrapper"] {
+        let condition = wf["jobs"][*job_name]["if"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{job_name} must have an if condition"));
+        assert!(
+            condition.contains("refs/tags/mcp-v"),
+            "{job_name} if-guard must check for 'refs/tags/mcp-v', not just 'refs/tags/': {condition}"
+        );
+    }
+}
+
+// The CI build job must use the repo's pinned Rust toolchain, not @stable,
+// so release binaries are compiled with the same compiler as local/CI builds.
+#[test]
+fn build_job_uses_pinned_rust_toolchain() {
+    let text = load_workflow_text();
+    assert!(
+        !text.contains("rust-toolchain@stable"),
+        "workflow must not use rust-toolchain@stable; use the repo's rust-toolchain.toml version"
+    );
+}
+
+// Dockerfile.cross must pin cargo-zigbuild to a specific version
+// to stay in sync with the CI workflow.
+#[test]
+fn dockerfile_pins_cargo_zigbuild_version() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let dockerfile = std::fs::read_to_string(repo_root.join("src/simlin-mcp/Dockerfile.cross"))
+        .expect("read Dockerfile.cross");
+    assert!(
+        dockerfile
+            .lines()
+            .any(|line| line.contains("cargo-zigbuild@")),
+        "Dockerfile.cross must pin cargo-zigbuild to a specific version"
     );
 }
 
