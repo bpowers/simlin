@@ -1,29 +1,30 @@
-# Agent Guidance
+# Simlin Development Guide
 
 ## Overview
 
-Simlin is a system dynamics (SD) modeling tool for building and simulating stock-and-flow models, including models from Vensim and Stella. The XMILE specification (`docs/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
+Simlin is a system dynamics (SD) modeling tool for building, simulating, and iterating on stock-and-flow models, including models originally created in Vensim and Stella. The XMILE specification (`docs/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
 
-The engine is in Rust, the interactive editor in TypeScript/React, the server and app in TypeScript. This is a monorepo without external users -- breaking changes are OK if tests pass. Exception: protobuf files must follow standard versioning (we have a DB with serialized instances).
+This is a monorepo without external users -- breaking changes are OK if tests pass. Exception: protobuf files must follow standard versioning (we have a DB with serialized instances).
 
 For detailed architecture and the dependency graph, see [docs/architecture.md](/docs/architecture.md).
 For documentation index, see [docs/README.md](/docs/README.md).
 
 ## Components
 
-| Component | Language | Description | Docs |
-|-----------|----------|-------------|------|
-| `src/simlin-engine` | Rust | Compiles, type-checks, and simulates SD models | [CLAUDE.md](/src/simlin-engine/CLAUDE.md) |
-| `src/libsimlin` | Rust | Flat C FFI to simlin-engine (WASM, CGo, C/C++) | [CLAUDE.md](/src/libsimlin/CLAUDE.md) |
-| `src/engine` | TypeScript | Promise-based TypeScript API for WASM engine | [CLAUDE.md](/src/engine/CLAUDE.md) |
-| `src/core` | TypeScript | Shared data models and common utilities | [CLAUDE.md](/src/core/CLAUDE.md) |
-| `src/diagram` | TypeScript | React model editor and visualization toolkit | [CLAUDE.md](/src/diagram/CLAUDE.md) |
-| `src/app` | TypeScript | Full-featured SD application | [CLAUDE.md](/src/app/CLAUDE.md) |
-| `src/server` | TypeScript | Express.js backend (Firebase Auth, Firestore) | [CLAUDE.md](/src/server/CLAUDE.md) |
-| `src/xmutil` | C++/Rust | Vensim-to-XMILE converter (test-only) | -- |
-| `src/simlin-cli` | Rust | CLI for simulation/conversion (testing/debugging) | [CLAUDE.md](/src/simlin-cli/CLAUDE.md) |
-| `src/pysimlin` | Python/Rust | Python bindings for the simulation engine | [CLAUDE.md](/src/pysimlin/CLAUDE.md) |
-| `website` | TypeScript | Rspress-based documentation site | [CLAUDE.md](/website/CLAUDE.md) |
+| Component           | Language | Description                                      | Docs                                      |
+|---------------------|----------|--------------------------------------------------|-------------------------------------------|
+| `src/simlin-engine` | Rust | Compiles, type-checks, and simulates SD models   | [CLAUDE.md](/src/simlin-engine/CLAUDE.md) |
+| `src/libsimlin`     | Rust | Flat C FFI to simlin-engine (WASM, CGo, C/C++)   | [CLAUDE.md](/src/libsimlin/CLAUDE.md)     |
+| `src/simlin-mcp`    | Rust | MCP server for viewing and editing models        | [CLAUDE.md](/src/simlin-mcp/CLAUDE.md)    |
+| `src/engine`        | TypeScript | Promise-based TypeScript API for WASM engine     | [CLAUDE.md](/src/engine/CLAUDE.md)        |
+| `src/core`          | TypeScript | Shared data models and common utilities          | [CLAUDE.md](/src/core/CLAUDE.md)          |
+| `src/diagram`       | TypeScript | React model editor and visualization toolkit     | [CLAUDE.md](/src/diagram/CLAUDE.md)       |
+| `src/app`           | TypeScript | Full-featured SD application                     | [CLAUDE.md](/src/app/CLAUDE.md)           |
+| `src/server`        | TypeScript | Express.js backend (Firebase Auth, Firestore)    | [CLAUDE.md](/src/server/CLAUDE.md)        |
+| `src/xmutil`        | C++/Rust | Vensim-to-XMILE converter (test-only)            | --                                        |
+| `src/simlin-cli`    | Rust | CLI for simulation/conversion (testing/debugging) | [CLAUDE.md](/src/simlin-cli/CLAUDE.md)    |
+| `src/pysimlin`      | Python/Rust | Python bindings for the simulation engine        | [CLAUDE.md](/src/pysimlin/CLAUDE.md)      |
+| `website`           | TypeScript | Rspress-based documentation site                 | [CLAUDE.md](/website/CLAUDE.md)           |
 
 ## Environment Setup
 
@@ -33,7 +34,7 @@ For documentation index, see [docs/README.md](/docs/README.md).
 ./scripts/dev-init.sh
 ```
 
-Idempotent and fast -- short-circuits work already done.
+(Idempotent and fast: short-circuits work already done)
 
 ## Build / Test / Lint
 
@@ -55,9 +56,9 @@ The pre-commit hook (`scripts/pre-commit`) runs automatically and performs:
 7. TypeScript tests
 8. Python bindings tests
 
-**Important**: Never use `--no-verify` to skip hooks.
+**Important**: NEVER use `--no-verify` with `git commit` to skip hooks.
 
-IMPORTANT: Lean on the pre-commit hook -- just run `git commit ...` and fix reported problems rather than running tests yourself to try to get a clean commit on the first try.
+Lean on the pre-commit hook: run `git commit ...` and fix reported problems rather than running tests yourself to try to get a clean commit on the first try.
 
 ## Commit Message Style
 
@@ -68,9 +69,7 @@ IMPORTANT: Lean on the pre-commit hook -- just run `git commit ...` and fix repo
 
 ## Hard Rules
 
-It is CRITICAL that you NEVER use `--no-verify` with `git commit`.
-
-IMPORTANT: Simple, general, testable, maintainable code is better than preserving an interface. There are NO places where VM bytecode is serialized to disk; compatibility is only needed around protobufs.
+IMPORTANT: Simple, general, testable, maintainable code is better than preserving an interface. There are NO places where VM bytecode is serialized to disk; backwards compatibility is ONLY needed for protobufs.
 
 **CRITICAL**: ALL work must follow test-driven development targeting 95%+ code coverage. For TypeScript, follow the functional core / imperative shell pattern.
 
@@ -79,11 +78,10 @@ IMPORTANT: If feedback seems non-actionable, it means you need comments explaini
 ## Comment and Rustdoc Standards
 
 - Preserve useful comments/docstrings when refactoring. Do not delete comments unless they are stale, wrong, or redundant with clearer replacement code.
-- Prefer comments that explain **why** (invariants, ordering constraints, cache behavior, edge-case semantics), not line-by-line mechanics.
+- Comments should explain **why** (invariants, ordering constraints, cache behavior, edge-case semantics), not line-by-line mechanics.
 - Public Rust items and non-trivial internal functions should have concise rustdoc describing purpose, key assumptions, and side effects.
 - When behavior changes, update nearby comments in the same commit so docs and code stay aligned.
 - If you intentionally remove a comment block, replace it with an updated equivalent when the context is still non-obvious.
-- Code review should treat missing or stale “why” comments as actionable feedback, especially in simulation semantics, incremental compilation, and dependency ordering code.
 
 ## Development Standards
 
