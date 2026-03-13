@@ -23,7 +23,7 @@ docker build -t "$IMAGE_NAME" -f "$MCP_DIR/Dockerfile.cross" "$MCP_DIR/"
 # Previous Docker runs leave root-owned files in dist/; remove via Docker
 # to avoid "Permission denied" when cleaning up as a non-root user.
 if [ -d "$DIST_DIR" ]; then
-    docker run --rm -v "$DIST_DIR:/dist" alpine rm -rf /dist/* 2>/dev/null || true
+    docker run --rm -v "$DIST_DIR:/dist" alpine sh -c 'rm -rf /dist/*' 2>/dev/null || true
 fi
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
