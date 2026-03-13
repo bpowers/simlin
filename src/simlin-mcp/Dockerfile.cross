@@ -6,6 +6,7 @@
 # Update RUST_VERSION to match the current stable Rust when building.
 # Override at build time: docker build --build-arg RUST_VERSION=1.88.0 ...
 ARG RUST_VERSION=1.87.0
+# Keep in sync with .github/workflows/mcp-release.yml
 ARG ZIG_VERSION=0.15.2
 
 FROM rust:${RUST_VERSION}-bookworm

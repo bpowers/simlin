@@ -1,0 +1,216 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! Static validation tests for .github/workflows/mcp-release.yml (AC1, AC2, AC5).
+//!
+//! These tests parse the YAML workflow file and assert structural properties
+//! that would otherwise only be detectable via a live CI run.  Catching
+//! regressions here is cheaper than waiting for a failed release workflow.
+
+use std::path::Path;
+
+fn load_workflow() -> serde_yaml::Value {
+    // CARGO_MANIFEST_DIR is src/simlin-mcp; repo root is two levels up.
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let wf_path = repo_root.join(".github/workflows/mcp-release.yml");
+    let contents = std::fs::read_to_string(&wf_path).expect("read workflow YAML");
+    serde_yaml::from_str(&contents).expect("parse workflow YAML")
+}
+
+fn load_workflow_text() -> String {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let wf_path = repo_root.join(".github/workflows/mcp-release.yml");
+    std::fs::read_to_string(&wf_path).expect("read workflow YAML")
+}
+
+// AC1.1 / AC1.6: only mcp-v* tags trigger the workflow (no broader patterns)
+#[test]
+fn ac1_1_tag_trigger_is_mcp_v_star() {
+    let wf = load_workflow();
+    let tags = wf["on"]["push"]["tags"]
+        .as_sequence()
+        .expect("on.push.tags should be a sequence");
+    assert_eq!(
+        tags.len(),
+        1,
+        "expected exactly one tag pattern, got {}",
+        tags.len()
+    );
+    assert_eq!(
+        tags[0].as_str().unwrap_or(""),
+        "mcp-v*",
+        "tag trigger pattern should be exactly 'mcp-v*'"
+    );
+}
+
+// AC1.2 - AC1.5: build matrix has exactly 4 entries with the expected targets/os
+#[test]
+fn ac1_2_to_1_5_build_matrix_has_all_four_targets() {
+    let wf = load_workflow();
+    let matrix = wf["jobs"]["build"]["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("jobs.build.strategy.matrix.include should be a sequence");
+
+    assert_eq!(
+        matrix.len(),
+        4,
+        "expected exactly 4 build matrix entries, got {}",
+        matrix.len()
+    );
+
+    let targets: Vec<&str> = matrix
+        .iter()
+        .map(|e| e["target"].as_str().expect("matrix entry missing target"))
+        .collect();
+
+    assert!(
+        targets.contains(&"x86_64-unknown-linux-musl"),
+        "matrix missing x86_64-unknown-linux-musl (AC1.2)"
+    );
+    assert!(
+        targets.contains(&"aarch64-unknown-linux-musl"),
+        "matrix missing aarch64-unknown-linux-musl (AC1.3)"
+    );
+    assert!(
+        targets.contains(&"x86_64-pc-windows-gnu"),
+        "matrix missing x86_64-pc-windows-gnu (AC1.4)"
+    );
+    assert!(
+        targets.contains(&"aarch64-apple-darwin"),
+        "matrix missing aarch64-apple-darwin (AC1.5)"
+    );
+
+    // macOS arm64 must use macos-latest runner
+    let darwin_entry = matrix
+        .iter()
+        .find(|e| e["target"].as_str() == Some("aarch64-apple-darwin"))
+        .expect("aarch64-apple-darwin entry not found");
+    assert_eq!(
+        darwin_entry["os"].as_str().unwrap_or(""),
+        "macos-latest",
+        "aarch64-apple-darwin build must run on macos-latest (AC1.5)"
+    );
+}
+
+// AC5.1: top-level permissions.contents is "read"
+#[test]
+fn ac5_1_top_level_permissions_contents_read() {
+    let wf = load_workflow();
+    assert_eq!(
+        wf["permissions"]["contents"].as_str().unwrap_or(""),
+        "read",
+        "top-level permissions.contents should be 'read'"
+    );
+}
+
+// AC5.2: only publish-platform and publish-wrapper have id-token: write;
+//        build and validate jobs must not have it
+#[test]
+fn ac5_2_only_publish_jobs_have_id_token_write() {
+    let wf = load_workflow();
+
+    assert_eq!(
+        wf["jobs"]["publish-platform"]["permissions"]["id-token"]
+            .as_str()
+            .unwrap_or(""),
+        "write",
+        "publish-platform must have id-token: write"
+    );
+    assert_eq!(
+        wf["jobs"]["publish-wrapper"]["permissions"]["id-token"]
+            .as_str()
+            .unwrap_or(""),
+        "write",
+        "publish-wrapper must have id-token: write"
+    );
+
+    // build and validate jobs must not grant id-token
+    let build_id_token = &wf["jobs"]["build"]["permissions"]["id-token"];
+    assert!(
+        build_id_token.is_null(),
+        "build job must not have id-token permission"
+    );
+    let validate_id_token = &wf["jobs"]["validate"]["permissions"]["id-token"];
+    assert!(
+        validate_id_token.is_null(),
+        "validate job must not have id-token permission"
+    );
+}
+
+// AC5.3: no long-lived npm tokens in the workflow
+#[test]
+fn ac5_3_no_npm_token_in_workflow() {
+    let text = load_workflow_text();
+    assert!(
+        !text.contains("NPM_TOKEN"),
+        "workflow must not reference NPM_TOKEN"
+    );
+    assert!(
+        !text.contains("NODE_AUTH_TOKEN"),
+        "workflow must not reference NODE_AUTH_TOKEN"
+    );
+    assert!(
+        !text.contains("secrets.NPM"),
+        "workflow must not reference secrets.NPM"
+    );
+}
+
+// AC2.1: publish-wrapper depends on publish-platform
+#[test]
+fn ac2_1_publish_wrapper_needs_publish_platform() {
+    let wf = load_workflow();
+    let needs = wf["jobs"]["publish-wrapper"]["needs"]
+        .as_sequence()
+        .expect("publish-wrapper.needs should be a sequence");
+    let need_names: Vec<&str> = needs
+        .iter()
+        .map(|n| n.as_str().expect("needs entry should be a string"))
+        .collect();
+    assert!(
+        need_names.contains(&"publish-platform"),
+        "publish-wrapper must list publish-platform in its needs (AC2.1)"
+    );
+}
+
+// AC2.3: every npm publish invocation includes --provenance
+#[test]
+fn ac2_3_all_npm_publish_commands_have_provenance() {
+    let text = load_workflow_text();
+    // Find every line that calls `npm publish` and assert --provenance is present.
+    for (lineno, line) in text.lines().enumerate() {
+        if line.contains("npm publish") {
+            assert!(
+                line.contains("--provenance"),
+                "line {} calls npm publish without --provenance: {line}",
+                lineno + 1
+            );
+        }
+    }
+}
+
+// AC2.5: chmod +x is present for the 3 non-Windows binaries
+#[test]
+fn ac2_5_chmod_for_non_windows_binaries() {
+    let text = load_workflow_text();
+    assert!(
+        text.contains("chmod +x") && text.contains("mcp-linux-x64"),
+        "workflow must chmod +x the linux-x64 binary (AC2.5)"
+    );
+    assert!(
+        text.contains("chmod +x") && text.contains("mcp-linux-arm64"),
+        "workflow must chmod +x the linux-arm64 binary (AC2.5)"
+    );
+    assert!(
+        text.contains("chmod +x") && text.contains("mcp-darwin-arm64"),
+        "workflow must chmod +x the darwin-arm64 binary (AC2.5)"
+    );
+}
