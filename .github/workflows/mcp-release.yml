@@ -1,0 +1,234 @@
+name: MCP npm Release
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract and validate version
+        id: version
+        run: |
+          CARGO_VERSION=$(grep '^version = ' src/simlin-mcp/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          if [[ "$GITHUB_REF" == refs/tags/mcp-v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#mcp-v}"
+            echo "Tag version: $TAG_VERSION"
+            if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+              echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml ($CARGO_VERSION)"
+              exit 1
+            fi
+          fi
+
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: mcp-linux-x64
+            binary: simlin-mcp
+            use-zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: mcp-linux-arm64
+            binary: simlin-mcp
+            use-zigbuild: true
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            artifact: mcp-win32-x64
+            binary: simlin-mcp.exe
+            use-zigbuild: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: mcp-darwin-arm64
+            binary: simlin-mcp
+            use-zigbuild: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read Rust toolchain version
+        id: rust-version
+        run: echo "version=$(grep '^channel' rust-toolchain.toml | sed 's/channel = \"\(.*\)\"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-mcp-${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-mcp-${{ matrix.os }}-${{ matrix.target }}-
+
+      - name: Install Zig
+        if: matrix.use-zigbuild
+        uses: mlugg/setup-zig@v2
+        with:
+          # Keep in sync with src/simlin-mcp/Dockerfile.cross
+          version: '0.15.2'
+
+      - name: Install cargo-zigbuild
+        if: matrix.use-zigbuild
+        run: cargo install --locked cargo-zigbuild@0.22
+
+      - name: Build (zigbuild)
+        if: matrix.use-zigbuild
+        run: cargo zigbuild -p simlin-mcp --locked --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.use-zigbuild }}
+        run: cargo build -p simlin-mcp --locked --release --target ${{ matrix.target }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-platform:
+    name: Publish platform packages
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/mcp-v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install -g npm@latest
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare platform packages
+        working-directory: src/simlin-mcp
+        run: |
+          bash build-npm-packages.sh
+
+          cp ../../artifacts/mcp-linux-x64/simlin-mcp npm/@simlin/mcp-linux-x64/bin/
+          cp ../../artifacts/mcp-linux-arm64/simlin-mcp npm/@simlin/mcp-linux-arm64/bin/
+          cp ../../artifacts/mcp-win32-x64/simlin-mcp.exe npm/@simlin/mcp-win32-x64/bin/
+          cp ../../artifacts/mcp-darwin-arm64/simlin-mcp npm/@simlin/mcp-darwin-arm64/bin/
+
+          chmod +x npm/@simlin/mcp-linux-x64/bin/simlin-mcp
+          chmod +x npm/@simlin/mcp-linux-arm64/bin/simlin-mcp
+          chmod +x npm/@simlin/mcp-darwin-arm64/bin/simlin-mcp
+
+      - name: Publish @simlin/mcp-linux-x64
+        working-directory: src/simlin-mcp/npm/@simlin/mcp-linux-x64
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-linux-x64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-linux-x64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Publish @simlin/mcp-linux-arm64
+        working-directory: src/simlin-mcp/npm/@simlin/mcp-linux-arm64
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-linux-arm64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-linux-arm64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Publish @simlin/mcp-win32-x64
+        working-directory: src/simlin-mcp/npm/@simlin/mcp-win32-x64
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-win32-x64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-win32-x64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Publish @simlin/mcp-darwin-arm64
+        working-directory: src/simlin-mcp/npm/@simlin/mcp-darwin-arm64
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp-darwin-arm64@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp-darwin-arm64@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
+  publish-wrapper:
+    name: Publish @simlin/mcp
+    needs: [validate, publish-platform]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/mcp-v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install -g npm@latest
+
+      - name: Update wrapper version
+        working-directory: src/simlin-mcp
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          jq --arg v "$VERSION" '
+            .version = $v |
+            .optionalDependencies = (
+              .optionalDependencies | to_entries | map(.value = $v) | from_entries
+            )
+          ' package.json > package.json.tmp && mv package.json.tmp package.json
+
+          echo "Updated wrapper package.json:"
+          cat package.json
+
+      - name: Publish @simlin/mcp
+        working-directory: src/simlin-mcp
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if npm view "@simlin/mcp@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/mcp@$VERSION, skipping"
+          else
+            npm publish --provenance --access public
+          fi

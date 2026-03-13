@@ -1,0 +1,31 @@
+# Cross-compilation toolchain for simlin-mcp.
+#
+# Provides Rust + Zig + cargo-zigbuild for building Linux (musl) and
+# Windows (mingw) binaries from a single image.  Used by scripts/cross-build.sh.
+
+# Keep in sync with rust-toolchain.toml (tested by dockerfile_rust_version_matches_toolchain)
+ARG RUST_VERSION=1.94.0
+# Keep in sync with .github/workflows/mcp-release.yml
+ARG ZIG_VERSION=0.15.2
+
+FROM rust:${RUST_VERSION}-bookworm
+
+ARG ZIG_VERSION
+
+# Install Zig from upstream tarball
+RUN ARCH=$(uname -m) && \
+    TARBALL="zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" && \
+    DIR="zig-${ARCH}-linux-${ZIG_VERSION}" && \
+    curl -L "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}" \
+        | tar -J -x -C /usr/local && \
+    ln -s "/usr/local/${DIR}/zig" /usr/local/bin/zig
+
+# Keep version in sync with .github/workflows/mcp-release.yml
+RUN cargo install --locked cargo-zigbuild@0.22
+
+RUN rustup target add \
+    x86_64-unknown-linux-musl \
+    aarch64-unknown-linux-musl \
+    x86_64-pc-windows-gnu
+
+WORKDIR /src

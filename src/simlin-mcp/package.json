@@ -15,5 +15,13 @@
     "@simlin/mcp-win32-x64": "0.1.0"
   },
   "license": "Apache-2.0",
-  "type": "module"
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bpowers/simlin.git",
+    "directory": "src/simlin-mcp"
+  }
 }

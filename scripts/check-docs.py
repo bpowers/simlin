@@ -98,6 +98,9 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
                                  "python ", "ruff ", "mypy ", "pytest ",
                                  "--", "RUST_", "DISABLE_")):
                 continue
+            # Skip npm scoped package names (e.g. @simlin/mcp)
+            if token.startswith("@"):
+                continue
             # Skip glob patterns
             if "*" in token:
                 continue

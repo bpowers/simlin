@@ -41,7 +41,15 @@ for entry in "${PLATFORMS[@]}"; do
   "os": ["$os"],
   "cpu": ["$cpu"],
   "files": ["bin"],
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bpowers/simlin.git",
+    "directory": "src/simlin-mcp"
+  }
 }
 JSON
 
