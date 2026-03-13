@@ -52,13 +52,27 @@ ls -lh "$DIST_DIR"/*/simlin-mcp*
 # Smoke test: verify the Linux x64 binary is a valid static executable and runs
 echo ""
 echo "==> Smoke test: Linux x64 binary..."
-file "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp"
+FILE_OUTPUT=$(file "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp")
+echo "$FILE_OUTPUT"
+if ! echo "$FILE_OUTPUT" | grep -q "ELF.*executable"; then
+    echo "FAIL: binary is not an ELF executable"
+    exit 1
+fi
 
 echo "==> Verifying binary executes..."
 # simlin-mcp is a stdio MCP server that waits for input, so feed it empty input
-# with a timeout. Any exit (including error) proves the binary loads and runs.
-echo '' | timeout 2 "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp" 2>/dev/null || true
-echo "Smoke test passed (binary executed)"
+# with a timeout.  timeout exits 124 when it kills a running process (expected),
+# and the binary itself may exit with a small non-zero code on empty input.
+# Fatal failures are: 126 (cannot execute), 127 (not found), >= 128 (signal).
+set +e
+echo '' | timeout 2 "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp" 2>/dev/null
+EXIT_CODE=$?
+set -e
+if [ "$EXIT_CODE" -ge 126 ] && [ "$EXIT_CODE" -ne 124 ]; then
+    echo "FAIL: binary did not execute properly (exit code $EXIT_CODE)"
+    exit 1
+fi
+echo "Smoke test passed (binary executed, exit code $EXIT_CODE)"
 
 echo ""
 echo "Done. Binaries in $DIST_DIR/"
