@@ -291,6 +291,24 @@ fn build_job_uses_pinned_rust_toolchain() {
     );
 }
 
+// Release builds must use --locked so a stale Cargo.lock causes a build
+// failure rather than silently resolving different dependencies.
+#[test]
+fn release_builds_use_locked() {
+    let text = load_workflow_text();
+    for (lineno, line) in text.lines().enumerate() {
+        if (line.contains("cargo zigbuild") || line.contains("cargo build"))
+            && line.contains("--release")
+        {
+            assert!(
+                line.contains("--locked"),
+                "line {} has a release build without --locked: {line}",
+                lineno + 1
+            );
+        }
+    }
+}
+
 // Dockerfile.cross must pin cargo-zigbuild to a specific version
 // to stay in sync with the CI workflow.
 #[test]
