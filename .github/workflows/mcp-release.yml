@@ -87,6 +87,7 @@ jobs:
         if: matrix.use-zigbuild
         uses: mlugg/setup-zig@v2
         with:
+          # Keep in sync with src/simlin-mcp/Dockerfile.cross
           version: '0.15.2'
 
       - name: Install cargo-zigbuild

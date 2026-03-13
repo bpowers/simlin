@@ -165,4 +165,49 @@ fn ac4_platform_packages_have_correct_fields() {
             plat.suffix
         );
     }
+
+    // AC4.3: exactly 4 platform directories, no extras
+    let simlin_dir = tmp.path().join("npm").join("@simlin");
+    let dir_count = std::fs::read_dir(&simlin_dir)
+        .expect("failed to read @simlin directory")
+        .filter(|e| {
+            e.as_ref()
+                .map(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        dir_count, 4,
+        "expected exactly 4 platform directories under npm/@simlin/, got {dir_count}"
+    );
+}
+
+#[test]
+fn ac4_2_js_launcher_windows_triple() {
+    let js_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/simlin-mcp.js");
+    let contents = std::fs::read_to_string(&js_path).expect("read simlin-mcp.js");
+    assert!(
+        contents.contains("x86_64-pc-windows-gnu"),
+        "JS launcher should map Windows to x86_64-pc-windows-gnu"
+    );
+    assert!(
+        !contents.contains("x86_64-pc-windows-msvc"),
+        "JS launcher should not reference the msvc triple"
+    );
+}
+
+#[test]
+fn ac4_4_wrapper_package_json_has_publish_config() {
+    let pkg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("package.json");
+    let contents = std::fs::read_to_string(&pkg_path).expect("read package.json");
+    let pkg: serde_json::Value = serde_json::from_str(&contents).expect("valid JSON");
+    assert_eq!(pkg["publishConfig"]["access"], "public");
+    assert_eq!(pkg["repository"]["type"], "git");
+    assert!(
+        pkg["repository"]["url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("simlin"),
+        "repository.url should reference simlin"
+    );
 }
