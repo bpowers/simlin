@@ -4,9 +4,10 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::result::Result as StdResult;
 
-use pico_args::Arguments;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use simlin::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
@@ -26,7 +27,6 @@ use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmil
 mod gen_stdlib;
 mod vdf_dump;
 
-const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
 
 #[macro_export]
@@ -38,116 +38,162 @@ macro_rules! die(
     } }
 );
 
-fn usage() -> ! {
-    let argv0 = std::env::args()
-        .next()
-        .unwrap_or_else(|| "<mdl>".to_string());
-    die!(
-        concat!(
-            "mdl {}: Simulate system dynamics models.\n\
-         \n\
-         USAGE:\n",
-            "    {} [SUBCOMMAND] [OPTION...] PATH\n",
-            "\n\
-         OPTIONS:\n",
-            "    -h, --help       show this message\n",
-            "    --vensim         model is a Vensim .mdl file\n",
-            "    --pb-input       input is binary protobuf project\n",
-            "    --to-xmile       output should be XMILE not protobuf\n",
-            "    --to-mdl         output should be Vensim MDL not protobuf\n",
-            "    --model-only     for conversion, only output model instead of project\n",
-            "    --output FILE    path to write output file\n",
-            "    --reference FILE reference TSV for debug subcommand\n",
-            "    --no-output      don't print the output (for benchmarking)\n",
-            "    --ltm            enable Loops That Matter analysis\n",
-            "    --stdlib-dir DIR directory containing stdlib/*.stmx files\n",
-            "\n\
-         SUBCOMMANDS:\n",
-            "    simulate         Simulate a model and display output\n",
-            "    convert          Convert an XMILE or Vensim model to protobuf\n",
-            "    equations        Print the equations out\n",
-            "    debug            Output model equations interleaved with a reference run\n",
-            "    gen-stdlib       Generate Rust code for stdlib models\n",
-            "    vdf-dump         Pretty-print VDF file structure and contents\n",
-        ),
-        VERSION,
-        argv0
-    );
+#[derive(Debug, Parser)]
+#[command(name = "simlin", version, about = "Simulate system dynamics models")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-#[derive(Clone, Default, Debug)]
-struct Args {
-    path: Option<String>,
-    output: Option<String>,
-    reference: Option<String>,
-    stdlib_dir: Option<String>,
-    is_vensim: bool,
-    is_pb_input: bool,
-    is_to_xmile: bool,
-    is_to_mdl: bool,
-    is_convert: bool,
-    is_model_only: bool,
-    is_no_output: bool,
-    is_equations: bool,
-    is_debug: bool,
-    is_ltm: bool,
-    is_gen_stdlib: bool,
-    is_vdf_dump: bool,
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Simulate a model and print results as TSV
+    Simulate {
+        #[command(flatten)]
+        input: InputArgs,
+
+        /// Suppress output (useful for benchmarking)
+        #[arg(long)]
+        no_output: bool,
+
+        /// Enable Loops That Matter analysis
+        #[arg(long)]
+        ltm: bool,
+    },
+
+    /// Convert a model between formats
+    Convert {
+        #[command(flatten)]
+        input: InputArgs,
+
+        /// Output format (defaults to protobuf)
+        #[arg(long, value_enum, default_value_t = OutputFormat::Protobuf)]
+        to: OutputFormat,
+
+        /// Output only the model, not the full project (protobuf only)
+        #[arg(long)]
+        model_only: bool,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
+    /// Print model equations as LaTeX
+    Equations {
+        #[command(flatten)]
+        input: InputArgs,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
+    /// Compare simulation output with a reference run
+    Debug {
+        #[command(flatten)]
+        input: InputArgs,
+
+        /// Reference TSV or DAT file for comparison
+        #[arg(long)]
+        reference: PathBuf,
+
+        /// Enable Loops That Matter analysis
+        #[arg(long)]
+        ltm: bool,
+    },
+
+    /// Generate Rust code for stdlib models
+    GenStdlib {
+        /// Directory containing stdlib .stmx files
+        #[arg(long, default_value = "stdlib")]
+        stdlib_dir: PathBuf,
+
+        /// Output file path
+        #[arg(long, short, default_value = "src/simlin-engine/src/stdlib.gen.rs")]
+        output: PathBuf,
+    },
+
+    /// Pretty-print VDF file structure and contents
+    VdfDump {
+        /// VDF file path
+        path: PathBuf,
+    },
 }
 
-fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
-    let mut parsed = Arguments::from_env();
-    if parsed.contains(["-h", "--help"]) {
-        usage();
+/// Shared arguments for commands that read a model file.
+#[derive(Clone, Debug, Args)]
+struct InputArgs {
+    /// Model file path (reads stdin if omitted)
+    path: Option<PathBuf>,
+
+    /// Input format (auto-detected from file extension when omitted:
+    /// .mdl -> vensim, .pb/.bin -> protobuf, everything else -> xmile)
+    #[arg(long, value_enum)]
+    format: Option<InputFormat>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum InputFormat {
+    Xmile,
+    Vensim,
+    Protobuf,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum OutputFormat {
+    Protobuf,
+    Xmile,
+    Mdl,
+}
+
+/// Infer input format from file extension, falling back to XMILE.
+fn resolve_input_format(input: &InputArgs) -> InputFormat {
+    if let Some(fmt) = &input.format {
+        return fmt.clone();
     }
-
-    let subcommand = parsed.subcommand()?;
-    if subcommand.is_none() {
-        eprintln!("error: subcommand required");
-        usage();
+    match input
+        .path
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+    {
+        Some("mdl") => InputFormat::Vensim,
+        Some("pb" | "bin") => InputFormat::Protobuf,
+        _ => InputFormat::Xmile,
     }
+}
 
-    let mut args: Args = Default::default();
+/// Load a model file, dispatching on format. Exits on error.
+fn open_model(input: &InputArgs) -> DatamodelProject {
+    let format = resolve_input_format(input);
+    let file_path = input
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/dev/stdin".to_string());
 
-    let subcommand = subcommand.unwrap();
-    if subcommand == "convert" {
-        args.is_convert = true;
-    } else if subcommand == "simulate" {
-    } else if subcommand == "equations" {
-        args.is_equations = true;
-    } else if subcommand == "debug" {
-        args.is_debug = true;
-    } else if subcommand == "gen-stdlib" {
-        args.is_gen_stdlib = true;
-    } else if subcommand == "vdf-dump" {
-        args.is_vdf_dump = true;
-    } else {
-        eprintln!("error: unknown subcommand {}", subcommand);
-        usage();
+    let result = match format {
+        InputFormat::Vensim => {
+            let contents = std::fs::read_to_string(&file_path).unwrap();
+            open_vensim(&contents)
+        }
+        InputFormat::Protobuf => {
+            let file = File::open(&file_path).unwrap();
+            let mut reader = BufReader::new(file);
+            open_binary(&mut reader)
+        }
+        InputFormat::Xmile => {
+            let file = File::open(&file_path).unwrap();
+            let mut reader = BufReader::new(file);
+            open_xmile(&mut reader)
+        }
+    };
+
+    match result {
+        Ok(project) => project,
+        Err(err) => die!("model '{}' error: {}", &file_path, err),
     }
-
-    args.output = parsed.value_from_str("--output").ok();
-    args.reference = parsed.value_from_str("--reference").ok();
-    args.stdlib_dir = parsed.value_from_str("--stdlib-dir").ok();
-    args.is_no_output = parsed.contains("--no-output");
-    args.is_model_only = parsed.contains("--model-only");
-    args.is_to_xmile = parsed.contains("--to-xmile");
-    args.is_to_mdl = parsed.contains("--to-mdl");
-    args.is_vensim = parsed.contains("--vensim");
-    args.is_pb_input = parsed.contains("--pb-input");
-    args.is_ltm = parsed.contains("--ltm");
-
-    let free_arguments = parsed.finish();
-    if free_arguments.is_empty() && !args.is_gen_stdlib {
-        eprintln!("error: input path required");
-        usage();
-    }
-
-    args.path = free_arguments
-        .first()
-        .and_then(|s| s.to_str().map(|s| s.to_owned()));
-
-    Ok(args)
 }
 
 fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
@@ -297,9 +343,9 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     run_datamodel_with_errors(project)
 }
 
-fn print_equations(project: &DatamodelProject, output: Option<String>) {
-    let mut output_file =
-        File::create(output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
+fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
+    let output_path = output.unwrap_or_else(|| PathBuf::from("/dev/stdout"));
+    let mut output_file = File::create(&output_path).unwrap();
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
@@ -409,121 +455,95 @@ fn print_equations(project: &DatamodelProject, output: Option<String>) {
 }
 
 fn main() {
-    let args = match parse_args() {
-        Ok(args) => args,
-        Err(err) => {
-            eprintln!("error: {}", err);
-            usage();
-        }
-    };
+    let cli = Cli::parse();
 
-    if args.is_gen_stdlib {
-        let stdlib_dir = args.stdlib_dir.unwrap_or_else(|| "stdlib".to_string());
-        let output_path = args
-            .output
-            .unwrap_or_else(|| "src/simlin-engine/src/stdlib.gen.rs".to_string());
-        if let Err(err) = gen_stdlib::generate(&stdlib_dir, &output_path) {
-            die!("gen-stdlib failed: {}", err);
-        }
-        return;
-    }
-
-    if args.is_vdf_dump {
-        let file_path = args.path.unwrap_or_else(|| {
-            eprintln!("error: VDF file path required");
-            std::process::exit(EXIT_FAILURE);
-        });
-        if let Err(err) = vdf_dump::dump_vdf(&file_path) {
-            die!("vdf-dump failed: {}", err);
-        }
-        return;
-    }
-
-    let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
-
-    let project = if args.is_vensim {
-        let contents = std::fs::read_to_string(&file_path).unwrap();
-        open_vensim(&contents)
-    } else if args.is_pb_input {
-        let file = File::open(&file_path).unwrap();
-        let mut reader = BufReader::new(file);
-        open_binary(&mut reader)
-    } else {
-        let file = File::open(&file_path).unwrap();
-        let mut reader = BufReader::new(file);
-        open_xmile(&mut reader)
-    };
-
-    if project.is_err() {
-        eprintln!("model '{}' error: {}", &file_path, project.err().unwrap());
-        return;
-    };
-
-    let project = project.unwrap();
-
-    if args.is_equations {
-        print_equations(&project, args.output);
-    } else if args.is_convert {
-        let pb_project = match serde::serialize(&project) {
-            Ok(pb) => pb,
-            Err(err) => die!("protobuf serialization failed: {}", err),
-        };
-
-        let mut buf: Vec<u8> = if args.is_model_only {
-            if pb_project.models.len() != 1 {
-                die!("--model-only specified, but more than 1 model in this project");
-            }
-            let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len());
-            pb_project.models[0].encode(&mut buf).unwrap();
-            buf
-        } else {
-            let mut buf = Vec::with_capacity(pb_project.encoded_len());
-            pb_project.encode(&mut buf).unwrap();
-            buf
-        };
-
-        if args.is_to_xmile {
-            match to_xmile(&project) {
-                Ok(s) => {
-                    buf = s.into_bytes();
-                    buf.push(b'\n');
-                }
-                Err(err) => {
-                    die!("error converting to XMILE: {}", err);
-                }
-            }
-        } else if args.is_to_mdl {
-            match to_mdl(&project) {
-                Ok(s) => {
-                    buf = s.into_bytes();
-                }
-                Err(err) => {
-                    die!("error converting to MDL: {}", err);
-                }
+    match cli.command {
+        Command::GenStdlib { stdlib_dir, output } => {
+            if let Err(err) =
+                gen_stdlib::generate(&stdlib_dir.to_string_lossy(), &output.to_string_lossy())
+            {
+                die!("gen-stdlib failed: {}", err);
             }
         }
-
-        let mut output_file =
-            File::create(args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
-        output_file.write_all(&buf).unwrap();
-    } else if args.is_debug {
-        if args.reference.is_none() {
-            eprintln!("missing required argument --reference FILE");
-            std::process::exit(1);
+        Command::VdfDump { path } => {
+            if let Err(err) = vdf_dump::dump_vdf(&path.to_string_lossy()) {
+                die!("vdf-dump failed: {}", err);
+            }
         }
-        let ref_path = args.reference.unwrap();
-        let reference = if ref_path.ends_with(".dat") {
-            load_dat(&ref_path).unwrap()
-        } else {
-            load_csv(&ref_path, b'\t').unwrap()
-        };
-        let results = simulate(&project, args.is_ltm);
+        Command::Simulate {
+            input,
+            no_output,
+            ltm,
+        } => {
+            let project = open_model(&input);
+            let results = simulate(&project, ltm);
+            if !no_output {
+                results.print_tsv();
+            }
+        }
+        Command::Convert {
+            input,
+            to,
+            model_only,
+            output,
+        } => {
+            let project = open_model(&input);
 
-        results.print_tsv_comparison(Some(&reference));
-    } else {
-        let results = simulate(&project, args.is_ltm);
-        if !args.is_no_output {
-            results.print_tsv();
+            let buf: Vec<u8> = match to {
+                OutputFormat::Xmile => match to_xmile(&project) {
+                    Ok(s) => {
+                        let mut bytes = s.into_bytes();
+                        bytes.push(b'\n');
+                        bytes
+                    }
+                    Err(err) => die!("error converting to XMILE: {}", err),
+                },
+                OutputFormat::Mdl => match to_mdl(&project) {
+                    Ok(s) => s.into_bytes(),
+                    Err(err) => die!("error converting to MDL: {}", err),
+                },
+                OutputFormat::Protobuf => {
+                    let pb_project = match serde::serialize(&project) {
+                        Ok(pb) => pb,
+                        Err(err) => die!("protobuf serialization failed: {}", err),
+                    };
+                    if model_only {
+                        if pb_project.models.len() != 1 {
+                            die!("--model-only specified, but more than 1 model in this project");
+                        }
+                        let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len());
+                        pb_project.models[0].encode(&mut buf).unwrap();
+                        buf
+                    } else {
+                        let mut buf = Vec::with_capacity(pb_project.encoded_len());
+                        pb_project.encode(&mut buf).unwrap();
+                        buf
+                    }
+                }
+            };
+
+            let output_path = output.unwrap_or_else(|| PathBuf::from("/dev/stdout"));
+            let mut output_file = File::create(&output_path).unwrap();
+            output_file.write_all(&buf).unwrap();
+        }
+        Command::Equations { input, output } => {
+            let project = open_model(&input);
+            print_equations(&project, output);
+        }
+        Command::Debug {
+            input,
+            reference,
+            ltm,
+        } => {
+            let project = open_model(&input);
+            let ref_path = reference.to_string_lossy();
+            let reference_data = if ref_path.ends_with(".dat") {
+                load_dat(&ref_path).unwrap()
+            } else {
+                load_csv(&ref_path, b'\t').unwrap()
+            };
+            let results = simulate(&project, ltm);
+            results.print_tsv_comparison(Some(&reference_data));
         }
     }
 }
