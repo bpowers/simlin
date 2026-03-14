@@ -10,7 +10,7 @@ name = "simlin"
 path = "src/main.rs"
 
 [dependencies]
-pico-args = "0.5"
+clap = { version = "4", features = ["derive"] }
 stringreader = "0.1"
 sha2 = "0.10"
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_io"] }

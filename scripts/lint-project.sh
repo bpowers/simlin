@@ -38,6 +38,9 @@ fi
 # Rule 2: Rust source file size warning
 # Threshold set just above the current maximum (vm.rs at ~5513 lines).
 MAX_LINES=6000
+RS_FILES=$(mktemp)
+find src -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' \
+    -not -name '*.gen.rs' -not -path '*/tests/*' > "$RS_FILES"
 while IFS= read -r file; do
     lines=$(wc -l < "$file" | tr -d ' ')
     if [ "$lines" -gt "$MAX_LINES" ]; then
@@ -45,8 +48,8 @@ while IFS= read -r file; do
         echo "  Fix: Consider splitting this file into smaller modules."
         ERRORS=$((ERRORS + 1))
     fi
-done < <(find src -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' \
-    -not -name '*.gen.rs' -not -path '*/tests/*')
+done < "$RS_FILES"
+rm -f "$RS_FILES"
 
 # Rule 3: Copyright headers on all Rust and TypeScript source files
 # check-copyright.py writes one error per line to stdout; summary to stderr.
