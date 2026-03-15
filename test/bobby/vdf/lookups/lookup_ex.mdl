@@ -1,0 +1,94 @@
+{UTF-8}
+inline lookup table=
+	WITH LOOKUP(Time, ((0,6),(30,5),(100,3)))
+	~	
+	~		|
+
+lookup table 1(
+	[(0,0)-(100,20)],(0,4),(10,5),(20,6),(30,10),(40,12),(50,13),(60,16),(70,16),(80,18)\
+		,(90,19),(100,20))
+	~	
+	~		|
+
+net change=
+	lookup table 1(Time) + inline lookup table
+	~	
+	~		|
+
+stock= INTEG (
+	net change,
+		0)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,lookup table 1,196,65,46,11,8,3,0,0,0,0,0,0
+10,2,inline lookup table,162,270,57,11,8,3,0,0,0,0,0,0
+10,3,Time,82,157,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+10,4,stock,532,181,40,20,3,3,0,0,0,0,0,0
+12,5,48,334,180,10,8,0,3,0,0,-1,0,0,0
+1,7,9,4,4,0,0,22,0,0,0,-1--1--1,,1|(458,180)|
+1,8,9,5,100,0,0,22,0,0,0,-1--1--1,,1|(378,180)|
+11,9,0,418,180,6,8,34,3,0,0,1,0,0,0
+10,10,net change,418,199,34,11,40,3,0,0,-1,0,0,0
+1,12,3,2,0,0,0,0,0,64,0,-1--1--1,,1|(117,207)|
+1,13,2,9,0,0,0,0,0,64,0,-1--1--1,,1|(295,222)|
+1,14,1,9,0,0,0,0,0,64,0,-1--1--1,,1|(308,123)|
+1,15,3,9,0,0,0,0,0,64,0,-1--1--1,,1|(253,168)|
+///---\\\
+:L<%^E!@
+9:Current
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+5:stock
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0
