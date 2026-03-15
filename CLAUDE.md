@@ -1,15 +1,15 @@
 # Simlin Development Guide
 
-## Overview
+Simlin is a set of tools for building, editing, simulating, and analyzing system dynamics (SD) models.
 
-Simlin is a system dynamics (SD) modeling tool for building, simulating, and iterating on stock-and-flow models, including models originally created in Vensim and Stella. The XMILE specification (`docs/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
+## Simlin's Mission
 
-This is a monorepo without external users -- breaking changes are OK if tests pass. Exception: protobuf files must follow standard versioning (we have a DB with serialized instances).
-
-For detailed architecture and the dependency graph, see [docs/architecture.md](/docs/architecture.md).
-For documentation index, see [docs/README.md](/docs/README.md).
+Enable AI agents and humans to debug their intuition through simulation modeling, leveling-up their ability to learn.
+With Simlin you can iterate on strategy and policy faster than you can in the real world, with fewer costs and the freedom to fail.
 
 ## Components
+
+This is a monorepo without external users -- breaking changes are OK if tests pass. Exception: protobuf files must follow standard versioning (we have a DB with serialized instances).
 
 | Component           | Language | Description                                      | Docs                                      |
 |---------------------|----------|--------------------------------------------------|-------------------------------------------|
@@ -25,6 +25,11 @@ For documentation index, see [docs/README.md](/docs/README.md).
 | `src/simlin-cli`    | Rust | CLI for simulation/conversion (testing/debugging) | [CLAUDE.md](/src/simlin-cli/CLAUDE.md)    |
 | `src/pysimlin`      | Python/Rust | Python bindings for the simulation engine        | [CLAUDE.md](/src/pysimlin/CLAUDE.md)      |
 | `website`           | TypeScript | Rspress-based documentation site                 | [CLAUDE.md](/website/CLAUDE.md)           |
+
+The XMILE specification (`docs/reference/xmile-v1.0.html`) is a crucial reference for simulation concepts, array/subscript notation, and equation syntax.
+
+For detailed architecture and the dependency graph, see [docs/architecture.md](/docs/architecture.md).
+For documentation index, see [docs/README.md](/docs/README.md).
 
 ## Environment Setup
 
