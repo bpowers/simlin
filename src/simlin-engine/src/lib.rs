@@ -92,9 +92,6 @@ pub use self::compat::{open_vensim, open_vensim_with_data, open_xmile, to_mdl, t
 #[cfg(feature = "file_io")]
 pub use self::data_provider::FilesystemDataProvider;
 pub use self::data_provider::{DataProvider, NullDataProvider};
-#[cfg(feature = "file_io")]
-pub use self::vdf::load_vdf;
-
 #[cfg(test)]
 mod protobuf_freshness_tests {
     use sha2::{Digest, Sha256};

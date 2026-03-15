@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use std::error::Error;
 
 use simlin_engine::vdf::{
-    FILE_HEADER_SIZE, RECORD_SIZE, SYSTEM_NAMES, Section, VDF_SENTINEL, VENSIM_BUILTINS, VdfFile,
-    read_f32, read_u16, read_u32,
+    FILE_HEADER_SIZE, RECORD_SIZE, SYSTEM_NAMES, Section, VDF_SECTION6_OT_CODE_STOCK,
+    VDF_SECTION6_OT_CODE_TIME, VDF_SENTINEL, VENSIM_BUILTINS, VdfFile, read_f32, read_u16,
+    read_u32,
 };
 
 const SECTION_ROLES: [&str; 8] = [
@@ -37,6 +38,8 @@ pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
     print_records(&vdf);
     print_record_ot_ranges(&vdf);
     print_ref_streams(&vdf);
+    print_section6_ot_codes(&vdf);
+    print_section6_tail(&vdf);
     print_offset_table(&vdf);
     print_data_blocks(&vdf);
     print_gaps(&vdf, file_size);
@@ -314,12 +317,19 @@ fn print_records(vdf: &VdfFile) {
     );
     println!();
 
+    let mut slot_to_name: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+    for (i, &slot) in vdf.slot_table.iter().enumerate() {
+        if let Some(name) = vdf.names.get(i) {
+            slot_to_name.insert(slot, name.as_str());
+        }
+    }
+
     // Column header
     print!("  {:>3} {:>10}", "#", "offset");
     for i in 0..16 {
         print!("{:>6}", format!("f{}", i));
     }
-    println!("  class");
+    println!("  class slot");
 
     let ot_count = vdf.offset_table_count;
 
@@ -342,7 +352,12 @@ fn print_records(vdf: &VdfFile) {
         for &val in f {
             print!("{}", fmt_field(val));
         }
-        println!("  {}", class);
+        let slot_name = slot_to_name.get(&f[12]).copied().unwrap_or("");
+        if slot_name.is_empty() {
+            println!("  {}", class);
+        } else {
+            println!("  {} slot=\"{}\"", class, slot_name);
+        }
     }
     println!();
 }
@@ -433,6 +448,40 @@ fn print_ref_streams(vdf: &VdfFile) {
             if entries.len() > 12 {
                 println!("  ... ({} more entries)", entries.len() - 12);
             }
+
+            let interesting_names: HashSet<&str> = HashSet::from([
+                "IN", "INI", "DEL", "LV1", "LV2", "LV3", "ST", "RT1", "RT2", "DL", "OUTPUT",
+                "SMOOTH", "SMOOTHI", "SMOOTH3", "SMOOTH3I", "DELAY1", "DELAY1I", "DELAY3",
+                "DELAY3I", "TREND", "NPV",
+            ]);
+            let interesting_entries: Vec<(usize, Vec<String>)> = entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    let refs: Vec<String> = e
+                        .refs
+                        .iter()
+                        .filter_map(|r| {
+                            let name = slot_to_name.get(r).copied()?;
+                            (name.starts_with('#') || interesting_names.contains(name))
+                                .then(|| format!("{r}:{name}"))
+                        })
+                        .collect();
+                    (!refs.is_empty()).then_some((i, refs))
+                })
+                .collect();
+            if !interesting_entries.is_empty() {
+                println!("  interesting entries (module helpers / #names):");
+                for (i, refs) in interesting_entries.iter().take(40) {
+                    println!("    {:>3}: {:?}", i, refs);
+                }
+                if interesting_entries.len() > 40 {
+                    println!(
+                        "    ... ({} more interesting entries)",
+                        interesting_entries.len() - 40
+                    );
+                }
+            }
         }
         _ => println!("  (none)"),
     }
@@ -479,19 +528,139 @@ fn print_ref_streams(vdf: &VdfFile) {
     println!();
 }
 
+fn section6_code_label(code: u8) -> &'static str {
+    match code {
+        VDF_SECTION6_OT_CODE_TIME => "time",
+        VDF_SECTION6_OT_CODE_STOCK => "stock",
+        0x11 => "dynamic?",
+        0x17 => "const/system?",
+        _ => "unknown",
+    }
+}
+
+fn print_section6_ot_codes(vdf: &VdfFile) {
+    println!("=== Section 6 OT Class Codes ===");
+    let Some(codes) = vdf.section6_ot_class_codes() else {
+        println!("  (none)");
+        println!();
+        return;
+    };
+
+    let stock_count = codes
+        .iter()
+        .skip(1)
+        .filter(|&&code| code == VDF_SECTION6_OT_CODE_STOCK)
+        .count();
+    let first_non_stock = codes
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(i, &code)| (code != VDF_SECTION6_OT_CODE_STOCK).then_some(i));
+
+    let mut counts = std::collections::BTreeMap::<u8, usize>::new();
+    for &code in &codes {
+        *counts.entry(code).or_default() += 1;
+    }
+
+    println!(
+        "  codes={} stock_like={} first_non_stock={}",
+        codes.len(),
+        stock_count,
+        first_non_stock
+            .map(|idx| format!("OT[{idx}]"))
+            .unwrap_or_else(|| "none".to_string())
+    );
+    for (code, count) in counts {
+        println!(
+            "  code=0x{code:02x}  count={count:>3}  label={}",
+            section6_code_label(code)
+        );
+    }
+
+    println!("  First 40 codes:");
+    for (i, code) in codes.iter().take(40).enumerate() {
+        println!(
+            "    OT[{i:>3}]  0x{code:02x}  {}",
+            section6_code_label(*code)
+        );
+    }
+    if codes.len() > 40 {
+        println!("  ... ({} more codes)", codes.len() - 40);
+    }
+    println!();
+}
+
+fn print_section6_tail(vdf: &VdfFile) {
+    println!("=== Section 6 Tail ===");
+
+    match vdf.section6_ot_final_values() {
+        Some(values) if !values.is_empty() => {
+            println!("  OT final values: {}", values.len());
+            for (ot, value) in values.iter().take(16).enumerate() {
+                println!("    OT[{ot:>3}] final={value}");
+            }
+            if values.len() > 16 {
+                println!("    ... ({} more final values)", values.len() - 16);
+            }
+        }
+        _ => println!("  OT final values: (none)"),
+    }
+
+    match vdf.section6_display_records() {
+        Some(records) if !records.is_empty() => {
+            println!("  display records: {}", records.len());
+            for (i, rec) in records.iter().take(16).enumerate() {
+                let w = &rec.words;
+                println!(
+                    "    {:>3} @0x{:08x} ot={} words=[{:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}]",
+                    i,
+                    rec.file_offset,
+                    rec.ot_index(),
+                    w[0],
+                    w[1],
+                    w[2],
+                    w[3],
+                    w[4],
+                    w[5],
+                    w[6],
+                    w[7],
+                    w[8],
+                    w[9],
+                    w[10],
+                    w[11],
+                    w[12],
+                );
+            }
+            if records.len() > 16 {
+                println!("    ... ({} more display records)", records.len() - 16);
+            }
+        }
+        Some(_) => println!("  display records: 0"),
+        None => println!("  display records: (unparsed)"),
+    }
+
+    println!();
+}
+
 fn print_offset_table(vdf: &VdfFile) {
     println!(
         "=== Offset Table ({} entries @ 0x{:08x}) ===",
         vdf.offset_table_count, vdf.offset_table_start
     );
+    let codes = vdf.section6_ot_class_codes();
 
     for i in 0..vdf.offset_table_count {
         if let Some(raw) = vdf.offset_table_entry(i) {
+            let code_suffix = codes
+                .as_ref()
+                .and_then(|codes| codes.get(i))
+                .map(|code| format!("  code=0x{code:02x} ({})", section6_code_label(*code)))
+                .unwrap_or_default();
             if vdf.is_data_block_offset(raw) {
-                println!("  {:>3}  0x{:08x}  block", i, raw);
+                println!("  {:>3}  0x{:08x}  block{}", i, raw, code_suffix);
             } else {
                 let f = f32::from_le_bytes(raw.to_le_bytes());
-                println!("  {:>3}  0x{:08x}  const = {}", i, raw, f);
+                println!("  {:>3}  0x{:08x}  const = {}{}", i, raw, f, code_suffix);
             }
         }
     }

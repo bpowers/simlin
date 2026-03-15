@@ -144,6 +144,55 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
 }
 
 /// Compare VDF reference data against simulation results with cross-simulator
+/// Build a Results struct from a VDF data extraction and an empirical OT map.
+fn build_results_from_ot_map(
+    vdf: &simlin_engine::vdf::VdfData,
+    ot_map: &HashMap<Ident<Canonical>, usize>,
+) -> Results {
+    use simlin_engine::{Method, SimSpecs};
+
+    let step_count = vdf.time_values.len();
+    let step_size = ot_map.len();
+    let mut step_data = vec![f64::NAN; step_count * step_size];
+    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+
+    let mut sorted_entries: Vec<_> = ot_map.iter().collect();
+    sorted_entries.sort_by_key(|&(_, &ot)| ot);
+
+    for (col, (id, &ot_idx)) in sorted_entries.into_iter().enumerate() {
+        offsets.insert(id.clone(), col);
+        if let Some(series) = vdf.entries.get(ot_idx) {
+            for step in 0..step_count {
+                step_data[step * step_size + col] = series[step];
+            }
+        }
+    }
+
+    let initial_time = vdf.time_values[0];
+    let final_time = vdf.time_values[step_count - 1];
+    let saveper = if step_count > 1 {
+        vdf.time_values[1] - vdf.time_values[0]
+    } else {
+        1.0
+    };
+
+    Results {
+        offsets,
+        data: step_data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: SimSpecs {
+            start: initial_time,
+            stop: final_time,
+            dt: saveper,
+            save_step: saveper,
+            method: Method::Euler,
+            n_chunks: step_count,
+        },
+        is_vensim: true,
+    }
+}
+
 /// tolerance. VDF stores f32 (~7 digits) and Vensim's integration may differ
 /// from ours, so we allow up to 1% relative error.
 /// Variables present in `results` but not in `vdf_expected` are skipped
@@ -1124,18 +1173,21 @@ fn simulates_wrld3_03() {
     ensure_results(&results1, &results2);
 
     // Compare simulation output against the Vensim reference VDF data.
-    // Uses empirical matching (time series correlation) to map VDF entries
-    // to simulation variables, since the VDF metadata chain linking names
-    // to data entries has not been fully decoded.
+    // Uses empirical correlation matching as a test oracle since the
+    // structural mapping (stocks-first) has residual mismatches on WRLD3.
     let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
     let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
+    let vdf_data = vdf_file
+        .extract_data()
+        .unwrap_or_else(|e| panic!("VDF extract_data failed: {e}"));
+    let ot_map = simlin_engine::vdf::build_empirical_ot_map(&vdf_data, &results1)
+        .unwrap_or_else(|e| panic!("VDF build_empirical_ot_map failed: {e}"));
 
-    let vdf_results = vdf_file
-        .to_results(&results1)
-        .unwrap_or_else(|e| panic!("VDF to_results failed: {e}"));
+    // Build a Results struct from the empirical mapping
+    let vdf_results = build_results_from_ot_map(&vdf_data, &ot_map);
 
     // Cross-simulator comparison needs wider tolerance than our own
     // interpreter vs VM check: Vensim's integration may differ slightly,
@@ -1184,10 +1236,12 @@ fn simulates_clearn() {
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
     let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
-
-    let vdf_results = vdf_file
-        .to_results(&results1)
-        .unwrap_or_else(|e| panic!("VDF to_results failed: {e}"));
+    let vdf_data = vdf_file
+        .extract_data()
+        .unwrap_or_else(|e| panic!("VDF extract_data failed: {e}"));
+    let ot_map = simlin_engine::vdf::build_empirical_ot_map(&vdf_data, &results1)
+        .unwrap_or_else(|e| panic!("VDF build_empirical_ot_map failed: {e}"));
+    let vdf_results = build_results_from_ot_map(&vdf_data, &ot_map);
 
     ensure_vdf_results(&vdf_results, &results1);
 }

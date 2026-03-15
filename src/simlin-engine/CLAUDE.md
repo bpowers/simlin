@@ -60,7 +60,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
   - view/ subdir - Sketch/diagram parsing
   - `xmile_compat.rs` - Expression formatting for XMILE output
   - `settings.rs` - Integration settings parser
-- **`src/vdf.rs`** - Vensim VDF (binary data file) parser. Parses all structural elements (sections, records, name/slot/offset tables, data blocks). Deterministic name-to-OT mapping works for small models; the full metadata chain for large models is not yet decoded. See `docs/design/vdf.md` for the format specification.
+- **`src/vdf.rs`** - Vensim VDF (binary data file) parser. Parses all structural elements (sections, records, name/slot/offset tables, data blocks). Model-guided name-to-OT mapping via `build_stocks_first_ot_map()` uses stocks-first-alphabetical ordering with VDF name table cross-referencing. The VDF does not encode stock/non-stock classification directly, so the model is required for classification. See `docs/design/vdf.md` for the format specification and reverse-engineering history.
 - **`src/json.rs`** - JSON serialization matching Go `sd` package schema
 - **`src/json_sdai.rs`** - JSON schema for AI metadata augmentation
 - **`src/serde.rs`** - Generic serde utilities

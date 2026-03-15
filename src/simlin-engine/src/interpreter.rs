@@ -1919,6 +1919,10 @@ impl Simulation {
         })
     }
 
+    pub fn root_key(&self) -> &ModuleKey {
+        &self.root
+    }
+
     pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {
         self.calc_flattened_order(&self.root)
     }

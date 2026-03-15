@@ -165,6 +165,23 @@ Observed entry counts (best alignment):
 
 This stream is structurally stable but is not yet the OT mapping table.
 
+**Section 6 trailing OT code array**: Immediately after the ref stream,
+all validated files store exactly `offset_table_count` bytes before the
+remaining float payload. These bytes are aligned to OT indices:
+
+- `OT[0]` is always `0x0f` (Time)
+- `0x08` marks stock-backed OT entries in all validated files
+- `0x11` appears on dynamic non-stock OT entries
+- `0x17` appears on constant/system OT entries
+
+Observed stock-backed (`0x08`) counts:
+- water: 1
+- pop: 2
+- econ: 11
+- WRLD3: 41
+
+This is the strongest VDF-only stock/non-stock signal identified so far.
+
 **Identifying sections by position, not field4**: The slot table section is
 always at index 1 and the name table section is always at index 2. Their
 field4 values vary (e.g., 2, 42, 473 for sec[1]; 55, 3546, 8284 for sec[2])
@@ -534,41 +551,26 @@ how do you find its offset table entry (and thus its time series data)?
 The metadata chain linking names -> slots -> records -> OT entries has NOT
 been fully decoded despite extensive reverse engineering.
 
-### What works: deterministic mapping (small models)
+### f[10]-based mapping: a validation tool, not a production strategy
 
-For small-to-medium models, `f[10]` serves as an alphabetical sort key that
-enables direct name-to-record matching:
+For a few test models (bact, water, pop), `f[10]` happens to serve as an
+alphabetical sort key that enables direct name-to-record matching. This is
+implemented in `VdfFile::build_deterministic_ot_map()` and is useful as a
+**validation oracle** -- when it works, it provides known-correct ground
+truth to test other approaches against.
 
-1. Filter records to model variables (see criteria above)
-2. Sort filtered records by `f[10]`
-3. Filter names from the name table: remove system names, group/unit markers
-   (`.` and `-` prefixes), and Vensim builtin function names
-4. Sort candidate names alphabetically (case-insensitive)
-5. Pair sorted records with sorted names 1:1; each record's `f[11]` gives
-   the OT index
-
-This is implemented in `VdfFile::build_deterministic_ot_map()` and validated
-against simulation output for bact, water, and pop models (all produce
-perfect matches).
-
-Additionally, `VdfFile::record_ot_ranges()` provides deterministic structural
-partitioning of OT indices across small and large files; this is useful for
-separating scalar vs multi-entry blocks before name decoding.
-
-### What fails: deterministic mapping for large models
-
-For WRLD3 (and presumably other large models), the deterministic approach
-completely breaks down:
+However, this approach is not general:
 
 - **Record/name count mismatch**: WRLD3 has 260 model records but only ~104
   model variable names. Many records correspond to internal module expansion
   variables (e.g., SMOOTH3 expands to multiple stocks and flows).
 - **f[10] is NOT globally alphabetical**: Kendall's tau between f[10] order
   and alphabetical order is 0.46 for WRLD3 (where 1.0 = perfect agreement).
-  Only 148/219 adjacent alphabetical pairs maintain the same relative order
-  in f[10].
-- **0 correct matches**: When attempting the alphabetical pairing globally,
-  0 out of 151 pairs match the empirically known OT indices.
+- **econ model fails**: even a medium-sized model (42 variables, 6 internal
+  SMOOTH/DELAY expansions) has f[10] ties that prevent 1:1 pairing.
+
+The f[10]-based approach should be treated as a test fixture, not a
+production code path. See section 30 for the current production approach.
 
 ### Validation via time series correlation
 
@@ -761,29 +763,31 @@ and field5 meaning changes based on section position.
 
 ## 15. Open questions
 
-1. **What is the complete name-to-data mapping for large models?** The
-   metadata chain (records -> slots -> names -> OT entries) is partially
-   decoded but no complete algorithm has been found that works without
-   a reference simulation.
+1. **Which visible names actually materialize as OT participants on larger
+   files?** The stock/non-stock partition is now partially decoded, but the
+   saved-name/materialization filter is still missing for econ/WRLD3-class
+   files.
 
-2. **What is f[10] exactly?** It behaves as an alphabetical sort key for
-   small models but breaks down for large ones. Understanding its computation
-   would likely unlock the full deterministic mapping.
+2. **How are helper/internal names related to visible outputs?** Names like
+   `IN`, `DEL`, `ST`, `LV1`, `LV2`, `LV3`, `DL`, `RT1`, and `RT2` clearly
+   participate in larger files, but their exact occupancy rules are still
+   unresolved.
 
-3. **What do the 16-byte slot entries contain?** The 4 x u32 values per slot
-   don't contain OT indices, but their purpose is otherwise unknown.
+3. **Where is the remaining save-list / materialization state encoded?**
+   Section 6 now yields a stable class-code array, final-value array, and a
+   smaller display-record stream, but none of those yet explains the full
+   visible-name -> OT assignment on larger files.
 
-4. **What is f[2]?** Monotonically increasing across records, possibly a
-   byte offset, but into what structure is unclear.
+4. **How do we map array elements to OT indices?** For a final VDF-only
+   reader, arrayed outputs need to be addressable by VDF-native element names
+   like `population[young]`, not just by base variable.
 
-5. **What do sections 3-7 contain?** Sections 4 and 7 are still largely
-   unknown. Section 6's leading `count+refs` stream and section 5's
-   array-heavy `n,0,refs...` sets are now structurally decoded, but their
-   complete semantic role in OT/name mapping remains unresolved.
+5. **What do the 16-byte slot entries contain?** The 4 x u32 words are not OT
+   indices, are not rerun-stable, and still do not have a reliable semantic
+   decoding.
 
-6. **How do we map names/elements to OT indices for large files?** Slot table
-   extent is now decoded reliably, but the full deterministic
-   name/element-to-OT mapping is still unresolved for large models.
+6. **What is f[2]?** It remains monotonically increasing across records, but
+   its backing structure is still unknown.
 
 
 ## 16. Additional hypotheses ruled out (2026-02-23)
@@ -812,28 +816,60 @@ remaining undecoded metadata, not in any simple reinterpretation of the
 already-decoded slot/record fields.
 
 
-## 17. Section 7 pre-OT region: graph/display data (2026-02-23)
+## 17. Section 7: lookup table storage and offset table (2026-03-15)
 
-The region between section 7's data start and the offset table start was
-analyzed as a potential mapping structure. **Result: this region contains
-only graph axis values and lookup table data points (packed f32 arrays),
-not mapping metadata.**
+Section 7 stores ALL graphical function / lookup table definitions as
+packed f32 arrays, immediately followed by zero-padding and the offset
+table. The full layout:
 
-Evidence:
-- All values in the pre-OT region decode as plausible f32 graph data
-  (axis tick values, lookup x/y pairs)
-- The region ends with 4-5 zero u32s padding before the offset table
-- Section 7 header field1 * 4 = pre_OT_bytes + 28 consistently, suggesting
-  field1 counts the number of f32 graph data values (plus a 7-word header)
+```
+  [section header: 16 bytes (magic + field1 + field2 + field3)]
+  [field4 = first lookup x-value (f32)]         ← lookup data starts here
+  [field5 = second lookup x-value (f32)]
+  [...packed lookup f32 data...]
+  [4-5 zero u32 padding]
+  [OFFSET TABLE: one u32 per OT entry]          ← may overlap field1 region
+  [DATA BLOCKS: time series data]
+```
 
-The pre-OT region is confirmed to be graph/display settings, not mapping
-metadata. This was a dead end.
+**field1** counts total f32 values from field4 through part of the offset
+table. The field1 boundary extends ~5 entries into the offset table.
+
+### Lookup table packing format
+
+Each table is stored as `[x_0, x_1, ..., x_n, y_0, y_1, ..., y_n]` --
+x-values as a contiguous f32 array followed immediately by y-values as a
+contiguous f32 array (NOT interleaved). Tables are packed with **no per-table
+headers, counts, or separators**. Table boundaries must be inferred from
+the x-value monotonicity property (x-values are strictly increasing within
+each table; the transition from y-values to the next table's x-values
+breaks monotonicity).
+
+### Table ordering and count
+
+Tables appear to be stored in the same order as their corresponding
+lookupish names in the VDF name table (alphabetical for fully-slotted
+VDFs). Verified:
+
+- **econ**: 4 tables matching the 4 lookupish names
+- **WRLD3**: 55 tables matching the 55 lookupish names (52 TABLE + 3 LOOKUP)
+
+Both saved and unsaved TABLE names have their data in section 7. The section
+contains no per-table save/no-save metadata.
+
+### Implications for name→OT mapping
+
+Section 7 confirms the TOTAL count of lookupish names but does **not**
+help distinguish which TABLE names have OT entries and which don't. The
+save-list information is not encoded here.
 
 
 ## 18. Slot blob analysis: static data (2026-02-23)
 
-Cross-file comparison of slot blob data revealed that **slot blobs are
-largely STATIC** and do NOT carry variable-specific mapping information:
+Early small-file comparisons suggested that slot blob data was heavily reused
+and did **not** carry variable-specific OT mapping information. Newer rerun
+work changed the "static" part of that conclusion, but not the "not the OT
+map" part:
 
 - Comparing two VDF files from the same model (water/Current.vdf vs
   water/base.vdf): slot blobs at the SAME section-1 offset are mostly
@@ -841,65 +877,51 @@ largely STATIC** and do NOT carry variable-specific mapping information:
 - Comparing DIFFERENT models (water vs pop): slot blobs at the same
   section-1 offsets are also mostly identical (e.g., slot offset 108
   has identical data [100, 0, 6291456, 96] in both water and pop).
+- Comparing newer reruns of larger models shows that the 16-byte slot payloads
+  can change substantially across Vensim versions/reruns even when the visible
+  name set and the overlapping direct visible OT assignments stay stable.
 - No slot blob word contains the corresponding variable's OT index
   (checked systematically for water, pop, and WRLD3).
 
-The slot blob data appears to be a structural layout artifact of section 1,
-not variable metadata. The slot table maps names to positions in this static
-structure, but the data at those positions is the same regardless of which
-variable occupies the slot.
+So the current conclusion is narrower and stronger:
+
+- slot blobs are **not** a durable name->OT key
+- slot blobs are **not** a direct OT map
+- whatever information they do encode is not sufficient, on its own, to solve
+  visible-name materialization on larger files
 
 
-## 19. Compilation-order hypothesis: confirmed (2026-02-23)
+## 19. Ordering hypothesis history (2026-02-23)
 
-Extensive empirical analysis using simulation-based OT mapping (290/297
-entries matched for WRLD3) established the following:
+Early empirical analysis using simulation-based OT matching on WRLD3
+(290/297 entries) explored several ordering hypotheses:
 
-### Small models: alphabetical ordering works
+1. **Global alphabetical ordering**: only 78% of matched names are in
+   alphabetical order by OT index. The remaining 22% have inversions.
+2. **Per-view (f[12]-group) alphabetical**: only 6/18 groups pass.
+3. **Name-table ordering**: only 55% monotonic.
 
-For bact, water, and pop, the OT ordering is consistent with:
-**stocks first (alphabetically), then non-stocks (alphabetically)**,
-with system variable OT entries interspersed at specific positions.
-This is exactly what `build_deterministic_ot_map()` computes.
+These results initially suggested the ordering was Vensim's compilation
+order, not purely alphabetical. However, this analysis did not account
+for the **stocks-first** split -- when stocks and non-stocks are sorted
+separately (stocks first, then non-stocks), the alphabetical ordering
+is correct. The apparent inversions were caused by non-stocks appearing
+before stocks in global alphabetical order but after them in OT order.
 
-### Large models: compilation order, NOT alphabetical
+The stocks-first-alphabetical hypothesis was confirmed later (see
+section 30) with perfect Kendall's tau = 1.0 on test models.
 
-For WRLD3 (297 OT entries, 404 names, 317 records):
+### No explicit flat mapping table found so far
 
-1. **Global alphabetical ordering fails**: only 78% of matched names
-   are in alphabetical order when sorted by OT index. The remaining
-   22% have significant inversions.
+No simple flat name->OT table has been found in the VDF. The data currently
+looks more like a combination of:
 
-2. **Per-view (f[12]-group) alphabetical ordering fails**: only 6/18
-   f[12] groups with 2+ named variables pass a strict alphabetical
-   check within the group.
+- OT ordering rules (stocks first, then non-stocks, each alphabetized)
+- materialization/save-list metadata that is still only partially decoded
+- helper/alias occupancy rules for stdlib expansions and lookup structures
 
-3. **Name-table ordering fails**: only 55% of matched name-table entries
-   have increasing OT indices (expected ~100% if name-table order = OT
-   order).
-
-4. **Internal module expansion variables are interspersed**: SMOOTH3,
-   DELAY3, and DELAY internal stocks/flows get OT entries interspersed
-   with user-visible variables. These entries follow Vensim's internal
-   compilation order, not any name-based sorting.
-
-### Conclusion: no explicit mapping in the VDF
-
-The VDF format does **not** store an explicit name-to-OT mapping table.
-The mapping is implicitly determined by Vensim's compilation pipeline,
-which depends on:
-
-- Model structure (views/sectors and their ordering)
-- Variable types (stocks, flows, auxiliaries, constants)
-- Module expansion (SMOOTH, DELAY, DELAY3 create internal variables)
-- Dependency ordering with alphabetical tie-breaking within each view
-
-This explains why:
-- No open-source VDF parser exists (all tools use the Vensim DLL)
-- PySD, EMAworkbench, and SDEverywhere require the Vensim DLL for VDF
-  reading
-- The `GET VDF DATA` Vensim function operates within a context where
-  the model is already loaded
+This is why VDF parsing remains difficult even after the OT ordering rule is
+mostly understood on smaller files.
 
 ### Section 4: view/group metadata structure
 
@@ -920,26 +942,80 @@ mapping itself.
 
 ## 20. Practical strategies for VDF reading
 
-Given that the VDF does not store an explicit mapping:
+Given that the VDF does not store an explicit name-to-OT mapping:
 
 | Scenario | Strategy | Status |
 |----------|----------|--------|
-| Small models (no SMOOTH/DELAY) | f[10] deterministic mapping | **Working** |
-| Large models + reference sim | Time-series correlation | **Working** |
-| Large models + .mdl file | Model-guided structural allocator (`build_model_guided_ot_map` / `to_results_with_model`) | **Baseline implemented; ordering accuracy still open** |
-| Standalone VDF (no model, no sim) | Relaxed f[10] heuristic + user assistance | **Future** |
+| VDF + model file | Conservative visible-name projection (`to_results_with_model`) backed by model-guided OT mapping | **Small models pass; econ/WRLD3 currently error instead of guessing** |
+| VDF + reference simulation | Time-series correlation (`build_empirical_ot_map`) | **Test oracle only; not a production path** |
+| VDF only (no model) | Requires a materialization decoder in addition to stock classification | **Still unsolved; see section 31** |
 
-The priority path for reading WRLD3 golden output:
-1. Parse the .mdl file to get model structure
-2. Simulate the model to get reference results
-3. Use `build_empirical_ot_map()` to match VDF entries to simulation variables
-4. Validate matches against the VDF data
+The current production-facing path is deliberately conservative:
 
-For eventual standalone VDF reading, implementing Vensim's compilation
-ordering from the .mdl model structure is the most promising approach.
+- `VdfFile::to_results_with_model()` now projects only **visible VDF names**
+  into `Results`
+- it preserves **VDF order**, not compiled/internal ordering
+- it excludes metadata entries, `#...` macro/internal names, and probable
+  lookup/table definition names
+- it returns an **error** if any remaining visible VDF names cannot be mapped
+  with confidence
+
+That behavior matches the current product goal: be accurate where we are sure,
+and fail explicitly where we are not.
+
+Time-series correlation is retained as a test oracle for validating new
+approaches, but it requires running a simulation and produces unreliable
+results for stocks (Euler/RK4 integration differences).
+
+
+## 20a. Rerun differentials and lookup/table caveats (2026-03-14)
+
+Fresh reruns of `water`, `pop`, `econ`, and `WRLD3` exposed two important
+constraints for any general VDF reader:
+
+1. **Section-1 slot words are not stable across Vensim versions/reruns.**
+   Same-model VDF pairs can preserve the visible name set while changing the
+   16-byte slot payloads for nearly every visible name. That rules out any
+   design that treats raw slot words as a durable name->OT key.
+
+2. **`build_empirical_ot_map` undercounts visible participants on larger
+   models.** It remains useful as a direct-series oracle, but only for the
+   subset of visible names whose series are unique enough to match 1:1. On
+   WRLD3 and econ, multiple visible VDF names can still correspond to real
+   participants even when the empirical direct map only recovers a smaller
+   subset.
+
+The reruns did reveal one stable property that is useful for future
+differential work: overlapping directly matched visible names keep the same
+OT across reruns of the same model.
+
+- WRLD3 `SCEN01.VDF` vs `experiment.vdf`: 223 overlapping direct visible names,
+  all with the same OT
+- econ `base.vdf` vs `rk.vdf`: 22 overlapping direct visible names, all with
+  the same OT
+
+The new WRLD3 diagnostics also narrowed one important part of the remaining
+occupancy problem to **graphical-function lookup/table names**:
+
+- 55 visible WRLD3 candidates are table/lookup definitions (`gf + scalar:0+0`)
+- among those, the current empirical/section-6 split is:
+  - 9 names with both section-6 ref evidence and direct-series evidence
+  - 22 names with section-6 ref evidence only
+  - 5 names with direct-series evidence only
+  - 19 names with neither signal
+
+Implication: lookup/table handling is not binary. Some such names consume OT
+structure, some appear to share/alias another visible series, and some are
+pure name-table metadata. For the final `Results` API we can omit these names,
+but the decoder still has to account for their occupancy while assigning the
+surrounding visible series.
 
 
 ## 21. Inversion analysis: OT ordering breakdown (2026-02-23)
+
+This section is historical context. It was useful before section-6 stock
+classification and occupancy diagnostics clarified that the main remaining
+problem is materialization, not global ordering.
 
 When the 252 empirically matched WRLD3 variable names are sorted by OT
 index and checked for alphabetical ordering, 210 are in order and 50
@@ -1135,15 +1211,16 @@ correlation:
 This is a baseline allocator, not full Vensim compilation-order replication.
 It is intended to be improved incrementally with explicit ordering rules.
 
-Current implementation detail:
-- it maps only model groups visible in the slotted VDF name prefix (plus `time`)
-  rather than forcing all flattened model internals into OT space.
-- unresolved groups are skipped instead of hard-failing the entire map.
+Current implementation detail has since become more conservative:
+- `to_results_with_model()` now projects only visible VDF names (plus `time`)
+  rather than exposing compiled/internal ids
+- it excludes `#...` names and probable lookup/table definitions from the
+  returned `Results`
+- it now errors when visible VDF names remain unresolved, instead of silently
+  skipping them
 
-`VdfFile::to_results_with_model(project, main_model_name)` now materializes a
-`Results` value directly from that structural map (no simulation correlation),
-enabling deterministic VDF ingestion for scalar and arrayed files with a
-loaded `.mdl` project.
+That means this baseline is still useful infrastructure, but it is no longer
+treated as a trustworthy full decoder on econ/WRLD3-class files.
 
 
 ## 29. Array-model parser/compiler unblocks (2026-02-24)
@@ -1159,16 +1236,304 @@ gaps were closed:
 Unsupported/non-constant orders remain explicit compile errors.
 
 
-## 30. Current gaps and likely payoff path (2026-02-24)
+## 30. Stocks-first ordering and section-6 partition (2026-03-14)
 
-Still open:
-1. full WRLD3-quality mapping requires explicit compilation-order rules
-   (per-view dependency ordering, suffix/table/internal-variable placement),
-2. array-heavy models remain partially blocked by unrelated builtin coverage
-   gaps (e.g. `SHIFT_IF_TRUE`).
+Extensive hypothesis testing established a strong OT ordering rule:
 
-Highest-payoff next steps:
-1. strengthen model-guided allocator with compiler-order tie-break rules,
-2. add array block assignment using section-5 dimension sizes + record OT spans,
-3. use empirical matching only as a deterministic oracle in tests, not at
-   runtime.
+**Among the names that do materialize as OT participants, stock-backed entries
+occupy the lowest OT indices (alphabetized by VDF name, case-insensitive),
+followed by non-stocks (also alphabetized).** System-variable OT entries may
+still be interspersed between model-variable OTs.
+
+This rule is fully validated on water and pop, and it remains consistent with
+the larger-file diagnostics. But it is not, by itself, a complete decoder for
+econ/WRLD3, because the missing piece is now the materialization/occupancy
+filter rather than the broad ordering rule.
+
+### Internal SMOOTH/DELAY variables
+
+Vensim's macro-based stdlib functions (SMOOTH, SMOOTH3, DELAY1, DELAY3,
+TREND) expand into internal variables with `#`-prefixed signature names
+in the VDF name table. These participate in the stocks-first sort:
+
+- `#SMOOTH(arg1,arg2)#` -- stock (1 per call)
+- `#SMOOTHI(arg1,arg2,init)#` -- stock (1 per call; "I" variant has 3 args)
+- `#SMOOTH3(arg1,arg2)#`, `#LV1<...#`, `#LV2<...#` -- stocks; `#DL<...#` -- non-stock
+- `#DELAY1(arg1,arg2)#` -- non-stock output; `#LV1<...#` -- stock
+- `#DELAY3(...)#`, `#DL<...#`, `#RT1<...#`, `#RT2<...#` -- non-stocks;
+  `#LV1<...#`, `#LV2<...#`, `#LV3<...#` -- stocks
+- SMOOTHI/SMOOTH3I/DELAY1I/DELAY3I: same structure as non-I variant but
+  the function name in the signature includes the "I" suffix
+
+The `#` character sorts before all ASCII letters, so internal variable
+signatures sort before regular model variable names within each group.
+
+Not all VDF files save all internal variables. VDF files only contain
+variables that were configured to be saved in the Vensim run.
+
+### VDF name table content
+
+The VDF name table is a superset of model variables. It also contains:
+- System variable names (Time, INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER)
+- Unit annotations (prefixed with `-`: `-months`, `-dmnl`, `-$`)
+- Model/group identifiers (prefixed with `.`: `.Control`, `.mark2`)
+- Vensim builtin function names (SMOOTH, DELAY1, MIN, etc.)
+- Stdlib module internal variable names (IN, DEL, LV1, ST, etc.)
+- Metadata tags (`:SUPPLEMENTARY`)
+- Quoted subscript names (`"Absorption Land (GHA)"`)
+
+These non-variable entries do NOT have OT assignments and must be
+filtered before building the name-to-OT mapping.
+
+### Stock classification: not reliably encoded in VDF records
+
+Investigation of record fields across water, pop, econ, and WRLD3 VDFs
+found no single field that reliably encodes whether a variable is a
+stock or non-stock:
+
+- `f[1]` varies per model: the same value (e.g. 2056) appears for stocks
+  in one model and flows in another
+- `f[0]` low values (32, 36, 40, 44) appear for both stocks and non-stocks
+- High `f[0]` values (>1000) DO reliably indicate internal SMOOTH/DELAY
+  macro stocks
+- Slot data (section 1) contains cross-references, not type codes
+- Section 3 is uniformly zeros across all models
+
+This means **the records alone** do not provide a reliable stock/non-stock
+signal. However, section 6 does: the byte array immediately after the
+section-6 ref stream is OT-aligned, and code `0x08` marks stock-backed OT
+entries on all validated files (`water`, `pop`, `econ`, `WRLD3`).
+
+Observed validated counts:
+- water: 1 stock-coded OT
+- pop: 2 stock-coded OTs
+- econ: 11 stock-coded OTs
+- WRLD3: 41 stock-coded OTs
+
+On WRLD3, that `41` count matches the compiled model's stock-backed visible
+participant count exactly. So the stock/non-stock boundary is no longer the
+main blocker.
+
+### New section-6 tail decoding
+
+Section 6 contains more than the ref stream and class-code array. The
+currently validated layout is:
+
+1. Optional one-word prefix/header
+2. Leading `u32 count + refs[count]` stream
+3. OT-aligned class-code byte array (`offset_table_count` bytes)
+4. OT-aligned final-value array (`offset_table_count` little-endian `f32`s)
+5. Trailing fixed-width display records (`13 * u32` each), terminated by a
+   single zero word
+
+The OT-aligned final-value array matches the last saved value of each OT
+series exactly (or the inline constant value for constant OTs). This is now
+exposed by `VdfFile::section6_ot_final_values()`.
+
+The trailing fixed-width records are also real structure, not noise. On the
+validated files:
+- water/pop: no parsed display records
+- econ: 4 display records
+- WRLD3: 55 display records
+
+Within those records, word 10 is a stable OT index used by Vensim's display
+metadata. This is exposed by `VdfFile::section6_display_records()`.
+
+Important: these display records are **not** the full saved-name/materialized
+mapping. They provide OT-index anchors for graph/display metadata, but they
+cover only a subset of OT entries and do not yet explain where the full
+visible-name save list is encoded.
+
+### What this does and does not solve
+
+The section-6 tail solved two important subproblems:
+
+- VDF-only classification of OT entries into time / stock-backed / non-stock
+- VDF-only extraction of each OT's final saved value
+
+It did **not** solve the main large-model mapping problem. When the current
+stocks-first model-guided map is projected back onto visible VDF names and
+compared against direct empirical matches, the results are still poor:
+
+- econ: `projected=47 empirical=22 correct=0 wrong=15 missing=7`
+- WRLD3: `projected=154 empirical=223 correct=12 wrong=122 missing=89`
+
+So the remaining failure is not the stock partition; it is the unresolved
+visible/helper/lookup occupancy rules.
+
+### Current implementation: `build_stocks_first_ot_map`
+
+The model-guided approach:
+1. Extract candidate variable names from the VDF name table (progressive
+   filtering: system vars, units, groups, builtins, metadata, module
+   internals, SMOOTH/DELAY user-variable aliases)
+2. Add unslotted `#`-prefixed internal signature names
+3. Classify each candidate as stock/non-stock using the parsed model
+4. Sort: stocks alphabetically by VDF name, then non-stocks
+5. Pair sorted candidates with actual OT values from VDF records (handles
+   OT gaps from system variables)
+6. Map SMOOTH/DELAY user variable names to their output entry's OT
+
+This is validated to produce correct mappings on water and pop models
+(exact match with f[10]-based ground truth). On econ and WRLD3, it is now
+best understood as a hypothesis generator plus diagnostics aid, not as a
+complete mapping algorithm.
+
+
+## 31. Current gaps and next steps (2026-03-14)
+
+### The current blocker is occupancy/materialization, not stock-vs-non-stock
+
+The ultimate goal remains a VDF-only `Results` object keyed by VDF-native
+names, with `#...` entries excluded and lookup/table definition names omitted.
+Section 6 solved the stock partition, but it did not solve which visible and
+helper names actually consume OT positions in larger files.
+
+The current large-file evidence points at occupancy as the main remaining
+problem:
+
+- econ participant counts:
+  - `visible=72 lookupish=4 hash_names=6 helper_names=9`
+  - `participant_helper_names=3`
+  - `OT capacity excluding time = 77`
+  - `visible - lookupish + hash + participant_helpers = 77`
+- WRLD3 participant counts:
+  - `visible=309 lookupish=55 hash_names=20 helper_names=26`
+  - `participant_helper_names=13`
+  - `OT capacity excluding time = 296`
+  - `visible - lookupish + hash + participant_helpers = 287`
+
+Interpretation:
+- econ's remaining OT capacity can be explained almost entirely by visible
+  names plus `#...` names plus a small helper-participant vocabulary
+- WRLD3 still has a residual gap even after that accounting, concentrated in
+  helper/internal vocabulary, stdlib alias occupancy, and the subset of
+  lookup/table names that still consume structure
+
+### Latest dead ends that are now firmly ruled out
+
+1. **Same-slot record pairing is not the visible name->OT anchor.**
+   For direct visible empirical names on econ/WRLD3, the actual visible OT
+   does not appear as an `f[11]` match among records sharing the same slot
+   reference.
+
+2. **Section-6 leading refs are contextual but insufficient.**
+   They sometimes mention stdlib helper names and sometimes omit saved
+   stock-backed alias outputs entirely. They are not the missing instance-level
+   save-list.
+
+3. **Visible stocklike feature buckets do not yet reveal a clean classifier.**
+   Slot-word patterns and section-6 ref presence overlap too much between
+   stocklike and non-stocklike visible outputs to use as a VDF-only rule.
+
+4. **Raw slot words are not rerun-stable.**
+   Same-model reruns keep overlapping visible OTs stable, but the section-1
+   16-byte slot payloads still change enough to rule them out as durable keys.
+
+### Current runtime state
+
+The code is intentionally conservative now:
+
+- small models (`water`, `pop`, and related tiny fixtures) can produce
+  `Results` directly from the VDF plus model
+- econ and WRLD3 now fail explicitly when visible VDF names remain unresolved
+- the returned `Results` shape is aligned with the target API:
+  - keys are VDF-visible names
+  - `#...` entries are excluded
+  - lookup/table definition names are excluded
+  - uncertainty becomes an error, not a guessed partial mapping
+
+### Key findings from section-6 contiguity analysis (2026-03-15)
+
+**Section-6 OT class codes are always contiguous**: in every validated file
+(water, pop, econ, WRLD3), stock-backed OT entries (code 0x08) form a single
+contiguous block at OT[1..S], followed by all non-stock entries at
+OT[S+1..N-1]. No system variables or other entries are interspersed within
+the stock block.
+
+Non-stock codes split into two types:
+- `0x11`: dynamic non-stock (has a data block with time-varying series)
+- `0x17`: constant non-stock (inline f32 in the offset table)
+
+Dynamic and constant non-stocks are **interleaved** within the non-stock range
+(not in separate sub-blocks). Both types participate in the same alphabetical
+ordering.
+
+Validated stock/non-stock counts:
+
+| Model | OT[0] | Stocks (0x08) | Dynamic (0x11) | Constant (0x17) | Total |
+|-------|-------|---------------|----------------|-----------------|-------|
+| water |  Time |  1            |  3             |  5              |  10   |
+| pop   |  Time |  2            |  3             |  7              |  13   |
+| econ  |  Time | 11            | 37             | 29              |  78   |
+| WRLD3 |  Time | 41            | 174            | 81              | 297   |
+
+### Participant helper names consume OT entries (2026-03-15)
+
+Stdlib module-internal variable names in the VDF name table fall into two
+categories:
+
+**Non-participants** (do NOT consume OT entries): module function names
+(SMOOTH, DELAY1, etc.) and IO variable names (IN, INI, OUTPUT). These are
+metadata entries filtered by `is_vdf_metadata_entry`.
+
+**Participant helpers** (DO consume OT entries): DEL, LV1, LV2, LV3, ST,
+RT1, RT2, DL. These are the expansion variables that Vensim saves. Their
+stock/non-stock classification is deterministic from the name:
+- Stock-backed: LV1, LV2, LV3, ST
+- Non-stock: DEL, DL, RT1, RT2
+
+### TABLE vs LOOKUP naming distinction (2026-03-15)
+
+VDF name table entries containing " lookup" (e.g., "GDP per capita LOOKUP")
+are always standalone graphical function definitions without time series data.
+They never consume OT entries on any validated file. It is always safe to
+exclude these from the participant list.
+
+Entries containing " table" (e.g., "capacity utilization fraction table") are
+also standalone graphical function definitions in the MDL, but some DO consume
+OT entries as inline constants (code 0x17). In WRLD3, 14 of 52 TABLE names
+have OT entries; in econ, 0 of 1. The save/no-save decision is a Vensim
+runtime configuration not encoded in the MDL file.
+
+No VDF-structural signal (slot data, record presence, section-6 refs)
+reliably distinguishes saved from unsaved TABLE names. The slot 16-byte
+payloads show the same patterns for both groups.
+
+### Remaining obstacles to VDF-only Results (2026-03-15)
+
+Two problems remain unsolved for a fully VDF-only mapping:
+
+1. **Stock classification**: section-6 gives the exact stock COUNT (S) and
+   confirms stocks are contiguous at OT[1..S], but it cannot identify which
+   NAMES are stocks. The `#`-prefixed signature names encode stock/non-stock
+   in their prefix pattern, and participant helper names have deterministic
+   classification, but regular model variable names require the model for
+   stock classification. Without this, the stocks-first-alphabetical ordering
+   cannot be applied.
+
+2. **TABLE name materialization**: some TABLE names consume OT entries and
+   some do not, with no VDF-local signal to distinguish them. The model also
+   cannot distinguish them (both types are syntactically identical standalone
+   graphical function definitions). The save configuration is Vensim-internal.
+
+### What directions look best next
+
+1. **Cross-validate using section-6 final values and inline constants.**
+   For constant OTs (code 0x17), the offset table entry IS the constant value.
+   Matching known constant values to candidate names could anchor part of the
+   mapping and constrain the stock/non-stock partition.
+
+2. **Handle system variable placement.**
+   System variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER) consume
+   non-stock OT entries but may not follow strict alphabetical ordering with
+   model variables. Their placement pattern needs investigation.
+
+3. **Finish array element mapping.**
+   Combine section-5 dimension sizes, record-derived OT spans, and VDF-visible
+   element naming so outputs can eventually be surfaced as names like
+   `population[young]`.
+
+4. **Keep empirical correlation as an oracle only.**
+   It is still useful for validating new hypotheses, but it must stay out of
+   the runtime decoder.

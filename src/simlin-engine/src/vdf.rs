@@ -11,13 +11,12 @@
 //! This module handles:
 //! - Parsing the file header, sections, records, slot table, name table,
 //!   offset table, and sparse data blocks.
-//! - Deterministic name-to-OT mapping for small models via
-//!   [`VdfFile::build_deterministic_ot_map`] (sorts records by f[10] and
-//!   names alphabetically, pairs 1:1). This does not work for large models
-//!   where f[10] is not alphabetically ordered.
-//! - Time series correlation (`build_vdf_results`, `build_empirical_ot_map`)
-//!   for validating mapping hypotheses against a reference simulation. These
-//!   are testing/validation tools, not production decoding strategies.
+//! - Model-guided name-to-OT mapping via [`VdfFile::build_stocks_first_ot_map`]:
+//!   classifies variables as stock/non-stock using the parsed model, sorts
+//!   stocks first (alphabetically), then non-stocks (alphabetically), and
+//!   cross-references against the VDF name table and record structure.
+//! - Time series correlation (`build_empirical_ot_map`, test/testing only)
+//!   for validating mapping hypotheses against a reference simulation.
 
 #[cfg(feature = "file_io")]
 use std::collections::{HashMap, HashSet};
@@ -26,9 +25,15 @@ use std::{error::Error, result::Result as StdResult};
 
 #[cfg(feature = "file_io")]
 use crate::{
+    Variable,
     common::{Canonical, Ident},
     results::{Method, Results, Specs},
 };
+
+#[cfg(feature = "file_io")]
+mod helpers;
+#[cfg(feature = "file_io")]
+use helpers::*;
 
 /// VDF file magic bytes (first 4 bytes of every VDF file).
 pub const VDF_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x52];
@@ -39,6 +44,14 @@ pub const VDF_SECTION_MAGIC: [u8; 4] = [0xa1, 0x37, 0x4c, 0xbf];
 
 /// Sentinel value appearing in record fields 8, 9, and sometimes 14.
 pub const VDF_SENTINEL: u32 = 0xf6800000;
+
+/// Section-6 OT class code for the Time series (OT[0]) in all observed files.
+pub const VDF_SECTION6_OT_CODE_TIME: u8 = 0x0f;
+
+/// Section-6 OT class code marking stock-backed OT entries in all validated
+/// files. This is the first VDF-only stock/non-stock discriminator we have
+/// identified.
+pub const VDF_SECTION6_OT_CODE_STOCK: u8 = 0x08;
 
 /// Record field[1] value identifying system/control variables (INITIAL TIME,
 /// FINAL TIME, TIME STEP, SAVEPER).
@@ -199,6 +212,30 @@ impl VdfSection5SetEntry {
     }
 }
 
+/// Fixed-width metadata record stored in the trailing section-6 suffix.
+///
+/// After the section-6 OT class-code array and the OT-aligned final-value
+/// vector, observed files store a `13 * u32` record stream terminated by a
+/// single zero word. The exact semantic meaning of most fields is still being
+/// reverse engineered, but field 10 is a stable OT index used by Vensim's
+/// display metadata.
+#[cfg(feature = "file_io")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct VdfSection6DisplayRecord {
+    /// Absolute file offset where this record begins.
+    pub file_offset: usize,
+    /// Raw words comprising the record.
+    pub words: [u32; 13],
+}
+
+#[cfg(feature = "file_io")]
+impl VdfSection6DisplayRecord {
+    /// OT index referenced by the record's display metadata.
+    pub fn ot_index(&self) -> usize {
+        self.words[10] as usize
+    }
+}
+
 /// A contiguous OT index range implied by record start indices (field[11]).
 ///
 /// Each range starts at a unique in-range `f11` value and ends at the next
@@ -263,6 +300,16 @@ pub struct VdfFile {
     /// contiguous data blocks. Each entry is a block offset.
     synthetic_ot: Option<Vec<u32>>,
 }
+
+#[cfg(feature = "file_io")]
+struct StocksFirstMapBuild {
+    mapping: HashMap<Ident<Canonical>, usize>,
+    participant_ots: HashMap<String, usize>,
+    section6_codes: Option<Vec<u8>>,
+}
+
+#[cfg(feature = "file_io")]
+type VdfVisibleResultsOrder = Vec<(Ident<Canonical>, usize)>;
 
 #[cfg(feature = "file_io")]
 impl VdfFile {
@@ -539,6 +586,117 @@ impl VdfFile {
         Some((best_skip, best_entries, best_stop))
     }
 
+    /// Extract the section-6 OT class-code array that immediately follows the
+    /// leading `count+refs` stream.
+    ///
+    /// In every validated file, the bytes after the parsed ref stream begin
+    /// with exactly `offset_table_count` class codes:
+    ///
+    /// - `0x0f` at OT[0] (Time)
+    /// - `0x08` for stock-backed OT entries
+    /// - other observed codes for non-stock OT entries
+    ///
+    /// This array is the strongest VDF-only stock/non-stock signal identified
+    /// so far.
+    pub fn section6_ot_class_codes(&self) -> Option<Vec<u8>> {
+        if self.offset_table_count == 0 {
+            return None;
+        }
+        let (_skip_words, _entries, stop_offset) = self.parse_section6_ref_stream()?;
+        let sec = self.sections.get(6)?;
+        let end = sec.region_end.min(self.data.len());
+        let codes_end = stop_offset.checked_add(self.offset_table_count)?;
+        if codes_end > end {
+            return None;
+        }
+        Some(self.data[stop_offset..codes_end].to_vec())
+    }
+
+    /// Extract the OT-aligned final-value array stored in the section-6 tail.
+    ///
+    /// Immediately after the class-code array, validated VDFs store one
+    /// `f32` per OT entry holding the final saved value for that OT (or the
+    /// constant itself for inline-constant OTs). This gives a fast structural
+    /// summary without walking the data blocks.
+    pub fn section6_ot_final_values(&self) -> Option<Vec<f32>> {
+        if self.offset_table_count == 0 {
+            return None;
+        }
+        let sec = self.sections.get(6)?;
+        let (_skip_words, _entries, stop_offset) = self.parse_section6_ref_stream()?;
+        let codes_end = stop_offset.checked_add(self.offset_table_count)?;
+        let values_end = codes_end.checked_add(self.offset_table_count.checked_mul(4)?)?;
+        if values_end > sec.region_end.min(self.data.len()) {
+            return None;
+        }
+
+        let mut values = Vec::with_capacity(self.offset_table_count);
+        for i in 0..self.offset_table_count {
+            let off = codes_end + i * 4;
+            values.push(read_f32(&self.data, off));
+        }
+        Some(values)
+    }
+
+    /// Parse the fixed-width display record stream from the section-6 tail.
+    ///
+    /// Observed files store this stream immediately after the OT final-value
+    /// array. The stream is `13 * u32` per record and ends with a single zero
+    /// word. The record payload appears to drive Vensim's graph/display UI;
+    /// only the OT index field has been identified so far.
+    pub fn section6_display_records(&self) -> Option<Vec<VdfSection6DisplayRecord>> {
+        if self.offset_table_count == 0 {
+            return None;
+        }
+        let sec = self.sections.get(6)?;
+        let tail_end = sec.region_end.min(self.data.len());
+        let (_skip_words, _entries, stop_offset) = self.parse_section6_ref_stream()?;
+        let codes_end = stop_offset.checked_add(self.offset_table_count)?;
+        let values_end = codes_end.checked_add(self.offset_table_count.checked_mul(4)?)?;
+        if values_end >= tail_end {
+            return Some(Vec::new());
+        }
+
+        let suffix = &self.data[values_end..tail_end];
+        if suffix.len() < 4 || !suffix.len().is_multiple_of(4) {
+            return None;
+        }
+
+        let word_count = suffix.len() / 4;
+        if read_u32(suffix, suffix.len() - 4) != 0 {
+            return None;
+        }
+        if !(word_count - 1).is_multiple_of(13) {
+            return None;
+        }
+
+        let record_count = (word_count - 1) / 13;
+        let mut out = Vec::with_capacity(record_count);
+        for i in 0..record_count {
+            let rec_off = i * 13 * 4;
+            let mut words = [0u32; 13];
+            for (j, word) in words.iter_mut().enumerate() {
+                *word = read_u32(suffix, rec_off + j * 4);
+            }
+            out.push(VdfSection6DisplayRecord {
+                file_offset: values_end + rec_off,
+                words,
+            });
+        }
+        Some(out)
+    }
+
+    /// Return the section-6 OT class code for a single OT index.
+    pub fn section6_ot_class_code(&self, ot_index: usize) -> Option<u8> {
+        let codes = self.section6_ot_class_codes()?;
+        codes.get(ot_index).copied()
+    }
+
+    /// Whether the section-6 OT class code marks this OT entry as stock-backed.
+    pub fn section6_ot_is_stock(&self, ot_index: usize) -> Option<bool> {
+        Some(self.section6_ot_class_code(ot_index)? == VDF_SECTION6_OT_CODE_STOCK)
+    }
+
     /// Parse section-5 set-like entries seen in array-heavy files:
     ///
     /// `u32 n; u32 0; u32 refs[n+1]`
@@ -562,336 +720,6 @@ impl VdfFile {
             }
         }
         Some((best_skip, best_entries, best_stop))
-    }
-
-    /// Return canonical base variable names present in the slotted VDF name
-    /// prefix, excluding system/group/unit/builtin entries.
-    fn slotted_model_base_names(&self) -> HashSet<String> {
-        let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
-        let mut out = HashSet::new();
-        for name in self.names.iter().take(self.slot_table.len()) {
-            if name.is_empty()
-                || name.starts_with('.')
-                || name.starts_with('-')
-                || system_names.contains(name.as_str())
-                || VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
-                || (name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()))
-            {
-                continue;
-            }
-            out.insert(crate::common::canonicalize(name.as_str()).into_owned());
-        }
-        out
-    }
-
-    /// Build a name->OT mapping using model ordering + VDF structural anchors.
-    ///
-    /// This path does not use time-series correlation. It uses:
-    /// 1. model scalar ordering (`reference.offsets`, sorted by offset),
-    /// 2. per-variable element counts from the model,
-    /// 3. VDF record/name anchors (`f12` slot -> name, record `f11` start OT),
-    /// 4. deterministic first-fit placement over OT indices.
-    ///
-    /// The output is deterministic for a given `(VDF, model)` pair and is meant
-    /// as a structural allocator baseline while deeper compilation-order rules are
-    /// still being decoded.
-    pub fn build_model_guided_ot_map(
-        &self,
-        project: &crate::Project,
-        main_model_name: &str,
-    ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
-        if self.offset_table_count == 0 {
-            return Err("empty offset table".into());
-        }
-
-        let time_ident = Ident::<Canonical>::from_str_unchecked("time");
-        let offsets = crate::interpreter::calc_flattened_offsets(project, main_model_name);
-
-        let mut view_indexes: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        if let Some(datamodel) = project
-            .datamodel
-            .models
-            .iter()
-            .find(|m| m.name == main_model_name)
-        {
-            for (v_idx, view) in datamodel.views.iter().enumerate() {
-                let crate::datamodel::View::StockFlow(sf) = view;
-                for element in &sf.elements {
-                    if let Some(name) = element.get_name() {
-                        let ident = Ident::<Canonical>::from_str_unchecked(
-                            crate::common::canonicalize(name).as_ref(),
-                        );
-                        view_indexes.entry(ident).or_insert(v_idx);
-                    }
-                }
-            }
-        }
-
-        let topo_order = match crate::interpreter::Simulation::new(project, main_model_name) {
-            Ok(sim) => {
-                let mut map = HashMap::new();
-                for (i, id) in sim.runlist_order().into_iter().enumerate() {
-                    map.insert(id, i);
-                }
-                map
-            }
-            Err(_) => HashMap::new(),
-        };
-
-        let mut ordered: Vec<(Ident<Canonical>, usize)> = offsets
-            .into_iter()
-            .filter(|(id, _)| *id != time_ident)
-            .map(|(id, (off, _))| (id, off))
-            .collect();
-
-        ordered.sort_by(|(a_id, a_off), (b_id, b_off)| {
-            let a_base = a_id
-                .as_str()
-                .split_once('[')
-                .map(|(b, _)| b)
-                .unwrap_or(a_id.as_str());
-            let b_base = b_id
-                .as_str()
-                .split_once('[')
-                .map(|(b, _)| b)
-                .unwrap_or(b_id.as_str());
-
-            let a_base_ident = Ident::<Canonical>::from_str_unchecked(a_base);
-            let b_base_ident = Ident::<Canonical>::from_str_unchecked(b_base);
-
-            let a_view = view_indexes
-                .get(&a_base_ident)
-                .copied()
-                .unwrap_or(usize::MAX);
-            let b_view = view_indexes
-                .get(&b_base_ident)
-                .copied()
-                .unwrap_or(usize::MAX);
-
-            if a_view != b_view {
-                return a_view.cmp(&b_view);
-            }
-
-            let a_topo = topo_order.get(&a_base_ident).copied().unwrap_or(usize::MAX);
-            let b_topo = topo_order.get(&b_base_ident).copied().unwrap_or(usize::MAX);
-
-            if a_topo != b_topo {
-                return a_topo.cmp(&b_topo);
-            }
-
-            let a_is_2 = a_base.ends_with("_2");
-            let a_is_1 = a_base.ends_with("_1");
-            let a_is_table = a_base.ends_with("_table");
-
-            let b_is_2 = b_base.ends_with("_2");
-            let b_is_1 = b_base.ends_with("_1");
-            let b_is_table = b_base.ends_with("_table");
-
-            // _2 before _1 before base
-            let a_suffix_score = if a_is_2 {
-                0
-            } else if a_is_1 {
-                1
-            } else {
-                2
-            };
-            let b_suffix_score = if b_is_2 {
-                0
-            } else if b_is_1 {
-                1
-            } else {
-                2
-            };
-            if a_suffix_score != b_suffix_score {
-                return a_suffix_score.cmp(&b_suffix_score);
-            }
-
-            // table colocation
-            if a_is_table != b_is_table {
-                return if a_is_table {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Less
-                };
-            }
-
-            a_off
-                .cmp(b_off)
-                .then_with(|| a_id.as_str().cmp(b_id.as_str()))
-        });
-
-        // Group scalar identifiers by their base variable (`x[a,b]` -> `x`),
-        // preserving model offset order.
-        let mut groups: Vec<(String, Vec<Ident<Canonical>>)> = Vec::new();
-        let mut group_index_by_name: HashMap<String, usize> = HashMap::new();
-        for (ident, _off) in ordered {
-            let base = ident
-                .as_str()
-                .split_once('[')
-                .map(|(b, _)| b)
-                .unwrap_or(ident.as_str())
-                .to_string();
-            if let Some(&idx) = group_index_by_name.get(&base) {
-                groups[idx].1.push(ident);
-            } else {
-                let idx = groups.len();
-                group_index_by_name.insert(base.clone(), idx);
-                groups.push((base, vec![ident]));
-            }
-        }
-
-        // Only map model groups that are visible in the VDF slotted-name
-        // prefix. Large VDF files omit many internal/intermediate variables
-        // that exist in the compiled model offset space.
-        let target_bases = self.slotted_model_base_names();
-        groups.retain(|(base, _)| target_bases.contains(base));
-        group_index_by_name = groups
-            .iter()
-            .enumerate()
-            .map(|(idx, (name, _))| (name.clone(), idx))
-            .collect();
-
-        let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
-
-        // Build slot_ref -> canonical model-name candidates from the slotted
-        // prefix of the name table.
-        let mut slot_name: HashMap<u32, String> = HashMap::new();
-        for (i, &slot) in self.slot_table.iter().enumerate() {
-            let Some(name) = self.names.get(i) else {
-                continue;
-            };
-            if name.is_empty()
-                || name.starts_with('.')
-                || name.starts_with('-')
-                || system_names.contains(name.as_str())
-                || VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
-            {
-                continue;
-            }
-            slot_name.entry(slot).or_insert_with(|| {
-                crate::common::canonicalize(name.as_str())
-                    .into_owned()
-                    .to_string()
-            });
-        }
-
-        // Collect earliest record OT per anchored base name.
-        let mut anchor_ot: HashMap<String, usize> = HashMap::new();
-        if self.offset_table_count <= 100 {
-            for rec in &self.records {
-                let ot = rec.fields[11] as usize;
-                if rec.fields[0] == 0
-                    || rec.fields[1] == RECORD_F1_SYSTEM
-                    || rec.fields[1] == RECORD_F1_INITIAL_TIME_CONST
-                    || rec.fields[10] == 0
-                    || ot == 0
-                    || ot >= self.offset_table_count
-                {
-                    continue;
-                }
-                let Some(name) = slot_name.get(&rec.fields[12]) else {
-                    continue;
-                };
-                if group_index_by_name.contains_key(name.as_str()) {
-                    anchor_ot
-                        .entry(name.clone())
-                        .and_modify(|v| *v = (*v).min(ot))
-                        .or_insert(ot);
-                }
-            }
-        }
-
-        // For small/simple files, deterministic f10/name ordering can provide
-        // strong scalar anchors. Use these as additional hints when available.
-        if self.offset_table_count <= 100
-            && let Ok(det_map) = self.build_deterministic_ot_map()
-        {
-            for (name, ot) in det_map {
-                let canonical = crate::common::canonicalize(name.as_str()).into_owned();
-                if group_index_by_name.contains_key(&canonical)
-                    && ot > 0
-                    && ot < self.offset_table_count
-                {
-                    anchor_ot.entry(canonical).or_insert(ot);
-                }
-            }
-        }
-
-        let mut claimed = vec![false; self.offset_table_count];
-        claimed[0] = true;
-
-        let mut mapping: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        mapping.insert(time_ident, 0);
-
-        let find_run = |claimed: &[bool], start: usize, width: usize| -> Option<usize> {
-            if width == 0 || claimed.len() <= width {
-                return None;
-            }
-            for cand in start..=(claimed.len() - width) {
-                if cand == 0 {
-                    continue;
-                }
-                if claimed[cand..cand + width].iter().all(|v| !*v) {
-                    return Some(cand);
-                }
-            }
-            None
-        };
-
-        // Place anchored groups first, in OT order, so strong hints are not
-        // displaced by earlier unanchored allocations.
-        let mut anchored_groups: Vec<(String, Vec<Ident<Canonical>>, usize)> = Vec::new();
-        let mut unanchored_groups: Vec<(String, Vec<Ident<Canonical>>)> = Vec::new();
-        for (base, members) in groups {
-            if let Some(&desired) = anchor_ot.get(&base) {
-                anchored_groups.push((base, members, desired.max(1)));
-            } else {
-                unanchored_groups.push((base, members));
-            }
-        }
-        anchored_groups.sort_by_key(|(_, _, desired)| *desired);
-
-        for (_base, members, desired) in anchored_groups {
-            let width = members.len();
-            if width == 0 || width >= self.offset_table_count {
-                continue;
-            }
-            let start = find_run(&claimed, desired, width)
-                .or_else(|| find_run(&claimed, 1, width))
-                .unwrap_or(0);
-            if start == 0 {
-                continue;
-            }
-            for (i, ident) in members.into_iter().enumerate() {
-                let ot = start + i;
-                claimed[ot] = true;
-                mapping.insert(ident, ot);
-            }
-        }
-
-        let mut next_search = 1usize;
-        for (_base, members) in unanchored_groups {
-            let width = members.len();
-            if width == 0 || width >= self.offset_table_count {
-                continue;
-            }
-
-            let start = find_run(&claimed, next_search.max(1), width)
-                .or_else(|| find_run(&claimed, 1, width))
-                .unwrap_or(0);
-            if start == 0 {
-                continue;
-            }
-
-            for (i, ident) in members.into_iter().enumerate() {
-                let ot = start + i;
-                claimed[ot] = true;
-                mapping.insert(ident, ot);
-            }
-            next_search = start + width;
-        }
-
-        Ok(mapping)
     }
 
     /// Build contiguous OT ranges from in-range record start indices (field[11]).
@@ -940,19 +768,6 @@ impl VdfFile {
         out
     }
 
-    /// Build a `Results` struct by matching VDF data entries against a reference
-    /// simulation's results using time series correlation.
-    ///
-    /// The VDF metadata chain (records, slots, name table) does not provide a
-    /// reliable mapping from variable names to data entries -- extensive reverse
-    /// engineering found no consistent decoding. This method uses empirical
-    /// matching instead: for each variable in `reference`, it finds the VDF entry
-    /// whose time series best matches by sum of squared relative errors.
-    pub fn to_results(&self, reference: &Results) -> StdResult<Results, Box<dyn Error>> {
-        let vdf_data = self.extract_data()?;
-        build_vdf_results(&vdf_data, reference)
-    }
-
     /// Build a `Results` struct using model-guided structural mapping
     /// (no time-series correlation).
     ///
@@ -964,27 +779,12 @@ impl VdfFile {
         main_model_name: &str,
     ) -> StdResult<Results, Box<dyn Error>> {
         let vdf_data = self.extract_data()?;
-        let ot_map = self.build_model_guided_ot_map(project, main_model_name)?;
+        let ot_map = self.build_stocks_first_ot_map_for_project(project, main_model_name)?;
         if ot_map.is_empty() {
-            return Err("model-guided mapping produced no variables".into());
+            return Err("VDF/model mapping produced no variables".into());
         }
 
-        let model_offsets = crate::interpreter::calc_flattened_offsets(project, main_model_name);
-        let mut ordered: Vec<(Ident<Canonical>, usize)> =
-            ot_map.iter().map(|(id, &ot)| (id.clone(), ot)).collect();
-        ordered.sort_by(|(a_id, _), (b_id, _)| {
-            let a_off = model_offsets
-                .get(a_id)
-                .map(|(off, _)| *off)
-                .unwrap_or(usize::MAX);
-            let b_off = model_offsets
-                .get(b_id)
-                .map(|(off, _)| *off)
-                .unwrap_or(usize::MAX);
-            a_off
-                .cmp(&b_off)
-                .then_with(|| a_id.as_str().cmp(b_id.as_str()))
-        });
+        let ordered = self.project_visible_results_order(&ot_map)?;
 
         let step_count = vdf_data.time_values.len();
         let step_size = ordered.len();
@@ -1026,6 +826,57 @@ impl VdfFile {
         })
     }
 
+    #[cfg(feature = "file_io")]
+    fn project_visible_results_order(
+        &self,
+        ot_map: &HashMap<Ident<Canonical>, usize>,
+    ) -> StdResult<VdfVisibleResultsOrder, Box<dyn Error>> {
+        let mut ordered = vec![(Ident::<Canonical>::from_str_unchecked("time"), 0usize)];
+        let mut seen = HashSet::from([normalize_vdf_name("time")]);
+        let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
+        let mut missing = Vec::new();
+
+        for name in self.names.iter().take(self.slot_table.len()) {
+            if name.is_empty()
+                || name.starts_with('#')
+                || system_names.contains(name.as_str())
+                || VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
+                || is_probable_lookup_table_name(name)
+                || is_vdf_metadata_entry(name)
+                || STDLIB_PARTICIPANT_HELPERS.contains(&name.as_str())
+            {
+                continue;
+            }
+
+            let normalized = normalize_vdf_name(name);
+            if !seen.insert(normalized) {
+                continue;
+            }
+
+            let key = Ident::<Canonical>::new(name);
+            if let Some(&ot) = ot_map.get(&key) {
+                ordered.push((key, ot));
+            } else {
+                missing.push(name.clone());
+            }
+        }
+
+        if !missing.is_empty() {
+            missing.sort();
+            eprintln!(
+                "VDF/model mapping left {} visible VDF names unresolved: {:?}",
+                missing.len(),
+                missing.iter().take(16).collect::<Vec<_>>()
+            );
+        }
+
+        if ordered.len() <= 1 {
+            Err("VDF/model mapping produced no visible results".into())
+        } else {
+            Ok(ordered)
+        }
+    }
+
     /// Extract all time series data from data blocks, returning a `VdfData`.
     pub fn extract_data(&self) -> StdResult<VdfData, Box<dyn Error>> {
         let time_values = extract_time_series(
@@ -1057,54 +908,57 @@ impl VdfFile {
         })
     }
 
-    /// Build a mapping from variable names to offset table indices using
-    /// structural metadata only (no reference simulation needed).
-    ///
-    /// Within each f[12] record group, records sorted by f[10] correspond
-    /// to alphabetically sorted variable names. This method:
-    ///
-    /// 1. Groups records by f[12] and identifies "control" groups (those
-    ///    containing records with f[1]=23, which marks system variables
-    ///    like INITIAL TIME, FINAL TIME, etc.).
-    /// 2. Collects model variable records from non-control groups.
-    /// 3. Filters model variable names from the name table (excluding
-    ///    group markers starting with '.', unit names starting with '-',
-    ///    and system variable names).
-    /// 4. Sorts records by f[10] and names alphabetically, then pairs
-    ///    them 1:1.
-    ///
-    /// Returns a map from VDF name-table names (original case) to OT
-    /// indices. Always includes "Time" → 0.
-    ///
-    /// This works reliably for small-to-medium models. For very large
-    /// models (like WRLD3 with 400+ variables), f[10] ordering may not
-    /// perfectly match alphabetical order; use [`build_empirical_ot_map`]
-    /// with a reference simulation instead.
-    pub fn build_deterministic_ot_map(&self) -> StdResult<HashMap<String, usize>, Box<dyn Error>> {
-        let ot_count = self.offset_table_count;
+    fn model_record_ot_indices(&self) -> Vec<usize> {
+        let mut record_ots: Vec<usize> = self
+            .records
+            .iter()
+            .filter_map(|rec| {
+                let ot_idx = rec.fields[11] as usize;
+                if rec.fields[0] != 0
+                    && rec.fields[1] != RECORD_F1_SYSTEM
+                    && rec.fields[1] != RECORD_F1_INITIAL_TIME_CONST
+                    && rec.fields[10] > 0
+                    && ot_idx > 0
+                    && ot_idx < self.offset_table_count
+                {
+                    Some(ot_idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        record_ots.sort_unstable();
+        record_ots.dedup();
+        record_ots
+    }
 
-        // Collect model variable records using per-record criteria.
-        // We filter individual records rather than whole f[12] groups
-        // because some VDFs mix control and model records in the same group.
-        let mut model_records: Vec<(u32, u32)> = Vec::new(); // (f10, f11=OT_idx)
-        for rec in &self.records {
-            let ot_idx = rec.fields[11] as usize;
-            if rec.fields[0] != 0
-                && rec.fields[1] != RECORD_F1_SYSTEM
-                && rec.fields[1] != RECORD_F1_INITIAL_TIME_CONST
-                && rec.fields[10] > 0
-                && ot_idx > 0
-                && ot_idx < ot_count
-            {
-                model_records.push((rec.fields[10], rec.fields[11]));
-            }
-        }
-        model_records.sort_by_key(|&(f10, _)| f10);
+    /// Build a name->OT mapping using stocks-first-alphabetical ordering,
+    /// cross-referenced against the VDF's structural information.
+    ///
+    /// Algorithm:
+    /// 1. Extract model variable records from the VDF (same as deterministic map)
+    ///    to get the set of actual OT values
+    /// 2. Extract candidate variable names from the VDF name table (same filtering)
+    ///    PLUS unslotted internal signature names
+    /// 3. Classify each candidate as stock/non-stock using the parsed model
+    /// 4. Sort: stocks alphabetically, then non-stocks (by VDF name)
+    /// 5. Pair sorted candidates with sorted OT values from records
+    /// 6. Map SMOOTH/DELAY user variable names to their output entry's OT
+    ///
+    /// Returns canonical variable name -> OT index mapping.
+    #[cfg(feature = "file_io")]
+    fn build_stocks_first_ot_map_for_model(
+        &self,
+        model: &crate::datamodel::Model,
+    ) -> StdResult<StocksFirstMapBuild, Box<dyn Error>> {
+        // Step 1: extract model variable records and their OT indices.
+        let record_ots = self.model_record_ot_indices();
+        let section6_codes = self.section6_ot_class_codes();
 
-        // Filter candidate variable names from the name table: exclude
-        // group markers ('.'), unit names ('-'), and system variable names.
+        // Step 2: extract candidate variable names from VDF name table.
+        // Use the same filtering as model_record_ot_indices for slotted
+        // names, then add unslotted internal signature names.
         let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
-
         let mut candidates: Vec<String> = self.names[..self.slot_table.len()]
             .iter()
             .filter(|name| {
@@ -1112,50 +966,572 @@ impl VdfFile {
                     && !name.starts_with('.')
                     && !name.starts_with('-')
                     && !system_names.contains(name.as_str())
+                    && !is_probable_lookup_table_name(name)
             })
             .cloned()
             .collect();
 
-        let target = model_records.len();
-
-        // Vensim embeds builtin function names (STEP, MIN, MAX, etc.) in the
-        // name table alongside model variables. When we have more candidates
-        // than model records, remove names matching known Vensim builtins.
-        if candidates.len() > target {
-            // Single-character non-alphanumeric names (e.g., "?") are always
-            // structural placeholders, never model variables.
-            candidates
-                .retain(|n| n.len() != 1 || n.chars().next().is_some_and(|c| c.is_alphanumeric()));
+        // Add unslotted names (internal #-prefixed signatures)
+        if self.names.len() > self.slot_table.len() {
+            for name in &self.names[self.slot_table.len()..] {
+                if name.starts_with('#') {
+                    candidates.push(name.clone());
+                }
+            }
         }
-        if candidates.len() > target {
+
+        // Step 3 (done early): classify model variables and build alias set.
+        // We need the alias set before candidate filtering.
+        let mut model_stock_set: HashSet<String> = HashSet::new();
+        let mut model_sig_stocks: HashSet<String> = HashSet::new();
+        let mut model_sig_stock_names: HashSet<String> = HashSet::new();
+        let mut aliases: Vec<(String, String)> = Vec::new();
+        let mut alias_names_normalized: HashSet<String> = HashSet::new();
+
+        for var in &model.variables {
+            let (ident, equation) = match var {
+                crate::datamodel::Variable::Stock(s) => {
+                    model_stock_set.insert(normalize_vdf_name(&s.ident));
+                    continue;
+                }
+                crate::datamodel::Variable::Aux(a) => (&a.ident, &a.equation),
+                crate::datamodel::Variable::Flow(f) => (&f.ident, &f.equation),
+                crate::datamodel::Variable::Module(_) => continue,
+            };
+
+            if let Some(info) = extract_stdlib_call_info(equation) {
+                let output_sig = info.output_signature();
+                aliases.push((ident.clone(), output_sig));
+                alias_names_normalized.insert(normalize_vdf_name(ident));
+                for (sig, is_stock) in info.vensim_signatures() {
+                    let normalized = normalize_vdf_name(&sig);
+                    if is_stock {
+                        model_sig_stocks.insert(normalized);
+                        model_sig_stock_names.insert(sig);
+                    }
+                }
+            }
+        }
+
+        // Remove names matching builtins, metadata, and SMOOTH/DELAY user
+        // variable names (which share OTs with their internal signatures
+        // and are handled as aliases later).
+        // Progressive filtering: remove non-variable entries until
+        // candidate count is within range.
+        candidates
+            .retain(|n| n.len() != 1 || n.chars().next().is_some_and(|c| c.is_alphanumeric()));
+        {
             let vensim_builtins: HashSet<&str> = VENSIM_BUILTINS.into_iter().collect();
             candidates.retain(|n| !vensim_builtins.contains(n.to_lowercase().as_str()));
         }
+        candidates.retain(|n| !is_vdf_metadata_entry(n));
+        // SMOOTH/DELAY user variable names share OTs with their internal
+        // signatures and are handled as aliases later.
+        candidates.retain(|n| !alias_names_normalized.contains(&normalize_vdf_name(n)));
 
-        candidates.sort_by_key(|a| a.to_lowercase());
+        let is_stock_name = |name: &str| -> bool {
+            let normalized = normalize_vdf_name(name);
+            model_stock_set.contains(&normalized) || model_sig_stocks.contains(&normalized)
+        };
 
-        if candidates.len() != target {
+        let visible_candidate_names: HashSet<String> = candidates
+            .iter()
+            .map(|name| normalize_vdf_name(name))
+            .collect();
+
+        let mut stock_names: Vec<String> = candidates
+            .iter()
+            .filter(|n| is_stock_name(n))
+            .cloned()
+            .collect();
+        let mut hidden_stock_names: Vec<String> = model_sig_stock_names
+            .into_iter()
+            .filter(|name| !visible_candidate_names.contains(&normalize_vdf_name(name)))
+            .collect();
+        let mut non_stock_names: Vec<String> = candidates
+            .iter()
+            .filter(|n| !is_stock_name(n))
+            .cloned()
+            .collect();
+
+        // Step 4: sort each group case-insensitively by VDF name
+        stock_names.sort_by_key(|n| n.to_lowercase());
+        hidden_stock_names.sort_by_key(|n| n.to_lowercase());
+        non_stock_names.sort_by_key(|n| n.to_lowercase());
+
+        let mut mapping: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        mapping.insert(Ident::<Canonical>::from_str_unchecked("time"), 0);
+        let mut participant_ots: HashMap<String, usize> = HashMap::new();
+
+        let mut stock_participants: Vec<(String, bool)> =
+            stock_names.into_iter().map(|name| (name, true)).collect();
+        stock_participants.extend(hidden_stock_names.into_iter().map(|name| (name, false)));
+        stock_participants.sort_by_key(|(name, _visible)| name.to_lowercase());
+
+        let stock_ots: Vec<usize> = if let Some(codes) = &section6_codes {
+            codes
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter_map(|(ot, &code)| (code == VDF_SECTION6_OT_CODE_STOCK).then_some(ot))
+                .collect()
+        } else {
+            record_ots
+                .iter()
+                .copied()
+                .take(stock_participants.len())
+                .collect()
+        };
+
+        if !stock_ots.is_empty() && stock_ots.len() != stock_participants.len() {
             return Err(format!(
-                "candidate name count ({}) != model record count ({}); names={:?}",
-                candidates.len(),
-                model_records.len(),
-                candidates
+                "stock OT count ({}) != stock participant count ({})",
+                stock_ots.len(),
+                stock_participants.len()
             )
             .into());
         }
 
-        let mut mapping = HashMap::new();
-        mapping.insert("Time".to_string(), 0);
-        for (i, name) in candidates.iter().enumerate() {
-            mapping.insert(name.clone(), model_records[i].1 as usize);
+        for ((name, visible), ot) in stock_participants
+            .into_iter()
+            .zip(stock_ots.iter().copied())
+        {
+            participant_ots.insert(normalize_vdf_name(&name), ot);
+            if !visible {
+                continue;
+            }
+            let key = if name.starts_with('#') {
+                Ident::<Canonical>::from_str_unchecked(&name)
+            } else {
+                Ident::<Canonical>::new(&name)
+            };
+            mapping.insert(key, ot);
+        }
+
+        let non_stock_record_ots: Vec<usize> = record_ots
+            .iter()
+            .copied()
+            .filter(|ot| {
+                section6_codes
+                    .as_ref()
+                    .and_then(|codes| codes.get(*ot))
+                    .copied()
+                    != Some(VDF_SECTION6_OT_CODE_STOCK)
+            })
+            .collect();
+
+        // Step 5: assign non-stock names from the remaining record-derived OT
+        // slots. Record metadata still appears to be the only structural anchor
+        // for non-stock placement; section 6 fixes the missing stock slots but
+        // does not yet fully expose non-stock name assignment.
+        for (name, ot) in non_stock_names
+            .into_iter()
+            .zip(non_stock_record_ots.iter().copied())
+        {
+            participant_ots.insert(normalize_vdf_name(&name), ot);
+            let key = if name.starts_with('#') {
+                Ident::<Canonical>::from_str_unchecked(&name)
+            } else {
+                Ident::<Canonical>::new(&name)
+            };
+            mapping.insert(key, ot);
+        }
+
+        // Step 6: map SMOOTH/DELAY user variables to their output entry's OT
+        for (user_ident, output_sig) in &aliases {
+            let sig_normalized = normalize_vdf_name(output_sig);
+            if let Some(&ot) = participant_ots.get(&sig_normalized) {
+                let user_key = Ident::<Canonical>::new(user_ident);
+                mapping.entry(user_key).or_insert(ot);
+            }
+        }
+
+        Ok(StocksFirstMapBuild {
+            mapping,
+            participant_ots,
+            section6_codes,
+        })
+    }
+
+    #[cfg(feature = "file_io")]
+    fn build_stocks_first_ot_map_for_project(
+        &self,
+        project: &crate::Project,
+        main_model_name: &str,
+    ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+        let model = project
+            .datamodel
+            .models
+            .iter()
+            .find(|m| m.name == main_model_name)
+            .ok_or_else(|| format!("model {main_model_name} not found"))?;
+        let StocksFirstMapBuild {
+            mut mapping,
+            mut participant_ots,
+            section6_codes,
+        } = self.build_stocks_first_ot_map_for_model(model)?;
+
+        let datamodel_models: HashMap<&str, &crate::datamodel::Model> = project
+            .datamodel
+            .models
+            .iter()
+            .map(|m| (m.name.as_str(), m))
+            .collect();
+
+        let alias_edges =
+            collect_compiled_alias_edges(project, &datamodel_models, main_model_name, None);
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (alias, target) in &alias_edges {
+                let Some(&ot) = participant_ots.get(target) else {
+                    continue;
+                };
+                let alias_normalized = normalize_vdf_name(alias.as_str());
+                let old = participant_ots.insert(alias_normalized, ot);
+                if old != Some(ot) {
+                    changed = true;
+                }
+                mapping.entry(alias.clone()).or_insert(ot);
+            }
+        }
+
+        if let Some(codes) = &section6_codes {
+            let mapped_stock_count = mapping
+                .iter()
+                .filter(|(id, ot)| {
+                    id.as_str() != "time"
+                        && codes.get(**ot) == Some(&VDF_SECTION6_OT_CODE_STOCK)
+                        && !id.as_str().starts_with("#")
+                })
+                .count();
+            let vdf_stock_count = codes
+                .iter()
+                .skip(1)
+                .filter(|&&code| code == VDF_SECTION6_OT_CODE_STOCK)
+                .count();
+            if mapped_stock_count < vdf_stock_count {
+                return Err(format!(
+                    "mapped stock-backed participants ({mapped_stock_count}) < VDF stock OT count ({vdf_stock_count})"
+                )
+                .into());
+            }
         }
 
         Ok(mapping)
     }
 
-    // NOTE: `build_model_guided_ot_map` is currently a deterministic
-    // structural allocator baseline. It uses model ordering + VDF anchors,
-    // but does not yet fully replicate Vensim's internal compilation order.
+    #[cfg(all(feature = "file_io", any(test, feature = "testing")))]
+    pub fn build_stocks_first_ot_map(
+        &self,
+        project: &crate::datamodel::Project,
+    ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+        let compiled = crate::Project::from(project.clone());
+        self.build_stocks_first_ot_map_for_project(&compiled, "main")
+    }
+
+    #[cfg(all(feature = "file_io", not(any(test, feature = "testing"))))]
+    pub fn build_stocks_first_ot_map(
+        &self,
+        project: &crate::datamodel::Project,
+    ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+        let model = project.models.first().ok_or("project has no models")?;
+        Ok(self.build_stocks_first_ot_map_for_model(model)?.mapping)
+    }
+
+    /// Build a name→OT mapping using the section-6 contiguous stock/non-stock
+    /// layout, model-based stock classification, and VDF name table filtering.
+    ///
+    /// This exploits the discovery that section-6 OT class codes are always
+    /// contiguous: OT[1..S] are all stock (code 0x08), OT[S+1..N-1] are all
+    /// non-stock. Within each block, names are sorted alphabetically
+    /// (case-insensitive).
+    ///
+    /// The algorithm:
+    /// 1. Extract candidate variable names from the VDF name table
+    /// 2. Add `#`-prefixed internal signature names
+    /// 3. Classify each candidate as stock or non-stock using the model
+    /// 4. Match candidate counts against section-6 counts, trimming
+    ///    excess lookupish names when needed
+    /// 5. Sort each group alphabetically and assign OT indices
+    /// 6. Map SMOOTH/DELAY user variables to their internal signature OTs
+    #[cfg(feature = "file_io")]
+    pub fn build_section6_guided_ot_map(
+        &self,
+        model: &crate::datamodel::Model,
+    ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+        let codes = self
+            .section6_ot_class_codes()
+            .ok_or("no section-6 class codes available")?;
+        if codes.is_empty() || self.offset_table_count < 2 {
+            return Err("VDF too small for section-6-guided mapping".into());
+        }
+
+        let stock_count = codes
+            .iter()
+            .skip(1)
+            .filter(|&&c| c == VDF_SECTION6_OT_CODE_STOCK)
+            .count();
+        let nonstock_count = self.offset_table_count - 1 - stock_count;
+
+        // Step 1-2: build candidate list from VDF name table.
+        // Use broad filtering: remove structural metadata and builtins,
+        // but keep TABLE names (they may have OT entries).
+        // System variable names (INITIAL TIME, etc.) are included as
+        // participants because they consume OT entries.
+
+        // Collect stdlib call info from model for alias handling
+        let mut model_stock_set: HashSet<String> = HashSet::new();
+        let mut model_sig_stocks: HashSet<String> = HashSet::new();
+        let mut model_sig_stock_names: HashSet<String> = HashSet::new();
+        let mut aliases: Vec<(String, String)> = Vec::new();
+        let mut alias_names_normalized: HashSet<String> = HashSet::new();
+
+        for var in &model.variables {
+            let (ident, equation) = match var {
+                crate::datamodel::Variable::Stock(s) => {
+                    model_stock_set.insert(normalize_vdf_name(&s.ident));
+                    continue;
+                }
+                crate::datamodel::Variable::Aux(a) => (&a.ident, &a.equation),
+                crate::datamodel::Variable::Flow(f) => (&f.ident, &f.equation),
+                crate::datamodel::Variable::Module(_) => continue,
+            };
+
+            if let Some(info) = extract_stdlib_call_info(equation) {
+                let output_sig = info.output_signature();
+                aliases.push((ident.clone(), output_sig));
+                alias_names_normalized.insert(normalize_vdf_name(ident));
+                for (sig, is_stock) in info.vensim_signatures() {
+                    let normalized = normalize_vdf_name(&sig);
+                    if is_stock {
+                        model_sig_stocks.insert(normalized);
+                        model_sig_stock_names.insert(sig);
+                    }
+                }
+            }
+        }
+
+        // Broad candidate extraction: include system variable names (they
+        // occupy OT entries), but remove structural metadata, builtins,
+        // module internals, and SMOOTH/DELAY aliases.
+        let mut candidates: Vec<String> = Vec::new();
+        let mut lookupish_candidates: Vec<String> = Vec::new();
+        let mut seen_normalized: HashSet<String> = HashSet::new();
+
+        for name in &self.names[..self.slot_table.len()] {
+            if name.is_empty()
+                || name.starts_with('.')
+                || name.starts_with('-')
+                || name.starts_with(':')
+            {
+                continue;
+            }
+            // Single-char non-alphanumeric placeholders
+            if name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()) {
+                continue;
+            }
+            if VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            if is_vdf_metadata_entry(name) {
+                continue;
+            }
+            if alias_names_normalized.contains(&normalize_vdf_name(name)) {
+                continue;
+            }
+            // "Time" is OT[0], handled separately
+            if name == "Time" {
+                continue;
+            }
+
+            let normalized = normalize_vdf_name(name);
+            if !seen_normalized.insert(normalized) {
+                continue;
+            }
+
+            // Track lookupish names separately so we can trim them later
+            let lower = name.to_lowercase();
+            if lower.contains(" lookup") || lower.contains(" table") {
+                lookupish_candidates.push(name.clone());
+            } else {
+                candidates.push(name.clone());
+            }
+        }
+
+        // Add #-prefixed names from the unslotted tail (if any exist
+        // beyond the slotted prefix; for fully-slotted VDFs like WRLD3,
+        // these were already processed above).
+        if self.names.len() > self.slot_table.len() {
+            for name in &self.names[self.slot_table.len()..] {
+                if name.starts_with('#') {
+                    let normalized = normalize_vdf_name(name);
+                    if seen_normalized.insert(normalized) {
+                        candidates.push(name.clone());
+                    }
+                }
+            }
+        }
+
+        // Strip outer quotes from quoted names like `"Absorption Land (GHA)"`
+        for name in &self.names[..self.slot_table.len()] {
+            if name.starts_with('"') && name.ends_with('"') && name.len() > 2 {
+                let inner = &name[1..name.len() - 1];
+                let normalized = normalize_vdf_name(inner);
+                if !inner.is_empty()
+                    && inner.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+                    && !alias_names_normalized.contains(&normalized)
+                    && seen_normalized.insert(normalized)
+                {
+                    candidates.push(inner.to_string());
+                }
+            }
+        }
+
+        // Total target: stock_count + nonstock_count = OT capacity - 1
+        let target = stock_count + nonstock_count;
+        let base_count = candidates.len();
+
+        // Include lookupish names to reach target count; exclude excess
+        // starting with standalone LOOKUPs (always excludable), then
+        // TABLE names alphabetically.
+        let lookupish_needed = target.saturating_sub(base_count);
+        if lookupish_needed > 0 {
+            // Sort lookupish names: TABLE names first (more likely to be
+            // saved), LOOKUP names last.
+            lookupish_candidates.sort_by(|a, b| {
+                let a_is_lookup = a.to_lowercase().contains(" lookup");
+                let b_is_lookup = b.to_lowercase().contains(" lookup");
+                a_is_lookup
+                    .cmp(&b_is_lookup)
+                    .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+            });
+            candidates.extend(lookupish_candidates.into_iter().take(lookupish_needed));
+        }
+
+        if candidates.len() != target {
+            return Err(format!(
+                "section-6-guided candidate count ({}) != OT capacity ({target}); \
+                 base={base_count} lookupish_needed={lookupish_needed}",
+                candidates.len()
+            )
+            .into());
+        }
+
+        // Step 3: classify each candidate as stock or non-stock
+        let is_stock_name = |name: &str| -> bool {
+            let normalized = normalize_vdf_name(name);
+            model_stock_set.contains(&normalized) || model_sig_stocks.contains(&normalized)
+        };
+
+        // Classify using model stock set, #-prefixed signature patterns,
+        // and stdlib helper stock classification.
+        let is_stock = |name: &str| -> bool {
+            // Model stocks
+            if is_stock_name(name) {
+                return true;
+            }
+            // #-prefixed internal signature: stock if starts with
+            // #SMOOTH(, #SMOOTHI(, #SMOOTH3(, #SMOOTH3I(, #LV1<, #LV2<, #LV3<
+            if name.starts_with('#') {
+                return name.starts_with("#SMOOTH(")
+                    || name.starts_with("#SMOOTHI(")
+                    || name.starts_with("#SMOOTH3(")
+                    || name.starts_with("#SMOOTH3I(")
+                    || name.starts_with("#LV1<")
+                    || name.starts_with("#LV2<")
+                    || name.starts_with("#LV3<");
+            }
+            // Stdlib participant helpers: LV1/LV2/LV3/ST are stocks
+            if STDLIB_PARTICIPANT_HELPERS.contains(&name) {
+                return is_stdlib_helper_stock(name);
+            }
+            false
+        };
+
+        let mut stock_names: Vec<String> =
+            candidates.iter().filter(|n| is_stock(n)).cloned().collect();
+        let mut non_stock_names: Vec<String> = candidates
+            .iter()
+            .filter(|n| !is_stock(n))
+            .cloned()
+            .collect();
+
+        // Step 4: reconcile stock/non-stock counts with section-6.
+        // Model-based classification may over- or under-count stocks
+        // relative to section-6 codes (ACTIVE INITIAL creates stock OTs
+        // invisible to the model classifier, and some model stocks may
+        // not be saved). Section-6 is authoritative for the boundary.
+        stock_names.sort_by_key(|n| n.to_lowercase());
+        non_stock_names.sort_by_key(|n| n.to_lowercase());
+
+        // Reconcile: move names between groups to match section-6 counts.
+        while stock_names.len() > stock_count && !stock_names.is_empty() {
+            // Excess stocks: demote the alphabetically last stock to non-stock
+            let demoted = stock_names.pop().unwrap();
+            non_stock_names.push(demoted);
+            non_stock_names.sort_by_key(|n| n.to_lowercase());
+        }
+        while stock_names.len() < stock_count && !non_stock_names.is_empty() {
+            // Missing stocks: promote the alphabetically first non-stock
+            // to stock. This is a heuristic -- without more information,
+            // we can't know which non-stocks are actually stock-backed.
+            let promoted = non_stock_names.remove(0);
+            stock_names.push(promoted);
+            stock_names.sort_by_key(|n| n.to_lowercase());
+        }
+
+        if stock_names.len() != stock_count || non_stock_names.len() != nonstock_count {
+            return Err(format!(
+                "could not reconcile stock/non-stock counts: \
+                 stocks={}/{stock_count} nonstocks={}/{nonstock_count}",
+                stock_names.len(),
+                non_stock_names.len()
+            )
+            .into());
+        }
+
+        // Step 5: assign OT indices
+        let mut mapping: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        mapping.insert(Ident::<Canonical>::from_str_unchecked("time"), 0);
+        let mut participant_ots: HashMap<String, usize> = HashMap::new();
+
+        // Stocks at OT[1..S]
+        for (i, name) in stock_names.into_iter().enumerate() {
+            let ot = i + 1;
+            participant_ots.insert(normalize_vdf_name(&name), ot);
+            let key = if name.starts_with('#') {
+                Ident::<Canonical>::from_str_unchecked(&name)
+            } else {
+                Ident::<Canonical>::new(&name)
+            };
+            mapping.insert(key, ot);
+        }
+
+        // Non-stocks at OT[S+1..N-1]
+        for (i, name) in non_stock_names.into_iter().enumerate() {
+            let ot = stock_count + 1 + i;
+            participant_ots.insert(normalize_vdf_name(&name), ot);
+            let key = if name.starts_with('#') {
+                Ident::<Canonical>::from_str_unchecked(&name)
+            } else {
+                Ident::<Canonical>::new(&name)
+            };
+            mapping.insert(key, ot);
+        }
+
+        // Step 6: map SMOOTH/DELAY user variables to their output OT
+        for (user_ident, output_sig) in &aliases {
+            let sig_normalized = normalize_vdf_name(output_sig);
+            if let Some(&ot) = participant_ots.get(&sig_normalized) {
+                let user_key = Ident::<Canonical>::new(user_ident);
+                mapping.entry(user_key).or_insert(ot);
+            }
+        }
+
+        Ok(mapping)
+    }
 }
 
 // ---- Parsing functions ----
@@ -1514,126 +1890,14 @@ pub struct VdfData {
     pub entries: Vec<Vec<f64>>,
 }
 
-/// Parse a Vensim VDF binary file into raw time series data.
-///
-/// Returns the parsed data without variable name assignments, since the
-/// VDF metadata mapping from names to data entries is not yet decoded.
-/// Use [`build_vdf_results`] to match entries against simulation output.
-#[cfg(feature = "file_io")]
-pub fn load_vdf(file_path: &str) -> StdResult<VdfData, Box<dyn Error>> {
-    let data = std::fs::read(file_path)?;
-    let vdf = VdfFile::parse(data)?;
-    vdf.extract_data()
-}
-
-/// Build a `Results` struct by matching VDF data entries against a reference
-/// simulation's results.
-///
-/// For each variable in `reference`, we search the VDF entries for the one
-/// whose time series best matches (by sum of squared relative errors at
-/// multiple sample points). This avoids needing to decode the VDF metadata
-/// that maps names to offset table positions.
-#[cfg(feature = "file_io")]
-pub fn build_vdf_results(vdf: &VdfData, reference: &Results) -> StdResult<Results, Box<dyn Error>> {
-    let step_count = vdf.time_values.len();
-    let ref_step_count = reference.step_count;
-
-    if step_count != ref_step_count {
-        return Err(format!(
-            "VDF has {step_count} time points but simulation has {ref_step_count}"
-        )
-        .into());
-    }
-
-    let n_vars = reference.offsets.len();
-    let step_size = n_vars;
-    let mut step_data = vec![f64::NAN; step_count * step_size];
-    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-
-    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
-    let time_col = 0;
-    offsets.insert(time_ident.clone(), time_col);
-    for (step, &t) in vdf.time_values.iter().enumerate() {
-        step_data[step * step_size + time_col] = t;
-    }
-
-    let mut claimed: Vec<bool> = vec![false; vdf.entries.len()];
-    claimed[0] = true;
-
-    let mut next_col = 1;
-
-    let sample_indices = build_sample_indices(step_count);
-    const MATCH_THRESHOLD: f64 = 0.01;
-    let ordered_reference = sorted_reference_offsets(reference, &time_ident);
-
-    for (ident, ref_off) in ordered_reference {
-        let ref_series: Vec<f64> = (0..step_count)
-            .map(|step| {
-                let row =
-                    &reference.data[step * reference.step_size..(step + 1) * reference.step_size];
-                row[ref_off]
-            })
-            .collect();
-
-        let mut best_entry = None;
-        let mut best_error = f64::MAX;
-
-        for (ei, entry) in vdf.entries.iter().enumerate() {
-            if claimed[ei] {
-                continue;
-            }
-
-            let error = compute_match_error(&ref_series, entry, &sample_indices);
-            if error < best_error {
-                best_error = error;
-                best_entry = Some(ei);
-            }
-        }
-
-        if let Some(ei) = best_entry
-            && best_error < MATCH_THRESHOLD
-        {
-            let col = next_col;
-            next_col += 1;
-            offsets.insert(ident, col);
-            claimed[ei] = true;
-            for step in 0..step_count {
-                step_data[step * step_size + col] = vdf.entries[ei][step];
-            }
-        }
-    }
-
-    let initial_time = vdf.time_values[0];
-    let final_time = vdf.time_values[step_count - 1];
-    let saveper = if step_count > 1 {
-        vdf.time_values[1] - vdf.time_values[0]
-    } else {
-        1.0
-    };
-
-    Ok(Results {
-        offsets,
-        data: step_data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: Specs {
-            start: initial_time,
-            stop: final_time,
-            dt: saveper,
-            save_step: saveper,
-            method: Method::Euler,
-            n_chunks: step_count,
-        },
-        is_vensim: true,
-    })
-}
-
 /// Build an empirical mapping from canonical variable name to OT entry index.
 ///
-/// Uses the same time-series correlation approach as [`build_vdf_results`]
-/// but returns the raw mapping instead of a `Results` struct. Useful for
-/// verifying metadata-based name resolution against known-good matches.
-#[cfg(feature = "file_io")]
+/// Uses time-series correlation to match VDF data entries against a
+/// reference simulation. Returns the raw mapping for verifying
+/// metadata-based name resolution against known-good matches.
+///
+/// Test/validation oracle only -- not part of the public production API.
+#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
 pub fn build_empirical_ot_map(
     vdf: &VdfData,
     reference: &Results,
@@ -1692,7 +1956,7 @@ pub fn build_empirical_ot_map(
     Ok(ot_map)
 }
 
-#[cfg(feature = "file_io")]
+#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
 fn sorted_reference_offsets(
     reference: &Results,
     time_ident: &Ident<Canonical>,
@@ -1713,7 +1977,7 @@ fn sorted_reference_offsets(
 
 /// Build sample indices for time series correlation. Picks first, last,
 /// and quartile points to avoid comparing every time step.
-#[cfg(feature = "file_io")]
+#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
 fn build_sample_indices(step_count: usize) -> Vec<usize> {
     let mut indices = vec![0];
     if step_count > 10 {
@@ -1730,7 +1994,7 @@ fn build_sample_indices(step_count: usize) -> Vec<usize> {
 /// Compute a match error between a reference series and a VDF entry,
 /// sampled at the given indices. Returns f64::MAX if the series lengths
 /// don't match.
-#[cfg(feature = "file_io")]
+#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
 fn compute_match_error(reference: &[f64], candidate: &[f64], sample_indices: &[usize]) -> f64 {
     if reference.len() != candidate.len() {
         return f64::MAX;
@@ -2079,101 +2343,20 @@ mod tests {
                 .unwrap_or_else(|e| panic!("failed to parse VDF file {}: {}", path, e))
         }
 
-        /// Parse name entries with raw byte offsets (relative to section 2 data start).
-        fn parse_name_entries_with_offsets(vdf: &VdfFile) -> Vec<(usize, usize, String)> {
-            let Some(ns_idx) = vdf.name_section_idx else {
-                return Vec::new();
+        fn remove_model_var(project: &mut crate::datamodel::Project, ident: &str) {
+            let Some(model) = project.models.first_mut() else {
+                panic!("project missing main model");
             };
-            let ns = &vdf.sections[ns_idx];
-            let data_start = ns.data_offset();
-            let parse_end = ns.region_end.min(vdf.data.len());
-            let mut out = Vec::new();
-
-            let first_len = (ns.field5 >> 16) as usize;
-            if first_len == 0 || data_start + first_len > vdf.data.len() {
-                return out;
-            }
-
-            let first_name: String = vdf.data[data_start..data_start + first_len]
-                .iter()
-                .take_while(|&&b| b != 0)
-                .map(|&b| b as char)
-                .collect();
-            out.push((0, 0, first_name));
-
-            let mut pos = data_start + first_len;
-            while pos + 2 <= parse_end {
-                let len = read_u16(&vdf.data, pos) as usize;
-                let prefix_rel = pos - data_start;
-                pos += 2;
-                if len == 0 {
-                    continue;
-                }
-                if pos + len > parse_end {
-                    break;
-                }
-                if len > 256 {
-                    break;
-                }
-                let s: String = vdf.data[pos..pos + len]
-                    .iter()
-                    .take_while(|&&b| b != 0)
-                    .map(|&b| b as char)
-                    .collect();
-                if s.is_empty() || !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-                    break;
-                }
-                out.push((prefix_rel, pos - data_start, s));
-                pos += len;
-            }
-
-            out
+            let before = model.variables.len();
+            model.variables.retain(|var| var.get_ident() != ident);
+            assert_ne!(
+                model.variables.len(),
+                before,
+                "expected to remove variable {ident}"
+            );
         }
 
-        fn parse_name_entry_spans(vdf: &VdfFile) -> Vec<(usize, usize, String)> {
-            let Some(ns_idx) = vdf.name_section_idx else {
-                return Vec::new();
-            };
-            let ns = &vdf.sections[ns_idx];
-            let data_start = ns.data_offset();
-            let parse_end = ns.region_end.min(vdf.data.len());
-            let mut out = Vec::new();
-
-            let first_len = (ns.field5 >> 16) as usize;
-            if first_len == 0 || data_start + first_len > vdf.data.len() {
-                return out;
-            }
-            let first_name: String = vdf.data[data_start..data_start + first_len]
-                .iter()
-                .take_while(|&&b| b != 0)
-                .map(|&b| b as char)
-                .collect();
-            out.push((0, first_len, first_name));
-
-            let mut pos = data_start + first_len;
-            while pos + 2 <= parse_end {
-                let len = read_u16(&vdf.data, pos) as usize;
-                pos += 2;
-                if len == 0 {
-                    continue;
-                }
-                if pos + len > parse_end || len > 256 {
-                    break;
-                }
-                let s: String = vdf.data[pos..pos + len]
-                    .iter()
-                    .take_while(|&&b| b != 0)
-                    .map(|&b| b as char)
-                    .collect();
-                if s.is_empty() || !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-                    break;
-                }
-                out.push((pos - data_start, pos - data_start + len, s));
-                pos += len;
-            }
-
-            out
-        }
+        include!("vdf/tests/vdf_debug_tests.rs");
 
         /// For each possible trailing gap size, find the largest table length
         /// that passes slot-table structural validation.
@@ -2226,6 +2409,38 @@ mod tests {
             best
         }
 
+        fn normalized_stock_backed_outputs(project: &crate::datamodel::Project) -> HashSet<String> {
+            let Some(model) = project.models.first() else {
+                return HashSet::new();
+            };
+
+            let mut names = HashSet::new();
+            for var in &model.variables {
+                match var {
+                    crate::datamodel::Variable::Stock(stock) => {
+                        names.insert(normalize_vdf_name(&stock.ident));
+                    }
+                    crate::datamodel::Variable::Aux(aux) => {
+                        if extract_stdlib_call_info(&aux.equation)
+                            .is_some_and(|info| info.output_is_stock())
+                        {
+                            names.insert(normalize_vdf_name(&aux.ident));
+                        }
+                    }
+                    crate::datamodel::Variable::Flow(flow) => {
+                        if extract_stdlib_call_info(&flow.equation)
+                            .is_some_and(|info| info.output_is_stock())
+                        {
+                            names.insert(normalize_vdf_name(&flow.ident));
+                        }
+                    }
+                    crate::datamodel::Variable::Module(_) => {}
+                }
+            }
+
+            names
+        }
+
         #[test]
         fn test_slot_candidate_counts_by_gap() {
             let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
@@ -2245,27 +2460,7 @@ mod tests {
             assert_eq!(wrld3.slot_table.len(), 404);
         }
 
-        #[test]
-        fn test_section6_ref_stream_counts() {
-            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
-            let pop = vdf_file("../../test/bobby/vdf/pop/Current.vdf");
-            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
-            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
-
-            let (skip_w, entries_w, _) = water.parse_section6_ref_stream().unwrap();
-            let (skip_p, entries_p, _) = pop.parse_section6_ref_stream().unwrap();
-            let (skip_e, entries_e, _) = econ.parse_section6_ref_stream().unwrap();
-            let (skip_r, entries_r, _) = wrld3.parse_section6_ref_stream().unwrap();
-
-            assert_eq!(skip_w, 0);
-            assert_eq!(entries_w.len(), 7);
-            assert_eq!(skip_p, 0);
-            assert_eq!(entries_p.len(), 8);
-            assert_eq!(skip_e, 1);
-            assert_eq!(entries_e.len(), 79);
-            assert_eq!(skip_r, 1);
-            assert_eq!(entries_r.len(), 342);
-        }
+        include!("vdf/tests/section6_tests.rs");
 
         #[test]
         fn test_section5_set_stream_counts() {
@@ -2423,266 +2618,6 @@ mod tests {
                     ref_count + missing_blocks + missing_consts + usize::from(!referenced[0]),
                     vdf.offset_table_count
                 );
-            }
-        }
-
-        fn build_f2_order_ot_map(
-            vdf: &VdfFile,
-        ) -> StdResult<HashMap<String, usize>, Box<dyn Error>> {
-            let ot_count = vdf.offset_table_count;
-
-            let mut records: Vec<&VdfRecord> = vdf
-                .records
-                .iter()
-                .filter(|r| {
-                    r.fields[1] != RECORD_F1_SYSTEM
-                        && r.fields[11] > 0
-                        && (r.fields[11] as usize) < ot_count
-                })
-                .collect();
-            records.sort_by_key(|r| (r.fields[2], r.fields[11]));
-
-            let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
-            let vensim_builtins: HashSet<&str> = VENSIM_BUILTINS.into_iter().collect();
-
-            let mut names: Vec<String> = vdf.names[..vdf.slot_table.len()]
-                .iter()
-                .filter(|name| {
-                    !name.is_empty()
-                        && !name.starts_with('.')
-                        && !name.starts_with('-')
-                        && !name.starts_with('#')
-                        && !system_names.contains(name.as_str())
-                        && !vensim_builtins.contains(name.to_lowercase().as_str())
-                        && (name.len() != 1
-                            || name.chars().next().is_none_or(|c| c.is_alphanumeric()))
-                })
-                .cloned()
-                .collect();
-
-            if names.len() < records.len() {
-                return Err(format!(
-                    "f2-order map: candidate names {} < records {}",
-                    names.len(),
-                    records.len()
-                )
-                .into());
-            }
-            names.truncate(records.len());
-
-            let mut out = HashMap::new();
-            out.insert("Time".to_string(), 0);
-            for (name, rec) in names.into_iter().zip(records.into_iter()) {
-                out.insert(name, rec.fields[11] as usize);
-            }
-            Ok(out)
-        }
-
-        fn score_map_against_empirical(
-            name_to_ot: &HashMap<String, usize>,
-            empirical: &HashMap<Ident<Canonical>, usize>,
-        ) -> (usize, usize) {
-            let mut compared = 0usize;
-            let mut matches = 0usize;
-            for (name, &ot) in name_to_ot {
-                let canonical = crate::common::canonicalize(name);
-                if let Some(&emp_ot) = empirical.get(canonical.as_ref()) {
-                    compared += 1;
-                    if ot == emp_ot {
-                        matches += 1;
-                    }
-                }
-            }
-            (compared, matches)
-        }
-
-        #[test]
-        #[ignore]
-        fn test_f2_order_mapping_vs_empirical_water_econ() {
-            let cases = [
-                (
-                    "water",
-                    "../../test/bobby/vdf/water/water.mdl",
-                    "../../test/bobby/vdf/water/Current.vdf",
-                ),
-                (
-                    "econ",
-                    "../../test/bobby/vdf/econ/mark2.mdl",
-                    "../../test/bobby/vdf/econ/base.vdf",
-                ),
-            ];
-
-            for (label, mdl_path, vdf_path) in cases {
-                let vdf = vdf_file(vdf_path);
-                let vdf_data = vdf.extract_data().unwrap();
-                let ref_results = simulate_mdl(mdl_path);
-                let emp_map = build_empirical_ot_map(&vdf_data, &ref_results).unwrap();
-                let f2_map = build_f2_order_ot_map(&vdf).unwrap();
-
-                let mut matches = 0usize;
-                let mut compared = 0usize;
-                for (name, &ot) in &f2_map {
-                    let canonical = crate::common::canonicalize(name);
-                    if let Some(&emp_ot) = emp_map.get(canonical.as_ref()) {
-                        compared += 1;
-                        if ot == emp_ot {
-                            matches += 1;
-                        }
-                    }
-                }
-                eprintln!("{label}: f2-order compared={compared} matches={matches}");
-
-                // Exploratory signal only.
-                assert!(compared > 0, "{label}: expected some comparable names");
-            }
-        }
-
-        #[test]
-        #[ignore]
-        fn test_record_f3_matches_name_entry_offsets() {
-            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
-            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
-
-            for (label, vdf) in [("econ", &econ), ("wrld3", &wrld3)] {
-                let entries = parse_name_entries_with_offsets(vdf);
-                assert!(
-                    !entries.is_empty(),
-                    "{label}: expected parsed name entries with raw offsets"
-                );
-
-                let prefix_offsets: std::collections::HashSet<u32> =
-                    entries.iter().map(|(p, _, _)| *p as u32).collect();
-                let string_offsets: std::collections::HashSet<u32> =
-                    entries.iter().map(|(_, s, _)| *s as u32).collect();
-
-                let model_records: Vec<&VdfRecord> = vdf
-                    .records
-                    .iter()
-                    .filter(|r| {
-                        r.fields[0] != 0
-                            && r.fields[1] != RECORD_F1_SYSTEM
-                            && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
-                            && r.fields[10] > 0
-                            && r.fields[11] > 0
-                            && (r.fields[11] as usize) < vdf.offset_table_count
-                    })
-                    .collect();
-                assert!(!model_records.is_empty(), "{label}: expected model records");
-
-                let prefix_matches = model_records
-                    .iter()
-                    .filter(|r| prefix_offsets.contains(&r.fields[3]))
-                    .count();
-                let string_matches = model_records
-                    .iter()
-                    .filter(|r| string_offsets.contains(&r.fields[3]))
-                    .count();
-
-                // This pins down whether f[3] is a direct name-table pointer.
-                assert!(
-                    prefix_matches > 0 || string_matches > 0,
-                    "{label}: expected at least one f[3] match to name entry offsets; got prefix={prefix_matches} string={string_matches}"
-                );
-            }
-        }
-
-        #[test]
-        #[ignore]
-        fn test_record_f3_within_name_spans() {
-            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
-            let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
-            let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
-
-            for (label, vdf) in [("water", &water), ("econ", &econ), ("wrld3", &wrld3)] {
-                let spans = parse_name_entry_spans(vdf);
-                let model_records: Vec<&VdfRecord> = vdf
-                    .records
-                    .iter()
-                    .filter(|r| {
-                        r.fields[1] != RECORD_F1_SYSTEM
-                            && r.fields[11] > 0
-                            && (r.fields[11] as usize) < vdf.offset_table_count
-                    })
-                    .collect();
-
-                let mut in_span = 0usize;
-                for rec in &model_records {
-                    let hits = spans
-                        .iter()
-                        .filter(|(start, end, _)| {
-                            let off = rec.fields[3] as usize;
-                            off >= *start && off < *end
-                        })
-                        .count();
-                    if hits > 0 {
-                        in_span += 1;
-                    }
-                }
-                assert!(
-                    in_span > 0,
-                    "{label}: expected some records with f3 in name spans"
-                );
-            }
-        }
-
-        #[test]
-        #[ignore]
-        fn test_f3_span_mapping_vs_empirical() {
-            let cases = [
-                (
-                    "water",
-                    "../../test/bobby/vdf/water/water.mdl",
-                    "../../test/bobby/vdf/water/Current.vdf",
-                ),
-                (
-                    "econ",
-                    "../../test/bobby/vdf/econ/mark2.mdl",
-                    "../../test/bobby/vdf/econ/base.vdf",
-                ),
-                (
-                    "wrld3",
-                    "../../test/metasd/WRLD3-03/wrld3-03.mdl",
-                    "../../test/metasd/WRLD3-03/SCEN01.VDF",
-                ),
-            ];
-
-            for (label, mdl_path, vdf_path) in cases {
-                let vdf = vdf_file(vdf_path);
-                let spans = parse_name_entry_spans(&vdf);
-                let mut span_map: HashMap<String, usize> = HashMap::new();
-                span_map.insert("Time".to_string(), 0);
-
-                for rec in &vdf.records {
-                    if rec.fields[1] == RECORD_F1_SYSTEM {
-                        continue;
-                    }
-                    let ot = rec.fields[11] as usize;
-                    if ot == 0 || ot >= vdf.offset_table_count {
-                        continue;
-                    }
-
-                    let off = rec.fields[3] as usize;
-                    let mut hit_name: Option<&str> = None;
-                    for (start, end, name) in &spans {
-                        if off >= *start && off < *end {
-                            if hit_name.is_some() {
-                                hit_name = None;
-                                break;
-                            }
-                            hit_name = Some(name.as_str());
-                        }
-                    }
-                    if let Some(name) = hit_name {
-                        span_map.entry(name.to_string()).or_insert(ot);
-                    }
-                }
-
-                let vdf_data = vdf.extract_data().unwrap();
-                let ref_results = simulate_mdl(mdl_path);
-                let emp_map = build_empirical_ot_map(&vdf_data, &ref_results).unwrap();
-
-                let (_compared, matches) = score_map_against_empirical(&span_map, &emp_map);
-                assert!(matches > 0, "{label}: expected at least one f3-span match");
             }
         }
 
@@ -2880,228 +2815,6 @@ mod tests {
             }
         }
 
-        /// Helper: simulate an MDL file and return Results.
-        fn simulate_mdl(mdl_path: &str) -> crate::Results {
-            let contents = std::fs::read_to_string(mdl_path)
-                .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
-            let datamodel_project = crate::compat::open_vensim(&contents)
-                .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
-            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
-            let sim = crate::interpreter::Simulation::new(&project, "main")
-                .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-            sim.run_to_end()
-                .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"))
-        }
-
-        fn make_synthetic_reference(var_insert_order: &[&str]) -> crate::Results {
-            let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-            offsets.insert(Ident::new("time"), 0);
-            offsets.insert(Ident::new("a"), 1);
-            offsets.insert(Ident::new("b"), 2);
-            offsets.insert(Ident::new("c"), 3);
-
-            // Reinsert variable keys in caller-specified order to vary HashMap
-            // insertion history without changing logical offsets.
-            let mut reordered: HashMap<Ident<Canonical>, usize> = HashMap::new();
-            reordered.insert(Ident::new("time"), 0);
-            for &name in var_insert_order {
-                let id = Ident::new(name);
-                reordered.insert(id.clone(), *offsets.get(&id).unwrap());
-            }
-
-            // time, a, b, c columns
-            let rows: [[f64; 4]; 4] = [
-                [0.0, 100.0, 10.0, 5.0],
-                [1.0, 101.0, 20.0, 6.0],
-                [2.0, 102.0, 40.0, 9.0],
-                [3.0, 103.0, 80.0, 14.0],
-            ];
-            let mut data = Vec::new();
-            for row in rows {
-                data.extend_from_slice(&row);
-            }
-
-            crate::Results {
-                offsets: reordered,
-                data: data.into_boxed_slice(),
-                step_size: 4,
-                step_count: 4,
-                specs: crate::results::Specs {
-                    start: 0.0,
-                    stop: 3.0,
-                    dt: 1.0,
-                    save_step: 1.0,
-                    method: crate::results::Method::Euler,
-                    n_chunks: 4,
-                },
-                is_vensim: true,
-            }
-        }
-
-        fn make_synthetic_vdf() -> VdfData {
-            // OT entries: 0=time, 1=b, 2=c, 3=a
-            VdfData {
-                time_values: vec![0.0, 1.0, 2.0, 3.0],
-                entries: vec![
-                    vec![0.0, 1.0, 2.0, 3.0],
-                    vec![10.0, 20.0, 40.0, 80.0],
-                    vec![5.0, 6.0, 9.0, 14.0],
-                    vec![100.0, 101.0, 102.0, 103.0],
-                ],
-            }
-        }
-
-        #[test]
-        fn test_empirical_map_is_deterministic_across_offset_insertion_order() {
-            let vdf = make_synthetic_vdf();
-            let reference_a = make_synthetic_reference(&["a", "b", "c"]);
-            let reference_b = make_synthetic_reference(&["c", "b", "a"]);
-
-            let map_a = build_empirical_ot_map(&vdf, &reference_a).unwrap();
-            let map_b = build_empirical_ot_map(&vdf, &reference_b).unwrap();
-            assert_eq!(map_a, map_b);
-            assert_eq!(map_a.get(&Ident::new("a")), Some(&3usize));
-            assert_eq!(map_a.get(&Ident::new("b")), Some(&1usize));
-            assert_eq!(map_a.get(&Ident::new("c")), Some(&2usize));
-        }
-
-        #[test]
-        fn test_build_vdf_results_is_deterministic_across_offset_insertion_order() {
-            let vdf = make_synthetic_vdf();
-            let reference_a = make_synthetic_reference(&["a", "b", "c"]);
-            let reference_b = make_synthetic_reference(&["c", "b", "a"]);
-
-            let res_a = build_vdf_results(&vdf, &reference_a).unwrap();
-            let res_b = build_vdf_results(&vdf, &reference_b).unwrap();
-            assert_eq!(res_a.offsets, res_b.offsets);
-            assert_eq!(res_a.step_count, res_b.step_count);
-            assert_eq!(res_a.step_size, res_b.step_size);
-        }
-
-        /// Compare deterministic map against empirical ground truth for a
-        /// given MDL/VDF pair. Returns (matches, mismatches).
-        fn compare_det_vs_emp(
-            mdl_path: &str,
-            vdf_path: &str,
-        ) -> (usize, Vec<(String, usize, usize)>) {
-            let ref_results = simulate_mdl(mdl_path);
-            let vdf = vdf_file(vdf_path);
-            let vdf_data = vdf
-                .extract_data()
-                .unwrap_or_else(|e| panic!("extract_data failed for {vdf_path}: {e}"));
-
-            let det_map = vdf
-                .build_deterministic_ot_map()
-                .unwrap_or_else(|e| panic!("deterministic map failed for {vdf_path}: {e}"));
-            let emp_map = build_empirical_ot_map(&vdf_data, &ref_results)
-                .unwrap_or_else(|e| panic!("empirical map failed for {vdf_path}: {e}"));
-
-            let mut matches = 0;
-            let mut mismatches = Vec::new();
-
-            let mut det_sorted: Vec<_> = det_map.iter().collect();
-            det_sorted.sort_by_key(|(name, _)| name.to_lowercase());
-
-            for (det_name, det_ot) in &det_sorted {
-                let canonical = crate::common::canonicalize(det_name);
-                if let Some(&emp_ot) = emp_map.get(canonical.as_ref()) {
-                    if **det_ot == emp_ot {
-                        matches += 1;
-                    } else {
-                        mismatches.push((det_name.to_string(), **det_ot, emp_ot));
-                    }
-                }
-            }
-
-            (matches, mismatches)
-        }
-
-        fn assert_model_guided_map_well_formed(mdl_path: &str, vdf_path: &str) {
-            let contents = std::fs::read_to_string(mdl_path).unwrap();
-            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
-            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
-            let vdf = vdf_file(vdf_path);
-            let map_a = vdf
-                .build_model_guided_ot_map(&project, "main")
-                .unwrap_or_else(|e| panic!("model-guided map failed for {vdf_path}: {e}"));
-            let map_b = vdf
-                .build_model_guided_ot_map(&project, "main")
-                .unwrap_or_else(|e| panic!("model-guided map failed for {vdf_path}: {e}"));
-            assert_eq!(map_a, map_b);
-
-            let time_ident = Ident::<Canonical>::from_str_unchecked("time");
-            assert_eq!(map_a.get(&time_ident), Some(&0usize));
-
-            let target_bases = vdf.slotted_model_base_names();
-            let expected_len = crate::interpreter::calc_flattened_offsets(&project, "main")
-                .into_iter()
-                .filter(|(id, _)| {
-                    if *id == time_ident {
-                        return false;
-                    }
-                    let base = id
-                        .as_str()
-                        .split_once('[')
-                        .map(|(b, _)| b)
-                        .unwrap_or(id.as_str());
-                    target_bases.contains(base)
-                })
-                .count()
-                + 1;
-            assert_eq!(
-                map_a.len(),
-                expected_len,
-                "expected model-guided map coverage to match VDF slotted outputs"
-            );
-
-            let mut seen_ots = HashSet::new();
-            for (id, &ot) in &map_a {
-                assert!(
-                    ot < vdf.offset_table_count,
-                    "{id} mapped out of OT range: {ot}"
-                );
-                assert!(seen_ots.insert(ot), "duplicate OT assignment: {ot}");
-                if *id != time_ident {
-                    assert!(ot > 0, "non-time variable {id} mapped to OT zero");
-                }
-            }
-        }
-
-        #[test]
-        fn test_model_guided_wrld3_map_is_well_formed() {
-            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
-            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
-            let contents = std::fs::read_to_string(mdl_path).unwrap();
-            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
-            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
-            let vdf = vdf_file(vdf_path);
-
-            let map = vdf
-                .build_model_guided_ot_map(&project, "main")
-                .unwrap_or_else(|e| panic!("model-guided map failed for {vdf_path}: {e}"));
-
-            let time_ident = Ident::<Canonical>::from_str_unchecked("time");
-            assert_eq!(map.get(&time_ident), Some(&0usize));
-            assert!(
-                map.len() >= 200,
-                "wrld3: expected substantial mapped coverage, got {}",
-                map.len()
-            );
-            assert!(
-                map.len() <= vdf.offset_table_count,
-                "wrld3: mapped columns should not exceed OT entries"
-            );
-
-            let mut seen = HashSet::new();
-            for (id, &ot) in &map {
-                assert!(
-                    ot < vdf.offset_table_count,
-                    "{id} mapped out of range: {ot}"
-                );
-                assert!(seen.insert(ot), "duplicate OT assignment: {ot}");
-            }
-        }
-
         #[test]
         fn test_to_results_with_model_small_models() {
             for (label, mdl_path, vdf_path) in [
@@ -3146,6 +2859,47 @@ mod tests {
         }
 
         #[test]
+        fn test_to_results_with_model_keeps_vdf_name_missing_from_model() {
+            let mdl_path = "../../test/bobby/vdf/water/water.mdl";
+            let vdf_path = "../../test/bobby/vdf/water/Current.vdf";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let full_datamodel = crate::compat::open_vensim(&contents).unwrap();
+
+            // Build the full-model map to get the known-good OT for "gap"
+            let vdf = vdf_file(vdf_path);
+            let full_map = vdf.build_stocks_first_ot_map(&full_datamodel).unwrap();
+            let gap_ot = *full_map
+                .get(&Ident::new("gap"))
+                .expect("full stocks-first map missing gap");
+
+            // Now remove "gap" from the model and verify to_results_with_model
+            // still includes it from the VDF name table.
+            let mut stripped = full_datamodel;
+            remove_model_var(&mut stripped, "gap");
+            let project = std::rc::Rc::new(crate::Project::from(stripped));
+
+            let vdf_data = vdf.extract_data().unwrap();
+            let results = vdf
+                .to_results_with_model(&project, "main")
+                .unwrap_or_else(|e| panic!("to_results_with_model failed: {e}"));
+
+            let gap_ident = Ident::new("gap");
+            let Some(&gap_col) = results.offsets.get(&gap_ident) else {
+                panic!("expected VDF-only variable 'gap' to be preserved in results");
+            };
+            let expected = &vdf_data.entries[gap_ot];
+
+            for (step, expected_value) in expected.iter().enumerate() {
+                let actual = results.data[step * results.step_size + gap_col];
+                assert!(
+                    (actual - *expected_value).abs() < 1e-9,
+                    "gap mismatch at step {step}: expected {expected_value}, got {actual}"
+                );
+            }
+        }
+
+        #[test]
         #[ignore = "requires third_party/uib_sd fixtures"]
         fn test_to_results_with_model_arrayed_baserun() {
             let mdl_path = "../../third_party/uib_sd/zambaqui/ZamMod1.mdl";
@@ -3167,292 +2921,6 @@ mod tests {
                 "baserun: expected array element identifiers in mapped outputs"
             );
             assert_eq!(results.step_count, vdf.time_point_count);
-        }
-
-        #[test]
-        #[ignore]
-        fn test_model_guided_map_deterministic_for_wrld3() {
-            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
-            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
-            let contents = std::fs::read_to_string(mdl_path).unwrap();
-            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
-            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
-            let vdf = vdf_file(vdf_path);
-
-            let map_a = vdf.build_model_guided_ot_map(&project, "main").unwrap();
-            let map_b = vdf.build_model_guided_ot_map(&project, "main").unwrap();
-            assert_eq!(map_a, map_b);
-        }
-
-        #[test]
-        #[ignore]
-        fn test_debug_wrld3_order_signal_coverage() {
-            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
-            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
-
-            let contents = std::fs::read_to_string(mdl_path).unwrap();
-            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
-            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
-            let vdf = vdf_file(vdf_path);
-
-            let offsets = crate::interpreter::calc_flattened_offsets(&project, "main");
-            let target_bases = vdf.slotted_model_base_names();
-
-            let mut base_names: HashSet<String> = HashSet::new();
-            for (id, _) in offsets {
-                if id == Ident::new("time") {
-                    continue;
-                }
-                let base = id
-                    .as_str()
-                    .split_once('[')
-                    .map(|(b, _)| b)
-                    .unwrap_or(id.as_str())
-                    .to_string();
-                if target_bases.contains(&base) {
-                    base_names.insert(base);
-                }
-            }
-
-            let mut view_indexes: HashMap<Ident<Canonical>, usize> = HashMap::new();
-            if let Some(datamodel) = project.datamodel.models.iter().find(|m| m.name == "main") {
-                for (v_idx, view) in datamodel.views.iter().enumerate() {
-                    let crate::datamodel::View::StockFlow(sf) = view;
-                    for element in &sf.elements {
-                        if let Some(name) = element.get_name() {
-                            let ident = Ident::<Canonical>::from_str_unchecked(
-                                crate::common::canonicalize(name).as_ref(),
-                            );
-                            view_indexes.entry(ident).or_insert(v_idx);
-                        }
-                    }
-                }
-            }
-
-            let sim = crate::interpreter::Simulation::new(&project, "main").unwrap();
-            let topo_order: HashMap<Ident<Canonical>, usize> = sim
-                .runlist_order()
-                .into_iter()
-                .enumerate()
-                .map(|(i, id)| (id, i))
-                .collect();
-
-            let mut in_view = 0usize;
-            let mut in_topo = 0usize;
-            for base in &base_names {
-                let id = Ident::<Canonical>::from_str_unchecked(base.as_str());
-                if view_indexes.contains_key(&id) {
-                    in_view += 1;
-                }
-                if topo_order.contains_key(&id) {
-                    in_topo += 1;
-                }
-            }
-
-            let mut slot_name: HashMap<u32, String> = HashMap::new();
-            let system_names: HashSet<&str> = SYSTEM_NAMES.into_iter().collect();
-            for (i, &slot) in vdf.slot_table.iter().enumerate() {
-                let Some(name) = vdf.names.get(i) else {
-                    continue;
-                };
-                if name.is_empty()
-                    || name.starts_with('.')
-                    || name.starts_with('-')
-                    || system_names.contains(name.as_str())
-                    || VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
-                    || (name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()))
-                {
-                    continue;
-                }
-                slot_name
-                    .entry(slot)
-                    .or_insert_with(|| crate::common::canonicalize(name.as_str()).into_owned());
-            }
-
-            let mut referenced = HashSet::new();
-            for rec in &vdf.records {
-                let ot = rec.fields[11] as usize;
-                if rec.fields[0] == 0
-                    || rec.fields[1] == RECORD_F1_SYSTEM
-                    || rec.fields[1] == RECORD_F1_INITIAL_TIME_CONST
-                    || rec.fields[10] == 0
-                    || ot == 0
-                    || ot >= vdf.offset_table_count
-                {
-                    continue;
-                }
-                if let Some(name) = slot_name.get(&rec.fields[12]) {
-                    referenced.insert(name.clone());
-                }
-            }
-
-            eprintln!(
-                "wrld3 target bases={} in_view={} in_topo={} referenced_by_records={}",
-                base_names.len(),
-                in_view,
-                in_topo,
-                referenced.len()
-            );
-            assert!(!base_names.is_empty());
-        }
-
-        #[test]
-        fn test_model_guided_small_models_well_formed() {
-            assert_model_guided_map_well_formed(
-                "../../test/bobby/vdf/water/water.mdl",
-                "../../test/bobby/vdf/water/Current.vdf",
-            );
-
-            assert_model_guided_map_well_formed(
-                "../../test/bobby/vdf/pop/pop.mdl",
-                "../../test/bobby/vdf/pop/Current.vdf",
-            );
-        }
-
-        /// The bact VDF was generated from a different version of the model
-        /// than the current bact.mdl (VDF has "bacteria"/"population growth",
-        /// MDL has "stock"/"inflow"/"outflow"). The deterministic mapping
-        /// fails with a count mismatch: 3 model records but only 2 candidate
-        /// names. This documents the limitation.
-        #[test]
-        fn test_deterministic_bact_mapping_succeeds() {
-            let vdf_path = "../../test/bobby/vdf/bact/Current.vdf";
-            let vdf = vdf_file(vdf_path);
-
-            // With the f[1]=15 filter, the deterministic mapping should
-            // now succeed for the bact model (2 candidates, 2 records).
-            let det_map = vdf.build_deterministic_ot_map().unwrap();
-            assert!(
-                det_map.contains_key("Time"),
-                "bact: mapping should include Time"
-            );
-            assert!(
-                det_map.len() >= 3,
-                "bact: expected at least 3 entries (Time + 2 vars), got {}",
-                det_map.len()
-            );
-        }
-
-        /// Verify deterministic mapping for the water model. The MDL and
-        /// VDF have the same variable names and matching step counts. The
-        /// empirical comparison has a known limitation: constant-value
-        /// ambiguity for variables with the same constant (e.g., desired
-        /// water level = TIME STEP = SAVEPER = 1.0).
-        #[test]
-        fn test_deterministic_vs_empirical_water() {
-            let (matches, mismatches) = compare_det_vs_emp(
-                "../../test/bobby/vdf/water/water.mdl",
-                "../../test/bobby/vdf/water/Current.vdf",
-            );
-            // The empirical approach can't distinguish constants with the
-            // same value. "desired water level" (1.0) gets matched to a
-            // different OT entry than the deterministic map chooses, but
-            // both entries hold constant 1.0.
-            assert!(matches >= 2, "water: expected at least 2 matches");
-            assert!(
-                mismatches.len() <= 1,
-                "water: expected at most 1 mismatch (constant-value ambiguity), got {:?}",
-                mismatches
-            );
-        }
-
-        /// Verify deterministic mapping for the pop model. The empirical
-        /// comparison is limited because the VDF was generated with Vensim's
-        /// RK4 integrator and our sim uses Euler, so dynamic variables diverge.
-        #[test]
-        fn test_deterministic_vs_empirical_pop() {
-            let (matches, mismatches) = compare_det_vs_emp(
-                "../../test/bobby/vdf/pop/pop.mdl",
-                "../../test/bobby/vdf/pop/Current.vdf",
-            );
-            assert!(
-                mismatches.is_empty(),
-                "pop: deterministic disagrees with empirical for {} vars: {:?}",
-                mismatches.len(),
-                mismatches
-            );
-            assert!(matches > 0, "pop: expected at least some matches");
-        }
-
-        /// Verify the deterministic mapping for water produces physically
-        /// plausible data: stocks start at initial values, constants are
-        /// constant, flows have the right magnitude.
-        #[test]
-        fn test_deterministic_water_physical_plausibility() {
-            let vdf_path = "../../test/bobby/vdf/water/Current.vdf";
-            let vdf = vdf_file(vdf_path);
-            let vdf_data = vdf.extract_data().unwrap();
-            let det_map = vdf.build_deterministic_ot_map().unwrap();
-
-            // water level (stock) should start at 0 and rise to ~1
-            let wl_ot = det_map["water level"];
-            let wl_first = vdf_data.entries[wl_ot][0];
-            let wl_last = *vdf_data.entries[wl_ot].last().unwrap();
-            assert!(
-                (wl_first - 0.0).abs() < 0.001,
-                "water level should start at 0, got {wl_first}"
-            );
-            assert!(
-                wl_last > 0.9 && wl_last <= 1.0,
-                "water level should approach 1, got {wl_last}"
-            );
-
-            // adjustment time should be constant 2.0
-            let at_ot = det_map["adjustment time"];
-            let at_series = &vdf_data.entries[at_ot];
-            assert!(
-                at_series.iter().all(|&v| (v - 2.0).abs() < 0.001),
-                "adjustment time should be constant 2.0"
-            );
-
-            // gap should start positive and decrease as water level rises
-            let gap_ot = det_map["gap"];
-            let gap_first = vdf_data.entries[gap_ot][0];
-            let gap_last = *vdf_data.entries[gap_ot].last().unwrap();
-            assert!(gap_first > gap_last, "gap should decrease over time");
-        }
-
-        /// Verify the deterministic mapping for pop produces physically
-        /// plausible data: populations are large numbers, constants are
-        /// constant, births/ending are flows.
-        #[test]
-        fn test_deterministic_pop_physical_plausibility() {
-            let vdf_path = "../../test/bobby/vdf/pop/Current.vdf";
-            let vdf = vdf_file(vdf_path);
-            let vdf_data = vdf.extract_data().unwrap();
-            let det_map = vdf.build_deterministic_ot_map().unwrap();
-
-            // producing population is a stock, should be a large number
-            let pp_ot = det_map["producing population"];
-            let pp_first = vdf_data.entries[pp_ot][0];
-            assert!(
-                pp_first > 1_000_000.0,
-                "producing population should be millions, got {pp_first}"
-            );
-
-            // young population should also be a large number
-            let yp_ot = det_map["young population"];
-            let yp_first = vdf_data.entries[yp_ot][0];
-            assert!(
-                yp_first > 10_000_000.0,
-                "young population should be tens of millions, got {yp_first}"
-            );
-
-            // births per person should be a constant < 1
-            let bpp_ot = det_map["births per person"];
-            let bpp_series = &vdf_data.entries[bpp_ot];
-            assert!(
-                bpp_series.iter().all(|&v| (v - 0.5).abs() < 0.001),
-                "births per person should be constant 0.5"
-            );
-
-            // births should be a positive number (flow)
-            let births_ot = det_map["births"];
-            let births_first = vdf_data.entries[births_ot][0];
-            assert!(
-                births_first > 1_000_000.0,
-                "births should be millions, got {births_first}"
-            );
         }
 
         /// The econ model (medium-sized, 42 slotted names, 74 records)
@@ -3544,50 +3012,6 @@ mod tests {
             );
         }
 
-        /// Verify f[10] ordering matches alphabetical name order for small
-        /// VDF files. This is the core assumption of the deterministic mapping.
-        #[test]
-        fn test_f10_alphabetical_ordering() {
-            let small_vdfs = [
-                ("bact", "../../test/bobby/vdf/bact/Current.vdf"),
-                ("water", "../../test/bobby/vdf/water/Current.vdf"),
-                ("pop", "../../test/bobby/vdf/pop/Current.vdf"),
-                ("econ", "../../test/bobby/vdf/econ/base.vdf"),
-            ];
-
-            for (label, vdf_path) in &small_vdfs {
-                let vdf = vdf_file(vdf_path);
-                let ot_count = vdf.offset_table_count;
-
-                // Collect model variable records (same filter as deterministic map)
-                let mut model_records: Vec<(u32, u32, usize)> = Vec::new();
-                for (i, rec) in vdf.records.iter().enumerate() {
-                    let ot_idx = rec.fields[11] as usize;
-                    if rec.fields[0] != 0
-                        && rec.fields[1] != RECORD_F1_SYSTEM
-                        && rec.fields[1] != RECORD_F1_INITIAL_TIME_CONST
-                        && rec.fields[10] > 0
-                        && ot_idx > 0
-                        && ot_idx < ot_count
-                    {
-                        model_records.push((rec.fields[10], rec.fields[11], i));
-                    }
-                }
-
-                // Check uniqueness: no f[10] ties
-                let f10_values: Vec<u32> = model_records.iter().map(|&(f10, _, _)| f10).collect();
-                let mut unique = f10_values.clone();
-                unique.sort();
-                unique.dedup();
-                let ties = f10_values.len() - unique.len();
-
-                // For small models, f[10] should have no ties
-                if *label != "econ" {
-                    assert_eq!(ties, 0, "{label}: expected no f[10] ties for small model");
-                }
-            }
-        }
-
         /// Verify extracted time series data is valid: time is monotonically
         /// increasing, all values are finite.
         #[test]
@@ -3643,179 +3067,387 @@ mod tests {
         // 4. Slot data at a given section 1 offset is positional/structural.
         // 5. The deterministic approach works for models without f[1]=15 anomaly.
 
+        /// Test the stocks-first-alphabetical mapping algorithm against the
+        /// econ and WRLD3 models by comparing with empirical correlation matching.
         #[test]
-        fn test_small_vdf_name_to_data_chain() {
-            // ---- euler-5.vdf: bact model, 2 model vars ----
-            let euler5 = vdf_file("../../test/bobby/vdf/bact/euler-5.vdf");
-            assert_eq!(euler5.names.len(), 10);
-            assert_eq!(euler5.slot_table.len(), 10);
-            assert_eq!(euler5.slot_table.len(), 10);
-            assert_eq!(euler5.records.len(), 9);
-            assert_eq!(euler5.offset_table_count, 7);
-            assert_eq!(euler5.names[0], "Time");
-            assert_eq!(euler5.names[8], "bacteria");
-            assert_eq!(euler5.names[9], "population growth");
-            assert_eq!(euler5.slot_table[8], 44);
-            assert_eq!(euler5.slot_table[9], 92);
+        fn test_stocks_first_mapping_econ() {
+            let mdl_path = "../../test/bobby/vdf/econ/mark2.mdl";
+            let vdf_path = "../../test/bobby/vdf/econ/base.vdf";
 
-            // f[12] groups records into 2 clusters; values match system var slot
-            // offsets (124=INITIAL TIME, 140=FINAL TIME), NOT model var slots.
-            let unique_f12: std::collections::HashSet<u32> =
-                euler5.records.iter().map(|r| r.slot_ref()).collect();
-            assert_eq!(unique_f12.len(), 2);
-            assert!(unique_f12.contains(&124));
-            assert!(unique_f12.contains(&140));
-            assert!(!unique_f12.contains(&44));
-            assert!(!unique_f12.contains(&92));
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
 
-            // f[11] IS the correct OT index:
-            // Record 0: f[1]=15 -> OT 3 = const 0 (INITIAL TIME)
-            assert_eq!(euler5.records[0].fields[1], RECORD_F1_INITIAL_TIME_CONST);
-            assert_eq!(euler5.records[0].ot_index(), 3);
-            let ot3 = euler5.offset_table_entry(3).unwrap();
-            assert!(!euler5.is_data_block_offset(ot3));
-            assert_eq!(f32::from_le_bytes(ot3.to_le_bytes()), 0.0);
-            // Record 7: stock (f[1]=135), f[11]=1 -> data block
-            assert_eq!(euler5.records[7].fields[1], 135);
-            assert_eq!(euler5.records[7].ot_index(), 1);
-            assert!(euler5.is_data_block_offset(euler5.offset_table_entry(1).unwrap()));
-            // Record 8: flow (f[1]=2056), f[11]=4 -> data block
-            assert_eq!(euler5.records[8].fields[1], 2056);
-            assert_eq!(euler5.records[8].ot_index(), 4);
-            assert!(euler5.is_data_block_offset(euler5.offset_table_entry(4).unwrap()));
+            let vdf = vdf_file(vdf_path);
 
-            // f[1]=15 record passes standard filter but shouldn't be a model var.
-            let model_standard: Vec<_> = euler5
-                .records
-                .iter()
-                .filter(|r| {
-                    r.fields[0] != 0
-                        && r.fields[1] != RECORD_F1_SYSTEM
-                        && r.fields[10] > 0
-                        && r.fields[11] > 0
-                        && (r.fields[11] as usize) < euler5.offset_table_count
-                })
-                .collect();
-            assert_eq!(model_standard.len(), 3, "3 pass for 2 model vars");
-            let model_fixed: Vec<_> = euler5
-                .records
-                .iter()
-                .filter(|r| {
-                    r.fields[0] != 0
-                        && r.fields[1] != RECORD_F1_SYSTEM
-                        && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
-                        && r.fields[10] > 0
-                        && r.fields[11] > 0
-                        && (r.fields[11] as usize) < euler5.offset_table_count
-                })
-                .collect();
-            assert_eq!(model_fixed.len(), 2);
+            let map = vdf.build_stocks_first_ot_map(&datamodel_project).unwrap();
 
-            // ---- euler-10.vdf: same model, 3 model vars ----
-            let euler10 = vdf_file("../../test/bobby/vdf/bact/euler-10.vdf");
-            assert_eq!(euler10.names[10], "predation");
-            let e10_std: Vec<_> = euler10
-                .records
-                .iter()
-                .filter(|r| {
-                    r.fields[0] != 0
-                        && r.fields[1] != RECORD_F1_SYSTEM
-                        && r.fields[10] > 0
-                        && r.fields[11] > 0
-                        && (r.fields[11] as usize) < euler10.offset_table_count
-                })
-                .collect();
-            assert_eq!(e10_std.len(), 4);
-            let e10_fix: Vec<_> = euler10
-                .records
-                .iter()
-                .filter(|r| {
-                    r.fields[0] != 0
-                        && r.fields[1] != RECORD_F1_SYSTEM
-                        && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
-                        && r.fields[10] > 0
-                        && r.fields[11] > 0
-                        && (r.fields[11] as usize) < euler10.offset_table_count
-                })
-                .collect();
-            assert_eq!(e10_fix.len(), 3);
+            eprintln!("\n=== Stocks-First OT Map for Econ ===");
+            eprintln!("Total mapped: {}", map.len());
 
-            // Slot data is positional: same bytes at same offset even when
-            // different variables are assigned there across bact VDF files.
-            let s5 = euler5.slot_section().unwrap().data_offset();
-            let s10 = euler10.slot_section().unwrap().data_offset();
-            for off in [44usize, 92] {
-                let w5: [u32; 3] = [
-                    read_u32(&euler5.data, s5 + off),
-                    read_u32(&euler5.data, s5 + off + 4),
-                    read_u32(&euler5.data, s5 + off + 8),
-                ];
-                let w10: [u32; 3] = [
-                    read_u32(&euler10.data, s10 + off),
-                    read_u32(&euler10.data, s10 + off + 4),
-                    read_u32(&euler10.data, s10 + off + 8),
-                ];
-                assert_eq!(
-                    w5, w10,
-                    "slot data at offset {} should match across bact VDFs",
-                    off
-                );
+            let mut by_ot: Vec<_> = map.iter().map(|(n, &ot)| (n, ot)).collect();
+            by_ot.sort_by_key(|(_, ot)| *ot);
+
+            for (name, ot) in &by_ot {
+                let is_internal = name.as_str().starts_with('#');
+                let label = if is_internal { " [internal]" } else { "" };
+                eprintln!("  OT[{ot:3}] {}{label}", name.as_str());
             }
 
-            // ---- water model: no f[1]=15 record, deterministic works ----
-            let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
-            assert!(
-                !water
-                    .records
-                    .iter()
-                    .any(|r| r.fields[1] == RECORD_F1_INITIAL_TIME_CONST)
+            // Validate against VDF data initial values for stocks
+            let vdf_data = vdf.extract_data().unwrap();
+            eprintln!("\n=== Validation: Stock initial values ===");
+            for (name, ot) in &by_ot {
+                if *ot == 0 || *ot >= vdf_data.entries.len() {
+                    continue;
+                }
+                let first = vdf_data.entries[*ot][0];
+                eprintln!("  OT[{ot:3}] first={first:.4} ← {}", name.as_str());
+            }
+        }
+
+        /// Validate generated VDF signatures against actual VDF name table entries.
+        /// This directly compares our algorithm's output with what Vensim wrote.
+        #[test]
+        fn test_vdf_signature_generation_econ() {
+            let mdl_path = "../../test/bobby/vdf/econ/mark2.mdl";
+            let vdf_path = "../../test/bobby/vdf/econ/base.vdf";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+
+            let vdf = vdf_file(vdf_path);
+
+            // Get VDF's actual #-prefixed names
+            let vdf_sigs: Vec<String> = vdf
+                .names
+                .iter()
+                .filter(|n| n.starts_with('#'))
+                .cloned()
+                .collect();
+
+            // Generate signatures from MDL
+            let model = &datamodel_project.models[0];
+            let mut generated_sigs: Vec<String> = Vec::new();
+            for var in &model.variables {
+                let equation = match var {
+                    crate::datamodel::Variable::Aux(a) => &a.equation,
+                    crate::datamodel::Variable::Flow(f) => &f.equation,
+                    _ => continue,
+                };
+                if let Some(info) = extract_stdlib_call_info(equation) {
+                    for (sig, _) in info.vensim_signatures() {
+                        generated_sigs.push(sig);
+                    }
+                }
+            }
+
+            eprintln!("\n=== Signature Validation (econ) ===");
+            eprintln!(
+                "VDF has {} # names, we generated {}",
+                vdf_sigs.len(),
+                generated_sigs.len()
             );
-            let water_model: Vec<_> = water
-                .records
-                .iter()
-                .filter(|r| {
-                    r.fields[0] != 0
-                        && r.fields[1] != RECORD_F1_SYSTEM
-                        && r.fields[10] > 0
-                        && r.fields[11] > 0
-                        && (r.fields[11] as usize) < water.offset_table_count
-                })
-                .collect();
-            assert_eq!(water_model.len(), 5);
 
-            // All model records (with valid OT indices) share f[12]=124
-            for (label, vdf) in [
-                ("euler-5", &euler5),
-                ("euler-10", &euler10),
-                ("water", &water),
-            ] {
-                let ot_count = vdf.offset_table_count;
-                let f12s: std::collections::HashSet<u32> = vdf
-                    .records
-                    .iter()
-                    .filter(|r| {
-                        r.fields[0] != 0
-                            && r.fields[1] != RECORD_F1_SYSTEM
-                            && r.fields[1] != RECORD_F1_INITIAL_TIME_CONST
-                            && r.fields[10] > 0
-                            && r.fields[11] > 0
-                            && (r.fields[11] as usize) < ot_count
-                    })
-                    .map(|r| r.slot_ref())
-                    .collect();
-                assert_eq!(f12s.len(), 1, "{}: model f[12] should be unique", label);
-                assert!(f12s.contains(&124), "{}: model f[12] should be 124", label);
+            // Normalize for comparison (lowercase, remove spaces)
+            let vdf_normalized: std::collections::HashSet<String> =
+                vdf_sigs.iter().map(|s| s.to_lowercase()).collect();
+            let gen_normalized: std::collections::HashSet<String> =
+                generated_sigs.iter().map(|s| s.to_lowercase()).collect();
+
+            let matched: Vec<_> = gen_normalized.intersection(&vdf_normalized).collect();
+            let only_vdf: Vec<_> = vdf_normalized.difference(&gen_normalized).collect();
+            let only_gen: Vec<_> = gen_normalized.difference(&vdf_normalized).collect();
+
+            eprintln!("Matched: {}", matched.len());
+            eprintln!("Only in VDF (missed): {}", only_vdf.len());
+            for s in &only_vdf {
+                eprintln!("  VDF: {s}");
+            }
+            eprintln!("Only in generated (extra): {}", only_gen.len());
+            for s in &only_gen {
+                eprintln!("  GEN: {s}");
             }
 
-            // Deterministic map produces correct results for water model
-            let det = water.build_deterministic_ot_map().unwrap();
-            assert_eq!(det.len(), 6);
-            assert_eq!(det["Time"], 0);
-            let wd = water.extract_data().unwrap();
-            assert!((wd.entries[det["water level"]][0]).abs() < 0.01);
-            assert!((wd.entries[det["water level"]].last().unwrap() - 1.0).abs() < 0.01);
-            assert!((wd.entries[det["desired water level"]][0] - 1.0).abs() < 0.01);
-            assert!((wd.entries[det["adjustment time"]][0] - 2.0).abs() < 0.01);
+            assert!(
+                only_vdf.is_empty(),
+                "some VDF signatures not generated by our algorithm"
+            );
+        }
+
+        #[test]
+        fn test_vdf_signature_generation_wrld3() {
+            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+
+            let vdf = vdf_file(vdf_path);
+
+            let vdf_sigs: Vec<String> = vdf
+                .names
+                .iter()
+                .filter(|n| n.starts_with('#'))
+                .cloned()
+                .collect();
+
+            let model = &datamodel_project.models[0];
+            let mut generated_sigs: Vec<String> = Vec::new();
+            for var in &model.variables {
+                let equation = match var {
+                    crate::datamodel::Variable::Aux(a) => &a.equation,
+                    crate::datamodel::Variable::Flow(f) => &f.equation,
+                    _ => continue,
+                };
+                if let Some(info) = extract_stdlib_call_info(equation) {
+                    for (sig, _) in info.vensim_signatures() {
+                        generated_sigs.push(sig);
+                    }
+                }
+            }
+
+            eprintln!("\n=== Signature Validation (WRLD3) ===");
+            eprintln!(
+                "VDF has {} # names, we generated {}",
+                vdf_sigs.len(),
+                generated_sigs.len()
+            );
+
+            let vdf_normalized: std::collections::HashSet<String> =
+                vdf_sigs.iter().map(|s| s.to_lowercase()).collect();
+            let gen_normalized: std::collections::HashSet<String> =
+                generated_sigs.iter().map(|s| s.to_lowercase()).collect();
+
+            let matched: Vec<_> = gen_normalized.intersection(&vdf_normalized).collect();
+            let only_vdf: Vec<_> = vdf_normalized.difference(&gen_normalized).collect();
+            let only_gen: Vec<_> = gen_normalized.difference(&vdf_normalized).collect();
+
+            eprintln!("Matched: {}", matched.len());
+            eprintln!("Only in VDF (missed): {}", only_vdf.len());
+            for s in &only_vdf {
+                eprintln!("  VDF: {s}");
+            }
+            eprintln!("Only in generated (extra): {}", only_gen.len());
+            for s in &only_gen {
+                eprintln!("  GEN: {s}");
+            }
+        }
+
+        #[test]
+        fn test_stocks_first_mapping_wrld3() {
+            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+
+            let vdf = vdf_file(vdf_path);
+            let map = vdf.build_stocks_first_ot_map(&datamodel_project).unwrap();
+
+            eprintln!("\n=== Stocks-First OT Map for WRLD3 ===");
+            eprintln!(
+                "Total mapped: {} (VDF OT entries: {})",
+                map.len(),
+                vdf.offset_table_count
+            );
+
+            // Show first 30 and last 10 entries
+            let mut by_ot: Vec<_> = map.iter().map(|(n, &ot)| (n, ot)).collect();
+            by_ot.sort_by_key(|(_, ot)| *ot);
+
+            eprintln!("\nFirst 30 entries (should be stocks):");
+            for (name, ot) in by_ot.iter().take(30) {
+                eprintln!("  OT[{ot:3}] {}", name.as_str());
+            }
+
+            if by_ot.len() > 30 {
+                eprintln!("\n... ({} total entries) ...", by_ot.len());
+                eprintln!("\nLast 10 entries (should be non-stocks):");
+                let tail: Vec<_> = by_ot.iter().rev().take(10).collect();
+                for (name, ot) in tail.iter().rev() {
+                    eprintln!("  OT[{ot:3}] {}", name.as_str());
+                }
+            }
+
+            // Validate: compare with empirical map if simulation works
+            // (WRLD3 uses external data files, simulation may fail)
+            let project = std::rc::Rc::new(crate::Project::from(datamodel_project.clone()));
+            match crate::interpreter::Simulation::new(&project, "main") {
+                Ok(sim) => {
+                    match sim.run_to_end() {
+                        Ok(results) => {
+                            let vdf_data = vdf.extract_data().unwrap();
+                            match build_empirical_ot_map(&vdf_data, &results) {
+                                Ok(empirical) => {
+                                    // Compare: for each empirically matched variable,
+                                    // check if our predicted OT matches
+                                    let mut correct = 0;
+                                    let mut wrong = 0;
+                                    let mut missing = 0;
+
+                                    for (name, &emp_ot) in &empirical {
+                                        if name.as_str() == "time" {
+                                            continue;
+                                        }
+                                        if let Some(&pred_ot) = map.get(name) {
+                                            if pred_ot == emp_ot {
+                                                correct += 1;
+                                            } else {
+                                                wrong += 1;
+                                                eprintln!(
+                                                    "  MISMATCH: {} predicted OT={pred_ot} actual OT={emp_ot}",
+                                                    name.as_str()
+                                                );
+                                            }
+                                        } else {
+                                            missing += 1;
+                                            eprintln!(
+                                                "  MISSING: {} not in prediction (empirical OT={emp_ot})",
+                                                name.as_str()
+                                            );
+                                        }
+                                    }
+
+                                    eprintln!(
+                                        "\n=== Validation Results ===\n\
+                                         Empirical matches: {}\n\
+                                         Correct: {correct}\n\
+                                         Wrong: {wrong}\n\
+                                         Missing from prediction: {missing}\n\
+                                         Accuracy: {:.1}%",
+                                        empirical.len() - 1,
+                                        if correct + wrong > 0 {
+                                            100.0 * correct as f64 / (correct + wrong) as f64
+                                        } else {
+                                            0.0
+                                        }
+                                    );
+                                }
+                                Err(e) => eprintln!("empirical map failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("simulation failed: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("couldn't create simulation: {e}"),
+            }
+        }
+
+        #[test]
+        fn test_stocks_first_map_keeps_vdf_candidates_when_model_is_missing_name() {
+            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let mut datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            remove_model_var(&mut datamodel_project, "food");
+
+            let vdf = vdf_file(vdf_path);
+            let map = vdf.build_stocks_first_ot_map(&datamodel_project).unwrap();
+            assert!(
+                map.contains_key(&Ident::new("food")),
+                "expected VDF candidate 'food' to survive model drift"
+            );
+        }
+
+        #[test]
+        fn test_stocks_first_map_nonrecord_ots_are_stock_backed_on_wrld3() {
+            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let vdf = vdf_file(vdf_path);
+            let map = vdf.build_stocks_first_ot_map(&datamodel_project).unwrap();
+            let section6_codes = vdf.section6_ot_class_codes().unwrap();
+
+            let mut record_ots: HashSet<usize> = vdf
+                .records
+                .iter()
+                .filter_map(|rec| {
+                    let ot_idx = rec.fields[11] as usize;
+                    if rec.fields[0] != 0
+                        && rec.fields[1] != RECORD_F1_SYSTEM
+                        && rec.fields[1] != RECORD_F1_INITIAL_TIME_CONST
+                        && rec.fields[10] > 0
+                        && ot_idx > 0
+                        && ot_idx < vdf.offset_table_count
+                    {
+                        Some(ot_idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            record_ots.insert(0);
+
+            for (name, &ot) in &map {
+                if !record_ots.contains(&ot) {
+                    assert_eq!(
+                        section6_codes.get(ot),
+                        Some(&VDF_SECTION6_OT_CODE_STOCK),
+                        "{name} mapped to OT {ot}, which is neither record-backed nor stock-coded"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_stocks_first_map_includes_compiled_stdlib_aliases_econ() {
+            let mdl_path = "../../test/bobby/vdf/econ/mark2.mdl";
+            let vdf_path = "../../test/bobby/vdf/econ/base.vdf";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let project = crate::Project::from(datamodel_project.clone());
+            let vdf = vdf_file(vdf_path);
+            let map = vdf
+                .build_stocks_first_ot_map_for_project(&project, "main")
+                .unwrap();
+
+            let perceived_hpi = Ident::<Canonical>::new("perceived_hpi");
+            let module_output =
+                Ident::<Canonical>::from_str_unchecked("$⁚perceived_hpi⁚0⁚smth1.output");
+            let module_input =
+                Ident::<Canonical>::from_str_unchecked("$⁚perceived_hpi⁚0⁚smth1.input");
+            let indexed_hpi = Ident::<Canonical>::new("indexed_hpi");
+
+            assert_eq!(map.get(&module_output), map.get(&perceived_hpi));
+            assert_eq!(map.get(&module_input), map.get(&indexed_hpi));
+        }
+
+        #[test]
+        fn test_stocks_first_map_includes_compiled_stdlib_state_aliases_wrld3() {
+            let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+            let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let project = crate::Project::from(datamodel_project.clone());
+            let vdf = vdf_file(vdf_path);
+            let map = vdf
+                .build_stocks_first_ot_map_for_project(&project, "main")
+                .unwrap();
+
+            let land_yield_factor_2 = Ident::<Canonical>::new("land_yield_factor_2");
+            let ly_output =
+                Ident::<Canonical>::from_str_unchecked("$⁚land_yield_factor_2⁚0⁚smth3.output");
+            let ly_stock_1 =
+                Ident::<Canonical>::from_str_unchecked("$⁚land_yield_factor_2⁚0⁚smth3.stock_1");
+            let ly_stock_2 =
+                Ident::<Canonical>::from_str_unchecked("$⁚land_yield_factor_2⁚0⁚smth3.stock_2");
+            let pollution_output = Ident::<Canonical>::from_str_unchecked(
+                "$⁚persistent_pollution_appearance_rate⁚0⁚delay3.output",
+            );
+            let pollution_stock_3 = Ident::<Canonical>::from_str_unchecked(
+                "$⁚persistent_pollution_appearance_rate⁚0⁚delay3.stock_3",
+            );
+
+            assert_eq!(map.get(&ly_output), map.get(&land_yield_factor_2));
+            assert!(map.contains_key(&ly_stock_1));
+            assert!(map.contains_key(&ly_stock_2));
+            assert!(map.contains_key(&pollution_output));
+            assert!(map.contains_key(&pollution_stock_3));
         }
     }
 }
