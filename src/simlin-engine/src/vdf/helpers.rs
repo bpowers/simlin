@@ -252,6 +252,12 @@ pub(crate) fn is_stdlib_helper_stock(name: &str) -> bool {
 /// for those.
 #[cfg(feature = "file_io")]
 pub(crate) fn is_vdf_metadata_entry(name: &str) -> bool {
+    // Pure numeric labels show up in some name tables as structural markers,
+    // not user variables. Treat them as metadata so they don't steal OT slots
+    // from real model variables.
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
     // Unit annotations: "-months", "-dmnl", "-$", "-1"
     if name.starts_with('-') {
         return true;

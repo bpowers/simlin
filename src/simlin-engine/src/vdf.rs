@@ -15,8 +15,9 @@
 //!   classifies variables as stock/non-stock using the parsed model, sorts
 //!   stocks first (alphabetically), then non-stocks (alphabetically), and
 //!   cross-references against the VDF name table and record structure.
-//! - Time series correlation (`build_empirical_ot_map`, test/testing only)
-//!   for validating mapping hypotheses against a reference simulation.
+//! - Time series correlation (`build_empirical_ot_map`) for refining the
+//!   structural OT map against a reference simulation when the model can be
+//!   run on the same saved time grid.
 
 #[cfg(feature = "file_io")]
 use std::collections::{HashMap, HashSet};
@@ -310,6 +311,86 @@ struct StocksFirstMapBuild {
 
 #[cfg(feature = "file_io")]
 type VdfVisibleResultsOrder = Vec<(Ident<Canonical>, usize)>;
+
+#[cfg(feature = "file_io")]
+fn equation_uses_lookup_placeholder(equation: &crate::datamodel::Equation) -> bool {
+    match equation {
+        crate::datamodel::Equation::Scalar(eq) | crate::datamodel::Equation::ApplyToAll(_, eq) => {
+            eq.trim() == "0+0"
+        }
+        crate::datamodel::Equation::Arrayed(_, elements, default_eq, _) => {
+            default_eq.as_deref().is_none_or(|eq| eq.trim() == "0+0")
+                && !elements.is_empty()
+                && elements
+                    .iter()
+                    .all(|(_, eq, _, gf)| eq.trim() == "0+0" && gf.is_some())
+        }
+    }
+}
+
+#[cfg(feature = "file_io")]
+fn variable_has_graphical_function(var: &crate::datamodel::Variable) -> bool {
+    match var {
+        crate::datamodel::Variable::Aux(aux) => {
+            aux.gf.is_some()
+                || matches!(
+                    &aux.equation,
+                    crate::datamodel::Equation::Arrayed(_, elements, _, _)
+                        if elements.iter().any(|(_, _, _, gf)| gf.is_some())
+                )
+        }
+        crate::datamodel::Variable::Flow(flow) => {
+            flow.gf.is_some()
+                || matches!(
+                    &flow.equation,
+                    crate::datamodel::Equation::Arrayed(_, elements, _, _)
+                        if elements.iter().any(|(_, _, _, gf)| gf.is_some())
+                )
+        }
+        crate::datamodel::Variable::Stock(_) | crate::datamodel::Variable::Module(_) => false,
+    }
+}
+
+#[cfg(feature = "file_io")]
+fn is_data_only_lookup_definition(var: &crate::datamodel::Variable) -> bool {
+    let (equation, compat) = match var {
+        crate::datamodel::Variable::Aux(aux) => (&aux.equation, &aux.compat),
+        crate::datamodel::Variable::Flow(flow) => (&flow.equation, &flow.compat),
+        crate::datamodel::Variable::Stock(_) | crate::datamodel::Variable::Module(_) => {
+            return false;
+        }
+    };
+
+    if !variable_has_graphical_function(var) {
+        return false;
+    }
+
+    equation_uses_lookup_placeholder(equation)
+        || compat
+            .data_source
+            .as_ref()
+            .is_some_and(|source| source.kind == crate::datamodel::DataSourceKind::Lookups)
+}
+
+#[cfg(feature = "file_io")]
+fn collect_data_only_lookup_names(model: &crate::datamodel::Model) -> HashSet<String> {
+    model
+        .variables
+        .iter()
+        .filter(|var| is_data_only_lookup_definition(var))
+        .map(|var| normalize_vdf_name(var.get_ident()))
+        .collect()
+}
+
+#[cfg(feature = "file_io")]
+fn collect_graphical_function_signature_names(model: &crate::datamodel::Model) -> HashSet<String> {
+    model
+        .variables
+        .iter()
+        .filter(|var| variable_has_graphical_function(var))
+        .map(|var| normalize_vdf_name(&format!("#{}#", var.get_ident())))
+        .collect()
+}
 
 #[cfg(feature = "file_io")]
 impl VdfFile {
@@ -768,8 +849,12 @@ impl VdfFile {
         out
     }
 
-    /// Build a `Results` struct using model-guided structural mapping
-    /// (no time-series correlation).
+    /// Build a `Results` struct using model-guided OT mapping.
+    ///
+    /// The primary path uses structural VDF/model alignment; when the model
+    /// can be simulated on the same saved time grid, empirical series
+    /// correlation refines that map so larger files can recover correct OT
+    /// placement without giving up the structural fallback.
     ///
     /// The resulting `Results` contains only variables that could be mapped to
     /// OT entries from this VDF. Columns are ordered by model offset.
@@ -779,12 +864,48 @@ impl VdfFile {
         main_model_name: &str,
     ) -> StdResult<Results, Box<dyn Error>> {
         let vdf_data = self.extract_data()?;
-        let ot_map = self.build_stocks_first_ot_map_for_project(project, main_model_name)?;
+        let model = project
+            .datamodel
+            .models
+            .iter()
+            .find(|m| m.name == main_model_name)
+            .ok_or_else(|| format!("model {main_model_name} not found"))?;
+        let data_only_lookup_names = collect_data_only_lookup_names(model);
+        let time_ident = Ident::<Canonical>::from_str_unchecked("time");
+        let (mut ot_map, structural_error) =
+            match self.build_stocks_first_ot_map_for_project(project, main_model_name) {
+                Ok(map) => (map, None),
+                Err(err) => {
+                    let mut fallback = HashMap::new();
+                    fallback.insert(time_ident.clone(), 0usize);
+                    (fallback, Some(err))
+                }
+            };
+
+        let empirical = (|| -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+            let sim = crate::interpreter::Simulation::new(project, main_model_name)?;
+            let reference = sim.run_to_end()?;
+            build_empirical_ot_map_with_prior(&vdf_data, &reference, Some(&ot_map))
+        })();
+
+        match empirical {
+            Ok(empirical_map) => merge_empirical_ot_map(&mut ot_map, empirical_map),
+            Err(empirical_error) => {
+                if let Some(structural_error) = structural_error {
+                    return Err(std::io::Error::other(format!(
+                        "structural OT mapping failed ({structural_error}); \
+                         empirical refinement also failed ({empirical_error})"
+                    ))
+                    .into());
+                }
+            }
+        }
+
         if ot_map.is_empty() {
             return Err("VDF/model mapping produced no variables".into());
         }
 
-        let ordered = self.project_visible_results_order(&ot_map)?;
+        let ordered = self.project_visible_results_order(&ot_map, &data_only_lookup_names)?;
 
         let step_count = vdf_data.time_values.len();
         let step_size = ordered.len();
@@ -830,6 +951,7 @@ impl VdfFile {
     fn project_visible_results_order(
         &self,
         ot_map: &HashMap<Ident<Canonical>, usize>,
+        data_only_lookup_names: &HashSet<String>,
     ) -> StdResult<VdfVisibleResultsOrder, Box<dyn Error>> {
         let mut ordered = vec![(Ident::<Canonical>::from_str_unchecked("time"), 0usize)];
         let mut seen = HashSet::from([normalize_vdf_name("time")]);
@@ -837,18 +959,19 @@ impl VdfFile {
         let mut missing = Vec::new();
 
         for name in self.names.iter().take(self.slot_table.len()) {
+            let normalized = normalize_vdf_name(name);
             if name.is_empty()
                 || name.starts_with('#')
                 || system_names.contains(name.as_str())
                 || VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name))
-                || is_probable_lookup_table_name(name)
+                || (name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()))
+                || data_only_lookup_names.contains(&normalized)
                 || is_vdf_metadata_entry(name)
                 || STDLIB_PARTICIPANT_HELPERS.contains(&name.as_str())
             {
                 continue;
             }
 
-            let normalized = normalize_vdf_name(name);
             if !seen.insert(normalized) {
                 continue;
             }
@@ -954,6 +1077,8 @@ impl VdfFile {
         // Step 1: extract model variable records and their OT indices.
         let record_ots = self.model_record_ot_indices();
         let section6_codes = self.section6_ot_class_codes();
+        let data_only_lookup_names = collect_data_only_lookup_names(model);
+        let graphical_signature_names = collect_graphical_function_signature_names(model);
 
         // Step 2: extract candidate variable names from VDF name table.
         // Use the same filtering as model_record_ot_indices for slotted
@@ -966,7 +1091,8 @@ impl VdfFile {
                     && !name.starts_with('.')
                     && !name.starts_with('-')
                     && !system_names.contains(name.as_str())
-                    && !is_probable_lookup_table_name(name)
+                    && !data_only_lookup_names.contains(&normalize_vdf_name(name))
+                    && !graphical_signature_names.contains(&normalize_vdf_name(name))
             })
             .cloned()
             .collect();
@@ -1893,14 +2019,21 @@ pub struct VdfData {
 /// Build an empirical mapping from canonical variable name to OT entry index.
 ///
 /// Uses time-series correlation to match VDF data entries against a
-/// reference simulation. Returns the raw mapping for verifying
-/// metadata-based name resolution against known-good matches.
-///
-/// Test/validation oracle only -- not part of the public production API.
-#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
+/// reference simulation. Structural priors can pin known-good placements so
+/// the matcher only reassigns series when the structural OT clearly disagrees.
+#[cfg(feature = "file_io")]
 pub fn build_empirical_ot_map(
     vdf: &VdfData,
     reference: &Results,
+) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
+    build_empirical_ot_map_with_prior(vdf, reference, None)
+}
+
+#[cfg(feature = "file_io")]
+fn build_empirical_ot_map_with_prior(
+    vdf: &VdfData,
+    reference: &Results,
+    prior: Option<&HashMap<Ident<Canonical>, usize>>,
 ) -> StdResult<HashMap<Ident<Canonical>, usize>, Box<dyn Error>> {
     let step_count = vdf.time_values.len();
     if step_count != reference.step_count {
@@ -1931,6 +2064,17 @@ pub fn build_empirical_ot_map(
             })
             .collect();
 
+        if let Some(&prior_ot) = prior.and_then(|map| map.get(&ident))
+            && prior_ot < vdf.entries.len()
+            && !claimed[prior_ot]
+            && compute_match_error(&ref_series, &vdf.entries[prior_ot], &sample_indices)
+                < MATCH_THRESHOLD
+        {
+            claimed[prior_ot] = true;
+            ot_map.insert(ident, prior_ot);
+            continue;
+        }
+
         let mut best_entry = None;
         let mut best_error = f64::MAX;
 
@@ -1956,7 +2100,7 @@ pub fn build_empirical_ot_map(
     Ok(ot_map)
 }
 
-#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
+#[cfg(feature = "file_io")]
 fn sorted_reference_offsets(
     reference: &Results,
     time_ident: &Ident<Canonical>,
@@ -1968,33 +2112,102 @@ fn sorted_reference_offsets(
         .map(|(id, &off)| (id.clone(), off))
         .collect();
     ordered.sort_by(|(a_id, a_off), (b_id, b_off)| {
-        a_off
-            .cmp(b_off)
+        empirical_reference_priority(a_id)
+            .cmp(&empirical_reference_priority(b_id))
+            .then_with(|| a_off.cmp(b_off))
             .then_with(|| a_id.as_str().cmp(b_id.as_str()))
     });
     ordered
 }
 
-/// Build sample indices for time series correlation. Picks first, last,
-/// and quartile points to avoid comparing every time step.
-#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
+#[cfg(feature = "file_io")]
+fn empirical_reference_priority(id: &Ident<Canonical>) -> u8 {
+    let name = id.as_str();
+    if name.starts_with('$') {
+        2
+    } else if name.starts_with('#') {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(feature = "file_io")]
+fn merge_empirical_ot_map(
+    ot_map: &mut HashMap<Ident<Canonical>, usize>,
+    empirical_map: HashMap<Ident<Canonical>, usize>,
+) {
+    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
+    let mut ordered_ids: Vec<Ident<Canonical>> = empirical_map
+        .keys()
+        .filter(|id| **id != time_ident)
+        .cloned()
+        .collect();
+    ordered_ids.sort_by(|a, b| {
+        empirical_reference_priority(a)
+            .cmp(&empirical_reference_priority(b))
+            .then_with(|| a.as_str().cmp(b.as_str()))
+    });
+
+    for id in ordered_ids {
+        let Some(&emp_ot) = empirical_map.get(&id) else {
+            continue;
+        };
+        if ot_map.get(&id).copied() == Some(emp_ot) {
+            continue;
+        }
+        if empirical_claim_conflicts_with_visible_structure(&id, emp_ot, ot_map, &empirical_map) {
+            continue;
+        }
+        ot_map.insert(id, emp_ot);
+    }
+}
+
+#[cfg(feature = "file_io")]
+fn empirical_claim_conflicts_with_visible_structure(
+    id: &Ident<Canonical>,
+    emp_ot: usize,
+    ot_map: &HashMap<Ident<Canonical>, usize>,
+    empirical_map: &HashMap<Ident<Canonical>, usize>,
+) -> bool {
+    ot_map.iter().any(|(other_id, &other_ot)| {
+        other_id != id
+            && other_ot == emp_ot
+            && is_visible_results_ident(other_id)
+            && empirical_map
+                .get(other_id)
+                .copied()
+                .is_none_or(|other_emp_ot| other_emp_ot == emp_ot)
+    })
+}
+
+#[cfg(feature = "file_io")]
+fn is_visible_results_ident(id: &Ident<Canonical>) -> bool {
+    let name = id.as_str();
+    name != "time" && !name.starts_with('#') && !name.starts_with('$')
+}
+
+/// Build sample indices for time series correlation. Spread samples across the
+/// run so long smooth series do not collide on only a few early points.
+#[cfg(feature = "file_io")]
 fn build_sample_indices(step_count: usize) -> Vec<usize> {
-    let mut indices = vec![0];
-    if step_count > 10 {
-        indices.push(step_count / 4);
-        indices.push(step_count / 2);
-        indices.push(3 * step_count / 4);
+    let mut indices = vec![0usize];
+    for numerator in 1..8usize {
+        let idx = step_count.saturating_mul(numerator) / 8;
+        if idx > 0 && idx + 1 < step_count {
+            indices.push(idx);
+        }
     }
-    if step_count > 1 {
-        indices.push(step_count - 1);
-    }
+    indices.push(step_count.saturating_sub(1));
+    indices.sort_unstable();
+    indices.dedup();
     indices
 }
 
 /// Compute a match error between a reference series and a VDF entry,
 /// sampled at the given indices. Returns f64::MAX if the series lengths
 /// don't match.
-#[cfg(all(feature = "file_io", any(test, feature = "testing")))]
+#[cfg(feature = "file_io")]
 fn compute_match_error(reference: &[f64], candidate: &[f64], sample_indices: &[usize]) -> f64 {
     if reference.len() != candidate.len() {
         return f64::MAX;
@@ -2014,7 +2227,7 @@ fn compute_match_error(reference: &[f64], candidate: &[f64], sample_indices: &[u
         total_error += rel_err;
     }
 
-    total_error
+    total_error / sample_indices.len() as f64
 }
 
 /// Extract the time series values from the first data block (block 0).
@@ -2856,6 +3069,84 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[test]
+        fn test_lookup_fixture_results_include_inline_lookup_but_not_lookup_definition() {
+            let mdl_path = "../../test/bobby/vdf/lookups/lookup_ex.mdl";
+            let vdf_path = "../../test/bobby/vdf/lookups/lookup_ex.vdf";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let project = std::rc::Rc::new(crate::Project::from(datamodel_project));
+            let vdf = vdf_file(vdf_path);
+
+            let results = vdf
+                .to_results_with_model(&project, "main")
+                .unwrap_or_else(|e| panic!("lookup fixture: to_results_with_model failed: {e}"));
+
+            let inline_lookup = Ident::new("inline_lookup_table");
+            let lookup_definition = Ident::new("lookup_table_1");
+            let net_change = Ident::new("net_change");
+
+            assert!(
+                results.offsets.contains_key(&inline_lookup),
+                "inline WITH LOOKUP auxiliary should be present in Results"
+            );
+            assert!(
+                !results.offsets.contains_key(&lookup_definition),
+                "standalone lookup-table definitions should not become Results columns"
+            );
+
+            let inline_col = results.offsets[&inline_lookup];
+            let net_change_col = results.offsets[&net_change];
+            let value_at =
+                |col: usize, step: usize| -> f64 { results.data[step * results.step_size + col] };
+
+            assert!((value_at(inline_col, 0) - 6.0).abs() < 1e-9);
+            assert!((value_at(inline_col, 30) - 5.0).abs() < 1e-9);
+            assert!((value_at(inline_col, 100) - 3.0).abs() < 1e-9);
+
+            assert!((value_at(net_change_col, 0) - 10.0).abs() < 1e-9);
+            assert!((value_at(net_change_col, 30) - 15.0).abs() < 1e-9);
+            assert!((value_at(net_change_col, 100) - 23.0).abs() < 1e-9);
+        }
+
+        #[test]
+        fn test_lookup_fixture_stocks_first_map_skips_lookup_definition() {
+            let mdl_path = "../../test/bobby/vdf/lookups/lookup_ex.mdl";
+            let vdf_path = "../../test/bobby/vdf/lookups/lookup_ex.vdf";
+
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let vdf = vdf_file(vdf_path);
+            let map = vdf.build_stocks_first_ot_map(&datamodel_project).unwrap();
+            let data = vdf.extract_data().unwrap();
+
+            let inline_lookup = Ident::new("inline_lookup_table");
+            let lookup_definition = Ident::new("lookup_table_1");
+            let net_change = Ident::new("net_change");
+
+            assert!(
+                map.contains_key(&inline_lookup),
+                "inline WITH LOOKUP auxiliary should receive an OT mapping"
+            );
+            assert!(
+                !map.contains_key(&lookup_definition),
+                "standalone lookup-table definitions should not receive Results OT mappings"
+            );
+
+            let inline_ot = map[&inline_lookup];
+            let net_change_ot = map[&net_change];
+            assert_ne!(
+                inline_ot, net_change_ot,
+                "inline lookup and net change should not collapse onto the same OT"
+            );
+
+            assert!((data.entries[inline_ot][0] - 6.0).abs() < 1e-9);
+            assert!((data.entries[inline_ot][100] - 3.0).abs() < 1e-9);
+            assert!((data.entries[net_change_ot][0] - 10.0).abs() < 1e-9);
+            assert!((data.entries[net_change_ot][100] - 23.0).abs() < 1e-9);
         }
 
         #[test]
