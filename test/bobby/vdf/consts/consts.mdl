@@ -1,0 +1,113 @@
+{UTF-8}
+a=
+	1
+	~	
+	~		|
+
+a stock= INTEG (
+	net flow,
+		5.5)
+	~	
+	~		|
+
+b=
+	3
+	~	
+	~		|
+
+c=
+	3
+	~	
+	~		|
+
+d=
+	graphical function(c)
+	~	
+	~		|
+
+graphical function(
+	[(0,0)-(100,10)],(0,2),(25,3),(50,6),(75,8),(100,9))
+	~	
+	~		|
+
+net flow=
+	a + b + d
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,a stock,598,231,40,20,3,3,0,0,0,0,0,0
+12,2,48,438,228,10,8,0,3,0,0,-1,0,0,0
+1,4,6,1,4,0,0,22,0,0,0,-1--1--1,,1|(533,228)|
+1,5,6,2,100,0,0,22,0,0,0,-1--1--1,,1|(472,228)|
+11,6,0,503,228,6,8,34,3,0,0,1,0,0,0
+10,7,net flow,503,247,26,11,40,3,0,0,-1,0,0,0
+10,8,graphical function,154,340,55,11,8,3,0,0,0,0,0,0
+10,9,a,95,58,6,11,8,3,0,0,0,0,0,0
+10,10,b,95,130,6,11,8,3,0,0,0,0,0,0
+10,11,c,85,192,6,11,8,3,0,0,0,0,0,0
+10,12,d,325,269,6,11,8,3,0,0,0,0,0,0
+1,13,9,6,0,0,0,0,0,64,0,-1--1--1,,1|(292,139)|
+1,14,10,6,0,0,0,0,0,64,0,-1--1--1,,1|(292,176)|
+1,15,11,12,0,0,0,0,0,64,0,-1--1--1,,1|(198,227)|
+1,16,8,12,0,0,0,0,0,64,0,-1--1--1,,1|(243,302)|
+1,17,12,6,0,0,0,0,0,64,0,-1--1--1,,1|(407,250)|
+///---\\\
+:L<%^E!@
+1:b_is_3.vdf
+9:b_is_3
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:b
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:100
+26:100
