@@ -80,7 +80,9 @@ impl Context {
         // These ensure that "person" and "people" (etc.) are treated as the same unit.
         // We only add a built-in if the model doesn't already define a unit with that name.
         let builtin_units: &[(&str, &[&str])] = &[
+            ("$", &["dollar", "dollars", "$s"]),
             ("person", &["people", "persons"]),
+            ("unit", &["units"]),
             ("minute", &["minutes"]),
             ("month", &["months"]),
             ("year", &["years", "yr", "yrs"]),
@@ -831,4 +833,50 @@ fn test_year_years_builtin_alias() {
     let expr = Expr0::new("1/yr", LexerType::Units).unwrap().unwrap();
     let result = build_unit_components(&context, &expr).unwrap();
     assert_eq!(result, expected_inverse, "1/yr should be 1/year");
+}
+
+#[test]
+fn test_builtin_dollar_equivalences() {
+    let context = Context::new_with_builtins(&[], &Default::default()).unwrap();
+
+    let expected: UnitMap = [("$".to_owned(), 1)].iter().cloned().collect();
+
+    let expr = Expr0::new("$", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "$ should parse correctly");
+
+    let expr = Expr0::new("Dollar", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "Dollar should resolve to $");
+
+    let expr = Expr0::new("Dollars", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "Dollars should resolve to $");
+
+    let expr = Expr0::new("$s", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "$s should resolve to $");
+
+    // Dollar/Dollars should cancel out
+    let expr = Expr0::new("Dollar/Dollars", LexerType::Units)
+        .unwrap()
+        .unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    let expected_dmnl: UnitMap = UnitMap::new();
+    assert_eq!(result, expected_dmnl, "Dollar/Dollars should cancel out");
+}
+
+#[test]
+fn test_builtin_unit_equivalences() {
+    let context = Context::new_with_builtins(&[], &Default::default()).unwrap();
+
+    let expected: UnitMap = [("unit".to_owned(), 1)].iter().cloned().collect();
+
+    let expr = Expr0::new("Unit", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "Unit should parse correctly");
+
+    let expr = Expr0::new("Units", LexerType::Units).unwrap().unwrap();
+    let result = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(result, expected, "Units should resolve to unit");
 }
