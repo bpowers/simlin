@@ -558,7 +558,7 @@ pub struct Section {
     // every observed VDF file, so storing both adds no information.
     /// Field3 in header (often 0x1F4 = 500).
     pub field3: u32,
-    /// Field4: section type identifier (e.g. 19=model info, 2=variable slots).
+    /// Field4: section type identifier (e.g. 19=model info, 2=string table).
     pub field4: u32,
     /// Field5: for name table sections, high 16 bits = first name length.
     pub field5: u32,
@@ -643,23 +643,23 @@ impl VdfSection5SetEntry {
     }
 }
 
-/// Fixed-width metadata record stored in the trailing section-6 suffix.
+/// Fixed-width record stored in the trailing section-6 suffix.
 ///
 /// After the section-6 OT class-code array and the OT-aligned final-value
 /// vector, observed files store a `13 * u32` record stream terminated by a
-/// single zero word. The exact semantic meaning of most fields is still being
-/// reverse engineered, but field 10 is a stable OT index used by Vensim's
-/// display metadata.
+/// single zero word. These records correspond 1:1 with lookup table
+/// definitions in the name table; word[10] carries the OT index for each
+/// lookup. The semantic meaning of the other 12 fields is not yet decoded.
 #[derive(Debug, Clone, PartialEq)]
-pub struct VdfSection6DisplayRecord {
+pub struct VdfSection6LookupRecord {
     /// Absolute file offset where this record begins.
     pub file_offset: usize,
     /// Raw words comprising the record.
     pub words: [u32; 13],
 }
 
-impl VdfSection6DisplayRecord {
-    /// OT index referenced by the record's display metadata.
+impl VdfSection6LookupRecord {
+    /// OT index for this lookup table definition.
     pub fn ot_index(&self) -> usize {
         self.words[10] as usize
     }
@@ -832,7 +832,7 @@ impl VdfFile {
             })
             .unwrap_or_default();
 
-        // Section at index 1 is the variable slot table section. Its field4
+        // Section at index 1 is the string table section. Its field4
         // value varies across VDF versions (2, 42, etc.) so we identify it
         // by position rather than field4.
         let sec1_data_size = sections.get(1).map(|s| s.region_data_size()).unwrap_or(0);
@@ -941,7 +941,7 @@ impl VdfFile {
         offset >= self.first_data_block && offset < self.data.len()
     }
 
-    /// Get the variable slot table section (always at section index 1).
+    /// Get the string table section (always at section index 1).
     /// Its field4 value varies across VDF versions (2, 42, etc.).
     pub fn slot_section(&self) -> Option<&Section> {
         self.sections.get(1)
@@ -1136,13 +1136,13 @@ impl VdfFile {
         Some(values)
     }
 
-    /// Parse the fixed-width display record stream from the section-6 tail.
+    /// Parse the fixed-width lookup record stream from the section-6 tail.
     ///
     /// Observed files store this stream immediately after the OT final-value
     /// array. The stream is `13 * u32` per record and ends with a single zero
-    /// word. The record payload appears to drive Vensim's graph/display UI;
-    /// only the OT index field has been identified so far.
-    pub fn section6_display_records(&self) -> Option<Vec<VdfSection6DisplayRecord>> {
+    /// word. These records correspond 1:1 with lookup table definitions in
+    /// the name table; word[10] carries the OT index for each lookup.
+    pub fn section6_lookup_records(&self) -> Option<Vec<VdfSection6LookupRecord>> {
         if self.offset_table_count == 0 {
             return None;
         }
@@ -1176,7 +1176,7 @@ impl VdfFile {
             for (j, word) in words.iter_mut().enumerate() {
                 *word = read_u32(suffix, rec_off + j * 4);
             }
-            out.push(VdfSection6DisplayRecord {
+            out.push(VdfSection6LookupRecord {
                 file_offset: values_end + rec_off,
                 words,
             });
@@ -3173,34 +3173,34 @@ mod tests {
     }
 
     #[test]
-    fn test_section6_display_record_stream_shape() {
+    fn test_section6_lookup_record_stream_shape() {
         let water = vdf_file("../../test/bobby/vdf/water/Current.vdf");
         let pop = vdf_file("../../test/bobby/vdf/pop/Current.vdf");
         let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
         let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
 
-        let water_records = water.section6_display_records().unwrap();
-        let pop_records = pop.section6_display_records().unwrap();
-        let econ_records = econ.section6_display_records().unwrap();
-        let wrld3_records = wrld3.section6_display_records().unwrap();
+        let water_records = water.section6_lookup_records().unwrap();
+        let pop_records = pop.section6_lookup_records().unwrap();
+        let econ_records = econ.section6_lookup_records().unwrap();
+        let wrld3_records = wrld3.section6_lookup_records().unwrap();
 
         assert!(
             water_records.is_empty(),
-            "water should have no parsed display records"
+            "water should have no parsed lookup records"
         );
         assert!(
             pop_records.is_empty(),
-            "pop should have no parsed display records"
+            "pop should have no parsed lookup records"
         );
         assert_eq!(
             econ_records.len(),
             4,
-            "econ display-record count should be stable"
+            "econ lookup-record count should be stable"
         );
         assert_eq!(
             wrld3_records.len(),
             55,
-            "WRLD3 display-record count should be stable"
+            "WRLD3 lookup-record count should be stable"
         );
 
         for (label, vdf, records) in [
@@ -3210,12 +3210,12 @@ mod tests {
             for rec in records {
                 assert!(
                     rec.ot_index() < vdf.offset_table_count,
-                    "{label}: display record OT {} out of range",
+                    "{label}: lookup record OT {} out of range",
                     rec.ot_index()
                 );
                 assert_eq!(
                     rec.words[11], 1,
-                    "{label}: expected stable display-record flag"
+                    "{label}: expected stable lookup-record flag"
                 );
                 assert_eq!(rec.words[12], 0, "{label}: expected zero terminator word");
             }

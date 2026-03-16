@@ -13,13 +13,13 @@ use simlin_engine::vdf::{
 
 const SECTION_ROLES: [&str; 8] = [
     "model info",
-    "variable slot table",
+    "string table",
     "name table",
     "unknown (zeros)",
     "unknown metadata",
     "degenerate/marker",
     "unknown metadata",
-    "display settings",
+    "lookup + OT + data",
 ];
 
 /// Max bytes of section data to hexdump.
@@ -606,9 +606,9 @@ fn print_section6_tail(vdf: &VdfFile) {
         _ => println!("  OT final values: (none)"),
     }
 
-    match vdf.section6_display_records() {
+    match vdf.section6_lookup_records() {
         Some(records) if !records.is_empty() => {
-            println!("  display records: {}", records.len());
+            println!("  lookup records: {}", records.len());
             for (i, rec) in records.iter().take(16).enumerate() {
                 let w = &rec.words;
                 println!(
@@ -632,11 +632,11 @@ fn print_section6_tail(vdf: &VdfFile) {
                 );
             }
             if records.len() > 16 {
-                println!("    ... ({} more display records)", records.len() - 16);
+                println!("    ... ({} more lookup records)", records.len() - 16);
             }
         }
-        Some(_) => println!("  display records: 0"),
-        None => println!("  display records: (unparsed)"),
+        Some(_) => println!("  lookup records: 0"),
+        None => println!("  lookup records: (unparsed)"),
     }
 
     println!();
