@@ -2204,23 +2204,6 @@ pub struct Module {
     pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
-impl Module {
-    /// Iterator over variable idents computed during the Flows phase.
-    pub fn runlist_flows_idents(&self) -> impl Iterator<Item = &Ident<Canonical>> {
-        // runlist_order is [flows..., stocks...]; flows come first
-        let n_stocks = self.runlist_stocks.len();
-        let n_flows = self.runlist_order.len().saturating_sub(n_stocks);
-        self.runlist_order.iter().take(n_flows)
-    }
-
-    /// Iterator over variable idents computed during the Stocks phase.
-    pub fn runlist_stocks_idents(&self) -> impl Iterator<Item = &Ident<Canonical>> {
-        let n_stocks = self.runlist_stocks.len();
-        let n_flows = self.runlist_order.len().saturating_sub(n_stocks);
-        self.runlist_order.iter().skip(n_flows)
-    }
-}
-
 // calculate a mapping of module variable name -> module model name
 pub(crate) fn calc_module_model_map(
     project: &Project,
