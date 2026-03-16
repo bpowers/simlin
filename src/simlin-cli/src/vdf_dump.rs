@@ -7,8 +7,8 @@ use std::error::Error;
 
 use simlin_engine::vdf::{
     FILE_HEADER_SIZE, RECORD_SIZE, SYSTEM_NAMES, Section, VDF_SECTION6_OT_CODE_STOCK,
-    VDF_SECTION6_OT_CODE_TIME, VDF_SENTINEL, VENSIM_BUILTINS, VdfFile, read_f32, read_u16,
-    read_u32,
+    VDF_SECTION6_OT_CODE_TIME, VDF_SENTINEL, VENSIM_BUILTINS, VdfDatasetFile, VdfFile, VdfKind,
+    probe_vdf_kind, read_f32, read_u16, read_u32,
 };
 
 const SECTION_ROLES: [&str; 8] = [
@@ -28,6 +28,12 @@ const MAX_HEXDUMP: usize = 256;
 pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
     let data = std::fs::read(path)?;
     let file_size = data.len();
+    if probe_vdf_kind(&data) == Some(VdfKind::Dataset) {
+        let dataset = VdfDatasetFile::parse(data)?;
+        dump_dataset_vdf(path, file_size, &dataset)?;
+        return Ok(());
+    }
+
     let vdf = VdfFile::parse(data)?;
 
     print_header(&vdf, file_size, path);
@@ -36,6 +42,8 @@ pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
     print_names(&vdf);
     print_slots(&vdf);
     print_records(&vdf);
+    print_section3_directory(&vdf);
+    print_section4_entries(&vdf);
     print_record_ot_ranges(&vdf);
     print_ref_streams(&vdf);
     print_section6_ot_codes(&vdf);
@@ -44,6 +52,81 @@ pub fn dump_vdf(path: &str) -> Result<(), Box<dyn Error>> {
     print_data_blocks(&vdf);
     print_gaps(&vdf, file_size);
     print_summary(&vdf, file_size);
+
+    Ok(())
+}
+
+fn dump_dataset_vdf(
+    path: &str,
+    file_size: usize,
+    dataset: &VdfDatasetFile,
+) -> Result<(), Box<dyn Error>> {
+    println!("=== Dataset VDF File: {} ===", path);
+    println!("File size:    {} bytes", file_size);
+    println!("Origin:       {}", dataset.origin);
+    println!("Time points:  {}", dataset.time_point_count);
+    println!("Bitmap size:  {} bytes", dataset.bitmap_size);
+    println!();
+
+    println!("=== Sections ({}) ===", dataset.sections.len());
+    for (i, sec) in dataset.sections.iter().enumerate() {
+        println!(
+            "  Section {} @ 0x{:08x} field3={} field4={} field5=0x{:08x} region={}B",
+            i,
+            sec.file_offset,
+            sec.field3,
+            sec.field4,
+            sec.field5,
+            sec.region_data_size(),
+        );
+    }
+    println!();
+
+    println!("=== Names ({}) ===", dataset.names.len());
+    for (i, name) in dataset.names.iter().enumerate() {
+        println!("  {:>3}  {}", i, name);
+    }
+    println!();
+
+    println!("=== Data Blocks ({}) ===", dataset.data_block_offsets.len());
+    for (i, offset) in dataset.data_block_offsets.iter().enumerate() {
+        println!("  {:>3}  0x{:08x}", i + 1, offset);
+    }
+    println!();
+
+    let bindings = dataset.series_bindings()?;
+    println!("=== Dataset Bindings ({}) ===", bindings.len());
+    for binding in &bindings {
+        println!(
+            "  {:<28} block={:<2} record=0x{:08x} f2={:<3} f3={}",
+            binding.name,
+            binding.block_index + 1,
+            binding.record_file_offset,
+            binding.record_f2,
+            binding.record_f3
+        );
+    }
+    println!();
+
+    let data = dataset.extract_data()?;
+    println!("=== Dataset Series ({}) ===", data.series_order.len());
+    println!(
+        "  time(first,last)=({}, {})",
+        data.time_values.first().copied().unwrap_or(f64::NAN),
+        data.time_values.last().copied().unwrap_or(f64::NAN)
+    );
+    for name in &data.series_order {
+        let Some(series) = data.series(name) else {
+            continue;
+        };
+        println!(
+            "  {:<28} first={} last={}",
+            name,
+            series.first().copied().unwrap_or(f64::NAN),
+            series.last().copied().unwrap_or(f64::NAN)
+        );
+    }
+    println!();
 
     Ok(())
 }
@@ -396,6 +479,130 @@ fn print_record_ot_ranges(vdf: &VdfFile) {
     println!();
 }
 
+fn print_section3_directory(vdf: &VdfFile) {
+    println!("=== Section 3 Directory ===");
+    let Some(directory) = vdf.parse_section3_directory() else {
+        println!("  (unparseable)");
+        println!();
+        return;
+    };
+
+    println!(
+        "  zero_prefix_words={} entries={} trailing_zero_word={}",
+        directory.zero_prefix_words,
+        directory.entries.len(),
+        directory.has_trailing_zero_word
+    );
+    if directory.entries.is_empty() {
+        println!();
+        return;
+    }
+
+    let mut slot_to_names: std::collections::HashMap<u32, Vec<&str>> =
+        std::collections::HashMap::new();
+    for (i, &slot) in vdf.slot_table.iter().enumerate() {
+        if let Some(name) = vdf.names.get(i) {
+            slot_to_names.entry(slot).or_default().push(name.as_str());
+        }
+    }
+    let sec4_index_words: HashSet<u32> = vdf
+        .parse_section4_entry_stream()
+        .map(|stream| {
+            stream
+                .entries
+                .into_iter()
+                .map(|entry| entry.index_word())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for (i, entry) in directory.entries.iter().take(16).enumerate() {
+        let slot_refs: Vec<String> = entry
+            .axis_slot_refs()
+            .iter()
+            .map(|slot_ref| {
+                slot_to_names
+                    .get(slot_ref)
+                    .map(|names| format!("{slot_ref}:{}", names.join("|")))
+                    .unwrap_or_else(|| format!("{slot_ref}:<sec1>"))
+            })
+            .collect();
+        println!(
+            "  {:>3} @0x{:08x} idx={} sec4_hit={} flat={} axes={:?} w10={} w11={} slot_refs={:?} tail={}",
+            i,
+            entry.file_offset,
+            entry.index_word(),
+            sec4_index_words.contains(&entry.index_word()),
+            entry.flat_size(),
+            entry.axis_sizes(),
+            entry.words[10],
+            entry.words[11],
+            slot_refs,
+            entry.terminal_tag(),
+        );
+    }
+    if directory.entries.len() > 16 {
+        println!("  ... ({} more entries)", directory.entries.len() - 16);
+    }
+    println!();
+}
+
+fn print_section4_entries(vdf: &VdfFile) {
+    println!("=== Section 4 Entries ===");
+    let Some(stream) = vdf.parse_section4_entry_stream() else {
+        println!("  (unparseable)");
+        println!();
+        return;
+    };
+
+    println!(
+        "  zero_prefix_words={} entries={}",
+        stream.zero_prefix_words,
+        stream.entries.len()
+    );
+    if stream.entries.is_empty() {
+        println!();
+        return;
+    }
+
+    let mut slot_to_names: std::collections::HashMap<u32, Vec<&str>> =
+        std::collections::HashMap::new();
+    for (i, &slot) in vdf.slot_table.iter().enumerate() {
+        if let Some(name) = vdf.names.get(i) {
+            slot_to_names.entry(slot).or_default().push(name.as_str());
+        }
+    }
+
+    for (i, entry) in stream.entries.iter().take(24).enumerate() {
+        let refs: Vec<String> = entry
+            .refs
+            .iter()
+            .map(|slot_ref| {
+                slot_to_names
+                    .get(slot_ref)
+                    .map(|names| format!("{slot_ref}:{}", names.join("|")))
+                    .unwrap_or_else(|| format!("{slot_ref}:<sec1>"))
+            })
+            .collect();
+        println!(
+            "  {:>3} @0x{:08x} packed=0x{:08x} lo={} hi={} refs={} idx={} slotted={} refs={:?}",
+            i,
+            entry.file_offset,
+            entry.packed_word,
+            entry.count_lo(),
+            entry.count_hi(),
+            entry.refs.len(),
+            entry.index_word(),
+            entry.slotted_ref_count,
+            refs,
+        );
+    }
+    if stream.entries.len() > 24 {
+        println!("  ... ({} more entries)", stream.entries.len() - 24);
+    }
+    println!();
+}
+
 fn print_ref_streams(vdf: &VdfFile) {
     let mut slot_to_name: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
     for (i, &slot) in vdf.slot_table.iter().enumerate() {
@@ -509,10 +716,11 @@ fn print_ref_streams(vdf: &VdfFile) {
                     })
                     .collect();
                 println!(
-                    "  {:>3} @0x{:08x} n={} size={} dim={} slot_hits={} refs(head)={:?}",
+                    "  {:>3} @0x{:08x} n={} marker={} size={} dim={} slot_hits={} refs(head)={:?}",
                     i,
                     e.file_offset,
                     e.n,
+                    e.marker,
                     e.refs.len(),
                     e.dimension_size(),
                     e.slotted_ref_count,
