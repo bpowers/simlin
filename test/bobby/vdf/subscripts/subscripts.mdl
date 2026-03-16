@@ -1,0 +1,99 @@
+{UTF-8}
+a stock[sub1]= INTEG (
+	net flow[sub1],
+		sub1)
+	~	
+	~		|
+
+net flow[sub1]=
+	some rate * a stock[sub1] + other const[sub1]
+	~	
+	~		|
+
+other const[sub1]=
+	0.9,0.3,0.5
+	~	
+	~		|
+
+some rate=
+	0.7
+	~	
+	~		|
+
+sub1:
+	a,b,c
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 23
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*modelview
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,a stock,504,158,40,20,3,3,0,0,0,0,0,0
+12,2,48,327,159,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(435,159)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(365,159)|
+11,5,0,400,159,6,8,34,3,0,0,1,0,0,0
+10,6,net flow,400,178,26,11,40,3,0,0,-1,0,0,0
+10,7,some rate,218,59,32,11,8,3,0,0,0,0,0,0
+1,8,7,5,0,0,0,0,0,64,0,-1--1--1,,1|(309,109)|
+1,10,1,6,1,0,0,0,0,64,0,-1--1--1,,1|(442,217)|
+10,11,other const,233,251,36,11,8,3,0,0,0,0,0,0
+1,12,11,6,0,0,0,0,0,64,0,-1--1--1,,1|(309,217)|
+///---\\\
+:L<%^E!@
+1:subscripts.vdf
+9:subscripts
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:a stock[sub1]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:23
+26:23
+6:a
