@@ -203,6 +203,31 @@ class LookupRecord:
 
 
 @dataclass
+class SlotReferenceInfo:
+    slot_ref: int
+    heuristic_names: list[str]
+    signature: Optional[list[int]]
+    uses: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SlotTableLayout:
+    base: int
+    max_offset: int
+    distinct_strides: list[int]
+    irregular_stride_count: int
+    missing_16_slots: int
+    contiguous_16: bool
+
+
+@dataclass
+class Section5BridgeMatches:
+    exact: list[int] = field(default_factory=list)
+    partial: list[int] = field(default_factory=list)
+    null_trailing: list[int] = field(default_factory=list)
+
+
+@dataclass
 class OtRange:
     start: int
     end: int
@@ -560,8 +585,79 @@ def build_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
 def resolve_slot_ref(slot_ref: int, slot_to_names: dict[int, list[str]]) -> str:
     names = slot_to_names.get(slot_ref)
     if names:
-        return f"{slot_ref}:{'/'.join(names)}"
-    return f"{slot_ref}:<sec1>"
+        return f"{slot_ref}:?{'/'.join(names)}"
+    return f"{slot_ref}:?"
+
+
+def analyze_slot_table_offsets(values: list[int]) -> Optional[SlotTableLayout]:
+    if not values:
+        return None
+
+    sorted_vals = sorted(set(values))
+    base = sorted_vals[0]
+    max_offset = sorted_vals[-1]
+    strides = [sorted_vals[i + 1] - sorted_vals[i] for i in range(len(sorted_vals) - 1)]
+    distinct_strides = sorted(set(strides))
+
+    irregular_stride_count = 0
+    missing_16_slots = 0
+    for stride in strides:
+        if stride != 16:
+            irregular_stride_count += 1
+        if stride > 16 and stride % 16 == 0:
+            missing_16_slots += (stride // 16) - 1
+        elif stride > 16:
+            missing_16_slots += 1
+
+    contiguous_16 = len(sorted_vals) <= 1 or all(stride == 16 for stride in strides)
+    return SlotTableLayout(
+        base=base,
+        max_offset=max_offset,
+        distinct_strides=distinct_strides,
+        irregular_stride_count=irregular_stride_count,
+        missing_16_slots=missing_16_slots,
+        contiguous_16=contiguous_16,
+    )
+
+
+def format_slot_table_layout(layout: Optional[SlotTableLayout]) -> str:
+    if layout is None:
+        return "(empty)"
+    stride_str = ",".join(str(s) for s in layout.distinct_strides) if layout.distinct_strides else "-"
+    return (f"base={layout.base} max={layout.max_offset} strides=[{stride_str}] "
+            f"contiguous16={layout.contiguous_16} missing16={layout.missing_16_slots}")
+
+
+def section5_trailing_refs(entry: Section5SetEntry) -> list[int]:
+    trailing_count = 1 + entry.marker
+    if len(entry.refs) < trailing_count:
+        return []
+    return entry.refs[-trailing_count:]
+
+
+def classify_section5_bridge_matches(sec3: Section3Entry,
+                                     sec5_entries: list[Section5SetEntry]) -> Section5BridgeMatches:
+    axis_refs = [r for r in sec3.axis_slot_refs() if r > 0]
+    axis_set = set(axis_refs)
+    matches = Section5BridgeMatches()
+
+    if not axis_refs:
+        return matches
+
+    for idx, sec5 in enumerate(sec5_entries):
+        trailing = section5_trailing_refs(sec5)
+        trailing_pos = [r for r in trailing if r > 0]
+        trailing_set = set(trailing_pos)
+
+        if trailing_pos and trailing_pos == axis_refs:
+            matches.exact.append(idx)
+        elif trailing_pos and len(trailing_pos) == len(axis_refs) and trailing_set == axis_set:
+            matches.exact.append(idx)
+        elif trailing_pos and trailing_set & axis_set:
+            matches.partial.append(idx)
+        elif trailing and not trailing_pos:
+            matches.null_trailing.append(idx)
+    return matches
 
 
 # ---- Parsing ----
@@ -651,6 +747,9 @@ def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
         return 0, []
     end = name_sec.file_offset
 
+    best_key: Optional[tuple[int, int, int, int, int, int]] = None
+    best: tuple[int, list[int]] = (0, [])
+
     for gap in range(20):
         for name_count in range(max_name_count, 0, -1):
             table_size = name_count * 4
@@ -662,12 +761,33 @@ def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
             sorted_vals = sorted(set(values))
             if len(sorted_vals) != name_count:
                 continue
-            if not all(v % 4 == 0 and v > 0 and v < sec1_data_size for v in sorted_vals):
+            if not all(v % 4 == 0 and v > 0 and v + 16 <= sec1_data_size for v in sorted_vals):
                 continue
             strides = [sorted_vals[i + 1] - sorted_vals[i] for i in range(len(sorted_vals) - 1)]
-            if strides and min(strides) >= 4:
-                return table_start, values
-    return 0, []
+            if strides and min(strides) < 4:
+                continue
+
+            layout = analyze_slot_table_offsets(values)
+            if layout is None:
+                continue
+
+            # Prefer the largest structurally valid table first. Within that
+            # count, prefer the candidates that preserve the observed 16-byte
+            # slot lattice rather than whichever suffix happens to appear with
+            # the smallest gap before section 2.
+            key = (
+                name_count,
+                1 if layout.contiguous_16 else 0,
+                -layout.irregular_stride_count,
+                -layout.missing_16_slots,
+                -table_start,
+                -gap,
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (table_start, values)
+
+    return best
 
 
 def find_records(data: bytes, search_start: int, search_end: int) -> list[VdfRecord]:
@@ -921,6 +1041,7 @@ def print_slots(vdf: VdfFile) -> None:
         return
     sec1_data_start = vdf.sections[1].data_offset() if len(vdf.sections) > 1 else 0
     print(f"=== Slot Table ({len(vdf.slot_table)} entries @ 0x{vdf.slot_table_offset:08x}) ===")
+    print(f"  layout: {format_slot_table_layout(analyze_slot_table_offsets(vdf.slot_table))}")
     print(f"  {'Idx':>3}  {'Sec1Off':>7}  {'Name':<36}  {'w[0]':>8} {'w[1]':>8} {'w[2]':>8} {'w[3]':>8}")
     for i, offset in enumerate(vdf.slot_table):
         name = vdf.names[i] if i < len(vdf.names) else "???"
@@ -1007,10 +1128,13 @@ def print_section3(vdf: VdfFile) -> None:
     for i, entry in enumerate(directory.entries):
         slot_refs = [resolve_slot_ref(sr, slot_to_names) for sr in entry.axis_slot_refs()]
         sec4_hit = entry.index_word() in sec4_idx_words
+        state = "placeholder" if entry.flat_size() == 0 else "active"
         print(f"  {i:>3} @0x{entry.file_offset:08x} idx={entry.index_word()} sec4_hit={sec4_hit} "
-              f"flat={entry.flat_size()} axes={entry.axis_sizes()} "
+              f"state={state} flat={entry.flat_size()} axes={entry.axis_sizes()} "
               f"w10={entry.words[10]} w11={entry.words[11]} "
-              f"slot_refs={slot_refs} tail={entry.terminal_tag()}")
+              f"shape_words={entry.words[:4]} "
+              f"slot_refs={slot_refs} raw_slot_refs={entry.axis_slot_refs()} "
+              f"tail={entry.terminal_tag()}")
     print()
 
 
@@ -1050,9 +1174,12 @@ def print_section5(vdf: VdfFile) -> None:
     slot_to_names = build_slot_to_names(vdf)
     for i, e in enumerate(entries[:16]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs[:8]]
+        trailing_count = 1 + e.marker
+        trailing_refs = e.refs[-trailing_count:] if len(e.refs) >= trailing_count else []
         print(f"  {i:>3} @0x{e.file_offset:08x} n={e.n} marker={e.marker} "
               f"size={len(e.refs)} dim={e.dimension_size()} "
-              f"slotted={e.slotted_ref_count} refs(head)={refs}")
+              f"slotted={e.slotted_ref_count} refs(head)={refs} "
+              f"raw_refs={e.refs} trailing={trailing_refs}")
     if len(entries) > 16:
         print(f"  ... ({len(entries) - 16} more sets)")
     print()
@@ -1078,7 +1205,7 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
     for i, e in enumerate(entries[:12]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs]
         print(f"  {i:>3} @0x{e.file_offset:08x} n={len(e.refs)} "
-              f"slot_hits={e.slotted_ref_count} refs={refs}")
+              f"slot_hits={e.slotted_ref_count} raw_refs={e.refs} refs={refs}")
     if len(entries) > 12:
         print(f"  ... ({len(entries) - 12} more entries)")
     print()
@@ -1263,11 +1390,19 @@ def print_shape_record_bridge(vdf: VdfFile) -> None:
 
     for code in sorted(shape_groups.keys()):
         recs = shape_groups[code]
-        if code == 5:
+        if code == 0:
+            label = "neutral/padding or idx=0 placeholder"
+        elif code == 5:
             label = "scalar"
-        elif code in idx_to_entry:
+        elif code in idx_to_entry and code != 0:
             entry = idx_to_entry[code]
             label = f"sec3 idx={code}, flat={entry.flat_size()}, axes={entry.axis_sizes()}"
+        elif code == 32 and directory.entries:
+            active = [e for e in directory.entries if e.flat_size() > 0]
+            label = ("generic arrayed"
+                     if not active else
+                     "generic arrayed; active sec3="
+                     + ", ".join(f"{e.index_word()}/{e.axis_sizes()}" for e in active))
         elif code >= 7000:
             label = f"high-range ({code})"
         else:
@@ -1316,27 +1451,48 @@ def print_section35_bridge(vdf: VdfFile) -> None:
                   f"axes={sec3.axis_sizes()} -- no axis_slot_refs")
             continue
 
-        # Find sec5 entries whose trailing ref(s) overlap with this sec3's axis_slot_refs
-        matched_sec5 = []
-        for j, sec5 in enumerate(sec5_entries):
-            trailing_count = 1 + sec5.marker
-            trailing_refs = set(sec5.refs[-trailing_count:]) if len(sec5.refs) >= trailing_count else set()
-            if trailing_refs & axis_refs:
-                matched_sec5.append((j, sec5))
+        matches = classify_section5_bridge_matches(sec3, sec5_entries)
 
         axis_ref_strs = [resolve_slot_ref(r, slot_to_names) for r in sec3.axis_slot_refs()]
-        print(f"  sec3[{i}] idx={sec3.index_word()} flat={sec3.flat_size()} "
+        state = "placeholder" if sec3.flat_size() == 0 else "active"
+        print(f"  sec3[{i}] state={state} idx={sec3.index_word()} flat={sec3.flat_size()} "
               f"axes={sec3.axis_sizes()} axis_refs={axis_ref_strs}")
 
-        if matched_sec5:
-            for j, sec5 in matched_sec5:
-                trailing_count = 1 + sec5.marker
-                trailing = sec5.refs[-trailing_count:]
+        if matches.exact:
+            for j in matches.exact:
+                sec5 = sec5_entries[j]
+                trailing = section5_trailing_refs(sec5)
                 trailing_strs = [resolve_slot_ref(r, slot_to_names) for r in trailing]
-                print(f"    -> sec5[{j}] n={sec5.n} marker={sec5.marker} "
+                print(f"    -> exact sec5[{j}] n={sec5.n} marker={sec5.marker} "
                       f"dim_size={sec5.dimension_size()} trailing={trailing_strs}")
+        elif matches.partial:
+            for j in matches.partial:
+                sec5 = sec5_entries[j]
+                trailing = section5_trailing_refs(sec5)
+                trailing_strs = [resolve_slot_ref(r, slot_to_names) for r in trailing]
+                print(f"    -> partial sec5[{j}] n={sec5.n} marker={sec5.marker} "
+                      f"dim_size={sec5.dimension_size()} trailing={trailing_strs}")
+        elif matches.null_trailing:
+            null_idxs = ", ".join(f"sec5[{j}]" for j in matches.null_trailing)
+            verb = "ends" if len(matches.null_trailing) == 1 else "end"
+            print(f"    (no non-zero sec5 trailing refs; {null_idxs} {verb} in a 0 sentinel)")
         else:
             print(f"    (no matching sec5 entries)")
+    print()
+
+
+def print_slot_reference_inventory(vdf: VdfFile) -> None:
+    print("=== Referenced Slot Refs ===")
+    inventory = collect_slot_reference_inventory(vdf)
+    if not inventory:
+        print("  (none)\n")
+        return
+
+    for slot_ref in sorted(inventory):
+        info = inventory[slot_ref]
+        names = "/".join(info.heuristic_names) if info.heuristic_names else "<none>"
+        print(f"  {slot_ref:>4}  names?={names:<32} sig={format_u32_words(info.signature)}")
+        print(f"        uses={', '.join(info.uses)}")
     print()
 
 
@@ -1346,7 +1502,31 @@ def print_validation(vdf: VdfFile) -> None:
     errors: list[str] = []
     warnings: list[str] = []
 
-    # 1. Section-3 index_words form arithmetic progression (step=27)
+    # 1. Section framing should be stable and ordered.
+    if len(vdf.sections) == 8:
+        print("  [PASS] section scan found the expected 8 sections")
+    else:
+        errors.append(f"expected 8 sections, found {len(vdf.sections)}")
+
+    if any(vdf.sections[i].file_offset >= vdf.sections[i + 1].file_offset
+           for i in range(len(vdf.sections) - 1)):
+        errors.append("section offsets are not strictly increasing")
+    elif vdf.sections:
+        print("  [PASS] section offsets are strictly increasing")
+
+    # 2. Slot tables in small/medium fixtures form a contiguous 16-byte lattice.
+    slot_layout = analyze_slot_table_offsets(vdf.slot_table)
+    if slot_layout is None:
+        warnings.append("slot table is empty")
+    elif slot_layout.contiguous_16:
+        print(f"  [PASS] slot table forms a contiguous 16-byte lattice "
+              f"(base={slot_layout.base}, count={len(vdf.slot_table)})")
+    else:
+        warnings.append(
+            "slot table is structurally valid but not a contiguous 16-byte lattice: "
+            f"{format_slot_table_layout(slot_layout)}")
+
+    # 3. Section-3 index_words form arithmetic progression (step=27)
     directory = vdf.parse_section3_directory()
     if directory and directory.entries:
         idx_words = [e.index_word() for e in directory.entries]
@@ -1370,7 +1550,7 @@ def print_validation(vdf: VdfFile) -> None:
         elif len(idx_words) == 1:
             print(f"  [PASS] sec3 single entry, index_word={idx_words[0]}")
 
-        # 2. All sec3 axis_slot_refs are in the slot table
+        # 4. All sec3 axis_slot_refs are in the slot table
         slot_set = set(vdf.slot_table)
         all_axis_refs: list[int] = []
         for entry in directory.entries:
@@ -1386,7 +1566,7 @@ def print_validation(vdf: VdfFile) -> None:
     else:
         print(f"  [SKIP] no section-3 directory entries")
 
-    # 3. Section-5 trailing refs overlap with sec3 axis_slot_refs
+    # 5. Section-5 trailing refs overlap with sec3 axis_slot_refs
     sec5_entries = vdf.parse_section5_sets()
     if directory and directory.entries and sec5_entries:
         sec3_axis_set: set[int] = set()
@@ -1418,14 +1598,14 @@ def print_validation(vdf: VdfFile) -> None:
                 print(f"  [SKIP] empty axis ref sets (sec3={len(sec3_axis_set)}, "
                       f"sec5={len(sec5_trailing)})")
 
-        if sec3_only:
+        if sec3_only and sec5_trailing:
             warnings.append(f"sec3 axis refs not in sec5 trailing: {sec3_only}")
-        if sec5_only:
+        if sec5_only and sec3_axis_set:
             warnings.append(f"sec5 trailing refs not in sec3 axis: {sec5_only}")
     elif not sec5_entries:
         print(f"  [SKIP] no section-5 entries for axis ref overlap check")
 
-    # 4. Record field[6] values are either 0, 5, 32, a sec3 index_word, or in the high range (7000+)
+    # 6. Record field[6] values are either 0, 5, 32, a sec3 index_word, or in the high range (7000+)
     # 0 appears on padding/system/non-model records
     if directory and directory.entries:
         sec3_idx_words = {e.index_word() for e in directory.entries}
@@ -1494,6 +1674,7 @@ def print_summary(vdf: VdfFile) -> None:
     print(f"  OT entries:     {vdf.offset_table_count} ({n_block} blocks, {n_const} constants)")
     print(f"  Stocks:         {stock_count}")
     print(f"  Data blocks:    {n_block}")
+    print(f"  Slot lattice:   {format_slot_table_layout(analyze_slot_table_offsets(vdf.slot_table))}")
 
 
 def print_raw_section(vdf: VdfFile, section_idx: int) -> None:
@@ -1542,6 +1723,17 @@ def print_json_summary(vdf: VdfFile) -> None:
         ],
     }
 
+    slot_layout = analyze_slot_table_offsets(vdf.slot_table)
+    if slot_layout is not None:
+        summary["slot_table_layout"] = {
+            "base": slot_layout.base,
+            "max_offset": slot_layout.max_offset,
+            "distinct_strides": slot_layout.distinct_strides,
+            "irregular_stride_count": slot_layout.irregular_stride_count,
+            "missing_16_slots": slot_layout.missing_16_slots,
+            "contiguous_16": slot_layout.contiguous_16,
+        }
+
     directory = vdf.parse_section3_directory()
     if directory and directory.entries:
         summary["section3_entries"] = [
@@ -1567,7 +1759,7 @@ def print_json_summary(vdf: VdfFile) -> None:
 
 def slot_words(vdf: VdfFile, slot_offset: int) -> Optional[list[int]]:
     """Read the 16-byte section-1 payload for a slot-table entry."""
-    if len(vdf.sections) <= 1:
+    if len(vdf.sections) <= 1 or slot_offset <= 0:
         return None
     abs_off = vdf.sections[1].data_offset() + slot_offset
     if abs_off + 16 > len(vdf.data):
@@ -1579,6 +1771,60 @@ def format_u32_words(words: Optional[list[int]]) -> str:
     if words is None:
         return "(out of bounds)"
     return "[" + " ".join(f"{word:08x}" for word in words) + "]"
+
+
+def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = False) -> str:
+    names = build_slot_to_names(vdf).get(slot_ref, [])
+    label = resolve_slot_ref(slot_ref, {slot_ref: names} if names else {})
+    if not include_signature:
+        return label
+    return f"{label} sig={format_u32_words(slot_words(vdf, slot_ref))}"
+
+
+def collect_slot_reference_inventory(vdf: VdfFile) -> dict[int, SlotReferenceInfo]:
+    slot_to_names = build_slot_to_names(vdf)
+    inventory: dict[int, SlotReferenceInfo] = {}
+
+    def add(slot_ref: int, use: str) -> None:
+        if slot_ref <= 0:
+            return
+        info = inventory.setdefault(
+            slot_ref,
+            SlotReferenceInfo(
+                slot_ref=slot_ref,
+                heuristic_names=slot_to_names.get(slot_ref, []).copy(),
+                signature=slot_words(vdf, slot_ref),
+            ),
+        )
+        info.uses.append(use)
+
+    directory = vdf.parse_section3_directory()
+    if directory:
+        for entry_idx, entry in enumerate(directory.entries):
+            for axis_idx, slot_ref in enumerate(entry.axis_slot_refs()):
+                add(slot_ref, f"sec3[{entry_idx}].axis[{axis_idx}]")
+
+    sec4_entries = vdf.parse_section4_entries()
+    if sec4_entries:
+        for entry_idx, entry in enumerate(sec4_entries):
+            for ref_idx, slot_ref in enumerate(entry.refs):
+                add(slot_ref, f"sec4[{entry_idx}].ref[{ref_idx}]")
+
+    sec5_entries = vdf.parse_section5_sets()
+    if sec5_entries:
+        for entry_idx, entry in enumerate(sec5_entries):
+            for ref_idx, slot_ref in enumerate(entry.refs):
+                add(slot_ref, f"sec5[{entry_idx}].ref[{ref_idx}]")
+
+    sec6_result = vdf.parse_section6_ref_stream()
+    if sec6_result:
+        for entry_idx, entry in enumerate(sec6_result[1]):
+            for ref_idx, slot_ref in enumerate(entry.refs):
+                add(slot_ref, f"sec6[{entry_idx}].ref[{ref_idx}]")
+
+    for info in inventory.values():
+        info.uses.sort()
+    return inventory
 
 
 def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str) -> None:
@@ -1623,6 +1869,90 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         print("  (no shared-name slot payload differences)")
     print()
 
+    print("=== Referenced Slot Inventory Diffs ===")
+    left_inventory = collect_slot_reference_inventory(left)
+    right_inventory = collect_slot_reference_inventory(right)
+    any_inventory_diff = False
+    for slot_ref in sorted(set(left_inventory) | set(right_inventory)):
+        linfo = left_inventory.get(slot_ref)
+        rinfo = right_inventory.get(slot_ref)
+        if linfo is None or rinfo is None:
+            any_inventory_diff = True
+            print(f"  slot {slot_ref}")
+            if linfo is None:
+                print("    left:  missing")
+            else:
+                print(
+                    f"    left:  names?={linfo.heuristic_names} sig={format_u32_words(linfo.signature)} "
+                    f"uses={linfo.uses}"
+                )
+            if rinfo is None:
+                print("    right: missing")
+            else:
+                print(
+                    f"    right: names?={rinfo.heuristic_names} sig={format_u32_words(rinfo.signature)} "
+                    f"uses={rinfo.uses}"
+                )
+            continue
+        if (
+            linfo.signature != rinfo.signature
+            or linfo.heuristic_names != rinfo.heuristic_names
+            or linfo.uses != rinfo.uses
+        ):
+            any_inventory_diff = True
+            print(f"  slot {slot_ref}")
+            print(
+                f"    left:  names?={linfo.heuristic_names} sig={format_u32_words(linfo.signature)} "
+                f"uses={linfo.uses}"
+            )
+            print(
+                f"    right: names?={rinfo.heuristic_names} sig={format_u32_words(rinfo.signature)} "
+                f"uses={rinfo.uses}"
+            )
+    if not any_inventory_diff:
+        print("  (no referenced-slot differences)")
+    print()
+
+    print("=== Section 3 Diffs ===")
+    left_sec3 = left.parse_section3_directory()
+    right_sec3 = right.parse_section3_directory()
+    left_entries = left_sec3.entries if left_sec3 else []
+    right_entries = right_sec3.entries if right_sec3 else []
+    any_sec3_diff = False
+    max_sec3 = max(len(left_entries), len(right_entries))
+    for i in range(max_sec3):
+        lentry = left_entries[i] if i < len(left_entries) else None
+        rentry = right_entries[i] if i < len(right_entries) else None
+        lwords = lentry.words if lentry else None
+        rwords = rentry.words if rentry else None
+        if lwords != rwords:
+            any_sec3_diff = True
+            print(f"  sec3[{i}]")
+            print(f"    left:  {lwords}")
+            print(f"    right: {rwords}")
+    if not any_sec3_diff:
+        print("  (no section-3 differences)")
+    print()
+
+    print("=== Section 5 Diffs ===")
+    left_sec5 = left.parse_section5_sets() or []
+    right_sec5 = right.parse_section5_sets() or []
+    any_sec5_diff = False
+    max_sec5 = max(len(left_sec5), len(right_sec5))
+    for i in range(max_sec5):
+        lentry = left_sec5[i] if i < len(left_sec5) else None
+        rentry = right_sec5[i] if i < len(right_sec5) else None
+        ltuple = (lentry.n, lentry.marker, lentry.refs) if lentry else None
+        rtuple = (rentry.n, rentry.marker, rentry.refs) if rentry else None
+        if ltuple != rtuple:
+            any_sec5_diff = True
+            print(f"  sec5[{i}]")
+            print(f"    left:  {ltuple}")
+            print(f"    right: {rtuple}")
+    if not any_sec5_diff:
+        print("  (no section-5 differences)")
+    print()
+
     print("=== Record Diffs By Index ===")
     any_record_diff = False
     record_count = min(len(left.records), len(right.records))
@@ -1659,12 +1989,12 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         for i in range(max_entries):
             lentry = left_entries[i] if i < len(left_entries) else None
             rentry = right_entries[i] if i < len(right_entries) else None
-            lrefs = [resolve_slot_ref(r, left_slots) for r in lentry.refs] if lentry else []
-            rrefs = [resolve_slot_ref(r, right_slots) for r in rentry.refs] if rentry else []
-            if lrefs != rrefs:
+            lrefs_raw = lentry.refs if lentry else []
+            rrefs_raw = rentry.refs if rentry else []
+            if lrefs_raw != rrefs_raw:
                 print(f"  entry[{i}]")
-                print(f"    left:  {lrefs}")
-                print(f"    right: {rrefs}")
+                print(f"    left:  raw={lrefs_raw} refs={[resolve_slot_ref(r, left_slots) for r in lrefs_raw]}")
+                print(f"    right: raw={rrefs_raw} refs={[resolve_slot_ref(r, right_slots) for r in rrefs_raw]}")
     print()
 
     print("=== OT Class Code Diffs ===")
@@ -1726,6 +2056,8 @@ def main() -> None:
     parser.add_argument("--sec4", action="store_true", help="Show section 4 entries")
     parser.add_argument("--sec5", action="store_true", help="Show section 5 sets")
     parser.add_argument("--sec6", action="store_true", help="Show section 6 ref stream and tail")
+    parser.add_argument("--slot-xref", action="store_true",
+                        help="Show section 3/4/5/6 referenced slot refs with signatures")
     parser.add_argument("--ot", action="store_true", help="Show offset table")
     parser.add_argument("--blocks", action="store_true", help="Show data blocks")
     parser.add_argument("--data", action="store_true", help="Extract and show all time series")
@@ -1765,7 +2097,7 @@ def main() -> None:
     show_all = args.all
     show_specific = any([
         args.names, args.slots, args.records, args.sec3, args.sec4,
-        args.sec5, args.sec6, args.ot, args.blocks, args.data,
+        args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
         args.bridge, args.sec35_bridge, args.ranges, args.validate,
         args.raw_section is not None,
     ])
@@ -1793,6 +2125,8 @@ def main() -> None:
     if show_all or args.sec6:
         print_ot_codes(vdf)
         print_section6_tail(vdf)
+    if show_all or args.slot_xref:
+        print_slot_reference_inventory(vdf)
     if show_all or args.ranges:
         print_ot_ranges(vdf)
     if show_all or args.bridge:
