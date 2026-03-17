@@ -5,17 +5,6 @@
 import * as React from 'react';
 
 import {
-  signInWithRedirect,
-  GoogleAuthProvider,
-  OAuthProvider,
-  Auth as FirebaseAuth,
-  fetchSignInMethodsForEmail,
-  createUserWithEmailAndPassword,
-  updateProfile,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-} from '@firebase/auth';
-import {
   AppleIcon,
   EmailIcon,
   Button,
@@ -32,11 +21,27 @@ import typography from './typography.module.css';
 
 import styles from './Login.module.css';
 
-type EmailLoginStates = 'showEmail' | 'showPassword' | 'showSignup' | 'showProviderRedirect' | 'showRecover';
+type EmailLoginStates =
+  | 'showEmail'
+  | 'showPassword'
+  | 'showSignup'
+  | 'showProviderRedirect'
+  | 'showProviderUnavailable'
+  | 'showRecover';
+type OAuthProviderId = 'google.com' | 'apple.com';
+
+interface OAuthProvidersResponse {
+  oauthProviders?: unknown;
+}
+
+interface ProviderLookupResponse extends OAuthProvidersResponse {
+  providers?: unknown;
+  registered?: unknown;
+}
 
 export interface LoginProps {
   disabled: boolean;
-  auth: FirebaseAuth;
+  onLoginSuccess?: () => void;
 }
 
 interface LoginState {
@@ -47,14 +52,8 @@ interface LoginState {
   passwordError: string | undefined;
   fullName: string;
   fullNameError: string | undefined;
-  provider: 'google.com' | 'apple.com' | undefined;
-}
-
-function appleProvider(): OAuthProvider {
-  const provider = new OAuthProvider('apple.com');
-  provider.addScope('email');
-  provider.addScope('name');
-  return provider;
+  provider: OAuthProviderId | undefined;
+  oauthProviders: OAuthProviderId[];
 }
 
 export const GoogleIcon: React.FunctionComponent = (props) => {
@@ -80,21 +79,57 @@ export class Login extends React.Component<LoginProps, LoginState> {
       fullName: '',
       fullNameError: undefined,
       provider: undefined,
+      oauthProviders: [],
     };
   }
 
-  appleLoginClick = () => {
-    const provider = appleProvider();
-    setTimeout(async () => {
-      await signInWithRedirect(this.props.auth, provider);
+  componentDidMount() {
+    void this.loadOAuthProviders();
+  }
+
+  normalizeOAuthProviders(rawProviders: unknown): OAuthProviderId[] {
+    if (!Array.isArray(rawProviders)) {
+      return [];
+    }
+
+    return rawProviders.filter((provider): provider is OAuthProviderId => {
+      return provider === 'google.com' || provider === 'apple.com';
     });
+  }
+
+  getProviderDisplayName(provider: OAuthProviderId): string {
+    return provider === 'google.com' ? 'Google' : 'Apple';
+  }
+
+  isOAuthProviderEnabled(provider: OAuthProviderId): boolean {
+    return this.state.oauthProviders.includes(provider);
+  }
+
+  loadOAuthProviders = async () => {
+    try {
+      const response = await fetch('/auth/providers', {
+        credentials: 'same-origin',
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch OAuth providers (${response.status})`);
+      }
+
+      const { oauthProviders } = (await response.json()) as OAuthProvidersResponse;
+      this.setState({ oauthProviders: this.normalizeOAuthProviders(oauthProviders) });
+    } catch {
+      this.setState({ oauthProviders: [] });
+    }
+  };
+
+  appleLoginClick = () => {
+    const currentPath = window.location.pathname + window.location.search;
+    const returnUrl = encodeURIComponent(currentPath);
+    window.location.href = `/auth/apple?returnUrl=${returnUrl}`;
   };
   googleLoginClick = () => {
-    const provider = new GoogleAuthProvider();
-    provider.addScope('profile');
-    setTimeout(async () => {
-      await signInWithRedirect(this.props.auth, provider);
-    });
+    const currentPath = window.location.pathname + window.location.search;
+    const returnUrl = encodeURIComponent(currentPath);
+    window.location.href = `/auth/google?returnUrl=${returnUrl}`;
   };
   emailLoginClick = () => {
     this.setState({ emailLoginFlow: 'showEmail' });
@@ -109,7 +144,7 @@ export class Login extends React.Component<LoginProps, LoginState> {
     this.setState({ email: event.target.value });
   };
   onEmailCancel = () => {
-    this.setState({ emailLoginFlow: undefined });
+    this.setState({ emailLoginFlow: undefined, provider: undefined });
   };
   onSubmitEmail = async () => {
     const email = this.state.email.trim();
@@ -118,24 +153,50 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    const methods = await fetchSignInMethodsForEmail(this.props.auth, email);
-    if (methods.includes('password')) {
-      this.setState({ emailLoginFlow: 'showPassword' });
-    } else if (methods.length === 0) {
-      this.setState({ emailLoginFlow: 'showSignup' });
-    } else {
-      // we only allow 1 method
-      const method = methods[0];
-      if (method === 'google.com' || method === 'apple.com') {
-        this.setState({
-          emailLoginFlow: 'showProviderRedirect',
-          provider: methods[0] as 'google.com' | 'apple.com',
-        });
+    try {
+      const response = await fetch('/auth/providers', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      const { providers, registered, oauthProviders } = (await response.json()) as ProviderLookupResponse;
+      const availableOAuthProviders = this.normalizeOAuthProviders(oauthProviders);
+      const accountOAuthProviders = Array.isArray(providers)
+        ? providers.filter((provider): provider is OAuthProviderId => {
+            return provider === 'google.com' || provider === 'apple.com';
+          })
+        : [];
+
+      if (Array.isArray(providers) && providers.includes('password')) {
+        this.setState({ emailLoginFlow: 'showPassword', oauthProviders: availableOAuthProviders, provider: undefined });
+      } else if (!registered) {
+        this.setState({ emailLoginFlow: 'showSignup', oauthProviders: availableOAuthProviders, provider: undefined });
       } else {
-        this.setState({
-          emailError: 'an unknown error occurred; try a different email address',
-        });
+        const availableProvider = accountOAuthProviders.find((provider) => availableOAuthProviders.includes(provider));
+        if (availableProvider) {
+          this.setState({
+            emailLoginFlow: 'showProviderRedirect',
+            oauthProviders: availableOAuthProviders,
+            provider: availableProvider,
+          });
+        } else if (accountOAuthProviders.length > 0) {
+          this.setState({
+            emailLoginFlow: 'showProviderUnavailable',
+            oauthProviders: availableOAuthProviders,
+            provider: accountOAuthProviders[0],
+          });
+        } else {
+          this.setState({
+            emailError: 'an unknown error occurred; try a different email address',
+            oauthProviders: availableOAuthProviders,
+          });
+        }
       }
+    } catch (err) {
+      console.log(err);
+      this.setState({ emailError: 'Failed to check email. Please try again.' });
     }
   };
   onSubmitRecovery = async () => {
@@ -145,7 +206,16 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    await sendPasswordResetEmail(this.props.auth, email);
+    try {
+      await fetch('/auth/reset-password', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+    } catch (err) {
+      console.log(err);
+    }
 
     this.setState({
       emailLoginFlow: 'showPassword',
@@ -166,15 +236,32 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    const password = this.state.password.trim();
+    // Password whitespace is significant (Firebase treats it as part of the
+    // password), so we only check for empty -- do not trim.
+    const password = this.state.password;
     if (!password) {
       this.setState({ passwordError: 'Enter a password to continue' });
       return;
     }
 
     try {
-      const userCred = await createUserWithEmailAndPassword(this.props.auth, email, password);
-      await updateProfile(userCred.user, { displayName: fullName });
+      const response = await fetch('/auth/signup', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          displayName: fullName,
+        }),
+      });
+
+      if (response.ok) {
+        this.props.onLoginSuccess?.();
+      } else {
+        const { error } = await response.json();
+        this.setState({ passwordError: error || 'Something went wrong' });
+      }
     } catch (err) {
       console.log(err);
       if (err instanceof Error) {
@@ -198,14 +285,28 @@ export class Login extends React.Component<LoginProps, LoginState> {
       return;
     }
 
-    const password = this.state.password.trim();
+    // Password whitespace is significant (Firebase treats it as part of the
+    // password), so we only check for empty -- do not trim.
+    const password = this.state.password;
     if (!password) {
-      this.setState({ passwordError: 'Enter your email address to continue' });
+      this.setState({ passwordError: 'Enter your password to continue' });
       return;
     }
 
     try {
-      await signInWithEmailAndPassword(this.props.auth, email, password);
+      const response = await fetch('/auth/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+
+      if (response.ok) {
+        this.props.onLoginSuccess?.();
+      } else {
+        const { error } = await response.json();
+        this.setState({ passwordError: error || 'Incorrect password' });
+      }
     } catch (err) {
       console.log(err);
       if (err instanceof Error) {
@@ -349,7 +450,11 @@ export class Login extends React.Component<LoginProps, LoginState> {
           );
           break;
         case 'showProviderRedirect':
-          const provider = this.state.provider === 'google.com' ? 'Google' : 'Apple';
+          if (!this.state.provider) {
+            loginUI = <div />;
+            break;
+          }
+          const provider = this.getProviderDisplayName(this.state.provider);
           loginUI = (
             <Card variant="outlined" className={styles.emailForm}>
               <form onSubmit={this.onNullSubmit}>
@@ -368,6 +473,31 @@ export class Login extends React.Component<LoginProps, LoginState> {
                     onClick={this.state.provider === 'google.com' ? this.googleLoginClick : this.appleLoginClick}
                   >
                     Sign in with {provider}
+                  </Button>
+                </CardActions>
+              </form>
+            </Card>
+          );
+          break;
+        case 'showProviderUnavailable':
+          if (!this.state.provider) {
+            loginUI = <div />;
+            break;
+          }
+          const unavailableProvider = this.getProviderDisplayName(this.state.provider);
+          loginUI = (
+            <Card variant="outlined" className={styles.emailForm}>
+              <form onSubmit={this.onNullSubmit}>
+                <CardContent>
+                  <h6 className={typography.heading6}>Sign in unavailable</h6>
+                  <p className={styles.recoverInstructions}>
+                    This account uses {unavailableProvider} sign-in for <b>{this.state.email}</b>, but {unavailableProvider}{' '}
+                    sign-in is not configured in this environment.
+                  </p>
+                </CardContent>
+                <CardActions>
+                  <Button style={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
+                    Back
                   </Button>
                 </CardActions>
               </form>
@@ -411,17 +541,21 @@ export class Login extends React.Component<LoginProps, LoginState> {
         default:
           loginUI = (
             <div className={styles.optionsButtons}>
-              <Button
-                variant="contained"
-                className={styles.appleButton}
-                startIcon={<AppleIcon />}
-                onClick={this.appleLoginClick}
-              >
-                Sign in with Apple
-              </Button>
-              <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={this.googleLoginClick}>
-                Sign in with Google
-              </Button>
+              {this.isOAuthProviderEnabled('apple.com') ? (
+                <Button
+                  variant="contained"
+                  className={styles.appleButton}
+                  startIcon={<AppleIcon />}
+                  onClick={this.appleLoginClick}
+                >
+                  Sign in with Apple
+                </Button>
+              ) : undefined}
+              {this.isOAuthProviderEnabled('google.com') ? (
+                <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={this.googleLoginClick}>
+                  Sign in with Google
+                </Button>
+              ) : undefined}
               <Button
                 variant="contained"
                 className={styles.emailButton}

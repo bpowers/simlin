@@ -23,6 +23,7 @@ const baseConfig = {
       require: 'readonly',
       global: 'readonly',
       URL: 'readonly',
+      URLSearchParams: 'readonly',
       // Browser globals
       window: 'readonly',
       document: 'readonly',
