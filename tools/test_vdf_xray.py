@@ -137,6 +137,50 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(matches.partial, [])
         self.assertEqual(matches.null_trailing, [0])
 
+    def test_run6_section5_payload_and_sec3_axis_size_diverge(self) -> None:
+        run6 = parse_fixture("test/bobby/vdf/model_editing/run_6.vdf")
+        sec3 = run6.parse_section3_directory()
+        sec5 = run6.parse_section5_sets()
+
+        self.assertIsNotNone(sec3)
+        self.assertIsNotNone(sec5)
+
+        entry = sec5[0]
+        self.assertEqual(entry.n, 3)
+        self.assertEqual(vdf_xray.section5_payload_refs(entry), [188, 204, 220])
+
+        matches = vdf_xray.classify_section5_shape_matches(entry, sec3.entries)
+        self.assertEqual(matches.exact, [0])
+        self.assertEqual(vdf_xray.section5_exact_axis_sizes(entry, sec3.entries), [[2]])
+        self.assertNotEqual(entry.n, sec3.entries[0].axis_sizes()[0])
+
+    def test_run8_section5_exact_matches_recover_axis_sizes_from_sec3(self) -> None:
+        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
+        sec3 = run8.parse_section3_directory()
+        sec5 = run8.parse_section5_sets()
+
+        self.assertIsNotNone(sec3)
+        self.assertIsNotNone(sec5)
+
+        matches0 = vdf_xray.classify_section5_shape_matches(sec5[0], sec3.entries)
+        matches1 = vdf_xray.classify_section5_shape_matches(sec5[1], sec3.entries)
+        matches2 = vdf_xray.classify_section5_shape_matches(sec5[2], sec3.entries)
+
+        self.assertEqual(matches0.exact, [0])
+        self.assertEqual(matches1.exact, [1])
+        self.assertEqual(matches2.exact, [])
+        self.assertEqual(vdf_xray.section5_exact_axis_sizes(sec5[0], sec3.entries), [[2]])
+        self.assertEqual(vdf_xray.section5_exact_axis_sizes(sec5[1], sec3.entries), [[2]])
+        self.assertEqual(matches2.null_trailing, [0])
+
+    def test_run6_composite_section6_entry_has_structural_signature_fingerprint(self) -> None:
+        run6 = parse_fixture("test/bobby/vdf/model_editing/run_6.vdf")
+        sec6 = run6.parse_section6_ref_stream()
+
+        self.assertIsNotNone(sec6)
+        fingerprint = vdf_xray.ref_signature_fingerprint(run6, sec6[1][2].refs)
+        self.assertEqual(fingerprint, [[32, 23, 17, 55], [140, 0, 0, 0]])
+
 
 if __name__ == "__main__":
     unittest.main()

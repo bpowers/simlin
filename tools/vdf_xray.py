@@ -179,9 +179,14 @@ class Section5SetEntry:
     refs: list[int]
     slotted_ref_count: int
 
-    def dimension_size(self) -> int:
-        # marker=0 entries have n+1 refs (1 trailing axis ref)
-        # marker=1 entries have n+2 refs (2 trailing axis refs)
+    def payload_ref_count(self) -> int:
+        """
+        Count of the non-trailing refs stored in the entry payload.
+
+        The model-edit fixtures show that this field should not be treated as
+        a decoded dimension cardinality. It is simply the length of the
+        leading ref payload before the trailing axis-anchor refs.
+        """
         trailing = 1 + self.marker
         return max(0, len(self.refs) - trailing)
 
@@ -635,6 +640,13 @@ def section5_trailing_refs(entry: Section5SetEntry) -> list[int]:
     return entry.refs[-trailing_count:]
 
 
+def section5_payload_refs(entry: Section5SetEntry) -> list[int]:
+    trailing_count = 1 + entry.marker
+    if len(entry.refs) < trailing_count:
+        return entry.refs.copy()
+    return entry.refs[:-trailing_count]
+
+
 def classify_section5_bridge_matches(sec3: Section3Entry,
                                      sec5_entries: list[Section5SetEntry]) -> Section5BridgeMatches:
     axis_refs = [r for r in sec3.axis_slot_refs() if r > 0]
@@ -658,6 +670,38 @@ def classify_section5_bridge_matches(sec3: Section3Entry,
         elif trailing and not trailing_pos:
             matches.null_trailing.append(idx)
     return matches
+
+
+def classify_section5_shape_matches(sec5: Section5SetEntry,
+                                    sec3_entries: list[Section3Entry]) -> Section5BridgeMatches:
+    trailing = section5_trailing_refs(sec5)
+    trailing_pos = [r for r in trailing if r > 0]
+    trailing_set = set(trailing_pos)
+    matches = Section5BridgeMatches()
+
+    if not trailing:
+        return matches
+    if not trailing_pos:
+        matches.null_trailing.append(0)
+        return matches
+
+    for idx, sec3 in enumerate(sec3_entries):
+        axis_refs = [r for r in sec3.axis_slot_refs() if r > 0]
+        axis_set = set(axis_refs)
+
+        if axis_refs and trailing_pos == axis_refs:
+            matches.exact.append(idx)
+        elif axis_refs and len(trailing_pos) == len(axis_refs) and trailing_set == axis_set:
+            matches.exact.append(idx)
+        elif axis_refs and trailing_set & axis_set:
+            matches.partial.append(idx)
+    return matches
+
+
+def section5_exact_axis_sizes(sec5: Section5SetEntry,
+                              sec3_entries: list[Section3Entry]) -> list[list[int]]:
+    matches = classify_section5_shape_matches(sec5, sec3_entries)
+    return [sec3_entries[idx].axis_sizes() for idx in matches.exact]
 
 
 # ---- Parsing ----
@@ -1172,14 +1216,24 @@ def print_section5(vdf: VdfFile) -> None:
         return
 
     slot_to_names = build_slot_to_names(vdf)
+    directory = vdf.parse_section3_directory()
+    sec3_entries = directory.entries if directory else []
     for i, e in enumerate(entries[:16]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs[:8]]
+        payload = section5_payload_refs(e)
+        payload_refs = [resolve_slot_ref(r, slot_to_names) for r in payload[:8]]
         trailing_count = 1 + e.marker
         trailing_refs = e.refs[-trailing_count:] if len(e.refs) >= trailing_count else []
+        trailing_ref_names = [resolve_slot_ref(r, slot_to_names) for r in trailing_refs]
+        exact_axes = section5_exact_axis_sizes(e, sec3_entries) if sec3_entries else []
+        sec3_matches = classify_section5_shape_matches(e, sec3_entries) if sec3_entries else None
         print(f"  {i:>3} @0x{e.file_offset:08x} n={e.n} marker={e.marker} "
-              f"size={len(e.refs)} dim={e.dimension_size()} "
+              f"size={len(e.refs)} payload_refs={e.payload_ref_count()} "
               f"slotted={e.slotted_ref_count} refs(head)={refs} "
-              f"raw_refs={e.refs} trailing={trailing_refs}")
+              f"payload={payload_refs} raw_refs={e.refs} "
+              f"trailing={trailing_ref_names} raw_trailing={trailing_refs} "
+              f"sec3_exact={sec3_matches.exact if sec3_matches else []} "
+              f"exact_axes={exact_axes}")
     if len(entries) > 16:
         print(f"  ... ({len(entries) - 16} more sets)")
     print()
@@ -1463,15 +1517,17 @@ def print_section35_bridge(vdf: VdfFile) -> None:
                 sec5 = sec5_entries[j]
                 trailing = section5_trailing_refs(sec5)
                 trailing_strs = [resolve_slot_ref(r, slot_to_names) for r in trailing]
+                exact_axes = section5_exact_axis_sizes(sec5, directory.entries)
                 print(f"    -> exact sec5[{j}] n={sec5.n} marker={sec5.marker} "
-                      f"dim_size={sec5.dimension_size()} trailing={trailing_strs}")
+                      f"payload_refs={sec5.payload_ref_count()} trailing={trailing_strs} "
+                      f"axes={exact_axes}")
         elif matches.partial:
             for j in matches.partial:
                 sec5 = sec5_entries[j]
                 trailing = section5_trailing_refs(sec5)
                 trailing_strs = [resolve_slot_ref(r, slot_to_names) for r in trailing]
                 print(f"    -> partial sec5[{j}] n={sec5.n} marker={sec5.marker} "
-                      f"dim_size={sec5.dimension_size()} trailing={trailing_strs}")
+                      f"payload_refs={sec5.payload_ref_count()} trailing={trailing_strs}")
         elif matches.null_trailing:
             null_idxs = ", ".join(f"sec5[{j}]" for j in matches.null_trailing)
             verb = "ends" if len(matches.null_trailing) == 1 else "end"
@@ -1773,6 +1829,17 @@ def format_u32_words(words: Optional[list[int]]) -> str:
     return "[" + " ".join(f"{word:08x}" for word in words) + "]"
 
 
+def ref_signature_fingerprint(vdf: VdfFile, refs: list[int]) -> list[Optional[list[int]]]:
+    return [slot_words(vdf, slot_ref) for slot_ref in refs]
+
+
+def format_ref_signature_fingerprint(vdf: VdfFile, refs: list[int]) -> str:
+    if not refs:
+        return "[]"
+    return "[" + ", ".join(format_u32_words(words)
+                           for words in ref_signature_fingerprint(vdf, refs)) + "]"
+
+
 def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = False) -> str:
     names = build_slot_to_names(vdf).get(slot_ref, [])
     label = resolve_slot_ref(slot_ref, {slot_ref: names} if names else {})
@@ -1947,8 +2014,20 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         if ltuple != rtuple:
             any_sec5_diff = True
             print(f"  sec5[{i}]")
-            print(f"    left:  {ltuple}")
-            print(f"    right: {rtuple}")
+            if lentry is None:
+                print("    left:  missing")
+            else:
+                print(f"    left:  {ltuple}")
+                print(f"           payload={section5_payload_refs(lentry)} "
+                      f"trailing={section5_trailing_refs(lentry)} "
+                      f"sigseq={format_ref_signature_fingerprint(left, lentry.refs)}")
+            if rentry is None:
+                print("    right: missing")
+            else:
+                print(f"    right: {rtuple}")
+                print(f"           payload={section5_payload_refs(rentry)} "
+                      f"trailing={section5_trailing_refs(rentry)} "
+                      f"sigseq={format_ref_signature_fingerprint(right, rentry.refs)}")
     if not any_sec5_diff:
         print("  (no section-5 differences)")
     print()
@@ -1994,7 +2073,9 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
             if lrefs_raw != rrefs_raw:
                 print(f"  entry[{i}]")
                 print(f"    left:  raw={lrefs_raw} refs={[resolve_slot_ref(r, left_slots) for r in lrefs_raw]}")
+                print(f"           sigseq={format_ref_signature_fingerprint(left, lrefs_raw)}")
                 print(f"    right: raw={rrefs_raw} refs={[resolve_slot_ref(r, right_slots) for r in rrefs_raw]}")
+                print(f"           sigseq={format_ref_signature_fingerprint(right, rrefs_raw)}")
     print()
 
     print("=== OT Class Code Diffs ===")
