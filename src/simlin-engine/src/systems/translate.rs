@@ -941,4 +941,103 @@ mod tests {
             "rate flow should reference .actual"
         );
     }
+
+    // ===================================================================
+    // Integration tests: parse and translate example files, verify compilation
+    // ===================================================================
+
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::systems::parse;
+
+    fn read_example(name: &str) -> String {
+        let path = format!(
+            "{}/../../third_party/systems/examples/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read example file {}: {}", path, e))
+    }
+
+    /// Parse, translate, and compile an example file. Panics on failure.
+    fn parse_translate_compile(name: &str) -> Project {
+        let contents = read_example(name);
+        let model = parse(&contents).unwrap_or_else(|e| panic!("{name}: parse failed: {e:?}"));
+        let project =
+            translate(&model, 5).unwrap_or_else(|e| panic!("{name}: translate failed: {e:?}"));
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let _compiled = compile_project_incremental(&db, sync.project, "main")
+            .unwrap_or_else(|e| panic!("{name}: compilation failed: {e:?}"));
+        project
+    }
+
+    #[test]
+    fn test_translate_hiring() {
+        let project = parse_translate_compile("hiring.txt");
+
+        // [Candidates] translates to a stock with equation "inf()"
+        assert_eq!(
+            scalar_eqn(&project, "candidates"),
+            Some("inf()".to_string()),
+            "Candidates should be infinite"
+        );
+
+        // Candidates -> PhoneScreens uses systems_rate (integer rate)
+        assert_eq!(
+            module_model_name(&project, "candidates_outflows"),
+            Some("stdlib\u{205A}systems_rate".to_string()),
+            "Candidates->PhoneScreens should use systems_rate"
+        );
+
+        // PhoneScreens -> Onsites uses systems_conversion (0.5 decimal)
+        assert_eq!(
+            module_model_name(&project, "phonescreens_outflows"),
+            Some("stdlib\u{205A}systems_conversion".to_string()),
+            "PhoneScreens->Onsites should use systems_conversion"
+        );
+
+        // Employees -> Departures uses systems_leak (explicit Leak)
+        assert_eq!(
+            module_model_name(&project, "employees_outflows"),
+            Some("stdlib\u{205A}systems_leak".to_string()),
+            "Employees->Departures should use systems_leak"
+        );
+
+        // Waste flows exist for conversion flows (PhoneScreens->Onsites)
+        let ps_outflows = stock_outflows(&project, "phonescreens");
+        assert!(
+            ps_outflows.contains(&"phonescreens_to_onsites_waste".to_string()),
+            "PhoneScreens should have waste outflow: {:?}",
+            ps_outflows
+        );
+
+        // Waste flow is not in any stock's inflows
+        let onsites_inflows = stock_inflows(&project, "onsites");
+        assert!(
+            !onsites_inflows.contains(&"phonescreens_to_onsites_waste".to_string()),
+            "waste flow should not be in Onsites inflows: {:?}",
+            onsites_inflows
+        );
+    }
+
+    #[test]
+    fn test_translate_links() {
+        parse_translate_compile("links.txt");
+    }
+
+    #[test]
+    fn test_translate_maximums() {
+        parse_translate_compile("maximums.txt");
+    }
+
+    #[test]
+    fn test_translate_projects() {
+        parse_translate_compile("projects.txt");
+    }
+
+    #[test]
+    fn test_translate_extended_syntax() {
+        parse_translate_compile("extended_syntax.txt");
+    }
 }
