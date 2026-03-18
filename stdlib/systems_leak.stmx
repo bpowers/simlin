@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>systems_leak</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler" time_units="time unit">
+        <start>0</start>
+        <stop>1</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model name="stdlib⁚systems_leak">
+        <variables>
+            <aux name="available">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="rate">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="dest_capacity">
+                <eqn>INF</eqn>
+            </aux>
+            <aux name="actual">
+                <eqn>MIN(INT(available * rate), dest_capacity)</eqn>
+            </aux>
+            <aux name="remaining">
+                <eqn>available - actual</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <aux name="available" x="100" y="100" label_side="bottom"></aux>
+                <aux name="rate" x="200" y="100" label_side="bottom"></aux>
+                <aux name="dest capacity" x="300" y="100" label_side="bottom"></aux>
+                <aux name="actual" x="200" y="200" label_side="bottom"></aux>
+                <aux name="remaining" x="300" y="200" label_side="bottom"></aux>
+            </view>
+        </views>
+    </model>
+</xmile>

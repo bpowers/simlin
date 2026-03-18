@@ -5,7 +5,7 @@
 // because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME).
 // Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs.
 //
-// Stdlib SHA256: 7edfc8d7e03eda7f3cbdc9acf9dd6b809c8aaee1c851499ea61935270576aefc
+// Stdlib SHA256: f3f6543678d4c548a42b3be2e84b498f19b561a6cb24ca83219862a3ac24a7da
 
 #![allow(
     clippy::approx_constant,
@@ -21,7 +21,17 @@ use crate::datamodel::{
     SimMethod, SimSpecs, Stock, StockFlow, Variable, View, ViewElement, Visibility, view_element,
 };
 
-pub const MODEL_NAMES: [&str; 6] = ["delay1", "delay3", "npv", "smth1", "smth3", "trend"];
+pub const MODEL_NAMES: [&str; 9] = [
+    "delay1",
+    "delay3",
+    "npv",
+    "smth1",
+    "smth3",
+    "systems_conversion",
+    "systems_leak",
+    "systems_rate",
+    "trend",
+];
 
 pub fn get(name: &str) -> Option<Model> {
     match name {
@@ -30,6 +40,9 @@ pub fn get(name: &str) -> Option<Model> {
         "npv" => Some(npv()),
         "smth1" => Some(smth1()),
         "smth3" => Some(smth3()),
+        "systems_conversion" => Some(systems_conversion()),
+        "systems_leak" => Some(systems_leak()),
+        "systems_rate" => Some(systems_rate()),
         "trend" => Some(trend()),
         _ => None,
     }
@@ -931,6 +944,352 @@ fn smth3() -> Model {
             use_lettered_polarity: false,
             font: None,
             sketch_compat: None,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    }
+}
+
+fn systems_conversion() -> Model {
+    Model {
+        name: "stdlib⁚systems_conversion".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Aux(Aux {
+                ident: "available".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "dest_capacity".to_string(),
+                equation: Equation::Scalar("INF".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "outflow".to_string(),
+                equation: Equation::Scalar("MIN(INT(available * rate), dest_capacity)".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "rate".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "remaining".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "waste".to_string(),
+                equation: Equation::Scalar("available - outflow".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+        ],
+        views: vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![
+                ViewElement::Aux(view_element::Aux {
+                    name: "available".to_string(),
+                    uid: 1,
+                    x: 100_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "rate".to_string(),
+                    uid: 2,
+                    x: 200_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "dest capacity".to_string(),
+                    uid: 3,
+                    x: 300_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "outflow".to_string(),
+                    uid: 4,
+                    x: 100_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "waste".to_string(),
+                    uid: 5,
+                    x: 200_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "remaining".to_string(),
+                    uid: 6,
+                    x: 300_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+            ],
+            view_box: Rect {
+                x: 0_f64,
+                y: 0_f64,
+                width: 0_f64,
+                height: 0_f64,
+            },
+            zoom: 1_f64,
+            use_lettered_polarity: false,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    }
+}
+
+fn systems_leak() -> Model {
+    Model {
+        name: "stdlib⁚systems_leak".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Aux(Aux {
+                ident: "actual".to_string(),
+                equation: Equation::Scalar("MIN(INT(available * rate), dest_capacity)".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "available".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "dest_capacity".to_string(),
+                equation: Equation::Scalar("INF".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "rate".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "remaining".to_string(),
+                equation: Equation::Scalar("available - actual".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+        ],
+        views: vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![
+                ViewElement::Aux(view_element::Aux {
+                    name: "available".to_string(),
+                    uid: 1,
+                    x: 100_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "rate".to_string(),
+                    uid: 2,
+                    x: 200_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "dest capacity".to_string(),
+                    uid: 3,
+                    x: 300_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "actual".to_string(),
+                    uid: 4,
+                    x: 200_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "remaining".to_string(),
+                    uid: 5,
+                    x: 300_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+            ],
+            view_box: Rect {
+                x: 0_f64,
+                y: 0_f64,
+                width: 0_f64,
+                height: 0_f64,
+            },
+            zoom: 1_f64,
+            use_lettered_polarity: false,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    }
+}
+
+fn systems_rate() -> Model {
+    Model {
+        name: "stdlib⁚systems_rate".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Aux(Aux {
+                ident: "actual".to_string(),
+                equation: Equation::Scalar(
+                    "MIN(requested, MIN(available, dest_capacity))".to_string(),
+                ),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "available".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "dest_capacity".to_string(),
+                equation: Equation::Scalar("INF".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "remaining".to_string(),
+                equation: Equation::Scalar("available - actual".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+            Variable::Aux(Aux {
+                ident: "requested".to_string(),
+                equation: Equation::Scalar("0".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }),
+        ],
+        views: vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![
+                ViewElement::Aux(view_element::Aux {
+                    name: "available".to_string(),
+                    uid: 1,
+                    x: 100_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "requested".to_string(),
+                    uid: 2,
+                    x: 200_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "dest capacity".to_string(),
+                    uid: 3,
+                    x: 300_f64,
+                    y: 100_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "actual".to_string(),
+                    uid: 4,
+                    x: 200_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "remaining".to_string(),
+                    uid: 5,
+                    x: 300_f64,
+                    y: 200_f64,
+                    label_side: LabelSide::Bottom,
+                }),
+            ],
+            view_box: Rect {
+                x: 0_f64,
+                y: 0_f64,
+                width: 0_f64,
+                height: 0_f64,
+            },
+            zoom: 1_f64,
+            use_lettered_polarity: false,
         })],
         loop_metadata: vec![],
         groups: vec![],
