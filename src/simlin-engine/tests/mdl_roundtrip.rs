@@ -111,6 +111,9 @@ static TEST_MDL_MODELS_WITH_SKETCH: &[&str] = &[
     "test/test-models/tests/constant_expressions/test_constant_expressions.mdl",
     "test/test-models/tests/parentheses/test_parens.mdl",
     "test/test-models/tests/number_handling/test_number_handling.mdl",
+    "test/bobby/vdf/econ/mark2.mdl",
+    "test/bobby/vdf/water/water.mdl",
+    "test/bobby/vdf/lookups/lookup_ex.mdl",
 ];
 
 fn resolve_path(relative: &str) -> String {
@@ -587,4 +590,112 @@ fn write_mdl_for_vensim_validation() {
         "\nOutput directory: {}\nOpen these files in Vensim to verify diagrams and simulation.",
         output_dir.display()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: mark2 sketch structure validation
+// ---------------------------------------------------------------------------
+
+/// Verify that the mark2 model's sketch roundtrips with correct Vensim
+/// element ordering: for each flow, pipe connectors (type 1 with flag 22)
+/// must precede the valve (type 11) and flow label (type 10, shape=40).
+/// Clouds (type 12) must precede the pipe connectors that reference them.
+#[test]
+fn mark2_sketch_ordering() {
+    let file_path = resolve_path("test/bobby/vdf/econ/mark2.mdl");
+    let source = fs::read_to_string(&file_path).expect("read mark2.mdl");
+    let project = mdl::parse_mdl(&source).expect("parse mark2.mdl");
+
+    let mdl_text = mdl::project_to_mdl(&project).expect("write mark2.mdl");
+
+    // The written MDL should be re-parseable
+    let project2 = mdl::parse_mdl(&mdl_text).expect("re-parse mark2.mdl");
+
+    // Both views should survive
+    assert_eq!(
+        project.models[0].views.len(),
+        project2.models[0].views.len()
+    );
+
+    // Extract the sketch section from the written text
+    let sketch_start = mdl_text
+        .find("\\\\\\---/// Sketch information")
+        .expect("should have sketch section");
+    let sketch_text = &mdl_text[sketch_start..];
+
+    // For each view, verify Vensim ordering constraints
+    for line in sketch_text.lines() {
+        // Flow pipe connectors (type 1 with field 7 = 22) must have the
+        // direction flag (field 4) set to 4 or 100
+        if line.starts_with("1,") {
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() > 7 && fields[7] == "22" {
+                let direction: i32 = fields[4].parse().unwrap_or(0);
+                assert!(
+                    direction == 4 || direction == 100,
+                    "pipe connector should have direction 4 or 100, got {direction}: {line}"
+                );
+            }
+        }
+
+        // Influence connectors (type 1 without flag 22) should have field 9 = 64
+        if line.starts_with("1,") {
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() > 9 && fields[7] != "22" {
+                let influence_flag: i32 = fields[9].parse().unwrap_or(0);
+                assert_eq!(
+                    influence_flag, 64,
+                    "influence connector should have field 9 = 64: {line}"
+                );
+            }
+        }
+    }
+
+    // Verify that pipe connectors appear before their valve in each flow block.
+    // Collect all valve UIDs and verify their pipes appear earlier in the text.
+    let sketch_lines: Vec<&str> = sketch_text.lines().collect();
+    for (i, line) in sketch_lines.iter().enumerate() {
+        if !line.starts_with("11,") {
+            continue;
+        }
+        let valve_fields: Vec<&str> = line.split(',').collect();
+        let valve_uid: &str = valve_fields[1];
+
+        // Find pipe connectors that reference this valve (field 2 = valve_uid)
+        for (j, pipe_line) in sketch_lines.iter().enumerate() {
+            if !pipe_line.starts_with("1,") {
+                continue;
+            }
+            let pipe_fields: Vec<&str> = pipe_line.split(',').collect();
+            if pipe_fields.len() > 7 && pipe_fields[7] == "22" && pipe_fields[2] == valve_uid {
+                assert!(
+                    j < i,
+                    "pipe connector for valve {valve_uid} at line {j} should precede valve at line {i}"
+                );
+            }
+        }
+    }
+
+    // Verify cloud elements appear before the pipe connectors that reference them
+    for (i, line) in sketch_lines.iter().enumerate() {
+        if !line.starts_with("12,") {
+            continue;
+        }
+        let cloud_fields: Vec<&str> = line.split(',').collect();
+        let cloud_uid: &str = cloud_fields[1];
+
+        // Find pipe connectors that reference this cloud (field 3 = cloud_uid)
+        for (j, pipe_line) in sketch_lines.iter().enumerate() {
+            if !pipe_line.starts_with("1,") {
+                continue;
+            }
+            let pipe_fields: Vec<&str> = pipe_line.split(',').collect();
+            if pipe_fields.len() > 7 && pipe_fields[7] == "22" && pipe_fields[3] == cloud_uid {
+                assert!(
+                    i < j,
+                    "cloud {cloud_uid} at line {i} should precede pipe connector at line {j}"
+                );
+            }
+        }
+    }
 }

@@ -1294,12 +1294,12 @@ fn sanitize_view_title_for_mdl(title: &str) -> String {
     out
 }
 
-/// Write a Flow element as type 11 (valve), type 10 (attached flow variable),
-/// and type 1 pipe connectors derived from flow endpoints.
+/// Write a Flow element as type 1 pipe connectors, type 11 (valve), and
+/// type 10 (attached flow variable).
 ///
-/// In MDL, flows are two elements: a valve (type 11) at the flow position
-/// and an attached variable (type 10) below it. The valve UID is looked up
-/// from the pre-allocated valve_uids map to avoid collisions.
+/// Vensim requires this exact ordering: pipe connectors first, then valve,
+/// then flow label. The valve UID is looked up from the pre-allocated
+/// valve_uids map to avoid collisions.
 fn write_flow_element(
     buf: &mut String,
     flow: &view_element::Flow,
@@ -1307,12 +1307,18 @@ fn write_flow_element(
     cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
 ) {
-    // Sketch names: see `write_aux_element` for why `underbar_to_space` is
-    // used here instead of `format_mdl_ident`.
     let name = underbar_to_space(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
 
+    // Pipe connectors must come before the valve and flow label.
+    let had_pipes =
+        write_flow_pipe_connectors(buf, flow, valve_uid, cloud_uids, next_connector_uid);
+
     // Type 11 (valve): field 3 is always 0 in Vensim-generated files.
+    // Prefix with \n only if pipes were emitted (otherwise caller handles separation).
+    if had_pipes {
+        buf.push('\n');
+    }
     write!(
         buf,
         "11,{},0,{},{},6,8,34,3,0,0,1,0,0,0",
@@ -1329,29 +1335,34 @@ fn write_flow_element(
         flow.uid, name, flow.x as i32, var_y,
     )
     .unwrap();
-
-    write_flow_pipe_connectors(buf, flow, valve_uid, cloud_uids, next_connector_uid);
 }
 
+/// Returns true if any pipe connectors were written.
 fn write_flow_pipe_connectors(
     buf: &mut String,
     flow: &view_element::Flow,
     valve_uid: i32,
     cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
-) {
+) -> bool {
+    let mut wrote_any = false;
+
     // Flow pipe connectors use field 4 for endpoint type and field 7 = 22 (pipe type).
     // Flag 4 = connects to a stock, flag 100 = connects to a cloud.
     let write_pipe = |buf: &mut String,
+                      first: bool,
                       connector_uid: i32,
                       from_uid: i32,
                       to_uid: i32,
                       direction: i32,
                       x: i32,
                       y: i32| {
+        if !first {
+            buf.push('\n');
+        }
         write!(
             buf,
-            "\n1,{},{},{},{},0,0,22,0,0,0,-1--1--1,,1|({},{})|",
+            "1,{},{},{},{},0,0,22,0,0,0,-1--1--1,,1|({},{})|",
             connector_uid, from_uid, to_uid, direction, x, y,
         )
         .unwrap();
@@ -1367,6 +1378,7 @@ fn write_flow_pipe_connectors(
         };
         write_pipe(
             buf,
+            !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
@@ -1374,6 +1386,7 @@ fn write_flow_pipe_connectors(
             first.x as i32,
             first.y as i32,
         );
+        wrote_any = true;
         *next_connector_uid += 1;
     }
 
@@ -1385,6 +1398,7 @@ fn write_flow_pipe_connectors(
     {
         write_pipe(
             buf,
+            !wrote_any,
             *next_connector_uid,
             valve_uid,
             valve_uid,
@@ -1392,6 +1406,7 @@ fn write_flow_pipe_connectors(
             point.x as i32,
             point.y as i32,
         );
+        wrote_any = true;
         *next_connector_uid += 1;
     }
 
@@ -1406,6 +1421,7 @@ fn write_flow_pipe_connectors(
         };
         write_pipe(
             buf,
+            !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
@@ -1413,8 +1429,11 @@ fn write_flow_pipe_connectors(
             last.x as i32,
             last.y as i32,
         );
+        wrote_any = true;
         *next_connector_uid += 1;
     }
+
+    wrote_any
 }
 
 /// Write a type 12 line for a Cloud element.
@@ -1744,15 +1763,17 @@ impl MdlWriter {
         // Build name map for alias resolution
         let name_map = build_name_map(&sf.elements);
 
-        // Collect cloud UIDs so flow pipe connectors can set the right direction flag
-        let cloud_uids: HashSet<i32> = sf
-            .elements
-            .iter()
-            .filter_map(|e| match e {
-                ViewElement::Cloud(c) => Some(c.uid),
-                _ => None,
-            })
-            .collect();
+        // Collect cloud UIDs so flow pipe connectors can set the right direction flag.
+        // Also build a map from flow_uid -> clouds so we can emit each cloud
+        // just before its associated flow (Vensim requires this ordering).
+        let mut cloud_uids: HashSet<i32> = HashSet::new();
+        let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
+        for elem in &sf.elements {
+            if let ViewElement::Cloud(c) = elem {
+                cloud_uids.insert(c.uid);
+                flow_clouds.entry(c.flow_uid).or_default().push(c);
+            }
+        }
 
         for elem in &sf.elements {
             match elem {
@@ -1765,6 +1786,13 @@ impl MdlWriter {
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
+                    // Emit associated clouds before the flow pipes
+                    if let Some(clouds) = flow_clouds.get(&flow.uid) {
+                        for cloud in clouds {
+                            write_cloud_element(&mut self.buf, cloud);
+                            self.buf.push('\n');
+                        }
+                    }
                     write_flow_element(
                         &mut self.buf,
                         flow,
@@ -1783,10 +1811,8 @@ impl MdlWriter {
                     );
                     self.buf.push('\n');
                 }
-                ViewElement::Cloud(cloud) => {
-                    write_cloud_element(&mut self.buf, cloud);
-                    self.buf.push('\n');
-                }
+                // Clouds are emitted with their associated flow above
+                ViewElement::Cloud(_) => {}
                 ViewElement::Alias(alias) => {
                     write_alias_element(&mut self.buf, alias, &name_map);
                     self.buf.push('\n');
@@ -3282,8 +3308,8 @@ mod tests {
             &HashSet::new(),
             &mut next_connector_uid,
         );
-        // valve line uses allocated UID (field 3 = 0), variable line uses flow's UID
-        assert!(buf.starts_with("11,100,0,295,191,6,8,34,3,0,0,1,0,0,0\n"));
+        // No flow points, so no pipe connectors; valve and label follow
+        assert!(buf.contains("11,100,0,295,191,6,8,34,3,0,0,1,0,0,0"));
         assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
     }
 
