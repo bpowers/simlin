@@ -136,6 +136,7 @@ pub fn parse_variable(uid: i32, fields: &str) -> Result<VensimVariable, ViewErro
         height,
         attached,
         is_ghost,
+        bits,
     })
 }
 
@@ -150,7 +151,8 @@ pub fn parse_valve(uid: i32, fields: &str) -> Result<VensimValve, ViewError> {
     let (y, rest) = parse_int_field(rest);
     let (width, rest) = parse_int_field(rest);
     let (height, rest) = parse_int_field(rest);
-    let (shape, _) = parse_int_field(rest);
+    let (shape, rest) = parse_int_field(rest);
+    let (bits, _) = parse_int_field(rest);
 
     let attached = (shape & (1 << 5)) != 0;
 
@@ -162,6 +164,7 @@ pub fn parse_valve(uid: i32, fields: &str) -> Result<VensimValve, ViewError> {
         width,
         height,
         attached,
+        bits,
     })
 }
 
@@ -193,6 +196,7 @@ pub fn parse_comment(uid: i32, fields: &str) -> Result<(VensimComment, bool), Vi
             width,
             height,
             scratch_name,
+            bits,
         },
         scratch_name,
     ))
@@ -400,6 +404,7 @@ mod tests {
         assert_eq!(var.height, 20);
         assert!(!var.attached); // shape=3, bit 5 not set
         assert!(!var.is_ghost); // bits=3, bit 0 is set
+        assert_eq!(var.bits, 3);
     }
 
     #[test]
@@ -411,6 +416,7 @@ mod tests {
         assert_eq!(var.name, "Infection Rate");
         assert!(var.attached); // shape=40 has bit 5 set
         assert!(!var.is_ghost);
+        assert_eq!(var.bits, 3);
     }
 
     #[test]
@@ -422,6 +428,7 @@ mod tests {
 
         assert_eq!(var.name, "Contact Rate c");
         assert!(var.is_ghost); // bits=2, bit 0 not set
+        assert_eq!(var.bits, 2);
     }
 
     #[test]
@@ -435,6 +442,7 @@ mod tests {
         assert_eq!(valve.x, 295);
         assert_eq!(valve.y, 191);
         assert!(valve.attached); // shape=34 has bit 5 set
+        assert_eq!(valve.bits, 3);
     }
 
     #[test]
@@ -450,6 +458,7 @@ mod tests {
         assert_eq!(comment.y, 218);
         assert!(scratch_name);
         assert!(comment.scratch_name);
+        assert_eq!(comment.bits, 4);
     }
 
     #[test]
@@ -461,6 +470,7 @@ mod tests {
         assert_eq!(comment.text, "Some text");
         assert!(!scratch_name);
         assert!(!comment.scratch_name);
+        assert_eq!(comment.bits, 0);
     }
 
     #[test]

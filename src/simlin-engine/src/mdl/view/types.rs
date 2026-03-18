@@ -40,6 +40,8 @@ pub struct VensimVariable {
     /// Whether this is a ghost (alias) of another element.
     /// Ghost = !(bits & 1), so bits & 1 == 0 means ghost.
     pub is_ghost: bool,
+    /// Raw bits field from MDL sketch for roundtrip fidelity.
+    pub bits: i32,
 }
 
 /// A valve element in the view (type 11).
@@ -56,6 +58,8 @@ pub struct VensimValve {
     pub height: i32,
     /// Whether this valve is attached to a flow (shape bit 5).
     pub attached: bool,
+    /// Raw bits field from MDL sketch for roundtrip fidelity.
+    pub bits: i32,
 }
 
 /// A comment element in the view (type 12).
@@ -72,6 +76,8 @@ pub struct VensimComment {
     /// If true, the actual text content was on the next line (scratch_name).
     /// This is set when bits & (1 << 2) is true.
     pub scratch_name: bool,
+    /// Raw bits field from MDL sketch for roundtrip fidelity.
+    pub bits: i32,
 }
 
 /// A connector element in the view (type 1).
@@ -343,6 +349,7 @@ mod tests {
             height: 20,
             attached: false,
             is_ghost: false,
+            bits: 3,
         };
 
         view.insert(5, VensimElement::Variable(var));
@@ -378,6 +385,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
         view.insert(
@@ -391,6 +399,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -411,6 +420,7 @@ mod tests {
             height: 20,
             attached: true,
             is_ghost: false,
+            bits: 3,
         });
 
         assert_eq!(var.uid(), 1);

@@ -681,6 +681,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -718,6 +719,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -733,6 +735,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true,
+                bits: 2,
             }),
         );
 
@@ -782,6 +785,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
 
@@ -797,6 +801,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -839,6 +844,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -853,6 +859,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
 
@@ -868,6 +875,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -932,6 +940,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -947,6 +956,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -961,6 +971,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
 
@@ -976,6 +987,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1057,6 +1069,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1072,6 +1085,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1086,6 +1100,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
 
@@ -1101,6 +1116,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1180,6 +1196,7 @@ mod tests {
                 width: 15,
                 height: 15,
                 scratch_name: false,
+                bits: 0,
             }),
         );
 
@@ -1195,6 +1212,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1209,6 +1227,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
 
@@ -1224,6 +1243,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1298,6 +1318,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1313,6 +1334,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1327,6 +1349,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
 
@@ -1342,6 +1365,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1415,6 +1439,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // ghost
+                bits: 2,
             }),
         );
 
@@ -1430,6 +1455,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // ghost
+                bits: 2,
             }),
         );
 

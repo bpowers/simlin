@@ -402,6 +402,15 @@ fn should_filter_from_view(
     false
 }
 
+/// Build a ViewElementCompat from raw MDL sketch dimensions.
+fn make_compat(width: i32, height: i32, bits: i32) -> view_element::ViewElementCompat {
+    view_element::ViewElementCompat {
+        width: width as f64,
+        height: height as f64,
+        bits: bits as u32,
+    }
+}
+
 /// Convert a variable element to the appropriate ViewElement type.
 #[allow(clippy::too_many_arguments)]
 fn convert_variable(
@@ -462,7 +471,7 @@ fn convert_variable(
                 x: alias_x,
                 y: alias_y,
                 label_side: view_element::LabelSide::Bottom,
-                compat: None,
+                compat: Some(make_compat(var.width, var.height, var.bits)),
             }));
         }
     }
@@ -476,12 +485,24 @@ fn convert_variable(
             x: var.x as f64,
             y: var.y as f64,
             label_side: view_element::LabelSide::Top, // Stocks default to top
-            compat: None,
+            compat: Some(make_compat(var.width, var.height, var.bits)),
         })),
         VariableType::Flow => {
             // For flows, find the associated valve and compute flow points
             let (flow_x, flow_y, points) =
                 compute_flow_data(var, view, uid_offset, symbols, flow_to_valve);
+
+            // compat holds the valve's dimensions; label_compat holds the label variable's
+            let valve_uid = flow_to_valve.get(&var.uid).copied().unwrap_or(var.uid - 1);
+            let valve_compat = if var.attached {
+                if let Some(VensimElement::Valve(valve)) = view.get(valve_uid) {
+                    Some(make_compat(valve.width, valve.height, valve.bits))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             Some(ViewElement::Flow(view_element::Flow {
                 name: xmile_name,
@@ -490,8 +511,8 @@ fn convert_variable(
                 y: flow_y as f64,
                 label_side: view_element::LabelSide::Bottom,
                 points,
-                compat: None,
-                label_compat: None,
+                compat: valve_compat,
+                label_compat: Some(make_compat(var.width, var.height, var.bits)),
             }))
         }
         VariableType::Aux => Some(ViewElement::Aux(view_element::Aux {
@@ -500,7 +521,7 @@ fn convert_variable(
             x: var.x as f64,
             y: var.y as f64,
             label_side: view_element::LabelSide::Bottom,
-            compat: None,
+            compat: Some(make_compat(var.width, var.height, var.bits)),
         })),
     }
 }
@@ -568,7 +589,7 @@ fn convert_comment_as_cloud(comment: &VensimComment, uid: i32, flow_uid: i32) ->
         flow_uid,
         x: comment.x as f64,
         y: comment.y as f64,
-        compat: None,
+        compat: Some(make_compat(comment.width, comment.height, comment.bits)),
     })
 }
 
@@ -851,6 +872,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -920,6 +942,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -935,6 +958,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // Usually marked as ghost
+                bits: 2,
             }),
         );
 
@@ -1011,6 +1035,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false, // Primary definition
+                bits: 3,
             }),
         );
 
@@ -1026,6 +1051,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // Ghost/alias
+                bits: 2,
             }),
         );
 
@@ -1080,6 +1106,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1121,6 +1148,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1158,6 +1186,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1173,6 +1202,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1215,6 +1245,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1230,6 +1261,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1287,6 +1319,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1300,6 +1333,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1346,6 +1380,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1359,6 +1394,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1371,6 +1407,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1384,6 +1421,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
 
@@ -1484,6 +1522,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1497,6 +1536,7 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1509,6 +1549,7 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1522,6 +1563,7 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
             }),
         );
         view.insert(
@@ -1612,5 +1654,402 @@ mod tests {
             stock_uids.get("Stock_B").copied(),
             "sink endpoint should remain attached to Stock_B",
         );
+    }
+
+    // --- Compat field population tests (AC2.1, AC2.2) ---
+
+    #[test]
+    fn test_stock_compat_preserves_dimensions() {
+        // AC2.1: Stock elements preserve original width/height/bits
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Stock".to_string(),
+                x: 100,
+                y: 50,
+                width: 53,
+                height: 32,
+                attached: false,
+                is_ghost: false,
+                bits: 131,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "test stock".to_string(),
+            make_symbol_info(VariableType::Stock),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let stock = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Stock(s) = e {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .expect("expected stock element");
+
+        let compat = stock.compat.as_ref().expect("expected compat on stock");
+        assert_eq!(compat.width, 53.0);
+        assert_eq!(compat.height, 32.0);
+        assert_eq!(compat.bits, 131);
+    }
+
+    #[test]
+    fn test_aux_compat_preserves_dimensions() {
+        // AC2.2: Aux elements preserve original dimensions and bits
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Aux".to_string(),
+                x: 200,
+                y: 150,
+                width: 45,
+                height: 25,
+                attached: false,
+                is_ghost: false,
+                bits: 7,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("test aux".to_string(), make_symbol_info(VariableType::Aux));
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let aux = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Aux(a) = e {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .expect("expected aux element");
+
+        let compat = aux.compat.as_ref().expect("expected compat on aux");
+        assert_eq!(compat.width, 45.0);
+        assert_eq!(compat.height, 25.0);
+        assert_eq!(compat.bits, 7);
+    }
+
+    #[test]
+    fn test_flow_compat_preserves_valve_and_label_dimensions() {
+        // AC2.2: Flow elements preserve valve compat and label compat
+        use super::super::types::VensimValve;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Stock for flow endpoint
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 50,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+            }),
+        );
+
+        // Valve at uid 2
+        view.insert(
+            2,
+            VensimElement::Valve(VensimValve {
+                uid: 2,
+                name: "444".to_string(),
+                x: 150,
+                y: 100,
+                width: 9,
+                height: 11,
+                attached: true,
+                bits: 17,
+            }),
+        );
+
+        // Flow variable at uid 3 (attached to valve)
+        view.insert(
+            3,
+            VensimElement::Variable(VensimVariable {
+                uid: 3,
+                name: "Flow Rate".to_string(),
+                x: 150,
+                y: 120,
+                width: 55,
+                height: 35,
+                attached: true,
+                is_ghost: false,
+                bits: 99,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("stock a".to_string(), make_symbol_info(VariableType::Stock));
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let flow = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Flow(f) = e {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .expect("expected flow element");
+
+        // compat comes from the valve
+        let compat = flow
+            .compat
+            .as_ref()
+            .expect("expected compat on flow (from valve)");
+        assert_eq!(compat.width, 9.0);
+        assert_eq!(compat.height, 11.0);
+        assert_eq!(compat.bits, 17);
+
+        // label_compat comes from the flow variable itself
+        let label_compat = flow
+            .label_compat
+            .as_ref()
+            .expect("expected label_compat on flow");
+        assert_eq!(label_compat.width, 55.0);
+        assert_eq!(label_compat.height, 35.0);
+        assert_eq!(label_compat.bits, 99);
+    }
+
+    #[test]
+    fn test_cloud_compat_preserves_dimensions() {
+        // AC2.2: Cloud elements preserve original dimensions and bits
+        use super::super::types::VensimValve;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Cloud (comment) at uid 1
+        view.insert(
+            1,
+            VensimElement::Comment(VensimComment {
+                uid: 1,
+                text: "".to_string(),
+                x: 50,
+                y: 100,
+                width: 18,
+                height: 18,
+                scratch_name: false,
+                bits: 12,
+            }),
+        );
+
+        // Stock at uid 2
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Stock B".to_string(),
+                x: 250,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+            }),
+        );
+
+        // Valve at uid 3
+        view.insert(
+            3,
+            VensimElement::Valve(VensimValve {
+                uid: 3,
+                name: "444".to_string(),
+                x: 150,
+                y: 100,
+                width: 6,
+                height: 8,
+                attached: true,
+                bits: 3,
+            }),
+        );
+
+        // Flow at uid 4 (attached to valve)
+        view.insert(
+            4,
+            VensimElement::Variable(VensimVariable {
+                uid: 4,
+                name: "Flow Rate".to_string(),
+                x: 150,
+                y: 120,
+                width: 40,
+                height: 20,
+                attached: true,
+                is_ghost: false,
+                bits: 3,
+            }),
+        );
+
+        // Connector from valve to cloud (cloud detection requires conn.to_uid == comment_uid)
+        view.insert(
+            5,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 5,
+                from_uid: 3,
+                to_uid: 1,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (100, 100),
+            }),
+        );
+
+        // Connector from valve to stock
+        view.insert(
+            6,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 6,
+                from_uid: 3,
+                to_uid: 2,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (200, 100),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        let mut stock_info = make_symbol_info(VariableType::Stock);
+        stock_info.inflows = vec!["flow rate".to_string()];
+        symbols.insert("stock b".to_string(), stock_info);
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let cloud = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Cloud(c) = e {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .expect("expected cloud element");
+
+        let compat = cloud.compat.as_ref().expect("expected compat on cloud");
+        assert_eq!(compat.width, 18.0);
+        assert_eq!(compat.height, 18.0);
+        assert_eq!(compat.bits, 12);
+    }
+
+    #[test]
+    fn test_alias_compat_preserves_dimensions() {
+        // AC2.2: Alias elements preserve original dimensions and bits
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+        };
+        let mut view = VensimView::new(header);
+
+        // Primary variable at uid 1
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Contact Rate".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+            }),
+        );
+
+        // Ghost/alias at uid 2 with non-default dimensions
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Contact Rate".to_string(),
+                x: 300,
+                y: 400,
+                width: 48,
+                height: 24,
+                attached: false,
+                is_ghost: true,
+                bits: 130,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "contact rate".to_string(),
+            make_symbol_info(VariableType::Aux),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let alias = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Alias(a) = e {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .expect("expected alias element");
+
+        let compat = alias.compat.as_ref().expect("expected compat on alias");
+        assert_eq!(compat.width, 48.0);
+        assert_eq!(compat.height, 24.0);
+        assert_eq!(compat.bits, 130);
     }
 }
