@@ -1603,6 +1603,53 @@ fn compute_control_point(from: (i32, i32), to: (i32, i32), canvas_angle: f64) ->
     (cx.round() as i32, cy.round() as i32)
 }
 
+/// Splits a StockFlow's elements into view segments at Group boundaries.
+///
+/// When the MDL parser merges multiple named views into a single StockFlow,
+/// it inserts a Group element at the start of each original view's elements.
+/// This function reverses that merge by splitting on Group boundaries.
+///
+/// Returns a Vec of (view_name, elements, font). If no Group elements exist,
+/// returns a single segment using the StockFlow's own name (or "View 1").
+fn split_view_on_groups<'a>(
+    sf: &'a datamodel::StockFlow,
+) -> Vec<(String, Vec<&'a ViewElement>, Option<String>)> {
+    let has_groups = sf
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Group(_)));
+
+    if !has_groups {
+        let name = sf.name.clone().unwrap_or_else(|| "View 1".to_string());
+        let elements: Vec<&ViewElement> = sf
+            .elements
+            .iter()
+            .filter(|e| !matches!(e, ViewElement::Module(_)))
+            .collect();
+        return vec![(name, elements, sf.font.clone())];
+    }
+
+    let mut segments = Vec::new();
+    let mut current_name = sf.name.clone().unwrap_or_else(|| "View 1".to_string());
+    let mut current_elements: Vec<&'a ViewElement> = Vec::new();
+
+    for element in &sf.elements {
+        if let ViewElement::Group(group) = element {
+            if !current_elements.is_empty() {
+                segments.push((current_name, current_elements, sf.font.clone()));
+                current_elements = Vec::new();
+            }
+            current_name = group.name.clone();
+        } else if !matches!(element, ViewElement::Module(_)) {
+            current_elements.push(element);
+        }
+    }
+    if !current_elements.is_empty() {
+        segments.push((current_name, current_elements, sf.font.clone()));
+    }
+    segments
+}
+
 /// Stateful writer that accumulates the full MDL file text.
 pub struct MdlWriter {
     buf: String,
@@ -1755,55 +1802,86 @@ impl MdlWriter {
     /// Each view gets its own `\\\---///` separator and `V300` header line.
     /// The first view's separator is already emitted by `write_equations_section`.
     /// The final `///---\\\` terminator follows the last view.
+    ///
+    /// When a StockFlow contains Group elements (from merging multiple MDL
+    /// views at parse time), we split on those boundaries to reconstruct
+    /// the original multi-view structure.
     fn write_sketch_section(&mut self, views: &[View]) {
-        for (i, view) in views.iter().enumerate() {
-            if i > 0 {
-                // Additional views need their own separator
-                self.buf.push_str(
-                    "\\\\\\---/// Sketch information - do not modify anything except names\n",
-                );
-            }
-            self.buf
-                .push_str("V300  Do not put anything below this section - it will be ignored\n");
-
+        let mut segment_idx = 0;
+        for view in views {
             let View::StockFlow(sf) = view;
-            self.write_stock_flow_view(sf);
+
+            // Build shared maps from ALL elements so that cross-view
+            // references (links, aliases) resolve correctly.
+            let valve_uids = allocate_valve_uids(&sf.elements);
+            let mut next_connector_uid = max_sketch_uid(&sf.elements, &valve_uids) + 1;
+            let elem_positions = build_element_positions(&sf.elements, &valve_uids);
+            let name_map = build_name_map(&sf.elements);
+
+            let segments = split_view_on_groups(sf);
+            for (view_name, elements, font) in &segments {
+                if segment_idx > 0 {
+                    self.buf.push_str(
+                        "\\\\\\---/// Sketch information - do not modify anything except names\n",
+                    );
+                }
+                self.buf.push_str(
+                    "V300  Do not put anything below this section - it will be ignored\n",
+                );
+                self.write_view_segment(
+                    view_name,
+                    elements,
+                    font.as_deref(),
+                    sf.use_lettered_polarity,
+                    &valve_uids,
+                    &mut next_connector_uid,
+                    &elem_positions,
+                    &name_map,
+                );
+                segment_idx += 1;
+            }
         }
 
         self.buf.push_str("///---\\\\\\\n");
     }
 
-    /// Write a single StockFlow view as sketch elements.
-    fn write_stock_flow_view(&mut self, sf: &datamodel::StockFlow) {
-        let view_title = sanitize_view_title_for_mdl(sf.name.as_deref().unwrap_or("View 1"));
+    /// Write a single view segment: title, font line, and all sketch elements.
+    #[allow(clippy::too_many_arguments)]
+    fn write_view_segment(
+        &mut self,
+        view_name: &str,
+        elements: &[&ViewElement],
+        font: Option<&str>,
+        use_lettered_polarity: bool,
+        valve_uids: &HashMap<i32, i32>,
+        next_connector_uid: &mut i32,
+        elem_positions: &HashMap<i32, (i32, i32)>,
+        name_map: &HashMap<i32, &str>,
+    ) {
+        let view_title = sanitize_view_title_for_mdl(view_name);
         writeln!(self.buf, "*{}", view_title).unwrap();
-        self.buf.push_str(
-            "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
-        );
 
-        // Allocate non-conflicting valve UIDs for flow elements
-        let valve_uids = allocate_valve_uids(&sf.elements);
-        let mut next_connector_uid = max_sketch_uid(&sf.elements, &valve_uids) + 1;
-
-        // Build position map for link control point computation
-        let elem_positions = build_element_positions(&sf.elements, &valve_uids);
-
-        // Build name map for alias resolution
-        let name_map = build_name_map(&sf.elements);
+        if let Some(f) = font {
+            writeln!(self.buf, "${}", f).unwrap();
+        } else {
+            self.buf.push_str(
+                "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
+            );
+        }
 
         // Collect cloud UIDs so flow pipe connectors can set the right direction flag.
         // Also build a map from flow_uid -> clouds so we can emit each cloud
         // just before its associated flow (Vensim requires this ordering).
         let mut cloud_uids: HashSet<i32> = HashSet::new();
         let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
-        for elem in &sf.elements {
-            if let ViewElement::Cloud(c) = elem {
+        for elem in elements {
+            if let ViewElement::Cloud(c) = *elem {
                 cloud_uids.insert(c.uid);
                 flow_clouds.entry(c.flow_uid).or_default().push(c);
             }
         }
 
-        for elem in &sf.elements {
+        for elem in elements {
             match elem {
                 ViewElement::Aux(aux) => {
                     write_aux_element(&mut self.buf, aux);
@@ -1824,30 +1902,23 @@ impl MdlWriter {
                     write_flow_element(
                         &mut self.buf,
                         flow,
-                        &valve_uids,
+                        valve_uids,
                         &cloud_uids,
-                        &mut next_connector_uid,
+                        next_connector_uid,
                     );
                     self.buf.push('\n');
                 }
                 ViewElement::Link(link) => {
-                    write_link_element(
-                        &mut self.buf,
-                        link,
-                        &elem_positions,
-                        sf.use_lettered_polarity,
-                    );
+                    write_link_element(&mut self.buf, link, elem_positions, use_lettered_polarity);
                     self.buf.push('\n');
                 }
                 // Clouds are emitted with their associated flow above
                 ViewElement::Cloud(_) => {}
                 ViewElement::Alias(alias) => {
-                    write_alias_element(&mut self.buf, alias, &name_map);
+                    write_alias_element(&mut self.buf, alias, name_map);
                     self.buf.push('\n');
                 }
-                ViewElement::Module(_) | ViewElement::Group(_) => {
-                    // Modules and groups are not serialized in MDL sketch format
-                }
+                ViewElement::Module(_) | ViewElement::Group(_) => {}
             }
         }
     }
@@ -1981,7 +2052,7 @@ mod tests {
     use crate::common::RawIdent;
     use crate::datamodel::{
         Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
-        GraphicalFunctionScale, SimMethod, Stock, Unit, Variable,
+        GraphicalFunctionScale, Rect, SimMethod, Stock, StockFlow, Unit, Variable, view_element,
     };
     use crate::lexer::LexerType;
 
@@ -4625,6 +4696,268 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             eq.contains("GET DIRECT CONSTANTS"),
             "should produce GET DIRECT CONSTANTS: {eq}"
+        );
+    }
+
+    // ---- Multi-view split tests (Phase 3, Tasks 1-2) ----
+
+    fn make_view_aux(name: &str, uid: i32) -> ViewElement {
+        ViewElement::Aux(view_element::Aux {
+            name: name.to_owned(),
+            uid,
+            x: 100.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        })
+    }
+
+    fn make_view_stock(name: &str, uid: i32) -> ViewElement {
+        ViewElement::Stock(view_element::Stock {
+            name: name.to_owned(),
+            uid,
+            x: 200.0,
+            y: 200.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        })
+    }
+
+    fn make_view_flow(name: &str, uid: i32) -> ViewElement {
+        ViewElement::Flow(view_element::Flow {
+            name: name.to_owned(),
+            uid,
+            x: 150.0,
+            y: 150.0,
+            label_side: view_element::LabelSide::Bottom,
+            points: vec![],
+            compat: None,
+            label_compat: None,
+        })
+    }
+
+    fn make_view_group(name: &str, uid: i32) -> ViewElement {
+        ViewElement::Group(view_element::Group {
+            uid,
+            name: name.to_owned(),
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 500.0,
+        })
+    }
+
+    fn make_stock_flow(elements: Vec<ViewElement>) -> StockFlow {
+        StockFlow {
+            name: None,
+            elements,
+            view_box: Rect::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+        }
+    }
+
+    #[test]
+    fn split_view_no_groups_returns_single_segment() {
+        let sf = make_stock_flow(vec![
+            make_view_aux("price", 1),
+            make_view_stock("inventory", 2),
+        ]);
+        let segments = split_view_on_groups(&sf);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].0, "View 1");
+        assert_eq!(segments[0].1.len(), 2);
+    }
+
+    #[test]
+    fn split_view_no_groups_uses_stockflow_name() {
+        let mut sf = make_stock_flow(vec![make_view_aux("price", 1)]);
+        sf.name = Some("My Custom View".to_owned());
+        let segments = split_view_on_groups(&sf);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].0, "My Custom View");
+    }
+
+    #[test]
+    fn split_view_two_groups_produces_two_segments() {
+        let sf = make_stock_flow(vec![
+            make_view_group("1 housing", 100),
+            make_view_aux("price", 1),
+            make_view_stock("inventory", 2),
+            make_view_group("2 investments", 200),
+            make_view_aux("rate", 3),
+            make_view_flow("capital_flow", 4),
+        ]);
+        let segments = split_view_on_groups(&sf);
+        assert_eq!(segments.len(), 2, "expected 2 segments from 2 groups");
+        assert_eq!(segments[0].0, "1 housing");
+        assert_eq!(segments[0].1.len(), 2, "first segment: price + inventory");
+        assert_eq!(segments[1].0, "2 investments");
+        assert_eq!(
+            segments[1].1.len(),
+            2,
+            "second segment: rate + capital_flow"
+        );
+    }
+
+    #[test]
+    fn split_view_elements_partitioned_correctly() {
+        let sf = make_stock_flow(vec![
+            make_view_group("1 housing", 100),
+            make_view_aux("price", 1),
+            make_view_stock("inventory", 2),
+            make_view_group("2 investments", 200),
+            make_view_aux("rate", 3),
+        ]);
+        let segments = split_view_on_groups(&sf);
+
+        // First segment should contain price and inventory
+        let seg1_names: Vec<&str> = segments[0].1.iter().filter_map(|e| e.get_name()).collect();
+        assert_eq!(seg1_names, vec!["price", "inventory"]);
+
+        // Second segment should contain rate
+        let seg2_names: Vec<&str> = segments[1].1.iter().filter_map(|e| e.get_name()).collect();
+        assert_eq!(seg2_names, vec!["rate"]);
+    }
+
+    #[test]
+    fn split_view_modules_filtered_out() {
+        let sf = make_stock_flow(vec![
+            make_view_aux("price", 1),
+            ViewElement::Module(view_element::Module {
+                name: "submodel".to_owned(),
+                uid: 99,
+                x: 0.0,
+                y: 0.0,
+                label_side: view_element::LabelSide::Bottom,
+            }),
+        ]);
+        let segments = split_view_on_groups(&sf);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].1.len(), 1, "module should be filtered out");
+    }
+
+    #[test]
+    fn split_view_preserves_font() {
+        let mut sf = make_stock_flow(vec![
+            make_view_group("view1", 100),
+            make_view_aux("x", 1),
+            make_view_group("view2", 200),
+            make_view_aux("y", 2),
+        ]);
+        sf.font = Some("192-192-192,0,Verdana|10||0-0-0".to_owned());
+        let segments = split_view_on_groups(&sf);
+        for (_, _, font) in &segments {
+            assert_eq!(
+                font.as_deref(),
+                Some("192-192-192,0,Verdana|10||0-0-0"),
+                "all segments should share the StockFlow font"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_view_mdl_output_contains_view_headers() {
+        let sf = make_stock_flow(vec![
+            make_view_group("1 housing", 100),
+            make_view_aux("price", 1),
+            make_view_group("2 investments", 200),
+            make_view_aux("rate", 2),
+        ]);
+        let views = vec![View::StockFlow(sf)];
+
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&views);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("*1 housing"),
+            "output should contain first view header: {output}"
+        );
+        assert!(
+            output.contains("*2 investments"),
+            "output should contain second view header: {output}"
+        );
+    }
+
+    #[test]
+    fn multi_view_mdl_output_has_separators_between_views() {
+        let sf = make_stock_flow(vec![
+            make_view_group("view1", 100),
+            make_view_aux("a", 1),
+            make_view_group("view2", 200),
+            make_view_aux("b", 2),
+        ]);
+        let views = vec![View::StockFlow(sf)];
+
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&views);
+        let output = writer.buf;
+
+        // The second view should have a V300 header
+        let v300_count = output.matches("V300").count();
+        assert_eq!(
+            v300_count, 2,
+            "two views should produce two V300 headers: {output}"
+        );
+    }
+
+    #[test]
+    fn single_view_no_groups_mdl_output() {
+        let sf = make_stock_flow(vec![make_view_aux("price", 1)]);
+        let views = vec![View::StockFlow(sf)];
+
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&views);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("*View 1"),
+            "single view should use default name: {output}"
+        );
+        let v300_count = output.matches("V300").count();
+        assert_eq!(
+            v300_count, 1,
+            "single view should produce one V300 header: {output}"
+        );
+    }
+
+    #[test]
+    fn multi_view_uses_font_when_present() {
+        let mut sf = make_stock_flow(vec![make_view_group("view1", 100), make_view_aux("a", 1)]);
+        sf.font = Some(
+            "192-192-192,0,Verdana|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0"
+                .to_owned(),
+        );
+        let views = vec![View::StockFlow(sf)];
+
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&views);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("$192-192-192,0,Verdana|10||"),
+            "should use preserved font: {output}"
+        );
+        assert!(
+            !output.contains("Times New Roman"),
+            "should not use default font when custom font present: {output}"
+        );
+    }
+
+    #[test]
+    fn single_view_uses_default_font_when_none() {
+        let sf = make_stock_flow(vec![make_view_aux("a", 1)]);
+        let views = vec![View::StockFlow(sf)];
+
+        let mut writer = MdlWriter::new();
+        writer.write_sketch_section(&views);
+        let output = writer.buf;
+
+        assert!(
+            output.contains("Times New Roman|12"),
+            "should use default font when font is None: {output}"
         );
     }
 }
