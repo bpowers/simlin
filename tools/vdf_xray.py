@@ -38,6 +38,8 @@ VDF_SENTINEL = 0xF6800000
 
 OT_CODE_TIME = 0x0F
 OT_CODE_STOCK = 0x08
+OT_CODE_DYNAMIC = 0x11
+OT_CODE_CONST = 0x17
 
 SYSTEM_NAMES = {"Time", "INITIAL TIME", "FINAL TIME", "TIME STEP", "SAVEPER"}
 
@@ -271,6 +273,27 @@ class RecordShapeBlock:
 
 
 @dataclass
+class OwnerRecordBlock:
+    start: int
+    end: int
+    ot_codes: list[int]
+    sentinel_record_indices: list[int] = field(default_factory=list)
+    shape_codes: list[int] = field(default_factory=list)
+    slot_refs: list[int] = field(default_factory=list)
+    hidden_slot_refs: list[int] = field(default_factory=list)
+    direct_sort_keys: list[int] = field(default_factory=list)
+    attached_sort_keys: list[int] = field(default_factory=list)
+    sort_anchor_record_indices: list[int] = field(default_factory=list)
+    hidden: bool = False
+
+    def length(self) -> int:
+        return self.end - self.start
+
+    def homogeneous_ot_codes(self) -> bool:
+        return len(set(self.ot_codes)) <= 1
+
+
+@dataclass
 class MdlDimension:
     name: str
     elements: list[str]
@@ -285,6 +308,7 @@ class MdlDefinition:
     header: str
     source_index: int
     line_no: int
+    expression: str = ""
 
     def is_stock(self) -> bool:
         return self.kind == "stock"
@@ -297,6 +321,7 @@ class MdlDefinition:
 class MdlModel:
     dimensions: dict[str, MdlDimension]
     definitions: list[MdlDefinition]
+    sketch_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -896,6 +921,10 @@ def section5_exact_axis_sizes(sec5: Section5SetEntry,
 
 
 MDL_LHS_RE = re.compile(r"^(?P<name>[^\[]+?)(?:\[(?P<dims>[^\]]+)\])?$")
+MDL_NUMERIC_LITERAL_RE = re.compile(
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+)
+MDL_SKETCH_VAR_RE = re.compile(r"^10,\d+,([^,]+),")
 
 
 def parse_mdl_lhs(lhs: str) -> tuple[str, list[str]]:
@@ -908,6 +937,69 @@ def parse_mdl_lhs(lhs: str) -> tuple[str, list[str]]:
         return name, []
     dims = [part.strip() for part in dims_text.split(",") if part.strip()]
     return name, dims
+
+
+def parse_mdl_expression(lines: list[str], start_idx: int, rhs: str) -> tuple[str, int]:
+    parts: list[str] = []
+    if rhs.strip():
+        parts.append(rhs.strip())
+
+    j = start_idx + 1
+    while j < len(lines):
+        probe = lines[j].strip()
+        if (probe.startswith("~")
+                or probe == "|"
+                or probe.startswith("********************************************************")):
+            break
+        if probe:
+            parts.append(probe)
+        j += 1
+    return " ".join(parts).strip(), j
+
+
+def parse_mdl_sketch_names(lines: list[str]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    in_sketch = False
+
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("*View"):
+            in_sketch = True
+            continue
+        if not in_sketch:
+            continue
+        if line.startswith("///---\\\\\\"):
+            break
+        match = MDL_SKETCH_VAR_RE.match(line)
+        if match is None:
+            continue
+        name = match.group(1).strip()
+        if name == "Time" or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def mdl_definition_runtime_class(definition: MdlDefinition) -> str:
+    if definition.is_stock():
+        return "stock"
+    if MDL_NUMERIC_LITERAL_RE.fullmatch(definition.expression):
+        return "const"
+    return "dynamic"
+
+
+def mdl_sketch_definitions(model: MdlModel, *,
+                           include_kinds: Optional[set[str]] = None) -> list[MdlDefinition]:
+    if include_kinds is None:
+        include_kinds = {"stock", "var"}
+    by_name = {
+        definition.name: definition
+        for definition in model.definitions
+        if definition.kind in include_kinds
+    }
+    return [by_name[name] for name in model.sketch_names if name in by_name]
 
 
 def parse_mdl_model(text: str) -> MdlModel:
@@ -954,8 +1046,9 @@ def parse_mdl_model(text: str) -> MdlModel:
         if "=" in raw:
             lhs, rhs = raw.split("=", 1)
             name, dims = parse_mdl_lhs(lhs)
+            expression, next_idx = parse_mdl_expression(lines, i, rhs)
             source_index += 1
-            kind = "stock" if "INTEG" in rhs.upper() else "var"
+            kind = "stock" if "INTEG" in expression.upper() else "var"
             definitions.append(MdlDefinition(
                 name=name,
                 kind=kind,
@@ -963,8 +1056,9 @@ def parse_mdl_model(text: str) -> MdlModel:
                 header=line,
                 source_index=source_index,
                 line_no=i + 1,
+                expression=expression,
             ))
-            i += 1
+            i = next_idx
             continue
 
         if line.endswith("("):
@@ -976,10 +1070,15 @@ def parse_mdl_model(text: str) -> MdlModel:
                 header=line,
                 source_index=source_index,
                 line_no=i + 1,
+                expression=line,
             ))
         i += 1
 
-    return MdlModel(dimensions=dimensions, definitions=definitions)
+    return MdlModel(
+        dimensions=dimensions,
+        definitions=definitions,
+        sketch_names=parse_mdl_sketch_names(lines),
+    )
 
 
 def mdl_definition_flat_size(model: MdlModel, definition: MdlDefinition) -> Optional[int]:
@@ -1095,8 +1194,157 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
     return blocks
 
 
+def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
+    out: list[int] = []
+    for rec_idx, rec in enumerate(vdf.records):
+        if not rec.has_sentinel():
+            continue
+        if rec.fields[0] == 0 or rec.fields[1] == 23:
+            continue
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count:
+            continue
+        if record_shape_length(vdf, rec) is None:
+            continue
+        out.append(rec_idx)
+    return out
+
+
+def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
+    """
+    Build the narrower owner-oriented block set from sentinel model records.
+
+    In the model-edit fixtures, the structurally "real" visible owners are
+    carried by the sentinel model records. Non-sentinel records still matter
+    as sort/order anchors, but they over-generate overlapping shape spans.
+    This helper keeps the owner candidate set narrow while still attaching
+    visible sort anchors back onto those owners.
+    """
+    codes = vdf.section6_ot_class_codes() or []
+    hidden_slots = set(preferred_slot_name_alignment(vdf).hidden_slots)
+    by_range: dict[tuple[int, int], OwnerRecordBlock] = {}
+
+    def add_unique(values: list[int], value: int) -> None:
+        if value > 0 and value not in values:
+            values.append(value)
+
+    for rec_idx in sentinel_model_record_indices(vdf):
+        rec = vdf.records[rec_idx]
+        start = rec.ot_index()
+        length = record_shape_length(vdf, rec)
+        if length is None or length <= 0:
+            continue
+        end = min(vdf.offset_table_count, start + length)
+        key = (start, end)
+        block = by_range.setdefault(
+            key,
+            OwnerRecordBlock(
+                start=start,
+                end=end,
+                ot_codes=codes[start:end],
+            ),
+        )
+        block.sentinel_record_indices.append(rec_idx)
+        add_unique(block.shape_codes, rec.shape_code())
+        slot_ref = rec.slot_ref()
+        add_unique(block.slot_refs, slot_ref)
+        if slot_ref in hidden_slots:
+            add_unique(block.hidden_slot_refs, slot_ref)
+        if rec.fields[10] > 0:
+            add_unique(block.direct_sort_keys, rec.fields[10])
+            add_unique(block.attached_sort_keys, rec.fields[10])
+
+    blocks = sorted(by_range.values(), key=lambda block: (block.start, block.end))
+    for block in blocks:
+        block.sentinel_record_indices.sort()
+        block.shape_codes.sort()
+        block.slot_refs.sort()
+        block.hidden_slot_refs.sort()
+        block.direct_sort_keys.sort()
+        block.attached_sort_keys.sort()
+        block.hidden = bool(block.slot_refs) and len(block.hidden_slot_refs) == len(block.slot_refs)
+
+    visible_blocks = [block for block in blocks if not block.hidden]
+    hidden_blocks = [block for block in blocks if block.hidden]
+
+    def attach_sort(block: OwnerRecordBlock, rec_idx: int, sort_key: int) -> None:
+        add_unique(block.attached_sort_keys, sort_key)
+        add_unique(block.sort_anchor_record_indices, rec_idx)
+
+    def adjacent_visible_from_hidden(hidden_block: OwnerRecordBlock) -> list[OwnerRecordBlock]:
+        out: list[OwnerRecordBlock] = []
+        for block in visible_blocks:
+            if hidden_block.end == block.start:
+                if hidden_block.ot_codes and block.ot_codes and hidden_block.ot_codes[-1] == block.ot_codes[0]:
+                    out.append(block)
+            elif block.end == hidden_block.start:
+                if hidden_block.ot_codes and block.ot_codes and hidden_block.ot_codes[0] == block.ot_codes[-1]:
+                    out.append(block)
+        return out
+
+    for rec_idx, rec in enumerate(vdf.records):
+        sort_key = rec.fields[10]
+        ot_index = rec.ot_index()
+        if rec.has_sentinel() or sort_key <= 0 or ot_index <= 0 or ot_index >= vdf.offset_table_count:
+            continue
+
+        direct_hits = [block for block in visible_blocks if block.start <= ot_index < block.end]
+        if len(direct_hits) == 1:
+            attach_sort(direct_hits[0], rec_idx, sort_key)
+            continue
+
+        if direct_hits:
+            continue
+
+        hidden_hits = [block for block in hidden_blocks if block.start <= ot_index < block.end]
+        if len(hidden_hits) != 1:
+            continue
+
+        neighbors = adjacent_visible_from_hidden(hidden_hits[0])
+        if len(neighbors) == 1:
+            attach_sort(neighbors[0], rec_idx, sort_key)
+
+    for block in blocks:
+        block.attached_sort_keys.sort()
+        block.sort_anchor_record_indices.sort()
+    return blocks
+
+
+def owner_blocks_in_sentinel_order(vdf: VdfFile, *,
+                                   include_hidden: bool = False) -> list[OwnerRecordBlock]:
+    blocks = build_owner_record_blocks(vdf)
+    if not include_hidden:
+        blocks = [block for block in blocks if not block.hidden]
+    return sorted(
+        blocks,
+        key=lambda block: (
+            block.sentinel_record_indices[0] if block.sentinel_record_indices else len(vdf.records),
+            block.start,
+            block.end,
+        ),
+    )
+
+
+def owner_block_runtime_class(block: OwnerRecordBlock) -> str:
+    if block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes):
+        return "stock"
+    if block.ot_codes and all(code == OT_CODE_CONST for code in block.ot_codes):
+        return "const"
+    return "dynamic"
+
+
 def mdl_definition_matches_block(model: MdlModel, definition: MdlDefinition,
                                  block: RecordShapeBlock) -> bool:
+    expected_size = mdl_definition_flat_size(model, definition)
+    if expected_size is not None and block.length() != expected_size:
+        return False
+    if definition.is_stock():
+        return bool(block.ot_codes) and all(code == OT_CODE_STOCK for code in block.ot_codes)
+    return all(code != OT_CODE_STOCK for code in block.ot_codes)
+
+
+def mdl_definition_matches_owner_block(model: MdlModel, definition: MdlDefinition,
+                                       block: OwnerRecordBlock) -> bool:
     expected_size = mdl_definition_flat_size(model, definition)
     if expected_size is not None and block.length() != expected_size:
         return False
@@ -1114,6 +1362,23 @@ def match_mdl_definitions_to_blocks(vdf: VdfFile, model: MdlModel) -> list[MdlBl
         candidate_block_indices = [
             idx for idx, block in enumerate(blocks)
             if mdl_definition_matches_block(model, definition, block)
+        ]
+        matches.append(MdlBlockMatch(
+            definition=definition,
+            candidate_block_indices=candidate_block_indices,
+        ))
+    return matches
+
+
+def match_mdl_definitions_to_owner_blocks(vdf: VdfFile, model: MdlModel) -> list[MdlBlockMatch]:
+    blocks = build_owner_record_blocks(vdf)
+    matches: list[MdlBlockMatch] = []
+    for definition in model.definitions:
+        if definition.kind not in {"stock", "var", "lookup"}:
+            continue
+        candidate_block_indices = [
+            idx for idx, block in enumerate(blocks)
+            if not block.hidden and mdl_definition_matches_owner_block(model, definition, block)
         ]
         matches.append(MdlBlockMatch(
             definition=definition,
@@ -1926,6 +2191,27 @@ def print_record_shape_blocks(vdf: VdfFile) -> None:
     print()
 
 
+def print_owner_record_blocks(vdf: VdfFile) -> None:
+    print("=== Owner Record Blocks ===")
+    blocks = build_owner_record_blocks(vdf)
+    if not blocks:
+        print("  (none)\n")
+        return
+
+    for i, block in enumerate(blocks):
+        code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+        slot_labels = [describe_slot_ref(vdf, slot_ref) for slot_ref in block.slot_refs]
+        hidden_label = "hidden" if block.hidden else "visible"
+        print(f"  {i:>3}  OT[{block.start}..{block.end}) len={block.length()} "
+              f"{hidden_label} sentinel_recs={block.sentinel_record_indices} "
+              f"shape_codes={block.shape_codes} direct_sorts={block.direct_sort_keys} "
+              f"attached_sorts={block.attached_sort_keys} "
+              f"sort_anchors={block.sort_anchor_record_indices} "
+              f"codes={code_str} homogeneous={block.homogeneous_ot_codes()} "
+              f"slots={slot_labels}")
+    print()
+
+
 def format_record_shape_block(vdf: VdfFile, block: Optional[RecordShapeBlock], *,
                               block_idx: Optional[int] = None) -> str:
     if block is None:
@@ -1935,6 +2221,20 @@ def format_record_shape_block(vdf: VdfFile, block: Optional[RecordShapeBlock], *
     return (f"{prefix}OT[{block.start}..{block.end}) len={block.length()} "
             f"shape_codes={block.shape_codes} sorts={block.sort_keys} "
             f"codes={code_str} slots={block.slot_refs}")
+
+
+def format_owner_record_block(vdf: VdfFile, block: Optional[OwnerRecordBlock], *,
+                              block_idx: Optional[int] = None) -> str:
+    if block is None:
+        return "missing"
+    prefix = f"owner[{block_idx}] " if block_idx is not None else ""
+    code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+    hidden_label = "hidden" if block.hidden else "visible"
+    return (f"{prefix}OT[{block.start}..{block.end}) len={block.length()} {hidden_label} "
+            f"class={owner_block_runtime_class(block)} "
+            f"sentinel_recs={block.sentinel_record_indices} "
+            f"direct_sorts={block.direct_sort_keys} attached_sorts={block.attached_sort_keys} "
+            f"anchors={block.sort_anchor_record_indices} codes={code_str} slots={block.slot_refs}")
 
 
 def print_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
@@ -1971,6 +2271,88 @@ def print_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
         print("  unmatched blocks:")
         for idx in unmatched:
             print(f"        {format_record_shape_block(vdf, blocks[idx], block_idx=idx)}")
+    print()
+
+
+def print_owner_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
+    print("=== Owner MDL Alignment ===")
+    print(f"  mdl: {mdl_path}")
+
+    blocks = build_owner_record_blocks(vdf)
+    matches = match_mdl_definitions_to_owner_blocks(vdf, model)
+    matched_block_indices: set[int] = set()
+
+    for match in matches:
+        definition = match.definition
+        flat_size = mdl_definition_flat_size(model, definition)
+        if len(match.candidate_block_indices) == 1:
+            status = "unique"
+        elif len(match.candidate_block_indices) == 0:
+            status = "missing"
+        else:
+            status = "ambiguous"
+        print(f"  src[{definition.source_index:>2}] {definition.kind:<6} {definition.name}"
+              f"{'[' + ','.join(definition.dimensions) + ']' if definition.dimensions else ''} "
+              f"flat={flat_size if flat_size is not None else '?'} "
+              f"candidates={len(match.candidate_block_indices)} {status}")
+        for block_idx in match.candidate_block_indices:
+            matched_block_indices.add(block_idx)
+            print(f"        {format_owner_record_block(vdf, blocks[block_idx], block_idx=block_idx)}")
+
+    unmatched = [idx for idx, block in enumerate(blocks) if idx not in matched_block_indices and not block.hidden]
+    if unmatched:
+        print("  unmatched visible owners:")
+        for idx in unmatched:
+            print(f"        {format_owner_record_block(vdf, blocks[idx], block_idx=idx)}")
+
+    hidden = [idx for idx, block in enumerate(blocks) if block.hidden]
+    if hidden:
+        print("  hidden owner blocks:")
+        for idx in hidden:
+            print(f"        {format_owner_record_block(vdf, blocks[idx], block_idx=idx)}")
+    print()
+
+
+def print_owner_sketch_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
+    print("=== Owner Sketch Alignment ===")
+    print(f"  mdl: {mdl_path}")
+
+    sketch_defs = mdl_sketch_definitions(model)
+    blocks = owner_blocks_in_sentinel_order(vdf)
+
+    print(f"  sketch_names={len(model.sketch_names)} visible_defs={len(sketch_defs)} "
+          f"visible_owner_blocks={len(blocks)}")
+    if model.sketch_names:
+        print(f"  sketch_order={model.sketch_names}")
+
+    max_len = max(len(sketch_defs), len(blocks))
+    for idx in range(max_len):
+        definition = sketch_defs[idx] if idx < len(sketch_defs) else None
+        block = blocks[idx] if idx < len(blocks) else None
+
+        lhs = (
+            f"sketch[{idx:>2}] {definition.name} "
+            f"class={mdl_definition_runtime_class(definition)}"
+            if definition is not None else
+            f"sketch[{idx:>2}] missing"
+        )
+        rhs = (
+            f"owner[{idx:>2}] OT[{block.start}..{block.end}) "
+            f"class={owner_block_runtime_class(block)} "
+            f"sentinel_recs={block.sentinel_record_indices} "
+            f"attached_sorts={block.attached_sort_keys}"
+            if block is not None else
+            f"owner[{idx:>2}] missing"
+        )
+        print(f"  {lhs} -> {rhs}")
+
+    hidden = owner_blocks_in_sentinel_order(vdf, include_hidden=True)
+    hidden = [block for block in hidden if block.hidden]
+    if hidden:
+        print("  hidden owner blocks:")
+        for block in hidden:
+            print(f"        OT[{block.start}..{block.end}) class={owner_block_runtime_class(block)} "
+                  f"sentinel_recs={block.sentinel_record_indices} attached_sorts={block.attached_sort_keys}")
     print()
 
 
@@ -2583,6 +2965,45 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         print("  (no record-shape-block differences)")
     print()
 
+    print("=== Owner Block Diffs ===")
+    left_owner_blocks = build_owner_record_blocks(left)
+    right_owner_blocks = build_owner_record_blocks(right)
+    any_owner_diff = False
+    keys = sorted({(b.start, b.end) for b in left_owner_blocks} | {(b.start, b.end) for b in right_owner_blocks})
+    left_by_key = {(b.start, b.end): b for b in left_owner_blocks}
+    right_by_key = {(b.start, b.end): b for b in right_owner_blocks}
+    for key in keys:
+        lblock = left_by_key.get(key)
+        rblock = right_by_key.get(key)
+        if lblock is None or rblock is None:
+            any_owner_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_owner_record_block(left, lblock) if lblock else 'missing'}")
+            print(f"    right: {format_owner_record_block(right, rblock) if rblock else 'missing'}")
+            continue
+        ltuple = (
+            lblock.hidden,
+            lblock.sentinel_record_indices,
+            lblock.direct_sort_keys,
+            lblock.attached_sort_keys,
+            lblock.slot_refs,
+        )
+        rtuple = (
+            rblock.hidden,
+            rblock.sentinel_record_indices,
+            rblock.direct_sort_keys,
+            rblock.attached_sort_keys,
+            rblock.slot_refs,
+        )
+        if ltuple != rtuple:
+            any_owner_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_owner_record_block(left, lblock)}")
+            print(f"    right: {format_owner_record_block(right, rblock)}")
+    if not any_owner_diff:
+        print("  (no owner-block differences)")
+    print()
+
     print("=== Section 6 Ref Stream Diffs ===")
     left_ref_stream = left.parse_section6_ref_stream()
     right_ref_stream = right.parse_section6_ref_stream()
@@ -2650,8 +3071,12 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
 
     if left_mdl is not None:
         print_mdl_alignment(left, left_mdl[0], left_mdl[1])
+        print_owner_mdl_alignment(left, left_mdl[0], left_mdl[1])
+        print_owner_sketch_alignment(left, left_mdl[0], left_mdl[1])
     if right_mdl is not None:
         print_mdl_alignment(right, right_mdl[0], right_mdl[1])
+        print_owner_mdl_alignment(right, right_mdl[0], right_mdl[1])
+        print_owner_sketch_alignment(right, right_mdl[0], right_mdl[1])
 
 
 # ---- Main ----
@@ -2684,6 +3109,8 @@ def main() -> None:
     parser.add_argument("--bridge", action="store_true", help="Show record shape -> sec3 bridge")
     parser.add_argument("--record-blocks", action="store_true",
                         help="Show record groups merged by decoded shape span")
+    parser.add_argument("--owner-blocks", action="store_true",
+                        help="Show owner-oriented blocks built from sentinel model records")
     parser.add_argument("--sec35-bridge", action="store_true", help="Show section-3 -> section-5 bridge")
     parser.add_argument("--ranges", action="store_true", help="Show record-derived OT ranges")
     parser.add_argument("--validate", action="store_true", help="Check structural invariants")
@@ -2739,7 +3166,7 @@ def main() -> None:
         args.names, args.slots, args.records, args.sec3, args.sec4,
         args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
         args.bridge, args.record_blocks, args.sec35_bridge, args.ranges, args.validate,
-        args.raw_section is not None,
+        args.owner_blocks, args.raw_section is not None,
     ])
 
     # Always show header + layout + summary
@@ -2773,8 +3200,12 @@ def main() -> None:
         print_shape_record_bridge(vdf)
     if show_all or args.record_blocks:
         print_record_shape_blocks(vdf)
+    if show_all or args.owner_blocks:
+        print_owner_record_blocks(vdf)
     if mdl_model is not None:
         print_mdl_alignment(vdf, mdl_model[0], mdl_model[1])
+        print_owner_mdl_alignment(vdf, mdl_model[0], mdl_model[1])
+        print_owner_sketch_alignment(vdf, mdl_model[0], mdl_model[1])
     if show_all or args.sec35_bridge:
         print_section35_bridge(vdf)
     if show_all or args.ot:
