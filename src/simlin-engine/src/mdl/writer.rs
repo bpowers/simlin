@@ -1620,13 +1620,16 @@ impl MdlWriter {
     }
 
     /// Orchestrate the full MDL file assembly and return the result.
+    ///
+    /// Vensim requires CRLF (`\r\n`) line endings, so the final output
+    /// is converted from LF to CRLF before returning.
     pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
         self.buf.push_str("{UTF-8}\n");
         let model = &project.models[0];
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
-        Ok(self.buf)
+        Ok(self.buf.replace('\n', "\r\n"))
     }
 
     /// Write sim spec control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER).
@@ -3047,7 +3050,7 @@ mod tests {
         assert!(result.is_ok(), "should succeed: {:?}", result);
         let mdl = result.unwrap();
         assert!(
-            mdl.starts_with("{UTF-8}\n"),
+            mdl.starts_with("{UTF-8}\r\n"),
             "MDL should start with UTF-8 marker, got: {:?}",
             mdl.lines().next()
         );
@@ -3275,7 +3278,7 @@ mod tests {
 
         // Dimension def at the start, before variables
         assert!(
-            mdl.contains("region:\n\tnorth, south\n\t~~|"),
+            mdl.contains("region:\r\n\tnorth, south\r\n\t~~|"),
             "should contain dimension def"
         );
         let dim_pos = mdl.find("region:").unwrap();
@@ -3796,7 +3799,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         let mdl = crate::mdl::project_to_mdl(&project).expect("roundtrip MDL write should work");
 
         assert!(
-            mdl.contains("*Overview\n"),
+            mdl.contains("*Overview\r\n"),
             "Roundtrip should preserve original view title: {}",
             mdl
         );
@@ -3829,7 +3832,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
 
         let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
         assert!(
-            mdl.contains("*Overview Main\n"),
+            mdl.contains("*Overview Main\r\n"),
             "view title should be serialized as a single line: {mdl}",
         );
 
