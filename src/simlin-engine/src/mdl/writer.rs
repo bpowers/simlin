@@ -1193,12 +1193,23 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 
 // ---- Sketch element serialization ----
 
+/// Format a view element name for sketch output.
+///
+/// Sketch names need underscores replaced with spaces (like `underbar_to_space`),
+/// but also must escape actual newline characters as the literal two-character
+/// sequence `\n`. XMILE sources may contain real newlines in view element name
+/// attributes; Vensim MDL sketch lines are single-line records, so a real
+/// newline in a name would break parsing.
+fn format_sketch_name(name: &str) -> String {
+    name.replace('_', " ").replace('\n', "\\n")
+}
+
 /// Write a type 10 line for an Aux element.
-/// Sketch element names use bare `underbar_to_space` (not `format_mdl_ident`)
+/// Sketch element names use `format_sketch_name` (not `format_mdl_ident`)
 /// because MDL sketch lines are comma-delimited positional records where
 /// quoting is not used.
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
-    let name = underbar_to_space(&aux.name);
+    let name = format_sketch_name(&aux.name);
     // shape=8 (has equation), bits=3 (visible, primary)
     write!(
         buf,
@@ -1208,10 +1219,9 @@ fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
     .unwrap();
 }
 
-/// Write a type 10 line for a Stock element.  See `write_aux_element` for
-/// why sketch names use `underbar_to_space` instead of `format_mdl_ident`.
+/// Write a type 10 line for a Stock element.
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
-    let name = underbar_to_space(&stock.name);
+    let name = format_sketch_name(&stock.name);
     // shape=3 (box/stock shape), bits=3 (visible, primary)
     write!(
         buf,
@@ -1307,7 +1317,7 @@ fn write_flow_element(
     cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
 ) {
-    let name = underbar_to_space(&flow.name);
+    let name = format_sketch_name(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
 
     // Pipe connectors must come before the valve and flow label.
@@ -1453,10 +1463,9 @@ fn write_alias_element(
     alias: &view_element::Alias,
     name_map: &HashMap<i32, &str>,
 ) {
-    // Sketch names: see `write_aux_element` for why `underbar_to_space`.
     let name = name_map
         .get(&alias.alias_of_uid)
-        .map(|n| underbar_to_space(n))
+        .map(|n| format_sketch_name(n))
         .unwrap_or_default();
     // shape=8, bits=2 (visible but bit 0 unset = ghost)
     write!(
@@ -1681,20 +1690,26 @@ impl MdlWriter {
         }
 
         // Build a set of variable idents that belong to any group
+        // (skip .Control -- those vars are sim specs emitted separately)
         let mut grouped_idents: HashSet<&str> = HashSet::new();
         for group in &model.groups {
+            if group.name == "Control" || group.name == "control" {
+                continue;
+            }
             for member in &group.members {
                 grouped_idents.insert(member.as_str());
             }
         }
 
-        // 2. Variables in group order
+        // 2. Variables in group order (skip .Control -- emitted with sim specs)
         for group in &model.groups {
+            if group.name == "Control" || group.name == "control" {
+                continue;
+            }
             // Group marker
             write!(
                 self.buf,
                 "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
-                // Group names appear in comment-like header blocks, not in equations.
                 underbar_to_space(&group.name),
                 group.doc.as_deref().unwrap_or(""),
             )
@@ -1720,7 +1735,10 @@ impl MdlWriter {
             }
         }
 
-        // 4. Sim spec variables
+        // 4. .Control group header + sim spec variables
+        self.buf.push_str(
+            "\n********************************************************\n\t.Control\n********************************************************~\n\t\tSimulation Control Parameters\n\t|\n",
+        );
         let sim_specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
         self.write_sim_specs(sim_specs);
 
@@ -1731,13 +1749,20 @@ impl MdlWriter {
 
     /// Write the sketch/view section of the MDL file.
     ///
-    /// This emits the sketch header, each view's elements, and the sketch
-    /// terminator. The section follows the equations terminator line.
+    /// Each view gets its own `\\\---///` separator and `V300` header line.
+    /// The first view's separator is already emitted by `write_equations_section`.
+    /// The final `///---\\\` terminator follows the last view.
     fn write_sketch_section(&mut self, views: &[View]) {
-        self.buf
-            .push_str("V300  Do not put anything below this section - it will be ignored\n");
+        for (i, view) in views.iter().enumerate() {
+            if i > 0 {
+                // Additional views need their own separator
+                self.buf.push_str(
+                    "\\\\\\---/// Sketch information - do not modify anything except names\n",
+                );
+            }
+            self.buf
+                .push_str("V300  Do not put anything below this section - it will be ignored\n");
 
-        for view in views {
             let View::StockFlow(sf) = view;
             self.write_stock_flow_view(sf);
         }
