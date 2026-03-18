@@ -600,6 +600,31 @@ the remaining gap requires the model file.
 7. **Section-3 extension in array models** provides dimension cardinality
    at words 26-27 of the section data (e.g., 3 for a 3-element dimension).
 
+8. **Record sort_key (field 10) as global alphabetical ordering signal**.
+   When sorted ascending across all visible owner blocks, sort keys
+   correspond 1:1 to the alphabetically sorted (case-insensitive) variable
+   names. Validated across the full `model_editing/` test corpus and the
+   `water`, `pop`, `consts`, `lookups` models. Stock sentinel records
+   typically have sort_key=0; their sort keys come from attached sort
+   anchor records (non-sentinel records whose ot_index falls within the
+   stock's OT range).
+
+9. **OT-position validation for stock classification**. Given a proposed
+   name-to-block assignment, the stocks-first-alphabetical ordering
+   produces expected OT positions for each name. Checking expected vs
+   actual block start position uniquely determines which names are stocks.
+   This eliminates the need for external stock classification when sort
+   keys are available for all blocks. Validated on `model_editing/run_5`
+   (scalar stock with sort_key=0) through `run_9` (arrayed stock with
+   hidden SMOOTH helper).
+
+10. **Record field[2] monotonically correlates with name-table position**.
+    Records sorted by f[2] produce an ordering that tracks the name-table
+    entry order, though the exact encoding is not yet decoded. The
+    correlation is stable across simulation runs of the same model but
+    changes between model versions. This is a strong candidate for the
+    deterministic record-to-name link but needs further investigation.
+
 ### VDF-structural path (stock classifier required)
 
 `VdfFile::to_results_with_stock_classifier(is_stock)` uses only VDF structural
