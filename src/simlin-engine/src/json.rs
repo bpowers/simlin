@@ -1043,6 +1043,7 @@ impl From<ViewElement> for datamodel::ViewElement {
                     x: s.x,
                     y: s.y,
                     label_side: label_side_from_string(&s.label_side),
+                    compat: None,
                 })
             }
             ViewElement::Flow(f) => datamodel::ViewElement::Flow(datamodel::view_element::Flow {
@@ -1064,6 +1065,8 @@ impl From<ViewElement> for datamodel::ViewElement {
                         },
                     })
                     .collect(),
+                compat: None,
+                label_compat: None,
             }),
             ViewElement::Auxiliary(a) => {
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
@@ -1072,6 +1075,7 @@ impl From<ViewElement> for datamodel::ViewElement {
                     x: a.x,
                     y: a.y,
                     label_side: label_side_from_string(&a.label_side),
+                    compat: None,
                 })
             }
             ViewElement::Cloud(c) => {
@@ -1080,6 +1084,7 @@ impl From<ViewElement> for datamodel::ViewElement {
                     flow_uid: c.flow_uid,
                     x: c.x,
                     y: c.y,
+                    compat: None,
                 })
             }
             ViewElement::Link(l) => datamodel::ViewElement::Link(datamodel::view_element::Link {
@@ -1124,6 +1129,7 @@ impl From<ViewElement> for datamodel::ViewElement {
                     x: a.x,
                     y: a.y,
                     label_side: label_side_from_string(&a.label_side),
+                    compat: None,
                 })
             }
             ViewElement::Group(g) => {
@@ -1167,6 +1173,7 @@ impl From<View> for datamodel::View {
                 .unwrap_or_default(),
             zoom: if view.zoom == 0.0 { 1.0 } else { view.zoom },
             use_lettered_polarity: view.use_lettered_polarity,
+            font: None,
         })
     }
 }

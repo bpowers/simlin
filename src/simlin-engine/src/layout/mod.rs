@@ -166,6 +166,7 @@ impl<'a> LayoutEngine<'a> {
                 },
                 zoom: 1.0,
                 use_lettered_polarity: false,
+                font: None,
             });
         }
 
@@ -224,6 +225,7 @@ impl<'a> LayoutEngine<'a> {
             view_box,
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
         })
     }
 
@@ -447,6 +449,7 @@ impl<'a> LayoutEngine<'a> {
                     x: pos.x,
                     y: pos.y,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 });
                 self.elements.push(elem);
                 self.positions.insert(uid, pos);
@@ -579,6 +582,8 @@ impl<'a> LayoutEngine<'a> {
             y: pos.y,
             label_side,
             points: flow_points,
+            compat: None,
+            label_compat: None,
         };
 
         // Update bounds for flow points
@@ -620,6 +625,7 @@ impl<'a> LayoutEngine<'a> {
                 flow_uid: flow_elem.uid,
                 x: cx,
                 y: cy,
+                compat: None,
             });
             self.elements.push(cloud);
             flow_elem.points[0].attached_to_uid = Some(cloud_uid);
@@ -642,6 +648,7 @@ impl<'a> LayoutEngine<'a> {
                 flow_uid: flow_elem.uid,
                 x: cx,
                 y: cy,
+                compat: None,
             });
             self.elements.push(cloud);
             flow_elem.points[last_idx].attached_to_uid = Some(cloud_uid);
@@ -1258,6 +1265,7 @@ impl<'a> LayoutEngine<'a> {
                     x: pos.x,
                     y: pos.y,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 });
                 self.elements.push(elem);
                 self.positions.insert(uid, pos);
@@ -3148,6 +3156,7 @@ mod tests {
                     },
                     zoom: 1.0,
                     use_lettered_polarity: false,
+                    font: None,
                 },
                 crossings: 5,
                 seed: 42,
@@ -3164,6 +3173,7 @@ mod tests {
                     },
                     zoom: 1.0,
                     use_lettered_polarity: false,
+                    font: None,
                 },
                 crossings: 2,
                 seed: 123,
@@ -3186,6 +3196,7 @@ mod tests {
                         x: 0.0,
                         y: 0.0,
                         label_side: LabelSide::Bottom,
+                        compat: None,
                     })],
                     view_box: Rect {
                         x: 0.0,
@@ -3195,6 +3206,7 @@ mod tests {
                     },
                     zoom: 1.0,
                     use_lettered_polarity: false,
+                    font: None,
                 },
                 crossings: 3,
                 seed: 123,
@@ -3208,6 +3220,7 @@ mod tests {
                         x: 0.0,
                         y: 0.0,
                         label_side: LabelSide::Bottom,
+                        compat: None,
                     })],
                     view_box: Rect {
                         x: 0.0,
@@ -3217,6 +3230,7 @@ mod tests {
                     },
                     zoom: 1.0,
                     use_lettered_polarity: false,
+                    font: None,
                 },
                 crossings: 3,
                 seed: 42,
@@ -3734,6 +3748,7 @@ mod tests {
                     x: 0.0,
                     y: 0.0,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "b".to_string(),
@@ -3741,6 +3756,7 @@ mod tests {
                     x: 10.0,
                     y: 10.0,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "c".to_string(),
@@ -3748,6 +3764,7 @@ mod tests {
                     x: 10.0,
                     y: -10.0,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Link(view_element::Link {
                     uid: 4,
@@ -3772,6 +3789,7 @@ mod tests {
             },
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
         };
 
         assert_eq!(count_view_crossings(&view), 0);

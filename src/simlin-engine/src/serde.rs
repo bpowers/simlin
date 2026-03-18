@@ -1182,6 +1182,28 @@ fn test_label_side_roundtrip() {
     );
 }
 
+fn view_compat_to_proto(
+    compat: &Option<view_element::ViewElementCompat>,
+) -> Option<project_io::view_element::ViewElementCompat> {
+    compat
+        .as_ref()
+        .map(|c| project_io::view_element::ViewElementCompat {
+            width: Some(c.width),
+            height: Some(c.height),
+            bits: Some(c.bits),
+        })
+}
+
+fn view_compat_from_proto(
+    compat: Option<project_io::view_element::ViewElementCompat>,
+) -> Option<view_element::ViewElementCompat> {
+    compat.map(|c| view_element::ViewElementCompat {
+        width: c.width.unwrap_or(0.0),
+        height: c.height.unwrap_or(0.0),
+        bits: c.bits.unwrap_or(0),
+    })
+}
+
 impl From<project_io::view_element::Aux> for view_element::Aux {
     fn from(v: project_io::view_element::Aux) -> Self {
         view_element::Aux {
@@ -1192,6 +1214,7 @@ impl From<project_io::view_element::Aux> for view_element::Aux {
             label_side: view_element::LabelSide::from(
                 project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
             ),
+            compat: view_compat_from_proto(v.compat),
         }
     }
 }
@@ -1204,6 +1227,7 @@ impl From<view_element::Aux> for project_io::view_element::Aux {
             x: v.x,
             y: v.y,
             label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            compat: view_compat_to_proto(&v.compat),
         }
     }
 }
@@ -1216,6 +1240,7 @@ fn test_view_element_aux_roundtrip() {
         x: 2.0,
         y: 3.0,
         label_side: view_element::LabelSide::Top,
+        compat: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -1234,6 +1259,7 @@ impl From<project_io::view_element::Stock> for view_element::Stock {
             label_side: view_element::LabelSide::from(
                 project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
             ),
+            compat: view_compat_from_proto(v.compat),
         }
     }
 }
@@ -1246,6 +1272,7 @@ impl From<view_element::Stock> for project_io::view_element::Stock {
             x: v.x,
             y: v.y,
             label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            compat: view_compat_to_proto(&v.compat),
         }
     }
 }
@@ -1258,6 +1285,7 @@ fn test_view_element_stock_roundtrip() {
         x: 2.0,
         y: 3.0,
         label_side: view_element::LabelSide::Top,
+        compat: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -1366,6 +1394,8 @@ impl From<project_io::view_element::Flow> for view_element::Flow {
                 .into_iter()
                 .map(view_element::FlowPoint::from)
                 .collect(),
+            compat: view_compat_from_proto(v.compat),
+            label_compat: view_compat_from_proto(v.label_compat),
         }
     }
 }
@@ -1383,6 +1413,8 @@ impl From<view_element::Flow> for project_io::view_element::Flow {
                 .into_iter()
                 .map(project_io::view_element::FlowPoint::from)
                 .collect(),
+            compat: view_compat_to_proto(&v.compat),
+            label_compat: view_compat_to_proto(&v.label_compat),
         }
     }
 }
@@ -1407,6 +1439,8 @@ fn test_view_element_flow_roundtrip() {
                 attached_to_uid: None,
             },
         ],
+        compat: None,
+        label_compat: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -1591,6 +1625,7 @@ impl From<project_io::view_element::Alias> for view_element::Alias {
             label_side: view_element::LabelSide::from(
                 project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
             ),
+            compat: view_compat_from_proto(v.compat),
         }
     }
 }
@@ -1603,6 +1638,7 @@ impl From<view_element::Alias> for project_io::view_element::Alias {
             x: v.x,
             y: v.y,
             label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            compat: view_compat_to_proto(&v.compat),
         }
     }
 }
@@ -1615,6 +1651,7 @@ fn test_view_element_alias_roundtrip() {
         x: 2.0,
         y: 3.0,
         label_side: view_element::LabelSide::Top,
+        compat: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -1631,6 +1668,7 @@ impl From<project_io::view_element::Cloud> for view_element::Cloud {
             flow_uid: v.flow_uid,
             x: v.x,
             y: v.y,
+            compat: view_compat_from_proto(v.compat),
         }
     }
 }
@@ -1642,6 +1680,7 @@ impl From<view_element::Cloud> for project_io::view_element::Cloud {
             flow_uid: v.flow_uid,
             x: v.x,
             y: v.y,
+            compat: view_compat_to_proto(&v.compat),
         }
     }
 }
@@ -1679,6 +1718,7 @@ fn test_view_element_cloud_roundtrip() {
         flow_uid: 124,
         x: 2.0,
         y: 3.0,
+        compat: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -1760,6 +1800,7 @@ fn test_view_element_roundtrip() {
             flow_uid: 124,
             x: 2.0,
             y: 3.0,
+            compat: None,
         }),
         ViewElement::Group(view_element::Group {
             uid: 200,
@@ -1798,6 +1839,7 @@ impl From<View> for project_io::View {
                     use_lettered_polarity: view.use_lettered_polarity,
                     name,
                     has_name,
+                    font: view.font,
                 }
             }
         }
@@ -1813,6 +1855,7 @@ impl From<project_io::View> for View {
             use_lettered_polarity,
             name,
             has_name,
+            font,
             ..
         } = view;
 
@@ -1830,6 +1873,7 @@ impl From<project_io::View> for View {
                 zoom
             },
             use_lettered_polarity,
+            font,
         })
     }
 }
@@ -1842,6 +1886,7 @@ fn test_view_roundtrip_preserves_explicit_empty_title() {
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
+        font: None,
     });
 
     let roundtrip = View::from(project_io::View::from(view));
@@ -1861,6 +1906,7 @@ fn test_view_roundtrip_preserves_absent_title() {
         view_box: Rect::default(),
         zoom: 1.0,
         use_lettered_polarity: false,
+        font: None,
     });
 
     let roundtrip = View::from(project_io::View::from(view));
@@ -1878,6 +1924,7 @@ fn test_view_deserialize_keeps_nonempty_name_without_presence_flag() {
         use_lettered_polarity: false,
         name: "Overview".to_string(),
         has_name: false,
+        font: None,
     };
 
     let view = View::from(proto);

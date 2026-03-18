@@ -464,6 +464,17 @@ pub mod view_element {
         Right,
     }
 
+    /// Vensim-specific layout metadata preserved during MDL roundtripping.
+    /// Stores original element dimensions and type bits so the writer can
+    /// reproduce the sketch section byte-for-byte.
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
+    pub struct ViewElementCompat {
+        pub width: f64,
+        pub height: f64,
+        pub bits: u32,
+    }
+
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Clone, PartialEq)]
     pub struct Aux {
@@ -472,6 +483,7 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: LabelSide,
+        pub compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -482,6 +494,7 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: LabelSide,
+        pub compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -503,6 +516,8 @@ pub mod view_element {
         // pub segment_with_aux: i32,
         // pub aux_percentage_into_segment: f64,
         pub points: Vec<FlowPoint>,
+        pub compat: Option<ViewElementCompat>,
+        pub label_compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -548,6 +563,7 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: LabelSide,
+        pub compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -557,6 +573,7 @@ pub mod view_element {
         pub flow_uid: i32,
         pub x: f64,
         pub y: f64,
+        pub compat: Option<ViewElementCompat>,
     }
 
     /// Visual container for grouping related model elements.
@@ -638,6 +655,9 @@ pub struct StockFlow {
     /// letters (S/O) rather than symbols (+/-). Corresponds to xmutil's
     /// bLetterPolarity flag and XMILE's isee:use_lettered_polarity attribute.
     pub use_lettered_polarity: bool,
+    /// Vensim default font string (e.g. "Arial|12||0-0-0|0-0-0|-1--1--1|-1--1--1|96,96")
+    /// preserved during MDL roundtripping.
+    pub font: Option<String>,
 }
 
 impl StockFlow {

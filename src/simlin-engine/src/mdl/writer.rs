@@ -3294,6 +3294,7 @@ mod tests {
             x: 100.0,
             y: 200.0,
             label_side: view_element::LabelSide::Bottom,
+            compat: None,
         };
         let mut buf = String::new();
         write_aux_element(&mut buf, &aux);
@@ -3308,6 +3309,7 @@ mod tests {
             x: 300.0,
             y: 150.0,
             label_side: view_element::LabelSide::Top,
+            compat: None,
         };
         let mut buf = String::new();
         write_stock_element(&mut buf, &stock);
@@ -3323,6 +3325,8 @@ mod tests {
             y: 191.0,
             label_side: view_element::LabelSide::Bottom,
             points: vec![],
+            compat: None,
+            label_compat: None,
         };
         let mut buf = String::new();
         let valve_uids = HashMap::from([(6, 100)]);
@@ -3359,6 +3363,8 @@ mod tests {
                     attached_to_uid: Some(2),
                 },
             ],
+            compat: None,
+            label_compat: None,
         };
         let mut buf = String::new();
         let valve_uids = HashMap::from([(6, 100)]);
@@ -3401,6 +3407,7 @@ mod tests {
                 x: 100.0,
                 y: 100.0,
                 label_side: view_element::LabelSide::Bottom,
+                compat: None,
             }),
             ViewElement::Flow(view_element::Flow {
                 name: "Birth_Rate".to_string(),
@@ -3409,6 +3416,8 @@ mod tests {
                 y: 100.0,
                 label_side: view_element::LabelSide::Bottom,
                 points: vec![],
+                compat: None,
+                label_compat: None,
             }),
         ];
 
@@ -3426,6 +3435,7 @@ mod tests {
             flow_uid: 6,
             x: 479.0,
             y: 235.0,
+            compat: None,
         };
         let mut buf = String::new();
         write_cloud_element(&mut buf, &cloud);
@@ -3440,6 +3450,7 @@ mod tests {
             x: 200.0,
             y: 300.0,
             label_side: view_element::LabelSide::Bottom,
+            compat: None,
         };
         let mut name_map = HashMap::new();
         name_map.insert(1, "Growth_Rate");
@@ -3570,6 +3581,7 @@ mod tests {
                 x: 100.0,
                 y: 100.0,
                 label_side: view_element::LabelSide::Top,
+                compat: None,
             }),
             ViewElement::Aux(view_element::Aux {
                 name: "Growth_Rate".to_string(),
@@ -3577,6 +3589,7 @@ mod tests {
                 x: 200.0,
                 y: 200.0,
                 label_side: view_element::LabelSide::Bottom,
+                compat: None,
             }),
             ViewElement::Link(view_element::Link {
                 uid: 3,
@@ -3592,6 +3605,7 @@ mod tests {
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
         };
         let views = vec![View::StockFlow(sf)];
 
@@ -3637,6 +3651,7 @@ mod tests {
             x: 100.0,
             y: 100.0,
             label_side: view_element::LabelSide::Bottom,
+            compat: None,
         })];
         let model = datamodel::Model {
             name: "default".to_owned(),
@@ -3648,6 +3663,7 @@ mod tests {
                 view_box: Default::default(),
                 zoom: 1.0,
                 use_lettered_polarity: false,
+                font: None,
             })],
             loop_metadata: vec![],
             groups: vec![],
@@ -3818,10 +3834,12 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                     x: 100.0,
                     y: 100.0,
                     label_side: view_element::LabelSide::Bottom,
+                    compat: None,
                 })],
                 view_box: Default::default(),
                 zoom: 1.0,
                 use_lettered_polarity: false,
+                font: None,
             })],
             loop_metadata: vec![],
             groups: vec![],
@@ -3891,6 +3909,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                         x: 100.0,
                         y: 100.0,
                         label_side: view_element::LabelSide::Bottom,
+                        compat: None,
                     }),
                     ViewElement::Stock(view_element::Stock {
                         name: "Stock_B".to_owned(),
@@ -3898,6 +3917,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                         x: 300.0,
                         y: 100.0,
                         label_side: view_element::LabelSide::Bottom,
+                        compat: None,
                     }),
                     ViewElement::Flow(view_element::Flow {
                         name: "Flow_AB".to_owned(),
@@ -3917,11 +3937,14 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                                 attached_to_uid: Some(2),
                             },
                         ],
+                        compat: None,
+                        label_compat: None,
                     }),
                 ],
                 view_box: Default::default(),
                 zoom: 1.0,
                 use_lettered_polarity: false,
+                font: None,
             })],
             loop_metadata: vec![],
             groups: vec![],
@@ -4185,6 +4208,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
             x: 100.0,
             y: 100.0,
             label_side: view_element::LabelSide::Bottom,
+            compat: None,
         })];
         let model = datamodel::Model {
             name: "default".to_owned(),
@@ -4196,6 +4220,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
                 view_box: Default::default(),
                 zoom: 1.0,
                 use_lettered_polarity: false,
+                font: None,
             })],
             loop_metadata: vec![],
             groups: vec![],

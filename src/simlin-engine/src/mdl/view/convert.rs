@@ -265,6 +265,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
+        font: None,
     });
 
     vec![merged]
@@ -367,6 +368,7 @@ fn convert_view(
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
+        font: None,
     }))
 }
 
@@ -460,6 +462,7 @@ fn convert_variable(
                 x: alias_x,
                 y: alias_y,
                 label_side: view_element::LabelSide::Bottom,
+                compat: None,
             }));
         }
     }
@@ -473,6 +476,7 @@ fn convert_variable(
             x: var.x as f64,
             y: var.y as f64,
             label_side: view_element::LabelSide::Top, // Stocks default to top
+            compat: None,
         })),
         VariableType::Flow => {
             // For flows, find the associated valve and compute flow points
@@ -486,6 +490,8 @@ fn convert_variable(
                 y: flow_y as f64,
                 label_side: view_element::LabelSide::Bottom,
                 points,
+                compat: None,
+                label_compat: None,
             }))
         }
         VariableType::Aux => Some(ViewElement::Aux(view_element::Aux {
@@ -494,6 +500,7 @@ fn convert_variable(
             x: var.x as f64,
             y: var.y as f64,
             label_side: view_element::LabelSide::Bottom,
+            compat: None,
         })),
     }
 }
@@ -561,6 +568,7 @@ fn convert_comment_as_cloud(comment: &VensimComment, uid: i32, flow_uid: i32) ->
         flow_uid,
         x: comment.x as f64,
         y: comment.y as f64,
+        compat: None,
     })
 }
 

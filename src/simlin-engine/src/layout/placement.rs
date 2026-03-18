@@ -494,6 +494,7 @@ mod tests {
                 x: 10.0,
                 y: 20.0,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
             ViewElement::Stock(view_element::Stock {
                 name: "s".to_string(),
@@ -501,6 +502,7 @@ mod tests {
                 x: 30.0,
                 y: 40.0,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
         ];
 
@@ -543,6 +545,8 @@ mod tests {
                     attached_to_uid: None,
                 },
             ],
+            compat: None,
+            label_compat: None,
         })];
 
         normalize_coordinates(&mut elements, 50.0);

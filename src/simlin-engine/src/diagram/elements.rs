@@ -292,6 +292,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         }
     }
 
@@ -302,6 +303,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         }
     }
 
@@ -380,6 +382,7 @@ mod tests {
             flow_uid: 5,
             x: 100.0,
             y: 200.0,
+            compat: None,
         };
         let svg = render_cloud(&element);
         assert!(svg.contains("simlin-cloud"));
@@ -394,6 +397,7 @@ mod tests {
             flow_uid: 5,
             x: 100.0,
             y: 200.0,
+            compat: None,
         };
         let bounds = cloud_bounds(&element);
         assert_eq!(bounds.left, 100.0 - CLOUD_RADIUS);
@@ -408,6 +412,7 @@ mod tests {
             x: 100.0,
             y: 200.0,
             label_side: LabelSide::Bottom,
+            compat: None,
         };
         let svg = render_alias(&element, Some("population"));
         assert!(svg.contains("simlin-alias"));
@@ -422,6 +427,7 @@ mod tests {
             x: 100.0,
             y: 200.0,
             label_side: LabelSide::Bottom,
+            compat: None,
         };
         let svg = render_alias(&element, None);
         assert!(svg.contains("unknown alias"));

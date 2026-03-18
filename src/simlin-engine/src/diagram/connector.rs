@@ -469,6 +469,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         })
     }
 
@@ -479,6 +480,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         })
     }
 
