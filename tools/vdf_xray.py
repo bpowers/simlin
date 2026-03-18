@@ -1195,6 +1195,15 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
 
 
 def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
+    """
+    Return indices of records that are structurally model-variable owners.
+
+    The sentinel pair (f[8]=f[9]=0xf6800000) is a strong signal, but not
+    exclusive to model variables: system records (FINAL TIME, SAVEPER, etc.)
+    can also carry sentinels, especially in small/empty models. After reformat,
+    model records can carry f[0]=0 or f[1]=23, so those fields cannot be used
+    as filters. System-record discrimination is handled at the mapping layer.
+    """
     out: list[int] = []
     for rec_idx, rec in enumerate(vdf.records):
         if not rec.has_sentinel():
@@ -1348,16 +1357,11 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
             neighbor.attached_sort_keys.sort()
             neighbor.sort_anchor_record_indices.sort()
 
-    # Drop unanchored non-stock/system owner blocks that carry no visible-order
-    # evidence. They are structural passengers rather than visible base owners.
-    filtered: list[OwnerRecordBlock] = []
-    for block in blocks:
-        if block.hidden:
-            filtered.append(block)
-            continue
-        if block.attached_sort_keys or (block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes)):
-            filtered.append(block)
-    return filtered
+    # All sentinel-based owner blocks are kept: the sentinel pair (f[8]=f[9]=
+    # 0xf6800000) is sufficient evidence that a block is a real variable owner.
+    # Variables CAN have sort_key=0 (observed in run_3/run_4 of model_editing
+    # fixtures for the first or most recently added variable).
+    return blocks
 
 
 def owner_blocks_in_sentinel_order(vdf: VdfFile, *,
@@ -1388,6 +1392,643 @@ def owner_block_runtime_class(block: OwnerRecordBlock) -> str:
     if block.ot_codes and all(code == OT_CODE_CONST for code in block.ot_codes):
         return "const"
     return "dynamic"
+
+
+# ---- VDF-native name mapping ----
+
+# Names that are module IO / stdlib helpers and never own OT entries.
+VENSIM_MODULE_NAMES = {"IN", "INI", "OUTPUT"}
+VENSIM_STDLIB_HELPERS = {"DEL", "LV1", "LV2", "LV3", "ST", "RT1", "RT2", "DL"}
+
+
+def visible_variable_candidates(vdf: VdfFile) -> list[str]:
+    """
+    Filter the name table to candidate variable names (names that could own OT
+    entries). Removes system variables, metadata prefixed names, builtins,
+    module IO names, stdlib helpers, and unslotted names.
+
+    Dimension/element filtering is NOT done here because it requires OT
+    validation to distinguish ambiguous cases. That's handled in the mapping
+    stage.
+    """
+    slotted_count = len(vdf.slot_table)
+    candidates: list[str] = []
+    for i, name in enumerate(vdf.names):
+        if i >= slotted_count:
+            break
+        cls = classify_name(name)
+        if cls:
+            continue
+        if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+            continue
+        candidates.append(name)
+    return candidates
+
+
+def _identify_dimension_element_names(
+    candidates: list[str],
+    sec5_entries: list[Section5SetEntry],
+    vdf: VdfFile,
+) -> set[str]:
+    """
+    Identify dimension definition names and their element names from the
+    candidate list, using section 5 cardinalities, name-table adjacency,
+    and OT-position validation.
+
+    Uses backtracking: dimension names in the name table are followed by
+    their element names (with metadata gaps). A partition is only accepted
+    if the remaining variable names produce a valid stocks-first-alphabetical
+    OT mapping.
+    """
+    name_to_idx: dict[str, int] = {}
+    for i, name in enumerate(vdf.names):
+        if name not in name_to_idx:
+            name_to_idx[name] = i
+
+    candidate_set = set(candidates)
+    cardinalities = sorted([entry.n for entry in sec5_entries], reverse=True)
+
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+    target_var_count = len(visible_blocks)
+
+    def find_group(card: int, used: set[str]) -> list[tuple[str, list[str], int]]:
+        """
+        Find all valid (dim_name, elements, gap_score) groups for a cardinality.
+
+        Returns groups sorted by gap_score (ascending) so the tightest
+        name-table clusters are tried first. A lower gap_score means the
+        element names are closer to the dimension name in the name table,
+        which is the typical Vensim pattern.
+        """
+        groups: list[tuple[str, list[str], int]] = []
+        for cand in candidates:
+            if cand in used:
+                continue
+            cand_idx = name_to_idx.get(cand, -1)
+            if cand_idx < 0:
+                continue
+            elements: list[str] = []
+            last_elem_idx = cand_idx
+            for j in range(cand_idx + 1, len(vdf.names)):
+                if len(elements) >= card:
+                    break
+                next_name = vdf.names[j]
+                if next_name in used or next_name == cand:
+                    continue
+                cls = classify_name(next_name)
+                if cls:
+                    continue
+                if next_name in VENSIM_MODULE_NAMES or next_name in VENSIM_STDLIB_HELPERS:
+                    continue
+                if next_name in candidate_set:
+                    elements.append(next_name)
+                    last_elem_idx = j
+            if len(elements) == card and not any(e in used for e in elements):
+                gap = last_elem_idx - cand_idx
+                groups.append((cand, elements, gap))
+        # Prefer tightest clusters. Break ties by preferring dimension names
+        # that appear later in the name table (dimensions often appear after
+        # variables in the name table).
+        groups.sort(key=lambda g: (g[2], -name_to_idx.get(g[0], 0)))
+        return groups
+
+    def try_map_remaining(used: set[str]) -> bool:
+        """Check if the remaining candidates produce a valid OT mapping."""
+        var_names = sorted(
+            [c for c in candidates if c not in used], key=_vensim_sort_key)
+        if len(var_names) != target_var_count:
+            return False
+        return _try_name_block_mapping(var_names, visible_blocks, vdf) is not None
+
+    def solve(remaining_cards: list[int], used: set[str]) -> Optional[set[str]]:
+        if not remaining_cards:
+            if try_map_remaining(used):
+                return used.copy()
+            return None
+
+        card = remaining_cards[0]
+        rest = remaining_cards[1:]
+        for dim_name, elements, _ in find_group(card, used):
+            new_used = used | {dim_name} | set(elements)
+            result = solve(rest, new_used)
+            if result is not None:
+                return result
+        return None
+
+    result = solve(cardinalities, set())
+    return result if result is not None else set()
+
+
+def _try_name_block_mapping(
+    sorted_names: list[str],
+    visible_blocks: list[OwnerRecordBlock],
+    vdf: VdfFile,
+) -> Optional[dict[str, OwnerRecordBlock]]:
+    """
+    Try to find a valid name-to-block mapping for the given sorted names
+    and visible blocks. Returns the mapping if valid, None otherwise.
+    """
+    import itertools
+
+    V = len(sorted_names)
+    if V != len(visible_blocks):
+        return None
+
+    def valid_assignment(mapping: dict[str, OwnerRecordBlock]) -> bool:
+        return _validate_name_block_assignment(mapping, vdf)
+
+    keyed_blocks = [(b.attached_sort_keys[0], b)
+                    for b in visible_blocks if b.attached_sort_keys]
+    keyed_blocks.sort()
+    unkeyed_blocks = [b for b in visible_blocks if not b.attached_sort_keys]
+
+    if not unkeyed_blocks:
+        ordered_blocks = [b for _, b in keyed_blocks]
+        mapping = dict(zip(sorted_names, ordered_blocks))
+        if valid_assignment(mapping):
+            return mapping
+        return None
+
+    for unkeyed_name_indices in itertools.combinations(range(V), len(unkeyed_blocks)):
+        keyed_name_indices = [i for i in range(V) if i not in unkeyed_name_indices]
+        if len(keyed_name_indices) != len(keyed_blocks):
+            continue
+
+        mapping: dict[str, OwnerRecordBlock] = {}
+        for name_idx, (_, block) in zip(keyed_name_indices, keyed_blocks):
+            mapping[sorted_names[name_idx]] = block
+
+        for perm in itertools.permutations(unkeyed_blocks):
+            trial = dict(mapping)
+            for name_idx, block in zip(unkeyed_name_indices, perm):
+                trial[sorted_names[name_idx]] = block
+            if valid_assignment(trial):
+                return trial
+
+    return None
+
+
+@dataclass
+class NameMapping:
+    """Result of VDF-native name-to-OT mapping."""
+    variable_names: list[str]  # Alphabetically sorted variable names
+    owner_blocks: list[OwnerRecordBlock]  # Sort-key ordered visible blocks
+    name_to_block: dict[str, OwnerRecordBlock]
+    system_ot_indices: set[int]  # OT indices owned by system variables
+    unmapped_blocks: list[OwnerRecordBlock]  # Blocks that couldn't be mapped
+
+
+def _vensim_sort_key(name: str) -> str:
+    """Vensim sorts names case-insensitively."""
+    return name.lower()
+
+
+def _validate_name_block_assignment(
+    name_to_block: dict[str, OwnerRecordBlock],
+    vdf: VdfFile,
+) -> bool:
+    """
+    Check that a name-to-block assignment produces an OT layout consistent
+    with the stocks-first-alphabetical ordering rule.
+
+    For each model variable, its expected OT position (derived from alphabetical
+    sorting within the stock/non-stock group) must match its assigned block's
+    actual OT start position.
+    """
+    codes = vdf.section6_ot_class_codes() or []
+    stock_count = sum(1 for c in codes[1:] if c == OT_CODE_STOCK)
+
+    stock_names: list[str] = []
+    nonstock_names: list[str] = []
+    for name, block in name_to_block.items():
+        if block.ot_codes and all(c == OT_CODE_STOCK for c in block.ot_codes):
+            stock_names.append(name)
+        else:
+            nonstock_names.append(name)
+
+    stock_names.sort(key=_vensim_sort_key)
+    system_names_sorted = sorted(
+        (n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key)
+    all_nonstock = sorted(nonstock_names + system_names_sorted,
+                          key=_vensim_sort_key)
+
+    # Expected stock OT positions. Hidden stock blocks (SMOOTH/DELAY helpers)
+    # occupy OT slots before visible stocks, so start after them.
+    hidden_stock_ots = 0
+    if hasattr(vdf, '_hidden_stock_ot_count'):
+        hidden_stock_ots = vdf._hidden_stock_ot_count
+    expected_stock_pos = 1 + hidden_stock_ots
+    for name in stock_names:
+        block = name_to_block[name]
+        if block.start != expected_stock_pos:
+            return False
+        expected_stock_pos += block.length()
+
+    # Expected non-stock OT positions
+    expected_nonstock_pos = stock_count + 1
+    for name in all_nonstock:
+        block = name_to_block.get(name)
+        if block is not None:
+            if block.start != expected_nonstock_pos:
+                return False
+            expected_nonstock_pos += block.length()
+        else:
+            # System variable: occupies 1 OT entry
+            expected_nonstock_pos += 1
+
+    return True
+
+
+def _recover_dimension_element_names(vdf: VdfFile) -> set[str]:
+    """
+    Recover dimension element names from section 5 cardinalities and
+    name-table adjacency.
+
+    Vensim writes dimension definitions as contiguous runs in the name
+    table: dim_name, [metadata...], elem1, elem2, ..., elemN. The elements
+    form a contiguous block with no intervening candidate names. This
+    strict contiguity requirement avoids false matches where variable names
+    happen to be adjacent.
+
+    Returns the set of identified element names. These structurally cannot
+    own arrayed OT blocks.
+    """
+    sec5_entries = vdf.parse_section5_sets() or []
+    if not sec5_entries:
+        return set()
+
+    name_to_idx: dict[str, int] = {}
+    for i, name in enumerate(vdf.names):
+        if name not in name_to_idx:
+            name_to_idx[name] = i
+
+    candidate_set = set(visible_variable_candidates(vdf))
+    cardinalities = sorted([e.n for e in sec5_entries], reverse=True)
+    elements: set[str] = set()
+    used_dims: set[str] = set()
+
+    for card in cardinalities:
+        best_dim: Optional[str] = None
+        best_elems: Optional[list[str]] = None
+
+        for cand in sorted(candidate_set, key=lambda n: name_to_idx.get(n, 0)):
+            if cand in used_dims or cand in elements:
+                continue
+            cand_idx = name_to_idx.get(cand, -1)
+            if cand_idx < 0:
+                continue
+
+            # Collect the FIRST n candidates after this dim name, requiring
+            # they form a contiguous block (only metadata names between them)
+            elems: list[str] = []
+            contiguous = True
+            for j in range(cand_idx + 1, len(vdf.names)):
+                if len(elems) >= card:
+                    break
+                next_name = vdf.names[j]
+                if next_name in used_dims or next_name in elements:
+                    contiguous = False
+                    break
+                cls = classify_name(next_name)
+                if cls:
+                    continue  # skip metadata
+                if next_name in VENSIM_MODULE_NAMES or next_name in VENSIM_STDLIB_HELPERS:
+                    continue
+                if next_name not in candidate_set:
+                    contiguous = False
+                    break
+                elems.append(next_name)
+
+            if contiguous and len(elems) == card:
+                # Additional check: elements should be simple names (no spaces)
+                # to avoid matching compound variable names as elements
+                all_simple = all(" " not in e for e in elems)
+                if all_simple:
+                    best_dim = cand
+                    best_elems = elems
+                    break
+
+        if best_dim is not None and best_elems is not None:
+            used_dims.add(best_dim)
+            elements.update(best_elems)
+
+    return elements
+
+
+def _score_variable_name_set(var_names: list[str], all_candidates: list[str],
+                             vdf: Optional[VdfFile] = None) -> float:
+    """
+    Score how likely a set of names are actual model variables vs
+    dimension/element names. Higher score = more likely variables.
+
+    Primary signals:
+    1. Excluded names should form proper dimension groups (dim + N elements)
+    2. Variable names tend to be longer/compound; elements tend to be short
+    3. Excluding a compound name (contains space) strongly penalized
+    """
+    score = 0.0
+    var_set = set(var_names)
+    excluded = [n for n in all_candidates if n not in var_set]
+
+    # Primary: bonus if excluded names form dimension groups matching sec5
+    if vdf is not None:
+        sec5_entries = vdf.parse_section5_sets() or []
+        if sec5_entries:
+            cardinalities = sorted([e.n for e in sec5_entries], reverse=True)
+            dim_score = _score_excluded_as_dimensions(
+                excluded, cardinalities, vdf)
+            score += dim_score * 100
+
+    # Strong signal: compound names (with spaces) are almost always variables,
+    # never dimension elements. Penalize hard if a compound name is excluded.
+    for name in excluded:
+        if " " in name:
+            score -= 50
+    for name in var_names:
+        if " " in name:
+            score += 10
+
+    # Variable names tend to be longer than element names
+    for name in var_names:
+        score += min(len(name), 10)
+    for name in excluded:
+        # Excluding short names is fine; excluding long names is bad
+        if len(name) > 6:
+            score -= 5
+
+    return score
+
+
+def _score_excluded_as_dimensions(
+    excluded: list[str],
+    cardinalities: list[int],
+    vdf: VdfFile,
+) -> float:
+    """
+    Score how well excluded names form dimension groups matching the given
+    cardinalities. Returns 0-1 representing fraction of cardinalities matched.
+    """
+    if not cardinalities:
+        return 1.0 if not excluded else 0.0
+
+    expected_excluded = sum(1 + c for c in cardinalities)
+    if len(excluded) != expected_excluded:
+        return 0.0
+
+    name_to_idx: dict[str, int] = {}
+    for i, name in enumerate(vdf.names):
+        if name not in name_to_idx:
+            name_to_idx[name] = i
+
+    excluded_set = set(excluded)
+    matched = 0
+    score = 0.0
+
+    # Try to match each cardinality to a group: dim_name followed by N
+    # elements, all from the excluded set, tight in the name table
+    used: set[str] = set()
+    for card in cardinalities:
+        best_gap = float("inf")
+        best_group: Optional[tuple[str, list[str]]] = None
+        for name in excluded:
+            if name in used:
+                continue
+            idx = name_to_idx.get(name, -1)
+            if idx < 0:
+                continue
+            elements: list[str] = []
+            for j in range(idx + 1, len(vdf.names)):
+                if len(elements) >= card:
+                    break
+                next_name = vdf.names[j]
+                if next_name in used or next_name == name:
+                    continue
+                if next_name not in excluded_set:
+                    continue
+                elements.append(next_name)
+            if len(elements) == card:
+                last_idx = name_to_idx.get(elements[-1], idx)
+                gap = last_idx - idx
+                if gap < best_gap:
+                    best_gap = gap
+                    best_group = (name, elements)
+        if best_group is not None:
+            used.add(best_group[0])
+            used.update(best_group[1])
+            matched += 1
+            # Tighter groups (smaller gap) are more likely correct
+            score += 1.0 / (1.0 + best_gap)
+
+    # Combine match fraction with tightness bonus
+    return (matched / len(cardinalities)) + score * 0.1
+
+
+def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
+    """
+    Map visible variable names to owner blocks using the stocks-first-
+    alphabetical ordering rule, validated against actual OT positions.
+
+    Sort keys on owner blocks give the global alphabetical ordering.
+    When all blocks have sort keys, we zip directly. When some blocks
+    lack sort keys, we try all valid insertions and validate against OT
+    structure.
+    """
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+    hidden_blocks = [b for b in all_blocks if b.hidden]
+    candidates = visible_variable_candidates(vdf)
+
+    # Compute hidden stock OT count for validation
+    hidden_stock_ots = sum(
+        b.length() for b in hidden_blocks
+        if b.ot_codes and all(c == OT_CODE_STOCK for c in b.ot_codes))
+    vdf._hidden_stock_ot_count = hidden_stock_ots  # type: ignore[attr-defined]
+
+    if not visible_blocks or not candidates:
+        return NameMapping(
+            variable_names=sorted(candidates),
+            owner_blocks=[],
+            name_to_block={},
+            system_ot_indices=set(),
+            unmapped_blocks=visible_blocks,
+        )
+
+    B = len(visible_blocks)
+
+    # When there are excess blocks (system records that leaked through),
+    # try to select the right B blocks. First attempt: use all visible blocks.
+    # If that fails, try subsets.
+    system_blocks: list[OwnerRecordBlock] = []
+
+    # Fast path: if candidate count matches block count, try direct mapping
+    if len(candidates) == B:
+        sorted_names = sorted(candidates, key=_vensim_sort_key)
+        trial = _try_name_block_mapping(sorted_names, visible_blocks, vdf)
+        if trial is not None:
+            return _build_result(sorted_names, trial, system_blocks, vdf)
+
+    # General case: try all subsets of B candidates from the full candidate
+    # list. This handles dimension/element filtering and excess system blocks
+    # simultaneously. For C(14,4) = 1001 this is fast.
+    # Collect ALL valid solutions and pick the best one by scoring.
+    import itertools
+    solutions: list[tuple[float, list[str], dict[str, OwnerRecordBlock]]] = []
+    for subset in itertools.combinations(range(len(candidates)), B):
+        trial_names = sorted([candidates[i] for i in subset],
+                             key=_vensim_sort_key)
+        trial = _try_name_block_mapping(trial_names, visible_blocks, vdf)
+        if trial is not None:
+            score = _score_variable_name_set(trial_names, candidates, vdf)
+            solutions.append((score, trial_names, trial))
+    if solutions:
+        solutions.sort(key=lambda s: -s[0])
+        _, best_names, best_mapping = solutions[0]
+        return _build_result(best_names, best_mapping, system_blocks, vdf)
+
+    # If no subset of candidates matches all visible blocks, some visible
+    # blocks may be system-record artifacts. Try with fewer blocks.
+    for fewer in range(min(B, len(candidates)), 0, -1):
+        for block_subset in itertools.combinations(visible_blocks, fewer):
+            block_list = list(block_subset)
+            for name_subset in itertools.combinations(range(len(candidates)), fewer):
+                trial_names = sorted([candidates[i] for i in name_subset],
+                                     key=_vensim_sort_key)
+                trial = _try_name_block_mapping(trial_names, block_list, vdf)
+                if trial is not None:
+                    sys_blocks = [b for b in visible_blocks if b not in block_list]
+                    return _build_result(trial_names, trial, sys_blocks, vdf)
+
+    return None
+
+
+def _build_result(
+    sorted_names: list[str],
+    name_to_block: dict[str, OwnerRecordBlock],
+    system_blocks: list[OwnerRecordBlock],
+    vdf: VdfFile,
+) -> NameMapping:
+    ordered_blocks = [name_to_block[n] for n in sorted_names]
+    system_ots: set[int] = set()
+    for b in system_blocks:
+        system_ots.update(range(b.start, b.end))
+    return NameMapping(
+        variable_names=sorted_names,
+        owner_blocks=ordered_blocks,
+        name_to_block=name_to_block,
+        system_ot_indices=system_ots,
+        unmapped_blocks=system_blocks,
+    )
+
+
+@dataclass
+class NamedResult:
+    """A single named time series from a VDF file."""
+    name: str
+    ot_index: int
+    values: list[float]
+
+
+def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
+    """
+    Extract named time series from a VDF file using VDF-native structure only.
+
+    Returns a list of NamedResult for each mapped variable (scalar variables
+    get one entry, arrayed variables get one entry per element). System
+    variables (FINAL TIME, INITIAL TIME, SAVEPER, TIME STEP) are also included.
+    """
+    mapping = map_names_to_owner_blocks(vdf)
+    if mapping is None:
+        return None
+
+    # Extract time values
+    if vdf.first_data_block + 2 + vdf.bitmap_size > len(vdf.data):
+        return None
+    time_count = u16(vdf.data, vdf.first_data_block)
+    if time_count != vdf.time_point_count:
+        return None
+    data_start = vdf.first_data_block + 2 + vdf.bitmap_size
+    time_values = [f32(vdf.data, data_start + i * 4) for i in range(time_count)]
+
+    results: list[NamedResult] = []
+
+    # Time itself
+    results.append(NamedResult(name="Time", ot_index=0, values=time_values))
+
+    # Mapped variable results
+    codes = vdf.section6_ot_class_codes() or []
+    for name in mapping.variable_names:
+        block = mapping.name_to_block.get(name)
+        if block is None:
+            continue
+
+        if block.length() == 1:
+            # Scalar variable
+            ot_idx = block.start
+            raw = vdf.offset_table_entry(ot_idx)
+            if raw is None:
+                continue
+            if vdf.is_data_block_offset(raw):
+                series = vdf.extract_block_series(raw, time_values)
+            else:
+                const_val = u32_as_f32(raw)
+                series = [const_val] * len(time_values)
+            results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+        else:
+            # Arrayed variable: one result per OT element
+            for elem_offset in range(block.length()):
+                ot_idx = block.start + elem_offset
+                raw = vdf.offset_table_entry(ot_idx)
+                if raw is None:
+                    continue
+                if vdf.is_data_block_offset(raw):
+                    series = vdf.extract_block_series(raw, time_values)
+                else:
+                    const_val = u32_as_f32(raw)
+                    series = [const_val] * len(time_values)
+                elem_name = f"{name}[{elem_offset}]"
+                results.append(NamedResult(
+                    name=elem_name, ot_index=ot_idx, values=series))
+
+    # System variables (the unmapped OT entries that are inline constants)
+    system_names_sorted = sorted(
+        n for n in SYSTEM_NAMES if n != "Time")
+    system_ot_indices: list[int] = []
+    for ot_idx in range(1, vdf.offset_table_count):
+        if ot_idx in mapping.system_ot_indices:
+            system_ot_indices.append(ot_idx)
+            continue
+        # Check if this OT is covered by any mapped block
+        covered = any(
+            block.start <= ot_idx < block.end
+            for block in mapping.owner_blocks
+        )
+        if not covered:
+            # Also check hidden blocks
+            hidden_covered = any(
+                block.start <= ot_idx < block.end
+                for block in build_owner_record_blocks(vdf)
+                if block.hidden
+            )
+            if not hidden_covered:
+                system_ot_indices.append(ot_idx)
+
+    # Map system names alphabetically to system OT indices
+    for i, name in enumerate(system_names_sorted):
+        if i >= len(system_ot_indices):
+            break
+        ot_idx = system_ot_indices[i]
+        raw = vdf.offset_table_entry(ot_idx)
+        if raw is None:
+            continue
+        if vdf.is_data_block_offset(raw):
+            series = vdf.extract_block_series(raw, time_values)
+        else:
+            const_val = u32_as_f32(raw)
+            series = [const_val] * len(time_values)
+        results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+
+    return results
 
 
 def mdl_definition_matches_block(model: MdlModel, definition: MdlDefinition,
@@ -2370,6 +3011,75 @@ def print_owner_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> N
     print()
 
 
+def print_name_mapping(vdf: VdfFile) -> None:
+    """Show the VDF-native name-to-OT mapping."""
+    print("=== VDF-Native Name Mapping ===")
+
+    candidates = visible_variable_candidates(vdf)
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+    print(f"  candidates={len(candidates)} visible_owner_blocks={len(visible_blocks)}")
+    print(f"  candidate names: {candidates}")
+
+    mapping = map_names_to_owner_blocks(vdf)
+    if mapping is None:
+        print("  mapping FAILED (more candidates than blocks)")
+        print()
+        return
+
+    print(f"  mapped={len(mapping.name_to_block)} unmapped_blocks={len(mapping.unmapped_blocks)}")
+
+    for name in mapping.variable_names:
+        block = mapping.name_to_block.get(name)
+        if block is None:
+            print(f"  {name}: unmapped")
+            continue
+        cls = owner_block_runtime_class(block)
+        sort_str = str(block.attached_sort_keys) if block.attached_sort_keys else "[]"
+        print(f"  {name}: OT[{block.start}..{block.end}) len={block.length()} "
+              f"class={cls} sorts={sort_str}")
+
+    if mapping.unmapped_blocks:
+        print("  unmapped (system) blocks:")
+        for block in mapping.unmapped_blocks:
+            print(f"    OT[{block.start}..{block.end}) class={owner_block_runtime_class(block)}")
+
+    if mapping.system_ot_indices:
+        print(f"  system OT indices: {sorted(mapping.system_ot_indices)}")
+
+    # Verify against final values
+    finals = vdf.section6_final_values()
+    if finals:
+        print("  verification (final values):")
+        for name in mapping.variable_names:
+            block = mapping.name_to_block.get(name)
+            if block is None:
+                continue
+            for offset in range(block.length()):
+                ot_idx = block.start + offset
+                if ot_idx < len(finals):
+                    elem_label = f"{name}[{offset}]" if block.length() > 1 else name
+                    print(f"    {elem_label}: OT[{ot_idx}] final={finals[ot_idx]}")
+    print()
+
+
+def print_extracted_results(vdf: VdfFile) -> None:
+    """Extract and show named results using VDF-native mapping."""
+    print("=== Extracted Named Results ===")
+    results = extract_named_results(vdf)
+    if results is None:
+        print("  extraction FAILED")
+        print()
+        return
+
+    print(f"  total results: {len(results)}")
+    for r in results:
+        first = r.values[0] if r.values else float("nan")
+        last = r.values[-1] if r.values else float("nan")
+        print(f"  {r.name}: OT[{r.ot_index}] first={first} last={last}")
+    print()
+
+
 def print_owner_sketch_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
     print("=== Owner Sketch Alignment ===")
     print(f"  mdl: {mdl_path}")
@@ -3175,6 +3885,10 @@ def main() -> None:
     parser.add_argument("--sec35-bridge", action="store_true", help="Show section-3 -> section-5 bridge")
     parser.add_argument("--ranges", action="store_true", help="Show record-derived OT ranges")
     parser.add_argument("--validate", action="store_true", help="Check structural invariants")
+    parser.add_argument("--map-names", action="store_true",
+                        help="Show VDF-native name-to-OT mapping")
+    parser.add_argument("--extract", action="store_true",
+                        help="Extract named results using VDF-native mapping")
     parser.add_argument("--raw-section", type=int, metavar="N", help="Full hexdump of section N")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON summary")
 
@@ -3227,7 +3941,8 @@ def main() -> None:
         args.names, args.slots, args.records, args.sec3, args.sec4,
         args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
         args.bridge, args.record_blocks, args.sec35_bridge, args.ranges, args.validate,
-        args.owner_blocks, args.raw_section is not None,
+        args.owner_blocks, args.map_names, args.extract,
+        args.raw_section is not None,
     ])
 
     # Always show header + layout + summary
@@ -3281,6 +3996,10 @@ def main() -> None:
 
     if args.validate:
         print_validation(vdf)
+    if show_all or args.map_names:
+        print_name_mapping(vdf)
+    if args.extract:
+        print_extracted_results(vdf)
 
     if not show_specific or show_all:
         print_summary(vdf)
