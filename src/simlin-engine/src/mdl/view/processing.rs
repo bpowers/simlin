@@ -667,6 +667,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -704,6 +705,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -771,6 +773,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -829,6 +832,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -925,6 +929,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1054,6 +1059,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1182,6 +1188,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1303,6 +1310,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1424,6 +1432,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 

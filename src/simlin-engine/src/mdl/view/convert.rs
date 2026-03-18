@@ -252,10 +252,16 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
 
     let mut all_elements = Vec::new();
     let mut use_lettered_polarity = false;
+    // Use the font from the first view (all views in a Vensim file
+    // typically share the same font specification).
+    let mut font = None;
 
     for view in views {
         let View::StockFlow(sf) = view;
         use_lettered_polarity = use_lettered_polarity || sf.use_lettered_polarity;
+        if font.is_none() {
+            font = sf.font;
+        }
         all_elements.extend(sf.elements);
     }
 
@@ -265,7 +271,7 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
-        font: None,
+        font,
     });
 
     vec![merged]
@@ -368,7 +374,7 @@ fn convert_view(
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
-        font: None,
+        font: view.header.font.clone(),
     }))
 }
 
@@ -858,6 +864,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -927,6 +934,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1020,6 +1028,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1092,6 +1101,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Population".to_string(), // Same as variable name after canonicalization
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1134,6 +1144,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Demand/Supply-Overview*2026".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1171,6 +1182,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1230,6 +1242,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1306,6 +1319,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1366,6 +1380,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1508,6 +1523,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1664,6 +1680,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1715,6 +1732,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1765,6 +1783,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1864,6 +1883,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1991,6 +2011,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -2051,5 +2072,78 @@ mod tests {
         assert_eq!(compat.width, 48.0);
         assert_eq!(compat.height, 24.0);
         assert_eq!(compat.bits, 130);
+    }
+
+    #[test]
+    fn test_font_flows_to_stock_flow() {
+        // AC1.4: font string from the parsed view header should appear in StockFlow.font
+        let font_spec =
+            "192-192-192,0,Verdana|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0";
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: Some(font_spec.to_string()),
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Aux".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("test aux".to_string(), make_symbol_info(VariableType::Aux));
+        let all_names = names_from_symbols(&symbols);
+
+        let views = build_views(vec![view], &symbols, &all_names);
+        assert_eq!(views.len(), 1);
+
+        let View::StockFlow(sf) = &views[0];
+        assert_eq!(sf.font.as_deref(), Some(font_spec));
+    }
+
+    #[test]
+    fn test_no_font_gives_none_in_stock_flow() {
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Aux".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("test aux".to_string(), make_symbol_info(VariableType::Aux));
+        let all_names = names_from_symbols(&symbols);
+
+        let views = build_views(vec![view], &symbols, &all_names);
+        assert_eq!(views.len(), 1);
+
+        let View::StockFlow(sf) = &views[0];
+        assert!(sf.font.is_none());
     }
 }

@@ -138,15 +138,23 @@ impl<'a> ViewSectionParser<'a> {
                 }
             };
 
-            // Skip font line if present (we ignore PPI values per xmutil)
-            if let Some(line) = self.peek_line()
+            // Capture font line if present (the `$`-prefixed line after the
+            // title). Store without the leading `$` for roundtrip fidelity.
+            let font = if let Some(line) = self.peek_line()
                 && line.starts_with('$')
             {
-                self.read_line();
-            }
+                let font_line = self.read_line().unwrap();
+                Some(font_line[1..].to_string())
+            } else {
+                None
+            };
 
             // Create view with header
-            let header = ViewHeader { version, title };
+            let header = ViewHeader {
+                version,
+                title,
+                font,
+            };
             let mut view = VensimView::new(header);
 
             // Parse elements
@@ -451,5 +459,37 @@ $font
         let views = parse_views(source).unwrap();
         assert_eq!(views.len(), 1);
         assert!(views[0].get(1).is_some());
+    }
+
+    #[test]
+    fn test_font_line_captured_in_header() {
+        // AC1.4: font line should be captured without the leading '$'
+        let font_spec =
+            "192-192-192,0,Verdana|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0";
+        let source = format!(
+            "\\\\\\\\ ---/// Sketch information\n\
+             V300  Do not put anything below this section\n\
+             *View 1\n\
+             ${}\n\
+             10,1,Test Variable,100,200,40,20,3,3,0,0,0,0,0,0\n\
+             ///---\\\\\\\\\n",
+            font_spec
+        );
+        let views = parse_views(&source).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].header.font.as_deref(), Some(font_spec));
+    }
+
+    #[test]
+    fn test_no_font_line_gives_none() {
+        // When there is no font line, header.font should be None
+        let source = "\\\\\\\\ ---///\n\
+                       V300\n\
+                       *View 1\n\
+                       10,1,Test Variable,100,200,40,20,3,3,0,0,0,0,0,0\n\
+                       ///---\\\\\\\\\n";
+        let views = parse_views(source).unwrap();
+        assert_eq!(views.len(), 1);
+        assert!(views[0].header.font.is_none());
     }
 }

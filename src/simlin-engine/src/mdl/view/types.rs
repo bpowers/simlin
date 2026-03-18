@@ -21,6 +21,9 @@ pub enum ViewVersion {
 pub struct ViewHeader {
     pub version: ViewVersion,
     pub title: String,
+    /// Font specification from the MDL sketch section (the `$`-prefixed line,
+    /// stored without the leading `$`). Preserved for roundtrip fidelity.
+    pub font: Option<String>,
 }
 
 /// A variable element in the view (type 10).
@@ -337,6 +340,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -371,6 +375,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
