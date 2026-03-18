@@ -1826,36 +1826,50 @@ def _score_excluded_as_dimensions(
 
 def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
     """
-    Attempt deterministic record-to-name mapping via the f[2]-offset formula.
+    Deterministic record-to-name mapping via the f[2]-offset formula.
 
     Records sorted by f[2] correspond to names at position
-    (rank + offset) where offset = slot_count - record_count.
-    This gives a direct structural link from each sentinel model record
-    to its variable name, without any heuristic search.
+    (rank + offset) in the name table. The offset is typically
+    slot_count - record_count, but can differ by a small amount in
+    incrementally edited models. We try a small range of offsets and
+    validate each against OT positions.
 
-    Validated on fresh models: water, pop, subscripts, lookups, bact.
-    May not work for incrementally edited models where names were
-    inserted into the middle of an existing name table.
+    This is O(offset_range * records) -- fast and deterministic, matching
+    what a 90s C program would use to reconstruct the mapping.
     """
     n_recs = len(vdf.records)
     n_slots = len(vdf.slot_table)
     if n_recs == 0 or n_slots == 0 or n_recs > n_slots:
         return None
 
-    offset = n_slots - n_recs
     sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
-
     all_blocks = build_owner_record_blocks(vdf)
     visible_blocks = [b for b in all_blocks if not b.hidden]
 
-    # Build record_index -> name mapping
+    # The nominal offset is slot_count - record_count. Try a small range
+    # around it to handle cases where the offset shifts due to insertions.
+    nominal_offset = n_slots - n_recs
+    for offset in range(max(0, nominal_offset - 3), nominal_offset + 4):
+        result = _try_f2_with_offset(sorted_recs, offset, vdf, visible_blocks)
+        if result is not None:
+            return result
+
+    return None
+
+
+def _try_f2_with_offset(
+    sorted_recs: list[tuple[int, VdfRecord]],
+    offset: int,
+    vdf: VdfFile,
+    visible_blocks: list[OwnerRecordBlock],
+) -> Optional[dict[str, OwnerRecordBlock]]:
+    """Try a specific offset for the f[2]-based record-to-name mapping."""
     rec_to_name: dict[int, str] = {}
     for rank, (ri, rec) in enumerate(sorted_recs):
         name_idx = rank + offset
         if 0 <= name_idx < len(vdf.names):
             rec_to_name[ri] = vdf.names[name_idx]
 
-    # For each visible owner block, find its name via the sentinel record
     name_to_block: dict[str, OwnerRecordBlock] = {}
     for block in visible_blocks:
         for ri in block.sentinel_record_indices:
@@ -1867,7 +1881,6 @@ def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]
     if not name_to_block:
         return None
 
-    # Validate using OT positions
     if _validate_name_block_assignment(name_to_block, vdf):
         return name_to_block
 
