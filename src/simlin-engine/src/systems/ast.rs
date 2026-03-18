@@ -8,7 +8,6 @@
 //! models. This module defines the IR produced by the parser, preserving
 //! declaration order (critical for sequential debiting priority).
 
-use std::collections::HashMap;
 use std::fmt;
 
 use crate::canonicalize;
@@ -62,33 +61,6 @@ impl fmt::Display for BinOp {
 }
 
 impl Expr {
-    /// Rewrite all `Ref(name)` nodes whose canonical name appears in
-    /// `rewrites`, replacing the reference with the mapped target name.
-    /// Used to redirect rate formula references from raw stock names to
-    /// "effective" post-outflow aux variables.
-    pub fn rewrite_refs(&self, rewrites: &HashMap<String, String>) -> Expr
-    where
-        Self: Sized,
-    {
-        match self {
-            Expr::Ref(name) => {
-                let canon_name = canonicalize(name).into_owned();
-                if let Some(target) = rewrites.get(&canon_name) {
-                    Expr::Ref(target.clone())
-                } else {
-                    self.clone()
-                }
-            }
-            Expr::BinOp(left, op, right) => Expr::BinOp(
-                Box::new(left.rewrite_refs(rewrites)),
-                *op,
-                Box::new(right.rewrite_refs(rewrites)),
-            ),
-            Expr::Paren(inner) => Expr::Paren(Box::new(inner.rewrite_refs(rewrites))),
-            _ => self.clone(),
-        }
-    }
-
     /// Convert to an equation string with explicit parenthesization
     /// to preserve left-to-right evaluation semantics.
     ///
