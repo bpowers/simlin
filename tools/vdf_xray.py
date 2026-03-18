@@ -1888,7 +1888,9 @@ def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
 
     # If no subset of candidates matches all visible blocks, some visible
     # blocks may be system-record artifacts. Try with fewer blocks.
+    # Collect all solutions and pick the best by scoring.
     for fewer in range(min(B, len(candidates)), 0, -1):
+        fewer_solutions: list[tuple[float, list[str], dict[str, OwnerRecordBlock], list[OwnerRecordBlock]]] = []
         for block_subset in itertools.combinations(visible_blocks, fewer):
             block_list = list(block_subset)
             for name_subset in itertools.combinations(range(len(candidates)), fewer):
@@ -1897,7 +1899,12 @@ def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
                 trial = _try_name_block_mapping(trial_names, block_list, vdf)
                 if trial is not None:
                     sys_blocks = [b for b in visible_blocks if b not in block_list]
-                    return _build_result(trial_names, trial, sys_blocks, vdf)
+                    score = _score_variable_name_set(trial_names, candidates, vdf)
+                    fewer_solutions.append((score, trial_names, trial, sys_blocks))
+        if fewer_solutions:
+            fewer_solutions.sort(key=lambda s: -s[0])
+            _, best_names, best_mapping, best_sys = fewer_solutions[0]
+            return _build_result(best_names, best_mapping, best_sys, vdf)
 
     return None
 
