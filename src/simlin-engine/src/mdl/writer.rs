@@ -554,6 +554,16 @@ impl Visitor<String> for MdlPrintVisitor {
                 {
                     return kw.to_owned();
                 }
+                // Vensim lookup calls use `table_name ( input )` syntax
+                // rather than `LOOKUP(table_name, input)`.
+                if func == "lookup"
+                    && args.len() == 2
+                    && let Expr0::Var(table_ident, _) = &args[0]
+                {
+                    let table_name = format_mdl_ident(table_ident.as_str());
+                    let input = self.walk(&args[1]);
+                    return format!("{table_name} ( {input} )");
+                }
                 // safediv with 3+ args is XIDZ (3-arg form), not ZIDZ (2-arg)
                 let mdl_name = if func == "safediv" && args.len() >= 3 {
                     "XIDZ".to_owned()
@@ -2073,7 +2083,7 @@ fn build_name_map(elements: &[ViewElement]) -> HashMap<i32, &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr0, Loc};
+    use crate::ast::{Expr0, IndexExpr0, Loc};
     use crate::common::RawIdent;
     use crate::datamodel::{
         Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
@@ -2290,8 +2300,9 @@ mod tests {
     }
 
     #[test]
-    fn function_rename_lookup() {
-        assert_mdl("lookup(tbl, x)", "LOOKUP(tbl, x)");
+    fn lookup_call_native_vensim_syntax() {
+        // Vensim uses `table ( input )` syntax for lookup calls
+        assert_mdl("lookup(tbl, x)", "tbl ( x )");
     }
 
     #[test]
@@ -2448,6 +2459,51 @@ mod tests {
             "allocate(supply, region, demand, priority, width)",
             "ALLOCATE BY PRIORITY(demand, priority, 0, width, supply)",
         );
+    }
+
+    // ---- lookup call syntax tests ----
+
+    #[test]
+    fn lookup_call_with_spaced_table_name() {
+        // Multi-word table ident should be space-separated in output
+        assert_mdl(
+            "lookup(federal_funds_rate_lookup, time)",
+            "federal funds rate lookup ( Time )",
+        );
+    }
+
+    #[test]
+    fn lookup_call_with_expression_input() {
+        // The input argument can be an arbitrary expression
+        assert_mdl("lookup(my_table, a + b)", "my table ( a + b )");
+    }
+
+    #[test]
+    fn lookup_non_var_first_arg_falls_through() {
+        // When the first arg is not a bare variable (e.g. a subscripted
+        // reference), the generic LOOKUP(...) path is used as a fallback.
+        let table_sub = Expr0::Subscript(
+            RawIdent::new_from_str("tbl"),
+            vec![IndexExpr0::Expr(Expr0::Var(
+                RawIdent::new_from_str("i"),
+                Loc::default(),
+            ))],
+            Loc::default(),
+        );
+        let input = Expr0::Var(RawIdent::new_from_str("x"), Loc::default());
+        let expr = Expr0::App(
+            UntypedBuiltinFn("lookup".to_owned(), vec![table_sub, input]),
+            Loc::default(),
+        );
+        let mdl = expr0_to_mdl(&expr);
+        assert_eq!(mdl, "LOOKUP(tbl[i], x)");
+    }
+
+    #[test]
+    fn non_lookup_function_emits_normally() {
+        // Other function calls should not be affected by the lookup special-case
+        assert_mdl("max(a, b)", "MAX(a, b)");
+        assert_mdl("min(x, y)", "MIN(x, y)");
     }
 
     // ---- Task 1: Variable entry formatting (scalar) ----
