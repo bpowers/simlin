@@ -673,10 +673,10 @@ fn is_data_equation(xmile_eqn: &str) -> bool {
         || s.starts_with("GET_123")
 }
 
-/// Write a graphical-function (lookup table) body into `buf`.
+/// Write the inner body of a lookup table into `buf` (no outer parens).
 ///
-/// Format: `([(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...)`
-fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
+/// Format: `[(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...`
+fn write_lookup_body(buf: &mut String, gf: &GraphicalFunction) {
     let xs: Vec<f64> = match &gf.x_points {
         Some(pts) => pts.clone(),
         None => {
@@ -692,7 +692,7 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 
     write!(
         buf,
-        "([({},{})-({},{})]",
+        "[({},{})-({},{})]",
         format_f64(gf.x_scale.min),
         format_f64(gf.y_scale.min),
         format_f64(gf.x_scale.max),
@@ -703,7 +703,22 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
     for (x, y) in xs.iter().zip(gf.y_points.iter()) {
         write!(buf, ",({},{})", format_f64(*x), format_f64(*y)).unwrap();
     }
+}
+
+/// Write a graphical-function (lookup table) wrapped in parens.
+///
+/// Format: `([(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...)`
+fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
+    buf.push('(');
+    write_lookup_body(buf, gf);
     buf.push(')');
+}
+
+/// Returns true when the equation text is a placeholder sentinel rather
+/// than a real input expression (standalone lookup definition).
+fn is_lookup_only_equation(eqn: &str) -> bool {
+    let trimmed = eqn.trim();
+    trimmed.is_empty() || trimmed == "0+0" || trimmed == "0"
 }
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.
@@ -985,20 +1000,34 @@ fn write_single_entry(
     gf: Option<&GraphicalFunction>,
 ) {
     let name = format_mdl_ident(ident);
-    let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-    if dims.is_empty() {
-        write!(buf, "{name}{assign_op}").unwrap();
+    let dim_suffix = if dims.is_empty() {
+        String::new()
     } else {
         let dim_strs: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
-        write!(buf, "{name}[{}]{assign_op}", dim_strs.join(",")).unwrap();
-    }
+        format!("[{}]", dim_strs.join(","))
+    };
 
     if let Some(gf) = gf {
-        // Lookup table replaces the equation
-        buf.push_str("\n\t");
-        write_lookup(buf, gf);
+        if is_lookup_only_equation(eqn) {
+            // Standalone lookup definition: name(\n\tbody)
+            write!(buf, "{name}{dim_suffix}(").unwrap();
+            buf.push_str("\n\t");
+            write_lookup_body(buf, gf);
+            buf.push(')');
+        } else {
+            // Embedded lookup: name=\n\tWITH LOOKUP(input, (body))
+            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+            write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
+            let mdl_eqn = equation_to_mdl(eqn);
+            buf.push_str("\n\tWITH LOOKUP(");
+            buf.push_str(&mdl_eqn);
+            buf.push_str(", ");
+            write_lookup(buf, gf);
+            buf.push(')');
+        }
     } else {
+        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+        write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
         let mdl_eqn = equation_to_mdl(eqn);
         buf.push_str("\n\t");
         buf.push_str(&mdl_eqn);
@@ -1037,14 +1066,26 @@ fn write_arrayed_element_entries(
     let last_idx = elements.len().saturating_sub(1);
     for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
-        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
 
         if let Some(gf) = elem_gf {
-            buf.push_str("\n\t");
-            write_lookup(buf, gf);
+            if is_lookup_only_equation(eqn) {
+                write!(buf, "{name}[{elem_display}](").unwrap();
+                buf.push_str("\n\t");
+                write_lookup_body(buf, gf);
+                buf.push(')');
+            } else {
+                let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+                write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+                let mdl_eqn = equation_to_mdl(eqn);
+                buf.push_str("\n\tWITH LOOKUP(");
+                buf.push_str(&mdl_eqn);
+                buf.push_str(", ");
+                write_lookup(buf, gf);
+                buf.push(')');
+            }
         } else {
+            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
             let mdl_eqn = equation_to_mdl(eqn);
             buf.push_str("\n\t");
             buf.push_str(&mdl_eqn);
@@ -1263,6 +1304,7 @@ fn write_flow_element(
     buf: &mut String,
     flow: &view_element::Flow,
     valve_uids: &HashMap<i32, i32>,
+    cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
 ) {
     // Sketch names: see `write_aux_element` for why `underbar_to_space` is
@@ -1270,12 +1312,11 @@ fn write_flow_element(
     let name = underbar_to_space(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
 
-    // Type 11 (valve): the valve name in Vensim is typically a numeric
-    // placeholder (like "48" or "444"). We use the valve uid as the name.
+    // Type 11 (valve): field 3 is always 0 in Vensim-generated files.
     write!(
         buf,
-        "11,{},{},{},{},6,8,34,3,0,0,1,0,0,0",
-        valve_uid, valve_uid, flow.x as i32, flow.y as i32,
+        "11,{},0,{},{},6,8,34,3,0,0,1,0,0,0",
+        valve_uid, flow.x as i32, flow.y as i32,
     )
     .unwrap();
 
@@ -1289,33 +1330,47 @@ fn write_flow_element(
     )
     .unwrap();
 
-    write_flow_pipe_connectors(buf, flow, valve_uid, next_connector_uid);
+    write_flow_pipe_connectors(buf, flow, valve_uid, cloud_uids, next_connector_uid);
 }
 
 fn write_flow_pipe_connectors(
     buf: &mut String,
     flow: &view_element::Flow,
     valve_uid: i32,
+    cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
 ) {
-    let write_connector =
-        |buf: &mut String, connector_uid: i32, from_uid: i32, to_uid: i32, x: i32, y: i32| {
-            write!(
-                buf,
-                "\n1,{},{},{},0,0,0,0,0,0,0,-1--1--1,,1|({},{})|",
-                connector_uid, from_uid, to_uid, x, y,
-            )
-            .unwrap();
-        };
+    // Flow pipe connectors use field 4 for endpoint type and field 7 = 22 (pipe type).
+    // Flag 4 = connects to a stock, flag 100 = connects to a cloud.
+    let write_pipe = |buf: &mut String,
+                      connector_uid: i32,
+                      from_uid: i32,
+                      to_uid: i32,
+                      direction: i32,
+                      x: i32,
+                      y: i32| {
+        write!(
+            buf,
+            "\n1,{},{},{},{},0,0,22,0,0,0,-1--1--1,,1|({},{})|",
+            connector_uid, from_uid, to_uid, direction, x, y,
+        )
+        .unwrap();
+    };
 
     if let Some(first) = flow.points.first()
         && let Some(endpoint_uid) = first.attached_to_uid
     {
-        write_connector(
+        let flag = if cloud_uids.contains(&endpoint_uid) {
+            100
+        } else {
+            4
+        };
+        write_pipe(
             buf,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
+            flag,
             first.x as i32,
             first.y as i32,
         );
@@ -1328,11 +1383,12 @@ fn write_flow_pipe_connectors(
         .skip(1)
         .take(flow.points.len().saturating_sub(2))
     {
-        write_connector(
+        write_pipe(
             buf,
             *next_connector_uid,
             valve_uid,
             valve_uid,
+            0,
             point.x as i32,
             point.y as i32,
         );
@@ -1343,11 +1399,17 @@ fn write_flow_pipe_connectors(
         && let Some(last) = flow.points.last()
         && let Some(endpoint_uid) = last.attached_to_uid
     {
-        write_connector(
+        let flag = if cloud_uids.contains(&endpoint_uid) {
+            100
+        } else {
+            4
+        };
+        write_pipe(
             buf,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
+            flag,
             last.x as i32,
             last.y as i32,
         );
@@ -1357,10 +1419,10 @@ fn write_flow_pipe_connectors(
 
 /// Write a type 12 line for a Cloud element.
 fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
-    // Clouds: text="0", shape=0, bits=3 (visible)
+    // Clouds: field 3 is 48 (ASCII '0') in Vensim-generated files, shape=0, bits=3
     write!(
         buf,
-        "12,{},0,{},{},10,8,0,3,0,0,-1,0,0,0",
+        "12,{},48,{},{},10,8,0,3,0,0,-1,0,0,0",
         cloud.uid, cloud.x as i32, cloud.y as i32,
     )
     .unwrap();
@@ -1410,11 +1472,12 @@ fn write_link_element(
         .unwrap_or((0, 0));
     let to_pos = elem_positions.get(&link.to_uid).copied().unwrap_or((0, 0));
 
+    // Field 9 = 64 marks influence (causal) connectors in Vensim sketches.
     match &link.shape {
         LinkShape::Straight => {
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,1|(0,0)|",
+                "1,{},{},{},0,0,{},0,0,64,0,-1--1--1,,1|(0,0)|",
                 link.uid, link.from_uid, link.to_uid, polarity_val,
             )
             .unwrap();
@@ -1423,7 +1486,7 @@ fn write_link_element(
             let (ctrl_x, ctrl_y) = compute_control_point(from_pos, to_pos, *canvas_angle);
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,1|({},{})|",
+                "1,{},{},{},0,0,{},0,0,64,0,-1--1--1,,1|({},{})|",
                 link.uid, link.from_uid, link.to_uid, polarity_val, ctrl_x, ctrl_y,
             )
             .unwrap();
@@ -1432,7 +1495,7 @@ fn write_link_element(
             let npoints = points.len();
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,{}|",
+                "1,{},{},{},0,0,{},0,0,64,0,-1--1--1,,{}|",
                 link.uid, link.from_uid, link.to_uid, polarity_val, npoints,
             )
             .unwrap();
@@ -1681,6 +1744,16 @@ impl MdlWriter {
         // Build name map for alias resolution
         let name_map = build_name_map(&sf.elements);
 
+        // Collect cloud UIDs so flow pipe connectors can set the right direction flag
+        let cloud_uids: HashSet<i32> = sf
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                ViewElement::Cloud(c) => Some(c.uid),
+                _ => None,
+            })
+            .collect();
+
         for elem in &sf.elements {
             match elem {
                 ViewElement::Aux(aux) => {
@@ -1692,7 +1765,13 @@ impl MdlWriter {
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
-                    write_flow_element(&mut self.buf, flow, &valve_uids, &mut next_connector_uid);
+                    write_flow_element(
+                        &mut self.buf,
+                        flow,
+                        &valve_uids,
+                        &cloud_uids,
+                        &mut next_connector_uid,
+                    );
                     self.buf.push('\n');
                 }
                 ViewElement::Link(link) => {
@@ -2471,7 +2550,7 @@ mod tests {
         write_variable_entry(&mut buf, &var);
         assert_eq!(
             buf,
-            "effect of x=\n\t([(0,0)-(2,1)],(0,0),(1,0.5),(2,1))\n\t~\t\n\t~\tLookup effect\n\t|"
+            "effect of x=\n\tWITH LOOKUP(Time, ([(0,0)-(2,1)],(0,0),(1,0.5),(2,1)))\n\t~\t\n\t~\tLookup effect\n\t|"
         );
     }
 
@@ -2499,10 +2578,10 @@ mod tests {
         });
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var);
-        // x_points auto-generated: 0, 5, 10
+        // Standalone lookup: name(\n\tbody)
         assert_eq!(
             buf,
-            "tbl=\n\t([(0,0)-(10,1)],(0,0),(5,0.5),(10,1))\n\t~\t\n\t~\t\n\t|"
+            "tbl(\n\t[(0,0)-(10,1)],(0,0),(5,0.5),(10,1))\n\t~\t\n\t~\t\n\t|"
         );
     }
 
@@ -2677,7 +2756,8 @@ mod tests {
         });
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var);
-        assert!(buf.contains("tbl[a]=\n\t([(0,0)-(2,1)]"));
+        // Element "a" has empty equation + gf → standalone lookup
+        assert!(buf.contains("tbl[a](\n\t[(0,0)-(2,1)]"));
         assert!(buf.contains("tbl[b]=\n\t5"));
     }
 
@@ -2817,7 +2897,8 @@ mod tests {
         });
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var);
-        assert!(buf.contains("flow rate=\n\t([(0,0)-(2,1)]"));
+        // Flow with equation "TIME" + gf → WITH LOOKUP
+        assert!(buf.contains("flow rate=\n\tWITH LOOKUP(Time, ([(0,0)-(2,1)]"));
         assert!(buf.contains("~\twidgets/year"));
         assert!(buf.contains("~\tA flow"));
     }
@@ -3194,9 +3275,15 @@ mod tests {
         let mut buf = String::new();
         let valve_uids = HashMap::from([(6, 100)]);
         let mut next_connector_uid = 200;
-        write_flow_element(&mut buf, &flow, &valve_uids, &mut next_connector_uid);
-        // valve line uses allocated UID, variable line uses flow's UID
-        assert!(buf.starts_with("11,100,100,295,191,6,8,34,3,0,0,1,0,0,0\n"));
+        write_flow_element(
+            &mut buf,
+            &flow,
+            &valve_uids,
+            &HashSet::new(),
+            &mut next_connector_uid,
+        );
+        // valve line uses allocated UID (field 3 = 0), variable line uses flow's UID
+        assert!(buf.starts_with("11,100,0,295,191,6,8,34,3,0,0,1,0,0,0\n"));
         assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
     }
 
@@ -3224,7 +3311,13 @@ mod tests {
         let mut buf = String::new();
         let valve_uids = HashMap::from([(6, 100)]);
         let mut next_connector_uid = 200;
-        write_flow_element(&mut buf, &flow, &valve_uids, &mut next_connector_uid);
+        write_flow_element(
+            &mut buf,
+            &flow,
+            &valve_uids,
+            &HashSet::new(),
+            &mut next_connector_uid,
+        );
 
         let connector_lines: Vec<&str> =
             buf.lines().filter(|line| line.starts_with("1,")).collect();
@@ -3284,7 +3377,7 @@ mod tests {
         };
         let mut buf = String::new();
         write_cloud_element(&mut buf, &cloud);
-        assert_eq!(buf, "12,7,0,479,235,10,8,0,3,0,0,-1,0,0,0");
+        assert_eq!(buf, "12,7,48,479,235,10,8,0,3,0,0,-1,0,0,0");
     }
 
     #[test]
@@ -3320,8 +3413,8 @@ mod tests {
         positions.insert(2, (200, 200));
         let mut buf = String::new();
         write_link_element(&mut buf, &link, &positions, false);
-        // Straight => control point (0,0)
-        assert_eq!(buf, "1,3,1,2,0,0,0,0,0,0,0,-1--1--1,,1|(0,0)|");
+        // Straight => control point (0,0), field 9 = 64 (influence connector)
+        assert_eq!(buf, "1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(0,0)|");
     }
 
     #[test]
@@ -3336,8 +3429,8 @@ mod tests {
         let positions = HashMap::new();
         let mut buf = String::new();
         write_link_element(&mut buf, &link, &positions, false);
-        // polarity=43 ('+')
-        assert!(buf.contains(",0,0,43,0,0,0,0,"));
+        // polarity=43 ('+'), field 9 = 64
+        assert!(buf.contains(",0,0,43,0,0,64,0,"));
     }
 
     #[test]
@@ -3352,8 +3445,8 @@ mod tests {
         let positions = HashMap::new();
         let mut buf = String::new();
         write_link_element(&mut buf, &link, &positions, true);
-        // polarity=83 ('S' for lettered positive)
-        assert!(buf.contains(",0,0,83,0,0,0,0,"));
+        // polarity=83 ('S' for lettered positive), field 9 = 64
+        assert!(buf.contains(",0,0,83,0,0,64,0,"));
     }
 
     #[test]
