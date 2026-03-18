@@ -71,6 +71,38 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     // Collect generated variables (modules, flows, aux helpers)
     let mut variables: Vec<Variable> = Vec::new();
 
+    // Deferred items: dest_capacity and rate auxes need the full outflow list
+    // for each stock before their equations can be finalized. We collect the
+    // info during flow processing and create the aux variables afterward.
+    struct DeferredCapacity {
+        aux_ident: String,
+        dest_canon: String,
+        dest_max_expr: Option<Expr>,
+        /// Source stock of this flow.
+        source_canon: String,
+        /// The `available` value for this flow (raw stock or chained remaining).
+        /// Used to substitute the source stock reference in the max expression,
+        /// giving the post-drain value without creating circular dependencies.
+        available_src: String,
+        /// Index into model.flows for ordering.
+        flow_idx: usize,
+    }
+    // Deferred rate aux info: rate auxes need context-dependent rewrites
+    // based on the global reversed flow processing order, so we collect
+    // the info during the first pass and create them in a second pass.
+    struct DeferredRate {
+        aux_ident: String,
+        rate_expr: Expr,
+        /// Source stock of this flow.
+        source_canon: String,
+        /// The `available` value for this flow (raw stock or chained remaining).
+        available_src: String,
+        /// Index into model.flows for ordering.
+        flow_idx: usize,
+    }
+    let mut deferred_capacities: Vec<DeferredCapacity> = Vec::new();
+    let mut deferred_rates: Vec<DeferredRate> = Vec::new();
+
     // Process each source stock's outflows in reversed declaration order
     for stock in &model.stocks {
         let source_canon = canon(&stock.name);
@@ -101,20 +133,58 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
                 FlowType::Conversion => "stdlib\u{205A}systems_conversion",
             };
 
-            // Determine `available` input binding
+            // Determine `available` input binding.
+            // When chaining, create an intermediate aux variable to bridge
+            // module outputs to module inputs, since module references can
+            // only bind outer model variables to module ports.
             let available_src = match &prev_module_ident {
                 None => source_canon.clone(),
-                Some(prev) => format!("{prev}.remaining"),
+                Some(prev) => {
+                    let remaining_aux = format!("{prev}_remaining");
+                    variables.push(Variable::Aux(Aux {
+                        ident: remaining_aux.clone(),
+                        equation: Equation::Scalar(format!("{prev}.remaining")),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    }));
+                    remaining_aux
+                }
             };
 
-            // Determine `dest_capacity` input: create an aux if dest has a non-inf max
+            // Record dest_capacity for deferred creation
             let dest_stock = model.stocks.iter().find(|s| canon(&s.name) == dest_canon);
-            let dest_capacity_src =
-                make_dest_capacity_aux(&module_ident, dest_stock, &dest_canon, &mut variables);
+            let dest_capacity_ident = format!("{module_ident}_dest_capacity");
+            let needs_capacity = dest_stock.map(|s| s.max != Expr::Inf).unwrap_or(false);
+            deferred_capacities.push(DeferredCapacity {
+                aux_ident: dest_capacity_ident.clone(),
+                dest_canon: dest_canon.clone(),
+                dest_max_expr: if needs_capacity {
+                    Some(dest_stock.unwrap().max.clone())
+                } else {
+                    None
+                },
+                source_canon: source_canon.clone(),
+                available_src: available_src.clone(),
+                flow_idx,
+            });
 
-            // Determine rate/requested input: create an aux for the rate expression
-            let (rate_port_name, rate_src) =
-                make_rate_aux(&module_ident, &flow.flow_type, &flow.rate, &mut variables);
+            // Record rate/requested aux for deferred creation (needs rewriting)
+            let rate_port_name = match flow.flow_type {
+                FlowType::Rate => "requested",
+                FlowType::Leak | FlowType::Conversion => "rate",
+            };
+            let rate_aux_ident = format!("{module_ident}_{rate_port_name}");
+            deferred_rates.push(DeferredRate {
+                aux_ident: rate_aux_ident.clone(),
+                rate_expr: flow.rate.clone(),
+                source_canon: source_canon.clone(),
+                available_src: available_src.clone(),
+                flow_idx,
+            });
 
             // Build module references
             let references = vec![
@@ -123,11 +193,11 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
                     dst: format!("{module_ident}.available"),
                 },
                 ModuleReference {
-                    src: rate_src,
+                    src: rate_aux_ident,
                     dst: format!("{module_ident}.{rate_port_name}"),
                 },
                 ModuleReference {
-                    src: dest_capacity_src,
+                    src: dest_capacity_ident,
                     dst: format!("{module_ident}.dest_capacity"),
                 },
             ];
@@ -195,6 +265,141 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
         }
     }
 
+    // Build "effective" (post-outflow) aux variables and a rewrite map.
+    //
+    // In the Python systems package, flows are processed sequentially and the
+    // shared state dictionary is updated immediately as each flow's source is
+    // drained. Later-processed flows see the decremented stock values in their
+    // rate formulas. In simlin's simultaneous SD model, stocks retain their
+    // start-of-step values during flow evaluation.
+    //
+    // To bridge this gap, we create an "{stock}_effective" aux for each
+    // non-infinite stock that has outflows. Its equation is:
+    //   stock - outflow1 - outflow2 - ...
+    // Rate formulas that reference such stocks are rewritten to use the
+    // effective variable, reproducing the Python sequential semantics.
+    let mut ref_rewrites: HashMap<String, String> = HashMap::new();
+    for sb in &stocks {
+        if sb.outflows.is_empty() {
+            continue;
+        }
+        // Infinite stocks (equation = "inf()") don't change with outflows
+        if sb.equation == "inf()" {
+            continue;
+        }
+        let eff_ident = format!("{}_effective", sb.ident);
+        let outflow_terms: Vec<&str> = sb.outflows.iter().map(|f| f.as_str()).collect();
+        let equation = format!("{} - {}", sb.ident, outflow_terms.join(" - "));
+        variables.push(Variable::Aux(Aux {
+            ident: eff_ident.clone(),
+            equation: Equation::Scalar(equation),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+        ref_rewrites.insert(sb.ident.clone(), eff_ident);
+    }
+
+    // Create deferred rate aux variables with order-dependent rewrites.
+    //
+    // In the Python systems package, flows process in reversed declaration order.
+    // Each flow immediately drains its source stock. Later-processed flows see
+    // the drained values in their rate formulas.
+    //
+    // For the flow's own source stock, we use the `available_src` (the chained
+    // remaining from earlier modules) rather than the raw stock or _effective.
+    // This avoids circular dependencies while correctly reflecting the
+    // intermediate source value after higher-priority outflows.
+    //
+    // For other stocks drained by earlier flows, we use their _effective values.
+    deferred_rates.sort_by_key(|dr| std::cmp::Reverse(dr.flow_idx));
+    let mut drained_stocks: HashMap<String, String> = HashMap::new();
+    for dr in &deferred_rates {
+        // Build rewrites: source stock -> available_src, other drained -> effective
+        let mut local_rewrites: HashMap<String, String> = drained_stocks.clone();
+        // For the source stock, use the chained available value instead of
+        // excluding it entirely -- this lets the rate formula see the post-drain
+        // source value (including any reverse flows from negative capacity).
+        local_rewrites.insert(dr.source_canon.clone(), dr.available_src.clone());
+
+        let equation = rewrite_expr_to_equation(&dr.rate_expr, &local_rewrites);
+        variables.push(Variable::Aux(Aux {
+            ident: dr.aux_ident.clone(),
+            equation: Equation::Scalar(equation),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+        // Mark this flow's source as drained for subsequent flows
+        if let Some(eff) = ref_rewrites.get(&dr.source_canon) {
+            drained_stocks.insert(dr.source_canon.clone(), eff.clone());
+        }
+    }
+
+    // Create dest_capacity aux variables.
+    //
+    // dest_capacity = max_expr - stock + total_outflows
+    //
+    // When the max expression references the flow's own source stock,
+    // we substitute the flow's `available` value (the chained remaining
+    // from earlier modules). This gives the post-drain value without
+    // creating circular dependencies: each flow in the chain sees the
+    // source's remaining value after higher-priority outflows, matching
+    // the Python sequential semantics.
+    //
+    // For references to other stocks that have been drained by earlier flows,
+    // we use the same order-dependent rewrite mechanism as for rate formulas.
+    deferred_capacities.sort_by_key(|dc| std::cmp::Reverse(dc.flow_idx));
+    let mut cap_drained: HashMap<String, String> = HashMap::new();
+    for dc in &deferred_capacities {
+        let equation = match &dc.dest_max_expr {
+            None => "inf()".to_string(),
+            Some(max_expr) => {
+                // Build rewrites: source stock -> available_src (chained remaining),
+                // plus any other drained stocks -> their effective values.
+                // We use rewrite_to_equation to avoid re-canonicalization of
+                // generated identifiers (which may contain `.` for module refs).
+                let mut max_rewrites: HashMap<String, String> = cap_drained.clone();
+                max_rewrites.insert(dc.source_canon.clone(), dc.available_src.clone());
+                let rewritten_max = rewrite_expr_to_equation(max_expr, &max_rewrites);
+
+                // Collect all outflow idents for the destination stock
+                let outflows: Vec<&str> = stocks
+                    .iter()
+                    .find(|s| s.ident == dc.dest_canon)
+                    .map(|s| s.outflows.iter().map(|f| f.as_str()).collect())
+                    .unwrap_or_default();
+
+                if outflows.is_empty() {
+                    format!("{rewritten_max} - {}", dc.dest_canon)
+                } else {
+                    let outflow_sum = outflows.join(" + ");
+                    format!("{rewritten_max} - {} + {outflow_sum}", dc.dest_canon)
+                }
+            }
+        };
+        variables.push(Variable::Aux(Aux {
+            ident: dc.aux_ident.clone(),
+            equation: Equation::Scalar(equation),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+        // Mark source as drained for other stocks' capacity checks
+        if let Some(eff) = ref_rewrites.get(&dc.source_canon) {
+            cap_drained.insert(dc.source_canon.clone(), eff.clone());
+        }
+    }
+
     // Convert stock builders into datamodel stocks and prepend them
     let stock_vars: Vec<Variable> = stocks
         .into_iter()
@@ -241,6 +446,36 @@ fn canon(name: &str) -> String {
     canonicalize(name).into_owned()
 }
 
+/// Rewrite an Expr to an equation string, substituting Ref nodes whose
+/// canonical name appears in `rewrites` with the raw target string.
+/// Unlike `Expr::rewrite_refs` + `to_equation_string`, this avoids
+/// re-canonicalizing the substituted targets, preserving `.` separators
+/// in module references like `module.remaining`.
+fn rewrite_expr_to_equation(expr: &Expr, rewrites: &HashMap<String, String>) -> String {
+    match expr {
+        Expr::Ref(name) => {
+            let canon_name = canonicalize(name).into_owned();
+            if let Some(target) = rewrites.get(&canon_name) {
+                target.clone()
+            } else {
+                canon_name
+            }
+        }
+        Expr::Int(n) => format!("{n}"),
+        Expr::Float(f) => {
+            let s = format!("{f}");
+            if s.contains('.') { s } else { format!("{f}.0") }
+        }
+        Expr::Inf => "inf()".to_string(),
+        Expr::Paren(inner) => format!("({})", rewrite_expr_to_equation(inner, rewrites)),
+        Expr::BinOp(left, op, right) => {
+            let left_str = rewrite_expr_to_equation(left, rewrites);
+            let right_str = rewrite_expr_to_equation(right, rewrites);
+            format!("{left_str} {op} {right_str}")
+        }
+    }
+}
+
 /// Intermediate builder for stocks, accumulating inflows/outflows
 /// as flows are processed.
 struct StockBuilder {
@@ -248,79 +483,6 @@ struct StockBuilder {
     equation: String,
     inflows: Vec<String>,
     outflows: Vec<String>,
-}
-
-/// Create a dest_capacity aux variable if the destination stock has a
-/// non-infinite maximum. Returns the src identifier for the module reference.
-fn make_dest_capacity_aux(
-    module_ident: &str,
-    dest_stock: Option<&super::ast::SystemsStock>,
-    dest_canon: &str,
-    variables: &mut Vec<Variable>,
-) -> String {
-    let needs_capacity_aux = dest_stock.map(|s| s.max != Expr::Inf).unwrap_or(false);
-
-    if !needs_capacity_aux {
-        // Use a simple aux with "inf()" for infinite capacity
-        let aux_ident = format!("{module_ident}_dest_capacity");
-        variables.push(Variable::Aux(Aux {
-            ident: aux_ident.clone(),
-            equation: Equation::Scalar("inf()".to_string()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        }));
-        aux_ident
-    } else {
-        let dest_max_expr = dest_stock.unwrap().max.to_equation_string();
-        let aux_ident = format!("{module_ident}_dest_capacity");
-        let equation = format!("{dest_max_expr} - {dest_canon}");
-        variables.push(Variable::Aux(Aux {
-            ident: aux_ident.clone(),
-            equation: Equation::Scalar(equation),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        }));
-        aux_ident
-    }
-}
-
-/// Create a rate/requested aux variable for the flow's rate expression.
-/// Returns (port_name, aux_ident) where port_name is "requested" for Rate
-/// and "rate" for Leak/Conversion.
-fn make_rate_aux(
-    module_ident: &str,
-    flow_type: &FlowType,
-    rate_expr: &Expr,
-    variables: &mut Vec<Variable>,
-) -> (String, String) {
-    let port_name = match flow_type {
-        FlowType::Rate => "requested",
-        FlowType::Leak | FlowType::Conversion => "rate",
-    };
-
-    let aux_ident = format!("{module_ident}_{port_name}");
-    let equation = rate_expr.to_equation_string();
-
-    variables.push(Variable::Aux(Aux {
-        ident: aux_ident.clone(),
-        equation: Equation::Scalar(equation),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: Compat::default(),
-    }));
-
-    (port_name.to_string(), aux_ident)
 }
 
 #[cfg(test)]
@@ -676,14 +838,19 @@ mod tests {
             c_refs
         );
 
-        // B module gets available=a_outflows_c.remaining (chained)
+        // B module gets available from C's remaining via intermediate aux
         let b_refs = module_refs(&project, "a_outflows_b");
         assert!(
             b_refs.iter().any(
-                |(src, dst)| src == "a_outflows_c.remaining" && dst == "a_outflows_b.available"
+                |(src, dst)| src == "a_outflows_c_remaining" && dst == "a_outflows_b.available"
             ),
-            "B module should chain from C's remaining: {:?}",
+            "B module should chain from C's remaining aux: {:?}",
             b_refs
+        );
+        // The intermediate aux bridges the module output
+        assert_eq!(
+            scalar_eqn(&project, "a_outflows_c_remaining"),
+            Some("a_outflows_c.remaining".to_string()),
         );
     }
 
@@ -745,15 +912,15 @@ mod tests {
             "C (last declared) should get direct stock reference"
         );
 
-        // B (first declared) has lower priority: available=a_outflows_c.remaining
+        // B (first declared) has lower priority: available from C's remaining via aux
         let b_refs = module_refs(&project, "a_outflows_b");
         let b_available = b_refs
             .iter()
             .find(|(_, dst)| dst == "a_outflows_b.available");
         assert_eq!(
             b_available.map(|(src, _)| src.as_str()),
-            Some("a_outflows_c.remaining"),
-            "B (first declared) should chain from C's remaining"
+            Some("a_outflows_c_remaining"),
+            "B (first declared) should chain from C's remaining aux"
         );
     }
 

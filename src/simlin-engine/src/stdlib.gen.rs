@@ -5,7 +5,7 @@
 // because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME).
 // Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs.
 //
-// Stdlib SHA256: f3f6543678d4c548a42b3be2e84b498f19b561a6cb24ca83219862a3ac24a7da
+// Stdlib SHA256: fcb9d2ab3499f5fcec9f3ca2787f3da346a584bb297272c794402fd2414f9895
 
 #![allow(
     clippy::approx_constant,
@@ -1193,7 +1193,7 @@ fn systems_rate() -> Model {
             Variable::Aux(Aux {
                 ident: "actual".to_string(),
                 equation: Equation::Scalar(
-                    "MIN(requested, MIN(available, dest_capacity))".to_string(),
+                    "MIN(dest_capacity, MAX(0, MIN(requested, available)))".to_string(),
                 ),
                 documentation: "".to_string(),
                 units: None,

@@ -22,7 +22,7 @@
                 <eqn>INF</eqn>
             </aux>
             <aux name="actual">
-                <eqn>MIN(requested, MIN(available, dest_capacity))</eqn>
+                <eqn>MIN(dest_capacity, MAX(0, MIN(requested, available)))</eqn>
             </aux>
             <aux name="remaining">
                 <eqn>available - actual</eqn>
