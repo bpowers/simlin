@@ -1,4 +1,6 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from tools import vdf_xray
@@ -12,7 +14,28 @@ def parse_fixture(relpath: str) -> vdf_xray.VdfFile:
     return vdf_xray.parse_vdf(path.read_bytes())
 
 
+def parse_mdl_fixture(relpath: str) -> vdf_xray.MdlModel:
+    path = REPO_ROOT / relpath
+    return vdf_xray.parse_mdl_model(path.read_text(errors="replace"))
+
+
 class VdfXrayModelEditingTests(unittest.TestCase):
+    def test_parse_mdl_model_preserves_definition_order_and_dimensions(self) -> None:
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/8_change_subscript.mdl")
+
+        self.assertEqual(list(model.dimensions), ["sub1", "sub2", "sub3"])
+        self.assertEqual(model.dimensions["sub2"].elements, ["i", "j"])
+        self.assertEqual(
+            [(definition.source_index, definition.kind, definition.name, definition.dimensions)
+             for definition in model.definitions],
+            [
+                (1, "var", "constant", []),
+                (2, "var", "flow", ["sub2"]),
+                (3, "stock", "stock", ["sub2"]),
+                (4, "var", "v", []),
+            ],
+        )
+
     def test_section_scan_finds_expected_eight_sections(self) -> None:
         for relpath in [
             "test/bobby/vdf/model_editing/run_8.vdf",
@@ -180,6 +203,138 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertIsNotNone(sec6)
         fingerprint = vdf_xray.ref_signature_fingerprint(run6, sec6[1][2].refs)
         self.assertEqual(fingerprint, [[32, 23, 17, 55], [140, 0, 0, 0]])
+
+    def test_run6_field6_zero_uses_active_sec3_index0_shape(self) -> None:
+        run6 = parse_fixture("test/bobby/vdf/model_editing/run_6.vdf")
+        rec = next(rec for rec in run6.records if rec.ot_index() == 1 and rec.fields[10] == 11)
+
+        self.assertEqual(rec.shape_code(), 0)
+        self.assertEqual(vdf_xray.record_shape_length(run6, rec), 2)
+
+    def test_run8_field6_zero_does_not_use_placeholder_sec3_index0_shape(self) -> None:
+        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
+        rec = next(rec for rec in run8.records if rec.ot_index() == 1 and rec.fields[10] == 11)
+
+        self.assertEqual(rec.shape_code(), 0)
+        self.assertIsNone(vdf_xray.record_shape_length(run8, rec))
+
+    def test_run7_record_shape_blocks_expose_overlapping_idx0_candidates(self) -> None:
+        run7 = parse_fixture("test/bobby/vdf/model_editing/run_7.vdf")
+        blocks = vdf_xray.build_record_shape_blocks(run7)
+
+        stock_block = next(block for block in blocks if block.start == 1 and block.end == 3)
+        overlap_block = next(block for block in blocks if block.start == 2 and block.end == 4)
+
+        self.assertEqual(stock_block.ot_codes, [vdf_xray.OT_CODE_STOCK, vdf_xray.OT_CODE_STOCK])
+        self.assertEqual(stock_block.sort_keys, [])
+        self.assertIn(13, stock_block.shape_record_indices)
+
+        self.assertEqual(
+            overlap_block.ot_codes,
+            [vdf_xray.OT_CODE_STOCK, 0x17],
+        )
+        self.assertEqual(overlap_block.sort_keys, [11])
+
+    def test_run7_mdl_alignment_is_precise_for_arrayed_owners_only(self) -> None:
+        run7 = parse_fixture("test/bobby/vdf/model_editing/run_7.vdf")
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/7_add_new_subscript.mdl")
+
+        matches = {
+            match.definition.name: match.candidate_block_indices
+            for match in vdf_xray.match_mdl_definitions_to_blocks(run7, model)
+        }
+
+        self.assertEqual(matches["flow"], [3])
+        self.assertEqual(matches["stock"], [0])
+        self.assertEqual(matches["constant"], [2, 4, 5])
+        self.assertEqual(matches["v"], [2, 4, 5])
+
+    def test_run8_mdl_alignment_finds_unique_arrayed_block_owners(self) -> None:
+        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/8_change_subscript.mdl")
+
+        matches = {
+            match.definition.name: match.candidate_block_indices
+            for match in vdf_xray.match_mdl_definitions_to_blocks(run8, model)
+        }
+
+        self.assertEqual(matches["flow"], [2])
+        self.assertEqual(matches["stock"], [0])
+        self.assertEqual(matches["constant"], [1, 3, 4])
+        self.assertEqual(matches["v"], [1, 3, 4])
+
+    def test_run9_record_shape_blocks_split_hidden_and_visible_stock_regions(self) -> None:
+        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
+        blocks = vdf_xray.build_record_shape_blocks(run9)
+
+        hidden_block = next(block for block in blocks if block.start == 1 and block.end == 2)
+        visible_stock_block = next(block for block in blocks if block.start == 2 and block.end == 4)
+
+        self.assertEqual(hidden_block.ot_codes, [vdf_xray.OT_CODE_STOCK])
+        self.assertIn(412, hidden_block.slot_refs)
+        self.assertEqual(hidden_block.sort_keys, [5, 13])
+
+        self.assertEqual(
+            visible_stock_block.ot_codes,
+            [vdf_xray.OT_CODE_STOCK, vdf_xray.OT_CODE_STOCK],
+        )
+        self.assertEqual(visible_stock_block.sort_keys, [])
+
+    def test_run9_mdl_alignment_excludes_hidden_smooth_stock_from_visible_stock(self) -> None:
+        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/9_smooth_time.mdl")
+
+        matches = {
+            match.definition.name: match.candidate_block_indices
+            for match in vdf_xray.match_mdl_definitions_to_blocks(run9, model)
+        }
+
+        self.assertEqual(matches["flow"], [3])
+        self.assertEqual(matches["stock"], [1])
+        self.assertEqual(matches["constant"], [2, 4])
+        self.assertEqual(matches["v"], [2, 4])
+
+    def test_print_compare_includes_record_shape_block_diffs_and_mdl_alignment(self) -> None:
+        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
+        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
+        mdl8 = parse_mdl_fixture("test/bobby/vdf/model_editing/8_change_subscript.mdl")
+        mdl9 = parse_mdl_fixture("test/bobby/vdf/model_editing/9_smooth_time.mdl")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            vdf_xray.print_compare(
+                run8,
+                "run_8.vdf",
+                run9,
+                "run_9.vdf",
+                left_mdl=(mdl8, "8_change_subscript.mdl"),
+                right_mdl=(mdl9, "9_smooth_time.mdl"),
+            )
+        output = buf.getvalue()
+
+        self.assertIn("=== Record Shape Block Diffs ===", output)
+        self.assertIn("=== MDL Alignment ===", output)
+        self.assertIn("src[ 3] stock  stock[sub2] flat=2", output)
+        self.assertIn("unmatched blocks:", output)
+
+    def test_run9_best_slot_alignment_detects_hidden_leading_slots(self) -> None:
+        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
+
+        default_alignment = vdf_xray.score_slot_name_alignment(run9, 0)
+        best_alignment = vdf_xray.best_slot_name_alignment(run9)
+
+        self.assertEqual(best_alignment.leading_extra_slots, 2)
+        self.assertEqual(best_alignment.hidden_slots, [8, 412])
+        self.assertGreater(best_alignment.score, default_alignment.score)
+
+    def test_run9_display_alignment_restores_time_and_sec5_metadata_refs(self) -> None:
+        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
+        slot_to_names = vdf_xray.build_display_slot_to_names(run9)
+
+        self.assertEqual(slot_to_names[156], ["Time"])
+        self.assertEqual(slot_to_names[188], ["TIME STEP"])
+        self.assertEqual(slot_to_names[204], ["SAVEPER"])
+        self.assertEqual(slot_to_names[220], ["sub1"])
 
 
 if __name__ == "__main__":

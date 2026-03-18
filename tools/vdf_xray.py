@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import struct
 import sys
 from dataclasses import dataclass, field
@@ -226,6 +227,15 @@ class SlotTableLayout:
 
 
 @dataclass
+class SlotNameAlignment:
+    leading_extra_slots: int
+    score: int
+    hidden_slots: list[int]
+    mapped_visible_names: int
+    slot_to_names: dict[int, list[str]]
+
+
+@dataclass
 class Section5BridgeMatches:
     exact: list[int] = field(default_factory=list)
     partial: list[int] = field(default_factory=list)
@@ -240,6 +250,59 @@ class OtRange:
 
     def length(self) -> int:
         return self.end - self.start
+
+
+@dataclass
+class RecordShapeBlock:
+    start: int
+    end: int
+    ot_codes: list[int]
+    record_indices: list[int] = field(default_factory=list)
+    shape_record_indices: list[int] = field(default_factory=list)
+    shape_codes: list[int] = field(default_factory=list)
+    sort_keys: list[int] = field(default_factory=list)
+    slot_refs: list[int] = field(default_factory=list)
+
+    def length(self) -> int:
+        return self.end - self.start
+
+    def homogeneous_ot_codes(self) -> bool:
+        return len(set(self.ot_codes)) <= 1
+
+
+@dataclass
+class MdlDimension:
+    name: str
+    elements: list[str]
+    line_no: int
+
+
+@dataclass
+class MdlDefinition:
+    name: str
+    kind: str
+    dimensions: list[str]
+    header: str
+    source_index: int
+    line_no: int
+
+    def is_stock(self) -> bool:
+        return self.kind == "stock"
+
+    def is_arrayed(self) -> bool:
+        return len(self.dimensions) > 0
+
+
+@dataclass
+class MdlModel:
+    dimensions: dict[str, MdlDimension]
+    definitions: list[MdlDefinition]
+
+
+@dataclass
+class MdlBlockMatch:
+    definition: MdlDefinition
+    candidate_block_indices: list[int]
 
 
 # ---- VDF File ----
@@ -580,8 +643,14 @@ class VdfFile:
 # ---- Slot-to-name helpers ----
 
 def build_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
+    return build_slot_to_names_with_offset(vdf, 0)
+
+
+def build_slot_to_names_with_offset(vdf: VdfFile, leading_extra_slots: int) -> dict[int, list[str]]:
     out: dict[int, list[str]] = {}
-    for i, slot in enumerate(vdf.slot_table):
+    if leading_extra_slots < 0:
+        leading_extra_slots = 0
+    for i, slot in enumerate(vdf.slot_table[leading_extra_slots:]):
         if i < len(vdf.names):
             out.setdefault(slot, []).append(vdf.names[i])
     return out
@@ -631,6 +700,128 @@ def format_slot_table_layout(layout: Optional[SlotTableLayout]) -> str:
     stride_str = ",".join(str(s) for s in layout.distinct_strides) if layout.distinct_strides else "-"
     return (f"base={layout.base} max={layout.max_offset} strides=[{stride_str}] "
             f"contiguous16={layout.contiguous_16} missing16={layout.missing_16_slots}")
+
+
+def _slot_name_alignment_class_score(name: Optional[str], cls: str,
+                                     *, section_kind: str) -> int:
+    if name is None:
+        return 0
+    if section_kind == "sec4":
+        if name == "Time":
+            return 10
+        if cls == "system":
+            return 4
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -2
+        return 1
+    if section_kind == "sec5_payload":
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -2
+        if cls == "system":
+            return 3
+        return 2
+    if section_kind == "sec5_trailing":
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -1
+        return 1
+    if section_kind == "sec6":
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -1
+        if cls == "system":
+            return 1
+        return 1
+    return 0
+
+
+def score_slot_name_alignment(vdf: VdfFile, leading_extra_slots: int) -> SlotNameAlignment:
+    """
+    Score a visible-name alignment against section-4/5/6 reference usage.
+
+    This is intentionally an analysis-layer heuristic. It does not change the
+    raw slot table or claim to decode the hidden slot/name relationship; it
+    only helps the xray output avoid obviously shifted name labels when helper
+    entries appear to occupy leading slot-table positions.
+    """
+    slot_to_names = build_slot_to_names_with_offset(vdf, leading_extra_slots)
+
+    def lookup(slot_ref: int) -> tuple[Optional[str], str]:
+        names = slot_to_names.get(slot_ref)
+        if not names:
+            return None, ""
+        name = names[0]
+        return name, classify_name(name)
+
+    score = 0
+
+    sec4_entries = vdf.parse_section4_entries() or []
+    for entry in sec4_entries:
+        for slot_ref in entry.refs:
+            name, cls = lookup(slot_ref)
+            score += _slot_name_alignment_class_score(name, cls, section_kind="sec4")
+
+    sec5_entries = vdf.parse_section5_sets() or []
+    for entry in sec5_entries:
+        for slot_ref in section5_payload_refs(entry):
+            if slot_ref <= 0:
+                continue
+            name, cls = lookup(slot_ref)
+            score += _slot_name_alignment_class_score(name, cls, section_kind="sec5_payload")
+        for slot_ref in section5_trailing_refs(entry):
+            if slot_ref <= 0:
+                continue
+            name, cls = lookup(slot_ref)
+            score += _slot_name_alignment_class_score(name, cls, section_kind="sec5_trailing")
+
+    sec6_result = vdf.parse_section6_ref_stream()
+    if sec6_result:
+        for entry in sec6_result[1]:
+            for slot_ref in entry.refs:
+                name, cls = lookup(slot_ref)
+                score += _slot_name_alignment_class_score(name, cls, section_kind="sec6")
+
+    mapped_visible_names = min(len(vdf.names), max(0, len(vdf.slot_table) - leading_extra_slots))
+    return SlotNameAlignment(
+        leading_extra_slots=leading_extra_slots,
+        score=score,
+        hidden_slots=vdf.slot_table[:leading_extra_slots],
+        mapped_visible_names=mapped_visible_names,
+        slot_to_names=slot_to_names,
+    )
+
+
+def best_slot_name_alignment(vdf: VdfFile, max_leading_extra_slots: int = 8) -> SlotNameAlignment:
+    if not vdf.slot_table:
+        return SlotNameAlignment(0, 0, [], 0, {})
+
+    limit = min(max_leading_extra_slots, len(vdf.slot_table) - 1)
+    best = score_slot_name_alignment(vdf, 0)
+    for leading in range(1, limit + 1):
+        candidate = score_slot_name_alignment(vdf, leading)
+        if candidate.score > best.score:
+            best = candidate
+    return best
+
+
+def preferred_slot_name_alignment(vdf: VdfFile) -> SlotNameAlignment:
+    """Use a shifted visible-name mapping only when it beats the default clearly."""
+    default = score_slot_name_alignment(vdf, 0)
+    best = best_slot_name_alignment(vdf)
+    if best.leading_extra_slots > 0 and best.score >= default.score + 4:
+        return best
+    return default
+
+
+def build_display_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
+    return preferred_slot_name_alignment(vdf).slot_to_names
+
+
+def visible_slot_name_pairs(vdf: VdfFile, *,
+                            alignment: Optional[SlotNameAlignment] = None) -> list[tuple[str, int]]:
+    alignment = alignment or preferred_slot_name_alignment(vdf)
+    pairs: list[tuple[str, int]] = []
+    for i in range(alignment.mapped_visible_names):
+        pairs.append((vdf.names[i], vdf.slot_table[alignment.leading_extra_slots + i]))
+    return pairs
 
 
 def section5_trailing_refs(entry: Section5SetEntry) -> list[int]:
@@ -702,6 +893,233 @@ def section5_exact_axis_sizes(sec5: Section5SetEntry,
                               sec3_entries: list[Section3Entry]) -> list[list[int]]:
     matches = classify_section5_shape_matches(sec5, sec3_entries)
     return [sec3_entries[idx].axis_sizes() for idx in matches.exact]
+
+
+MDL_LHS_RE = re.compile(r"^(?P<name>[^\[]+?)(?:\[(?P<dims>[^\]]+)\])?$")
+
+
+def parse_mdl_lhs(lhs: str) -> tuple[str, list[str]]:
+    match = MDL_LHS_RE.match(lhs.strip())
+    if match is None:
+        return lhs.strip(), []
+    name = match.group("name").strip()
+    dims_text = match.group("dims")
+    if not dims_text:
+        return name, []
+    dims = [part.strip() for part in dims_text.split(",") if part.strip()]
+    return name, dims
+
+
+def parse_mdl_model(text: str) -> MdlModel:
+    """
+    Parse the definition and dimension headers from a Vensim .mdl source file.
+
+    This is intentionally shallow: it does not parse expressions, only the
+    model declarations needed to align visible names with VDF structure.
+    """
+    dimensions: dict[str, MdlDimension] = {}
+    definitions: list[MdlDefinition] = []
+    source_index = 0
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i].rstrip()
+        line = raw.strip()
+
+        if line.startswith("********************************************************"):
+            break
+        if not line or line == "{UTF-8}" or line.startswith("~") or line == "|":
+            i += 1
+            continue
+
+        if line.endswith(":") and "=" not in line:
+            name = line[:-1].strip()
+            elements: list[str] = []
+            j = i + 1
+            while j < len(lines):
+                probe = lines[j].strip()
+                if not probe:
+                    j += 1
+                    continue
+                if (probe.startswith("~")
+                        or probe.startswith("|")
+                        or probe.startswith("********************************************************")):
+                    break
+                elements.extend(part.strip() for part in probe.split(",") if part.strip())
+                j += 1
+            dimensions[name] = MdlDimension(name=name, elements=elements, line_no=i + 1)
+            i = j
+            continue
+
+        if "=" in raw:
+            lhs, rhs = raw.split("=", 1)
+            name, dims = parse_mdl_lhs(lhs)
+            source_index += 1
+            kind = "stock" if "INTEG" in rhs.upper() else "var"
+            definitions.append(MdlDefinition(
+                name=name,
+                kind=kind,
+                dimensions=dims,
+                header=line,
+                source_index=source_index,
+                line_no=i + 1,
+            ))
+            i += 1
+            continue
+
+        if line.endswith("("):
+            source_index += 1
+            definitions.append(MdlDefinition(
+                name=line[:-1].strip(),
+                kind="lookup",
+                dimensions=[],
+                header=line,
+                source_index=source_index,
+                line_no=i + 1,
+            ))
+        i += 1
+
+    return MdlModel(dimensions=dimensions, definitions=definitions)
+
+
+def mdl_definition_flat_size(model: MdlModel, definition: MdlDefinition) -> Optional[int]:
+    if not definition.dimensions:
+        return 1
+    size = 1
+    for dim_name in definition.dimensions:
+        dim = model.dimensions.get(dim_name)
+        if dim is None or not dim.elements:
+            return None
+        size *= len(dim.elements)
+    return size
+
+
+def build_sec3_index_to_entry(vdf: VdfFile) -> dict[int, Section3Entry]:
+    directory = vdf.parse_section3_directory()
+    if directory is None:
+        return {}
+    return {entry.index_word(): entry for entry in directory.entries}
+
+
+def record_shape_length(vdf: VdfFile, rec: VdfRecord) -> Optional[int]:
+    """
+    Recover the OT span implied by record field[6], when the binding is decoded.
+
+    This is deterministic structure rather than a display heuristic:
+    - `5` always means scalar (len=1)
+    - an active sec3 `index_word` gives its flat size, including `index_word=0`
+      when that entry is active
+    - `32` is the generic array marker and resolves only when section 3 exposes
+      a single active flat size
+    """
+    code = rec.shape_code()
+    if code == 5:
+        return 1
+
+    idx_to_entry = build_sec3_index_to_entry(vdf)
+    entry = idx_to_entry.get(code)
+    if entry is not None and entry.flat_size() > 0:
+        return entry.flat_size()
+
+    if code == 32:
+        active_sizes = sorted({e.flat_size() for e in idx_to_entry.values() if e.flat_size() > 0})
+        if len(active_sizes) == 1:
+            return active_sizes[0]
+    return None
+
+
+def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
+    """
+    Group records by decoded shape span instead of raw ot_index.
+
+    A visible owner signal can split across records: one record may contribute
+    the shape-derived span while another positive-sort record lands inside that
+    span. This helper keeps the grouping structural and leaves name ownership
+    unresolved when the file does not force it.
+    """
+    codes = vdf.section6_ot_class_codes() or []
+    by_range: dict[tuple[int, int], RecordShapeBlock] = {}
+
+    def add_record(block: RecordShapeBlock, rec_idx: int, rec: VdfRecord, *,
+                   is_shape_record: bool) -> None:
+        if rec_idx not in block.record_indices:
+            block.record_indices.append(rec_idx)
+        if is_shape_record and rec_idx not in block.shape_record_indices:
+            block.shape_record_indices.append(rec_idx)
+        shape_code = rec.shape_code()
+        if is_shape_record and shape_code not in block.shape_codes:
+            block.shape_codes.append(shape_code)
+        sort_key = rec.fields[10]
+        if sort_key > 0 and sort_key not in block.sort_keys:
+            block.sort_keys.append(sort_key)
+        slot_ref = rec.slot_ref()
+        if slot_ref > 0 and slot_ref not in block.slot_refs:
+            block.slot_refs.append(slot_ref)
+
+    for rec_idx, rec in enumerate(vdf.records):
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count:
+            continue
+        length = record_shape_length(vdf, rec)
+        if length is None or length <= 0:
+            continue
+        end = min(vdf.offset_table_count, start + length)
+        key = (start, end)
+        block = by_range.setdefault(
+            key,
+            RecordShapeBlock(
+                start=start,
+                end=end,
+                ot_codes=codes[start:end],
+            ),
+        )
+        add_record(block, rec_idx, rec, is_shape_record=True)
+
+    for rec_idx, rec in enumerate(vdf.records):
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count or rec.fields[10] <= 0:
+            continue
+        if record_shape_length(vdf, rec) is not None:
+            continue
+        for block in by_range.values():
+            if block.start <= start < block.end:
+                add_record(block, rec_idx, rec, is_shape_record=False)
+
+    blocks = sorted(by_range.values(), key=lambda block: (block.start, block.end))
+    for block in blocks:
+        block.record_indices.sort()
+        block.shape_record_indices.sort()
+        block.shape_codes.sort()
+        block.sort_keys.sort()
+        block.slot_refs.sort()
+    return blocks
+
+
+def mdl_definition_matches_block(model: MdlModel, definition: MdlDefinition,
+                                 block: RecordShapeBlock) -> bool:
+    expected_size = mdl_definition_flat_size(model, definition)
+    if expected_size is not None and block.length() != expected_size:
+        return False
+    if definition.is_stock():
+        return bool(block.ot_codes) and all(code == OT_CODE_STOCK for code in block.ot_codes)
+    return all(code != OT_CODE_STOCK for code in block.ot_codes)
+
+
+def match_mdl_definitions_to_blocks(vdf: VdfFile, model: MdlModel) -> list[MdlBlockMatch]:
+    blocks = build_record_shape_blocks(vdf)
+    matches: list[MdlBlockMatch] = []
+    for definition in model.definitions:
+        if definition.kind not in {"stock", "var", "lookup"}:
+            continue
+        candidate_block_indices = [
+            idx for idx, block in enumerate(blocks)
+            if mdl_definition_matches_block(model, definition, block)
+        ]
+        matches.append(MdlBlockMatch(
+            definition=definition,
+            candidate_block_indices=candidate_block_indices,
+        ))
+    return matches
 
 
 # ---- Parsing ----
@@ -1084,11 +1502,19 @@ def print_slots(vdf: VdfFile) -> None:
         print("=== Slot Table ===\n  (empty)\n")
         return
     sec1_data_start = vdf.sections[1].data_offset() if len(vdf.sections) > 1 else 0
+    alignment = preferred_slot_name_alignment(vdf)
+    default_alignment = score_slot_name_alignment(vdf, 0)
     print(f"=== Slot Table ({len(vdf.slot_table)} entries @ 0x{vdf.slot_table_offset:08x}) ===")
     print(f"  layout: {format_slot_table_layout(analyze_slot_table_offsets(vdf.slot_table))}")
+    if alignment.leading_extra_slots > 0:
+        hidden = ", ".join(str(slot) for slot in alignment.hidden_slots)
+        print(f"  visible-name alignment: skip {alignment.leading_extra_slots} leading slot entries "
+              f"(score {alignment.score} vs default {default_alignment.score})")
+        print(f"  hidden slot refs: [{hidden}]")
     print(f"  {'Idx':>3}  {'Sec1Off':>7}  {'Name':<36}  {'w[0]':>8} {'w[1]':>8} {'w[2]':>8} {'w[3]':>8}")
     for i, offset in enumerate(vdf.slot_table):
-        name = vdf.names[i] if i < len(vdf.names) else "???"
+        name_idx = i - alignment.leading_extra_slots
+        name = vdf.names[name_idx] if 0 <= name_idx < len(vdf.names) else "<hidden>"
         abs_off = sec1_data_start + offset
         if abs_off + 16 <= len(vdf.data):
             w = [u32(vdf.data, abs_off + j * 4) for j in range(4)]
@@ -1106,9 +1532,9 @@ def print_records(vdf: VdfFile) -> None:
         return
 
     slot_to_name: dict[int, str] = {}
-    for i, slot in enumerate(vdf.slot_table):
-        if i < len(vdf.names):
-            slot_to_name[slot] = vdf.names[i]
+    for slot, names in build_display_slot_to_names(vdf).items():
+        if names:
+            slot_to_name[slot] = names[0]
 
     print(f"  SENT = sentinel 0x{VDF_SENTINEL:08x}")
     print(f"  Known: f[0]=type f[1]=class f[6]=shape f[10]=sort f[11]=ot_idx f[12]=slot_ref")
@@ -1163,7 +1589,7 @@ def print_section3(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     sec4_entries = vdf.parse_section4_entries()
     sec4_idx_words = set()
     if sec4_entries:
@@ -1193,7 +1619,7 @@ def print_section4(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     for i, e in enumerate(entries[:30]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs]
         print(f"  {i:>3} @0x{e.file_offset:08x} packed=0x{e.packed_word:08x} "
@@ -1215,7 +1641,7 @@ def print_section5(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     directory = vdf.parse_section3_directory()
     sec3_entries = directory.entries if directory else []
     for i, e in enumerate(entries[:16]):
@@ -1247,7 +1673,7 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
         return
 
     skip, entries, stop = result
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     slot_to_name_flat: dict[int, str] = {}
     for s, names in slot_to_names.items():
         slot_to_name_flat[s] = names[0] if names else ""
@@ -1444,13 +1870,12 @@ def print_shape_record_bridge(vdf: VdfFile) -> None:
 
     for code in sorted(shape_groups.keys()):
         recs = shape_groups[code]
-        if code == 0:
-            label = "neutral/padding or idx=0 placeholder"
-        elif code == 5:
+        entry = idx_to_entry.get(code)
+        if code == 5:
             label = "scalar"
-        elif code in idx_to_entry and code != 0:
-            entry = idx_to_entry[code]
-            label = f"sec3 idx={code}, flat={entry.flat_size()}, axes={entry.axis_sizes()}"
+        elif entry is not None:
+            state = "active" if entry.flat_size() > 0 else "placeholder"
+            label = f"sec3 idx={code}, flat={entry.flat_size()}, axes={entry.axis_sizes()} ({state})"
         elif code == 32 and directory.entries:
             active = [e for e in directory.entries if e.flat_size() > 0]
             label = ("generic arrayed"
@@ -1483,6 +1908,72 @@ def print_shape_record_bridge(vdf: VdfFile) -> None:
     print()
 
 
+def print_record_shape_blocks(vdf: VdfFile) -> None:
+    print("=== Record Shape Blocks ===")
+    blocks = build_record_shape_blocks(vdf)
+    if not blocks:
+        print("  (none)\n")
+        return
+
+    for i, block in enumerate(blocks):
+        code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+        slot_labels = [describe_slot_ref(vdf, slot_ref) for slot_ref in block.slot_refs]
+        print(f"  {i:>3}  OT[{block.start}..{block.end}) len={block.length()} "
+              f"shape_codes={block.shape_codes} recs={block.record_indices} "
+              f"shape_recs={block.shape_record_indices} sorts={block.sort_keys} "
+              f"codes={code_str} homogeneous={block.homogeneous_ot_codes()} "
+              f"slots={slot_labels}")
+    print()
+
+
+def format_record_shape_block(vdf: VdfFile, block: Optional[RecordShapeBlock], *,
+                              block_idx: Optional[int] = None) -> str:
+    if block is None:
+        return "missing"
+    prefix = f"block[{block_idx}] " if block_idx is not None else ""
+    code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+    return (f"{prefix}OT[{block.start}..{block.end}) len={block.length()} "
+            f"shape_codes={block.shape_codes} sorts={block.sort_keys} "
+            f"codes={code_str} slots={block.slot_refs}")
+
+
+def print_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
+    print("=== MDL Alignment ===")
+    print(f"  mdl: {mdl_path}")
+    print(f"  dimensions={len(model.dimensions)} definitions={len(model.definitions)}")
+    if model.dimensions:
+        for dim in model.dimensions.values():
+            print(f"    dim {dim.name}({len(dim.elements)}): {dim.elements}")
+
+    blocks = build_record_shape_blocks(vdf)
+    matches = match_mdl_definitions_to_blocks(vdf, model)
+    matched_block_indices: set[int] = set()
+
+    for match in matches:
+        definition = match.definition
+        flat_size = mdl_definition_flat_size(model, definition)
+        if len(match.candidate_block_indices) == 1:
+            status = "unique"
+        elif len(match.candidate_block_indices) == 0:
+            status = "missing"
+        else:
+            status = "ambiguous"
+        print(f"  src[{definition.source_index:>2}] {definition.kind:<6} {definition.name}"
+              f"{'[' + ','.join(definition.dimensions) + ']' if definition.dimensions else ''} "
+              f"flat={flat_size if flat_size is not None else '?'} "
+              f"candidates={len(match.candidate_block_indices)} {status}")
+        for block_idx in match.candidate_block_indices:
+            matched_block_indices.add(block_idx)
+            print(f"        {format_record_shape_block(vdf, blocks[block_idx], block_idx=block_idx)}")
+
+    unmatched = [idx for idx in range(len(blocks)) if idx not in matched_block_indices]
+    if unmatched:
+        print("  unmatched blocks:")
+        for idx in unmatched:
+            print(f"        {format_record_shape_block(vdf, blocks[idx], block_idx=idx)}")
+    print()
+
+
 def print_section35_bridge(vdf: VdfFile) -> None:
     """Show the section-3 -> section-5 relationship via shared axis_slot_refs."""
     print("=== Section 3 -> Section 5 Bridge ===")
@@ -1496,7 +1987,7 @@ def print_section35_bridge(vdf: VdfFile) -> None:
         print("  (no section-5 entries)\n")
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
 
     for i, sec3 in enumerate(directory.entries):
         axis_refs = set(sec3.axis_slot_refs())
@@ -1841,7 +2332,7 @@ def format_ref_signature_fingerprint(vdf: VdfFile, refs: list[int]) -> str:
 
 
 def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = False) -> str:
-    names = build_slot_to_names(vdf).get(slot_ref, [])
+    names = build_display_slot_to_names(vdf).get(slot_ref, [])
     label = resolve_slot_ref(slot_ref, {slot_ref: names} if names else {})
     if not include_signature:
         return label
@@ -1849,7 +2340,7 @@ def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = 
 
 
 def collect_slot_reference_inventory(vdf: VdfFile) -> dict[int, SlotReferenceInfo]:
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     inventory: dict[int, SlotReferenceInfo] = {}
 
     def add(slot_ref: int, use: str) -> None:
@@ -1894,7 +2385,9 @@ def collect_slot_reference_inventory(vdf: VdfFile) -> dict[int, SlotReferenceInf
     return inventory
 
 
-def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str) -> None:
+def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str, *,
+                  left_mdl: Optional[tuple[MdlModel, str]] = None,
+                  right_mdl: Optional[tuple[MdlModel, str]] = None) -> None:
     """Compare two parsed simulation-result VDFs at the decoded-structure level."""
     print("=== Compare ===")
     print(f"Left:  {left_path}")
@@ -1913,18 +2406,28 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
     for label, lhs, rhs in header_fields:
         if lhs != rhs:
             print(f"  {label}: left={lhs} right={rhs}")
+    left_alignment = preferred_slot_name_alignment(left)
+    right_alignment = preferred_slot_name_alignment(right)
+    if (left_alignment.leading_extra_slots != right_alignment.leading_extra_slots
+            or left_alignment.score != right_alignment.score):
+        print(f"  visible_slot_alignment: left=skip{left_alignment.leading_extra_slots}/score{left_alignment.score} "
+              f"right=skip{right_alignment.leading_extra_slots}/score{right_alignment.score}")
     print()
 
     print("=== Shared Name / Slot Diffs ===")
-    by_name_left = {name: i for i, name in enumerate(left.names[:len(left.slot_table)])}
-    by_name_right = {name: i for i, name in enumerate(right.names[:len(right.slot_table)])}
+    left_pairs = visible_slot_name_pairs(left, alignment=left_alignment)
+    right_pairs = visible_slot_name_pairs(right, alignment=right_alignment)
+    by_name_left: dict[str, tuple[int, int]] = {}
+    by_name_right: dict[str, tuple[int, int]] = {}
+    for idx, (name, slot) in enumerate(left_pairs):
+        by_name_left.setdefault(name, (idx, slot))
+    for idx, (name, slot) in enumerate(right_pairs):
+        by_name_right.setdefault(name, (idx, slot))
     shared_names = sorted(set(by_name_left) & set(by_name_right))
     any_slot_diff = False
     for name in shared_names:
-        li = by_name_left[name]
-        ri = by_name_right[name]
-        lslot = left.slot_table[li]
-        rslot = right.slot_table[ri]
+        _, lslot = by_name_left[name]
+        _, rslot = by_name_right[name]
         lwords = slot_words(left, lslot)
         rwords = slot_words(right, rslot)
         if lslot != rslot or lwords != rwords:
@@ -2053,6 +2556,33 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         print("  (no record differences)")
     print()
 
+    print("=== Record Shape Block Diffs ===")
+    left_blocks = build_record_shape_blocks(left)
+    right_blocks = build_record_shape_blocks(right)
+    any_block_diff = False
+    keys = sorted({(b.start, b.end) for b in left_blocks} | {(b.start, b.end) for b in right_blocks})
+    left_by_key = {(b.start, b.end): b for b in left_blocks}
+    right_by_key = {(b.start, b.end): b for b in right_blocks}
+    for key in keys:
+        lblock = left_by_key.get(key)
+        rblock = right_by_key.get(key)
+        if lblock is None or rblock is None:
+            any_block_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_record_shape_block(left, lblock) if lblock else 'missing'}")
+            print(f"    right: {format_record_shape_block(right, rblock) if rblock else 'missing'}")
+            continue
+        ltuple = (lblock.shape_codes, lblock.sort_keys, lblock.slot_refs, lblock.ot_codes)
+        rtuple = (rblock.shape_codes, rblock.sort_keys, rblock.slot_refs, rblock.ot_codes)
+        if ltuple != rtuple:
+            any_block_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_record_shape_block(left, lblock)}")
+            print(f"    right: {format_record_shape_block(right, rblock)}")
+    if not any_block_diff:
+        print("  (no record-shape-block differences)")
+    print()
+
     print("=== Section 6 Ref Stream Diffs ===")
     left_ref_stream = left.parse_section6_ref_stream()
     right_ref_stream = right.parse_section6_ref_stream()
@@ -2063,8 +2593,8 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         _, right_entries, right_stop = right_ref_stream
         print(f"  stop_offset: left=0x{left_stop:08x} right=0x{right_stop:08x}")
         max_entries = max(len(left_entries), len(right_entries))
-        left_slots = build_slot_to_names(left)
-        right_slots = build_slot_to_names(right)
+        left_slots = build_display_slot_to_names(left)
+        right_slots = build_display_slot_to_names(right)
         for i in range(max_entries):
             lentry = left_entries[i] if i < len(left_entries) else None
             rentry = right_entries[i] if i < len(right_entries) else None
@@ -2118,6 +2648,11 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
                 print(f"    right: raw=0x{rraw:08x} const={u32_as_f32(rraw)} final={rfin}")
     print()
 
+    if left_mdl is not None:
+        print_mdl_alignment(left, left_mdl[0], left_mdl[1])
+    if right_mdl is not None:
+        print_mdl_alignment(right, right_mdl[0], right_mdl[1])
+
 
 # ---- Main ----
 
@@ -2129,6 +2664,10 @@ def main() -> None:
     parser.add_argument("path", help="Path to VDF file")
     parser.add_argument("--compare", metavar="OTHER_VDF",
                         help="Compare this VDF against another simulation-result VDF")
+    parser.add_argument("--mdl", metavar="MODEL.mdl",
+                        help="Optional Vensim model source for mdl-aware alignment output")
+    parser.add_argument("--compare-mdl", metavar="OTHER_MODEL.mdl",
+                        help="Optional model source for the VDF passed to --compare")
     parser.add_argument("--all", action="store_true", help="Show everything")
     parser.add_argument("--names", action="store_true", help="Show name table")
     parser.add_argument("--slots", action="store_true", help="Show slot table")
@@ -2143,6 +2682,8 @@ def main() -> None:
     parser.add_argument("--blocks", action="store_true", help="Show data blocks")
     parser.add_argument("--data", action="store_true", help="Extract and show all time series")
     parser.add_argument("--bridge", action="store_true", help="Show record shape -> sec3 bridge")
+    parser.add_argument("--record-blocks", action="store_true",
+                        help="Show record groups merged by decoded shape span")
     parser.add_argument("--sec35-bridge", action="store_true", help="Show section-3 -> section-5 bridge")
     parser.add_argument("--ranges", action="store_true", help="Show record-derived OT ranges")
     parser.add_argument("--validate", action="store_true", help="Check structural invariants")
@@ -2159,6 +2700,10 @@ def main() -> None:
         sys.exit(1)
 
     vdf = parse_vdf(data)
+    mdl_model: Optional[tuple[MdlModel, str]] = None
+    if args.mdl:
+        mdl_path = Path(args.mdl)
+        mdl_model = (parse_mdl_model(mdl_path.read_text(errors="replace")), str(mdl_path))
 
     if args.compare:
         other_path = Path(args.compare)
@@ -2167,7 +2712,21 @@ def main() -> None:
             print(f"Dataset VDF detected ({other_path}). Compare mode only supports simulation-result VDFs.")
             sys.exit(1)
         other_vdf = parse_vdf(other_data)
-        print_compare(vdf, str(path), other_vdf, str(other_path))
+        other_mdl_model: Optional[tuple[MdlModel, str]] = None
+        if args.compare_mdl:
+            other_mdl_path = Path(args.compare_mdl)
+            other_mdl_model = (
+                parse_mdl_model(other_mdl_path.read_text(errors="replace")),
+                str(other_mdl_path),
+            )
+        print_compare(
+            vdf,
+            str(path),
+            other_vdf,
+            str(other_path),
+            left_mdl=mdl_model,
+            right_mdl=other_mdl_model,
+        )
         return
 
     if args.json:
@@ -2179,7 +2738,7 @@ def main() -> None:
     show_specific = any([
         args.names, args.slots, args.records, args.sec3, args.sec4,
         args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
-        args.bridge, args.sec35_bridge, args.ranges, args.validate,
+        args.bridge, args.record_blocks, args.sec35_bridge, args.ranges, args.validate,
         args.raw_section is not None,
     ])
 
@@ -2212,6 +2771,10 @@ def main() -> None:
         print_ot_ranges(vdf)
     if show_all or args.bridge:
         print_shape_record_bridge(vdf)
+    if show_all or args.record_blocks:
+        print_record_shape_blocks(vdf)
+    if mdl_model is not None:
+        print_mdl_alignment(vdf, mdl_model[0], mdl_model[1])
     if show_all or args.sec35_bridge:
         print_section35_bridge(vdf)
     if show_all or args.ot:
