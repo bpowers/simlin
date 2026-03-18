@@ -1199,8 +1199,6 @@ def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
     for rec_idx, rec in enumerate(vdf.records):
         if not rec.has_sentinel():
             continue
-        if rec.fields[0] == 0 or rec.fields[1] == 23:
-            continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count:
             continue
@@ -1221,7 +1219,8 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
     visible sort anchors back onto those owners.
     """
     codes = vdf.section6_ot_class_codes() or []
-    hidden_slots = set(preferred_slot_name_alignment(vdf).hidden_slots)
+    alignment = preferred_slot_name_alignment(vdf)
+    hidden_slots = set(alignment.hidden_slots)
     by_range: dict[tuple[int, int], OwnerRecordBlock] = {}
 
     def add_unique(values: list[int], value: int) -> None:
@@ -1255,6 +1254,11 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
             add_unique(block.attached_sort_keys, rec.fields[10])
 
     blocks = sorted(by_range.values(), key=lambda block: (block.start, block.end))
+    slot_ref_counts: dict[int, int] = {}
+    for block in blocks:
+        for slot_ref in block.slot_refs:
+            slot_ref_counts[slot_ref] = slot_ref_counts.get(slot_ref, 0) + 1
+
     for block in blocks:
         block.sentinel_record_indices.sort()
         block.shape_codes.sort()
@@ -1262,7 +1266,11 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
         block.hidden_slot_refs.sort()
         block.direct_sort_keys.sort()
         block.attached_sort_keys.sort()
-        block.hidden = bool(block.slot_refs) and len(block.hidden_slot_refs) == len(block.slot_refs)
+        block.hidden = (
+            bool(block.slot_refs)
+            and len(block.hidden_slot_refs) == len(block.slot_refs)
+            and all(slot_ref_counts.get(slot_ref, 0) == 1 for slot_ref in block.slot_refs)
+        )
 
     visible_blocks = [block for block in blocks if not block.hidden]
     hidden_blocks = [block for block in blocks if block.hidden]
@@ -1307,11 +1315,60 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
     for block in blocks:
         block.attached_sort_keys.sort()
         block.sort_anchor_record_indices.sort()
-    return blocks
+
+    # Some compiled helpers are structurally real one-element stock owners that
+    # sit immediately before the visible stock array block. They can survive
+    # cleanup/reformat passes even when slot-based hidden detection collapses.
+    for block in blocks:
+        if block.hidden:
+            continue
+        if block.length() != 1 or not block.direct_sort_keys:
+            continue
+        if not block.ot_codes or any(code != OT_CODE_STOCK for code in block.ot_codes):
+            continue
+        neighbor = next(
+            (
+                candidate for candidate in blocks
+                if not candidate.hidden
+                and candidate.start == block.end
+                and candidate.length() > block.length()
+                and candidate.ot_codes
+                and all(code == OT_CODE_STOCK for code in candidate.ot_codes)
+                and not candidate.direct_sort_keys
+            ),
+            None,
+        )
+        if neighbor is not None:
+            block.hidden = True
+            for sort_key in block.attached_sort_keys:
+                if sort_key not in block.direct_sort_keys:
+                    add_unique(neighbor.attached_sort_keys, sort_key)
+            for rec_idx in block.sort_anchor_record_indices:
+                add_unique(neighbor.sort_anchor_record_indices, rec_idx)
+            neighbor.attached_sort_keys.sort()
+            neighbor.sort_anchor_record_indices.sort()
+
+    # Drop unanchored non-stock/system owner blocks that carry no visible-order
+    # evidence. They are structural passengers rather than visible base owners.
+    filtered: list[OwnerRecordBlock] = []
+    for block in blocks:
+        if block.hidden:
+            filtered.append(block)
+            continue
+        if block.attached_sort_keys or (block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes)):
+            filtered.append(block)
+    return filtered
 
 
 def owner_blocks_in_sentinel_order(vdf: VdfFile, *,
                                    include_hidden: bool = False) -> list[OwnerRecordBlock]:
+    """
+    Return owner blocks in their sentinel-record/file order.
+
+    This is a VDF-local ordering signal, not a guaranteed sketch-order signal.
+    Older fixtures often preserve sketch order here, but cleanup/reformat saves
+    can reshuffle the sentinel records without changing owner identity.
+    """
     blocks = build_owner_record_blocks(vdf)
     if not include_hidden:
         blocks = [block for block in blocks if not block.hidden]
@@ -2324,6 +2381,10 @@ def print_owner_sketch_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -
           f"visible_owner_blocks={len(blocks)}")
     if model.sketch_names:
         print(f"  sketch_order={model.sketch_names}")
+    sketch_classes = [mdl_definition_runtime_class(definition) for definition in sketch_defs]
+    owner_classes = [owner_block_runtime_class(block) for block in blocks]
+    if sketch_classes != owner_classes:
+        print("  note: sentinel/file owner order does not match mdl sketch order in this fixture")
 
     max_len = max(len(sketch_defs), len(blocks))
     for idx in range(max_len):

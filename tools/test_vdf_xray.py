@@ -354,6 +354,57 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(matches["constant"], [2, 4])
         self.assertEqual(matches["v"], [2, 4])
 
+    def test_water_owner_blocks_drop_unanchored_system_only_const_block(self) -> None:
+        water = parse_fixture("test/bobby/vdf/water/Current.vdf")
+        blocks = vdf_xray.build_owner_record_blocks(water)
+
+        self.assertEqual([(block.start, block.end) for block in blocks], [
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (5, 6),
+            (6, 7),
+        ])
+
+    def test_run10_owner_blocks_keep_visible_blocks_and_hide_helper_structurally(self) -> None:
+        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
+        blocks = vdf_xray.build_owner_record_blocks(run10)
+
+        self.assertEqual([(block.start, block.end, block.hidden) for block in blocks], [
+            (1, 2, True),
+            (2, 4, False),
+            (4, 5, False),
+            (6, 8, False),
+            (11, 12, False),
+        ])
+
+        hidden_block = blocks[0]
+        self.assertEqual(hidden_block.direct_sort_keys, [5])
+        self.assertEqual(hidden_block.attached_sort_keys, [5, 13])
+
+        visible_stock_block = blocks[1]
+        self.assertEqual(visible_stock_block.direct_sort_keys, [])
+        self.assertEqual(visible_stock_block.attached_sort_keys, [13])
+        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [3])
+
+        self.assertEqual(blocks[2].attached_sort_keys, [7])
+        self.assertEqual(blocks[3].attached_sort_keys, [9])
+        self.assertEqual(blocks[4].attached_sort_keys, [18])
+
+    def test_run10_owner_mdl_alignment_recovers_same_visible_candidates_as_run9(self) -> None:
+        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/10_reformat.mdl")
+
+        matches = {
+            match.definition.name: match.candidate_block_indices
+            for match in vdf_xray.match_mdl_definitions_to_owner_blocks(run10, model)
+        }
+
+        self.assertEqual(matches["stock"], [1])
+        self.assertEqual(matches["flow"], [3])
+        self.assertEqual(matches["constant"], [2, 4])
+        self.assertEqual(matches["v"], [2, 4])
+
     def test_water_owner_blocks_in_sentinel_order_match_mdl_sketch_classes(self) -> None:
         water = parse_fixture("test/bobby/vdf/water/Current.vdf")
         model = parse_mdl_fixture("test/bobby/vdf/water/water.mdl")
@@ -430,6 +481,48 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             [(11, 12), (4, 5), (2, 4), (6, 8)],
         )
         self.assertEqual([(block.start, block.end) for block in hidden], [(1, 2)])
+
+    def test_run10_owner_blocks_in_sentinel_order_tracks_vdf_file_order_not_mdl_sketch_order(self) -> None:
+        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/10_reformat.mdl")
+
+        sketch_defs = vdf_xray.mdl_sketch_definitions(model)
+        blocks = vdf_xray.owner_blocks_in_sentinel_order(run10)
+        hidden = vdf_xray.owner_blocks_in_sentinel_order(run10, include_hidden=True)
+        hidden = [block for block in hidden if block.hidden]
+
+        self.assertEqual([definition.name for definition in sketch_defs], ["v", "constant", "stock", "flow"])
+        self.assertEqual(
+            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
+            ["dynamic", "const", "stock", "dynamic"],
+        )
+        self.assertEqual(
+            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
+            ["const", "dynamic", "dynamic", "stock"],
+        )
+        self.assertEqual(
+            [(block.start, block.end) for block in blocks],
+            [(4, 5), (6, 8), (11, 12), (2, 4)],
+        )
+        self.assertNotEqual(
+            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
+            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
+        )
+        self.assertEqual([(block.start, block.end) for block in hidden], [(1, 2)])
+
+    def test_run10_owner_sketch_alignment_reports_order_mismatch(self) -> None:
+        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
+        model = parse_mdl_fixture("test/bobby/vdf/model_editing/10_reformat.mdl")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            vdf_xray.print_owner_sketch_alignment(run10, model, "10_reformat.mdl")
+        output = buf.getvalue()
+
+        self.assertIn(
+            "note: sentinel/file owner order does not match mdl sketch order in this fixture",
+            output,
+        )
 
     def test_print_compare_includes_record_shape_block_diffs_and_mdl_alignment(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
