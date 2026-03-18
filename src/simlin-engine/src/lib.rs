@@ -55,6 +55,7 @@ mod results;
 pub mod serde;
 #[path = "stdlib.gen.rs"]
 mod stdlib;
+pub mod systems;
 #[cfg(test)]
 #[path = "systems_stdlib_tests.rs"]
 mod systems_stdlib_tests;
