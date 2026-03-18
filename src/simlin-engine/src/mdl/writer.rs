@@ -1210,11 +1210,15 @@ fn format_sketch_name(name: &str) -> String {
 /// quoting is not used.
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
     let name = format_sketch_name(&aux.name);
-    // shape=8 (has equation), bits=3 (visible, primary)
+    let (w, h, bits) = match &aux.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.bits),
+        None => (40, 20, 3),
+    };
+    // shape=8 (has equation)
     write!(
         buf,
-        "10,{},{},{},{},40,20,8,3,0,0,-1,0,0,0",
-        aux.uid, name, aux.x as i32, aux.y as i32,
+        "10,{},{},{},{},{},{},8,{},0,0,-1,0,0,0",
+        aux.uid, name, aux.x as i32, aux.y as i32, w, h, bits,
     )
     .unwrap();
 }
@@ -1222,11 +1226,15 @@ fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
 /// Write a type 10 line for a Stock element.
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
     let name = format_sketch_name(&stock.name);
-    // shape=3 (box/stock shape), bits=3 (visible, primary)
+    let (w, h, bits) = match &stock.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.bits),
+        None => (40, 20, 3),
+    };
+    // shape=3 (box/stock shape)
     write!(
         buf,
-        "10,{},{},{},{},40,20,3,3,0,0,0,0,0,0",
-        stock.uid, name, stock.x as i32, stock.y as i32,
+        "10,{},{},{},{},{},{},3,{},0,0,0,0,0,0",
+        stock.uid, name, stock.x as i32, stock.y as i32, w, h, bits,
     )
     .unwrap();
 }
@@ -1324,6 +1332,15 @@ fn write_flow_element(
     let had_pipes =
         write_flow_pipe_connectors(buf, flow, valve_uid, cloud_uids, next_connector_uid);
 
+    let (valve_w, valve_h, valve_bits) = match &flow.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.bits),
+        None => (6, 8, 3),
+    };
+    let (label_w, label_h, label_bits) = match &flow.label_compat {
+        Some(c) => (c.width as i32, c.height as i32, c.bits),
+        None => (49, 8, 3),
+    };
+
     // Type 11 (valve): field 3 is always 0 in Vensim-generated files.
     // Prefix with \n only if pipes were emitted (otherwise caller handles separation).
     if had_pipes {
@@ -1331,8 +1348,8 @@ fn write_flow_element(
     }
     write!(
         buf,
-        "11,{},0,{},{},6,8,34,3,0,0,1,0,0,0",
-        valve_uid, flow.x as i32, flow.y as i32,
+        "11,{},0,{},{},{},{},34,{},0,0,1,0,0,0",
+        valve_uid, flow.x as i32, flow.y as i32, valve_w, valve_h, valve_bits,
     )
     .unwrap();
 
@@ -1341,8 +1358,8 @@ fn write_flow_element(
     let var_y = flow.y as i32 + 16;
     write!(
         buf,
-        "\n10,{},{},{},{},49,8,40,3,0,0,-1,0,0,0",
-        flow.uid, name, flow.x as i32, var_y,
+        "\n10,{},{},{},{},{},{},40,{},0,0,-1,0,0,0",
+        flow.uid, name, flow.x as i32, var_y, label_w, label_h, label_bits,
     )
     .unwrap();
 }
@@ -1448,11 +1465,15 @@ fn write_flow_pipe_connectors(
 
 /// Write a type 12 line for a Cloud element.
 fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
-    // Clouds: field 3 is 48 (ASCII '0') in Vensim-generated files, shape=0, bits=3
+    let (w, h, bits) = match &cloud.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.bits),
+        None => (10, 8, 3),
+    };
+    // Clouds: field 3 is 48 (ASCII '0') in Vensim-generated files, shape=0
     write!(
         buf,
-        "12,{},48,{},{},10,8,0,3,0,0,-1,0,0,0",
-        cloud.uid, cloud.x as i32, cloud.y as i32,
+        "12,{},48,{},{},{},{},0,{},0,0,-1,0,0,0",
+        cloud.uid, cloud.x as i32, cloud.y as i32, w, h, bits,
     )
     .unwrap();
 }
@@ -1467,11 +1488,15 @@ fn write_alias_element(
         .get(&alias.alias_of_uid)
         .map(|n| format_sketch_name(n))
         .unwrap_or_default();
-    // shape=8, bits=2 (visible but bit 0 unset = ghost)
+    let (w, h, bits) = match &alias.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.bits),
+        None => (40, 20, 2),
+    };
+    // shape=8
     write!(
         buf,
-        "10,{},{},{},{},40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
-        alias.uid, name, alias.x as i32, alias.y as i32,
+        "10,{},{},{},{},{},{},8,{},0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
+        alias.uid, name, alias.x as i32, alias.y as i32, w, h, bits,
     )
     .unwrap();
 }
@@ -4958,6 +4983,246 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             output.contains("Times New Roman|12"),
             "should use default font when font is None: {output}"
+        );
+    }
+
+    // ---- Task 5: compat dimensions in element output ----
+
+    #[test]
+    fn stock_compat_dimensions_emitted() {
+        let stock = view_element::Stock {
+            name: "Population".to_string(),
+            uid: 2,
+            x: 300.0,
+            y: 150.0,
+            label_side: view_element::LabelSide::Top,
+            compat: Some(view_element::ViewElementCompat {
+                width: 53.0,
+                height: 32.0,
+                bits: 131,
+            }),
+        };
+        let mut buf = String::new();
+        write_stock_element(&mut buf, &stock);
+        assert!(
+            buf.contains(",53,32,3,131,"),
+            "stock with compat should emit preserved dimensions: {buf}"
+        );
+    }
+
+    #[test]
+    fn stock_default_dimensions_without_compat() {
+        let stock = view_element::Stock {
+            name: "Population".to_string(),
+            uid: 2,
+            x: 300.0,
+            y: 150.0,
+            label_side: view_element::LabelSide::Top,
+            compat: None,
+        };
+        let mut buf = String::new();
+        write_stock_element(&mut buf, &stock);
+        assert!(
+            buf.contains(",40,20,3,3,"),
+            "stock without compat should use default 40,20,3,3: {buf}"
+        );
+    }
+
+    #[test]
+    fn aux_compat_dimensions_emitted() {
+        let aux = view_element::Aux {
+            name: "Rate".to_string(),
+            uid: 1,
+            x: 100.0,
+            y: 200.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: Some(view_element::ViewElementCompat {
+                width: 45.0,
+                height: 18.0,
+                bits: 131,
+            }),
+        };
+        let mut buf = String::new();
+        write_aux_element(&mut buf, &aux);
+        assert!(
+            buf.contains(",45,18,8,131,"),
+            "aux with compat should emit preserved dimensions: {buf}"
+        );
+    }
+
+    #[test]
+    fn aux_default_dimensions_without_compat() {
+        let aux = view_element::Aux {
+            name: "Rate".to_string(),
+            uid: 1,
+            x: 100.0,
+            y: 200.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        };
+        let mut buf = String::new();
+        write_aux_element(&mut buf, &aux);
+        assert!(
+            buf.contains(",40,20,8,3,"),
+            "aux without compat should use default 40,20,8,3: {buf}"
+        );
+    }
+
+    #[test]
+    fn flow_valve_compat_dimensions_emitted() {
+        let flow = view_element::Flow {
+            name: "Birth_Rate".to_string(),
+            uid: 6,
+            x: 295.0,
+            y: 191.0,
+            label_side: view_element::LabelSide::Bottom,
+            points: vec![],
+            compat: Some(view_element::ViewElementCompat {
+                width: 12.0,
+                height: 18.0,
+                bits: 131,
+            }),
+            label_compat: Some(view_element::ViewElementCompat {
+                width: 55.0,
+                height: 14.0,
+                bits: 35,
+            }),
+        };
+        let mut buf = String::new();
+        let valve_uids = HashMap::from([(6, 100)]);
+        let mut next_connector_uid = 200;
+        write_flow_element(
+            &mut buf,
+            &flow,
+            &valve_uids,
+            &HashSet::new(),
+            &mut next_connector_uid,
+        );
+        // Valve line should use flow.compat dimensions
+        assert!(
+            buf.contains(",12,18,34,131,"),
+            "valve with compat should emit preserved dimensions: {buf}"
+        );
+        // Label line should use flow.label_compat dimensions
+        assert!(
+            buf.contains(",55,14,40,35,"),
+            "flow label with label_compat should emit preserved dimensions: {buf}"
+        );
+    }
+
+    #[test]
+    fn flow_default_dimensions_without_compat() {
+        let flow = view_element::Flow {
+            name: "Birth_Rate".to_string(),
+            uid: 6,
+            x: 295.0,
+            y: 191.0,
+            label_side: view_element::LabelSide::Bottom,
+            points: vec![],
+            compat: None,
+            label_compat: None,
+        };
+        let mut buf = String::new();
+        let valve_uids = HashMap::from([(6, 100)]);
+        let mut next_connector_uid = 200;
+        write_flow_element(
+            &mut buf,
+            &flow,
+            &valve_uids,
+            &HashSet::new(),
+            &mut next_connector_uid,
+        );
+        // Valve line should use default dimensions
+        assert!(
+            buf.contains(",6,8,34,3,"),
+            "valve without compat should use default 6,8,34,3: {buf}"
+        );
+        // Label line should use default dimensions
+        assert!(
+            buf.contains(",49,8,40,3,"),
+            "flow label without label_compat should use default 49,8,40,3: {buf}"
+        );
+    }
+
+    #[test]
+    fn cloud_compat_dimensions_emitted() {
+        let cloud = view_element::Cloud {
+            uid: 7,
+            flow_uid: 6,
+            x: 479.0,
+            y: 235.0,
+            compat: Some(view_element::ViewElementCompat {
+                width: 20.0,
+                height: 14.0,
+                bits: 131,
+            }),
+        };
+        let mut buf = String::new();
+        write_cloud_element(&mut buf, &cloud);
+        assert!(
+            buf.contains(",20,14,0,131,"),
+            "cloud with compat should emit preserved dimensions: {buf}"
+        );
+    }
+
+    #[test]
+    fn cloud_default_dimensions_without_compat() {
+        let cloud = view_element::Cloud {
+            uid: 7,
+            flow_uid: 6,
+            x: 479.0,
+            y: 235.0,
+            compat: None,
+        };
+        let mut buf = String::new();
+        write_cloud_element(&mut buf, &cloud);
+        assert!(
+            buf.contains(",10,8,0,3,"),
+            "cloud without compat should use default 10,8,0,3: {buf}"
+        );
+    }
+
+    #[test]
+    fn alias_compat_dimensions_emitted() {
+        let alias = view_element::Alias {
+            uid: 10,
+            alias_of_uid: 1,
+            x: 200.0,
+            y: 300.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: Some(view_element::ViewElementCompat {
+                width: 45.0,
+                height: 18.0,
+                bits: 66,
+            }),
+        };
+        let mut name_map = HashMap::new();
+        name_map.insert(1, "Growth_Rate");
+        let mut buf = String::new();
+        write_alias_element(&mut buf, &alias, &name_map);
+        assert!(
+            buf.contains(",45,18,8,66,"),
+            "alias with compat should emit preserved dimensions: {buf}"
+        );
+    }
+
+    #[test]
+    fn alias_default_dimensions_without_compat() {
+        let alias = view_element::Alias {
+            uid: 10,
+            alias_of_uid: 1,
+            x: 200.0,
+            y: 300.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        };
+        let mut name_map = HashMap::new();
+        name_map.insert(1, "Growth_Rate");
+        let mut buf = String::new();
+        write_alias_element(&mut buf, &alias, &name_map);
+        assert!(
+            buf.contains(",40,20,8,2,"),
+            "alias without compat should use default 40,20,8,2: {buf}"
         );
     }
 }
