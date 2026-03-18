@@ -448,9 +448,9 @@ fn canon(name: &str) -> String {
 
 /// Rewrite an Expr to an equation string, substituting Ref nodes whose
 /// canonical name appears in `rewrites` with the raw target string.
-/// Unlike `Expr::rewrite_refs` + `to_equation_string`, this avoids
-/// re-canonicalizing the substituted targets, preserving `.` separators
-/// in module references like `module.remaining`.
+/// Unlike `Expr::to_equation_string`, this avoids re-canonicalizing the
+/// substituted targets, preserving `.` separators in module references
+/// like `module.remaining`.
 fn rewrite_expr_to_equation(expr: &Expr, rewrites: &HashMap<String, String>) -> String {
     match expr {
         Expr::Ref(name) => {
