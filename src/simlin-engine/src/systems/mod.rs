@@ -11,5 +11,6 @@
 pub mod ast;
 mod lexer;
 mod parser;
+pub mod translate;
 
 pub use parser::parse;
