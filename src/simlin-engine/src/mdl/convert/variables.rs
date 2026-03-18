@@ -1349,20 +1349,25 @@ impl<'input> ConversionContext<'input> {
             }
         };
 
-        // y-scale: ALWAYS compute from data points, matching xmutil behavior.
-        // xmutil ignores file-specified y-ranges and recomputes from actual data.
-        let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
-        let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        // When all y-values are identical (ymin == ymax), use ymin+1 as max
-        // to avoid degenerate range. Matches xmutil's fallback logic.
-        let y_max = if (y_min - y_max).abs() < f64::EPSILON {
-            y_min + 1.0
+        // y-scale: use file-specified range if available for roundtrip fidelity,
+        // otherwise compute from data points
+        let y_scale = if let Some(y_range) = table.y_range {
+            GraphicalFunctionScale {
+                min: y_range.0,
+                max: y_range.1,
+            }
         } else {
-            y_max
-        };
-        let y_scale = GraphicalFunctionScale {
-            min: y_min,
-            max: y_max,
+            let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let y_max = if (y_min - y_max).abs() < f64::EPSILON {
+                y_min + 1.0
+            } else {
+                y_max
+            };
+            GraphicalFunctionScale {
+                min: y_min,
+                max: y_max,
+            }
         };
 
         // Check if extrapolation should be enabled:
@@ -2761,10 +2766,9 @@ x[bottom] = 2
     }
 
     #[test]
-    fn test_graphical_function_y_scale_computed_from_data() {
-        // y-scale should always be computed from data points, not from file-specified range.
-        // This matches xmutil behavior: XMILEGenerator.cpp:513-532 always recomputes y-scale.
-        // The file specifies y_range [0,5] but data max is 1.36, so y_scale.max should be 1.36.
+    fn test_graphical_function_y_scale_from_explicit_range() {
+        // When the MDL source specifies an explicit y_range via [(xmin,ymin)-(xmax,ymax)],
+        // preserve those bounds for roundtrip fidelity instead of recomputing from data.
         let mdl = "lookup_var(\
             [(0,0)-(2,5)],(0,0.5),(1,1.36),(2,0.8))
 ~ ~|
@@ -2785,17 +2789,17 @@ x[bottom] = 2
             // x-scale uses file range
             assert_eq!(gf.x_scale.min, 0.0);
             assert_eq!(gf.x_scale.max, 2.0);
-            // y-scale computed from data, not file range
-            assert_eq!(gf.y_scale.min, 0.5);
-            assert_eq!(gf.y_scale.max, 1.36);
+            // y-scale uses file-specified range, not computed from data
+            assert_eq!(gf.y_scale.min, 0.0);
+            assert_eq!(gf.y_scale.max, 5.0);
         } else {
             panic!("Expected Aux variable");
         }
     }
 
     #[test]
-    fn test_graphical_function_y_scale_all_same_fallback() {
-        // When all y-values are identical, ymax should be ymin+1 (degenerate range fallback).
+    fn test_graphical_function_y_scale_all_same_with_explicit_range() {
+        // When explicit y_range is present, it takes precedence even if min==max.
         let mdl = "zero_lookup(\
             [(0,0)-(2,0)],(0,0),(1,0),(2,0))
 ~ ~|
@@ -2813,8 +2817,66 @@ x[bottom] = 2
 
         if let Some(Variable::Aux(a)) = var {
             let gf = a.gf.as_ref().expect("Should have graphical function");
+            // Explicit y_range [0,0] is preserved as-is
             assert_eq!(gf.y_scale.min, 0.0);
-            assert_eq!(gf.y_scale.max, 1.0); // 0 + 1 = 1
+            assert_eq!(gf.y_scale.max, 0.0);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_computed_from_data_when_no_explicit_range() {
+        // When no explicit y_range is specified (e.g. WITH LOOKUP without range prefix),
+        // y_scale should be computed from the actual data points.
+        let mdl = "y = WITH LOOKUP(Time, ((0,0.5),(1,1.36),(2,0.8)))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y");
+        assert!(var.is_some(), "Should have y variable");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            // No explicit range, so x-scale and y-scale are computed from data
+            assert_eq!(gf.x_scale.min, 0.0);
+            assert_eq!(gf.x_scale.max, 2.0);
+            assert_eq!(gf.y_scale.min, 0.5);
+            assert_eq!(gf.y_scale.max, 1.36);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_all_same_fallback_no_explicit_range() {
+        // When no explicit y_range and all y-values are identical,
+        // ymax should be ymin+1 to avoid a degenerate range.
+        let mdl = "y = WITH LOOKUP(Time, ((0,0),(1,0),(2,0)))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y");
+        assert!(var.is_some(), "Should have y variable");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            assert_eq!(gf.y_scale.min, 0.0);
+            assert_eq!(gf.y_scale.max, 1.0); // 0 + 1 = 1 (degenerate range fallback)
         } else {
             panic!("Expected Aux variable");
         }
