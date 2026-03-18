@@ -618,12 +618,17 @@ the remaining gap requires the model file.
    (scalar stock with sort_key=0) through `run_9` (arrayed stock with
    hidden SMOOTH helper).
 
-10. **Record field[2] monotonically correlates with name-table position**.
-    Records sorted by f[2] produce an ordering that tracks the name-table
-    entry order, though the exact encoding is not yet decoded. The
-    correlation is stable across simulation runs of the same model but
-    changes between model versions. This is a strong candidate for the
-    deterministic record-to-name link but needs further investigation.
+10. **Record field[2] as deterministic record-to-name link**. Records sorted
+    by f[2] correspond to names at position `rank + offset` in the name
+    table. The nominal offset is `slot_count - record_count`, though
+    incrementally edited models may shift it by +/-1-2. Trying a small
+    range of offsets and validating via OT positions deterministically
+    resolves the mapping in O(offset_range * records) time. Validated
+    across the full test corpus including all `model_editing/` runs,
+    `water`, `pop`, `consts`, `subscripts`, `lookups`, and `bact`.
+    The f[2] value is stable across simulation runs of the same model
+    (verified with `water/*.vdf` variants) and encodes name-table
+    position, not variable structure.
 
 ### VDF-structural path (stock classifier required)
 
