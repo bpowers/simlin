@@ -1864,8 +1864,9 @@ impl MdlWriter {
             .and_then(|m| m.sim_specs.as_ref())
             .unwrap_or(&project.sim_specs);
 
-        // The ///---\\\ separator is already emitted by write_sketch_section
-        self.buf.push_str(":L<%^E!@\n");
+        // The ///---\\\ separator is already emitted by write_sketch_section.
+        // The 0x7F (DEL) between :L and <%^E!@ is required by Vensim's parser.
+        self.buf.push_str(":L\x7F<%^E!@\n");
 
         // Type 22: Unit equivalences
         for unit in &project.units {
@@ -1913,14 +1914,11 @@ impl MdlWriter {
         self.buf.push_str("41:0\n");
         self.buf.push_str("42:0\n");
 
-        // Types 24/25/26: Time bounds (initial, final, time step)
+        // Types 24/25/26: Display time range (start, end, end).
+        // All reference files set 24=start, 25=stop, 26=stop.
         writeln!(self.buf, "24:{}", format_f64(sim_specs.start)).unwrap();
         writeln!(self.buf, "25:{}", format_f64(sim_specs.stop)).unwrap();
-        let dt_val = match &sim_specs.dt {
-            datamodel::Dt::Dt(v) => format_f64(*v),
-            datamodel::Dt::Reciprocal(v) => format!("1/{}", format_f64(*v)),
-        };
-        writeln!(self.buf, "26:{}", dt_val).unwrap();
+        writeln!(self.buf, "26:{}", format_f64(sim_specs.stop)).unwrap();
     }
 }
 
@@ -4001,7 +3999,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         writer.write_settings_section(&project);
         let output = writer.buf;
         assert!(
-            output.starts_with(":L<%^E!@\n"),
+            output.starts_with(":L\x7F<%^E!@\n"),
             "settings section should start with marker (separator is in sketch section), got: {:?}",
             &output[..output.len().min(40)]
         );
@@ -4225,14 +4223,14 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(mdl.contains("*View 1"), "should have view title");
 
         // Section 3: Settings -- marker and type codes
-        assert!(mdl.contains(":L<%^E!@"), "should have settings marker");
+        assert!(mdl.contains(":L\x7F<%^E!@"), "should have settings marker");
         assert!(mdl.contains("15:"), "should have Type 15 line");
 
         // Sections should be in order: equations, sketch, settings
         let eq_term = mdl.find("\\\\\\---/// Sketch").unwrap();
         let v300 = mdl.find("V300").unwrap();
         let sketch_term = mdl.find("///---\\\\\\").unwrap();
-        let settings_marker = mdl.find(":L<%^E!@").unwrap();
+        let settings_marker = mdl.find(":L\x7F<%^E!@").unwrap();
         assert!(eq_term < v300, "equations should come before sketch");
         assert!(
             v300 < sketch_term,
