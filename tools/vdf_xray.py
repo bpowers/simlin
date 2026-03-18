@@ -1824,15 +1824,64 @@ def _score_excluded_as_dimensions(
     return (matched / len(cardinalities)) + score * 0.1
 
 
+def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
+    """
+    Attempt deterministic record-to-name mapping via the f[2]-offset formula.
+
+    Records sorted by f[2] correspond to names at position
+    (rank + offset) where offset = slot_count - record_count.
+    This gives a direct structural link from each sentinel model record
+    to its variable name, without any heuristic search.
+
+    Validated on fresh models: water, pop, subscripts, lookups, bact.
+    May not work for incrementally edited models where names were
+    inserted into the middle of an existing name table.
+    """
+    n_recs = len(vdf.records)
+    n_slots = len(vdf.slot_table)
+    if n_recs == 0 or n_slots == 0 or n_recs > n_slots:
+        return None
+
+    offset = n_slots - n_recs
+    sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
+
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+
+    # Build record_index -> name mapping
+    rec_to_name: dict[int, str] = {}
+    for rank, (ri, rec) in enumerate(sorted_recs):
+        name_idx = rank + offset
+        if 0 <= name_idx < len(vdf.names):
+            rec_to_name[ri] = vdf.names[name_idx]
+
+    # For each visible owner block, find its name via the sentinel record
+    name_to_block: dict[str, OwnerRecordBlock] = {}
+    for block in visible_blocks:
+        for ri in block.sentinel_record_indices:
+            name = rec_to_name.get(ri)
+            if name and classify_name(name) == "":
+                name_to_block[name] = block
+                break
+
+    if not name_to_block:
+        return None
+
+    # Validate using OT positions
+    if _validate_name_block_assignment(name_to_block, vdf):
+        return name_to_block
+
+    return None
+
+
 def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
     """
     Map visible variable names to owner blocks using the stocks-first-
     alphabetical ordering rule, validated against actual OT positions.
 
-    Sort keys on owner blocks give the global alphabetical ordering.
-    When all blocks have sort keys, we zip directly. When some blocks
-    lack sort keys, we try all valid insertions and validate against OT
-    structure.
+    First tries the deterministic f[2]-offset formula. Falls back to
+    exhaustive search with scoring when the formula doesn't produce
+    a valid result (e.g., incrementally edited models).
     """
     all_blocks = build_owner_record_blocks(vdf)
     visible_blocks = [b for b in all_blocks if not b.hidden]
@@ -1854,6 +1903,25 @@ def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
             unmapped_blocks=visible_blocks,
         )
 
+    # Try deterministic f[2]-offset mapping first
+    f2_result = _try_f2_offset_mapping(vdf)
+    if f2_result is not None:
+        mapped_names = sorted(f2_result.keys(), key=_vensim_sort_key)
+        mapped_blocks = [f2_result[n] for n in mapped_names]
+        mapped_set = set(id(b) for b in mapped_blocks)
+        sys_blocks = [b for b in visible_blocks if id(b) not in mapped_set]
+        sys_ots: set[int] = set()
+        for b in sys_blocks:
+            sys_ots.update(range(b.start, b.end))
+        return NameMapping(
+            variable_names=mapped_names,
+            owner_blocks=mapped_blocks,
+            name_to_block=f2_result,
+            system_ot_indices=sys_ots,
+            unmapped_blocks=sys_blocks,
+        )
+
+    # Fallback: exhaustive search with scoring
     B = len(visible_blocks)
 
     # When there are excess blocks (system records that leaked through),
