@@ -27,6 +27,11 @@
             <aux name="waste">
                 <eqn>available - outflow</eqn>
             </aux>
+            <!-- remaining is always 0: conversion fully consumes the source stock.
+                 The converted fraction goes to the destination via outflow,
+                 and everything else is removed via the waste flow. This matches
+                 the Python systems package semantics where conversion drains
+                 the entire available amount from the source. -->
             <aux name="remaining">
                 <eqn>0</eqn>
             </aux>

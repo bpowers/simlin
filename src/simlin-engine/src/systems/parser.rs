@@ -800,6 +800,19 @@ mod tests {
         assert_eq!(model.flows[0].rate, Expr::Int(5));
     }
 
+    /// FlowNoRate creates both stocks but no flow
+    #[test]
+    fn flow_no_rate_creates_stocks_but_no_flow() {
+        let model = parse("A > B").unwrap();
+        assert_eq!(model.stocks.len(), 2);
+        assert_stock(&model, "A", &Expr::Int(0), &Expr::Inf, false);
+        assert_stock(&model, "B", &Expr::Int(0), &Expr::Inf, false);
+        assert!(
+            model.flows.is_empty(),
+            "FlowNoRate should not create a flow"
+        );
+    }
+
     /// Stock name with underscores and digits
     #[test]
     fn stock_name_with_underscores_and_digits() {

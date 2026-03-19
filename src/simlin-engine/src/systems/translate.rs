@@ -265,42 +265,66 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
         }
     }
 
-    // Build "effective" (post-outflow) aux variables and a rewrite map.
+    // Pre-compute incremental drain states for cross-stock references.
     //
-    // In the Python systems package, flows are processed sequentially and the
-    // shared state dictionary is updated immediately as each flow's source is
-    // drained. Later-processed flows see the decremented stock values in their
-    // rate formulas. In simlin's simultaneous SD model, stocks retain their
-    // start-of-step values during flow evaluation.
+    // In the Python systems package, flows process sequentially in reversed
+    // declaration order. Each flow immediately drains its source stock.
+    // When a flow from stock C references stock A in its rate formula, it
+    // should see A's value after only the outflows processed so far, not
+    // all outflows.
     //
-    // To bridge this gap, we create an "{stock}_effective" aux for each
-    // non-infinite stock that has outflows. Its equation is:
-    //   stock - outflow1 - outflow2 - ...
-    // Rate formulas that reference such stocks are rewritten to use the
-    // effective variable, reproducing the Python sequential semantics.
-    let mut ref_rewrites: HashMap<String, String> = HashMap::new();
-    for sb in &stocks {
-        if sb.outflows.is_empty() {
-            continue;
+    // We iterate flows in reversed declaration order and build cumulative
+    // drain variables: `{stock}_drained_{n}` subtracts only the n outflows
+    // processed up to that point. The `drain_at_flow` map records the
+    // drain state at each flow's processing point, used later when
+    // creating rate and capacity aux variables.
+    let mut sorted_flow_idxs: Vec<usize> = (0..model.flows.len()).collect();
+    sorted_flow_idxs.sort_by_key(|&idx| std::cmp::Reverse(idx));
+
+    let mut drain_at_flow: HashMap<usize, HashMap<String, String>> = HashMap::new();
+    let mut cumulative_outflows: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current_drain: HashMap<String, String> = HashMap::new();
+
+    for &flow_idx in &sorted_flow_idxs {
+        // Record the drain state BEFORE this flow's rate/capacity is evaluated
+        drain_at_flow.insert(flow_idx, current_drain.clone());
+
+        let flow = &model.flows[flow_idx];
+        let source_canon = canon(&flow.source);
+        let dest_canon = canon(&flow.dest);
+        let flow_ident = format!("{source_canon}_to_{dest_canon}");
+
+        let acc = cumulative_outflows.entry(source_canon.clone()).or_default();
+        acc.push(flow_ident);
+        if flow.flow_type == FlowType::Conversion {
+            let waste_ident = format!("{source_canon}_to_{dest_canon}_waste");
+            acc.push(waste_ident);
         }
-        // Infinite stocks (equation = "inf()") don't change with outflows
-        if sb.equation == "inf()" {
-            continue;
+
+        // Create incremental drain variable for non-infinite stocks
+        let is_non_infinite = stocks
+            .iter()
+            .any(|s| s.ident == source_canon && s.equation != "inf()");
+        if is_non_infinite {
+            let drain_ident = format!("{source_canon}_drained_{}", acc.len());
+            let outflow_terms = acc
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" - ");
+            let drain_eq = format!("{source_canon} - {outflow_terms}");
+            variables.push(Variable::Aux(Aux {
+                ident: drain_ident.clone(),
+                equation: Equation::Scalar(drain_eq),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }));
+            current_drain.insert(source_canon, drain_ident);
         }
-        let eff_ident = format!("{}_effective", sb.ident);
-        let outflow_terms: Vec<&str> = sb.outflows.iter().map(|f| f.as_str()).collect();
-        let equation = format!("{} - {}", sb.ident, outflow_terms.join(" - "));
-        variables.push(Variable::Aux(Aux {
-            ident: eff_ident.clone(),
-            equation: Equation::Scalar(equation),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        }));
-        ref_rewrites.insert(sb.ident.clone(), eff_ident);
     }
 
     // Create deferred rate aux variables with order-dependent rewrites.
@@ -310,19 +334,19 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     // the drained values in their rate formulas.
     //
     // For the flow's own source stock, we use the `available_src` (the chained
-    // remaining from earlier modules) rather than the raw stock or _effective.
+    // remaining from earlier modules) rather than the raw stock or drain variable.
     // This avoids circular dependencies while correctly reflecting the
     // intermediate source value after higher-priority outflows.
     //
-    // For other stocks drained by earlier flows, we use their _effective values.
+    // For other stocks drained by earlier flows, we use the pre-computed
+    // incremental drain variables from `drain_at_flow`.
     deferred_rates.sort_by_key(|dr| std::cmp::Reverse(dr.flow_idx));
-    let mut drained_stocks: HashMap<String, String> = HashMap::new();
     for dr in &deferred_rates {
-        // Build rewrites: source stock -> available_src, other drained -> effective
+        let empty = HashMap::new();
+        let drained_stocks = drain_at_flow.get(&dr.flow_idx).unwrap_or(&empty);
+        // Build rewrites: other drained stocks -> their drain variables,
+        // source stock -> available_src (chained remaining from earlier modules)
         let mut local_rewrites: HashMap<String, String> = drained_stocks.clone();
-        // For the source stock, use the chained available value instead of
-        // excluding it entirely -- this lets the rate formula see the post-drain
-        // source value (including any reverse flows from negative capacity).
         local_rewrites.insert(dr.source_canon.clone(), dr.available_src.clone());
 
         let equation = rewrite_expr_to_equation(&dr.rate_expr, &local_rewrites);
@@ -336,10 +360,6 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             uid: None,
             compat: Compat::default(),
         }));
-        // Mark this flow's source as drained for subsequent flows
-        if let Some(eff) = ref_rewrites.get(&dr.source_canon) {
-            drained_stocks.insert(dr.source_canon.clone(), eff.clone());
-        }
     }
 
     // Create dest_capacity aux variables.
@@ -349,22 +369,19 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     // When the max expression references the flow's own source stock,
     // we substitute the flow's `available` value (the chained remaining
     // from earlier modules). This gives the post-drain value without
-    // creating circular dependencies: each flow in the chain sees the
-    // source's remaining value after higher-priority outflows, matching
-    // the Python sequential semantics.
+    // creating circular dependencies.
     //
-    // For references to other stocks that have been drained by earlier flows,
-    // we use the same order-dependent rewrite mechanism as for rate formulas.
+    // For references to other stocks drained by earlier flows, we use
+    // the pre-computed incremental drain variables from `drain_at_flow`.
     deferred_capacities.sort_by_key(|dc| std::cmp::Reverse(dc.flow_idx));
-    let mut cap_drained: HashMap<String, String> = HashMap::new();
     for dc in &deferred_capacities {
+        let empty = HashMap::new();
+        let cap_drained = drain_at_flow.get(&dc.flow_idx).unwrap_or(&empty);
         let equation = match &dc.dest_max_expr {
             None => "inf()".to_string(),
             Some(max_expr) => {
                 // Build rewrites: source stock -> available_src (chained remaining),
-                // plus any other drained stocks -> their effective values.
-                // We use rewrite_to_equation to avoid re-canonicalization of
-                // generated identifiers (which may contain `.` for module refs).
+                // plus other drained stocks -> their incremental drain variables.
                 let mut max_rewrites: HashMap<String, String> = cap_drained.clone();
                 max_rewrites.insert(dc.source_canon.clone(), dc.available_src.clone());
                 let rewritten_max = rewrite_expr_to_equation(max_expr, &max_rewrites);
@@ -394,10 +411,6 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             uid: None,
             compat: Compat::default(),
         }));
-        // Mark source as drained for other stocks' capacity checks
-        if let Some(eff) = ref_rewrites.get(&dc.source_canon) {
-            cap_drained.insert(dc.source_canon.clone(), eff.clone());
-        }
     }
 
     // Convert stock builders into datamodel stocks and prepend them
@@ -1225,6 +1238,89 @@ mod tests {
     #[test]
     fn test_translate_extended_syntax() {
         parse_translate_compile("extended_syntax.txt");
+    }
+
+    // -------------------------------------------------------------------
+    // Cross-stock rate references use incremental drain
+    //
+    // When a flow's rate formula references a stock other than its own
+    // source, and that stock has outflows, the rewrite must use the
+    // incremental drain value (reflecting only outflows processed so far
+    // in reversed declaration order), not the full post-drain value.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cross_stock_rate_uses_incremental_drain() {
+        // Model: A(10) > B @ 1, C(2) > D @ A, A > E @ 8
+        //
+        // Processing in reversed declaration order: [A>E, C>D, A>B]
+        // After A>E: A drained by a_to_e only.
+        // When C>D processes, its rate references A. It should see A
+        // after only A>E, not after both A>E and A>B.
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "A".to_string(),
+                    initial: Expr::Int(10),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "B".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "C".to_string(),
+                    initial: Expr::Int(2),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "D".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "E".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(1),
+                },
+                SystemsFlow {
+                    source: "C".to_string(),
+                    dest: "D".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Ref("A".to_string()),
+                },
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "E".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(8),
+                },
+            ],
+        };
+        let project = translate(&model, 5).unwrap();
+
+        // c_outflows_requested should reference the incremental drain
+        // (a - a_to_e), not the full drain (a - a_to_e - a_to_b)
+        let rate_eqn = scalar_eqn(&project, "c_outflows_requested")
+            .expect("c_outflows_requested should exist");
+        assert_eq!(
+            rate_eqn, "a_drained_1",
+            "cross-stock reference should use incremental drain after A>E only"
+        );
     }
 
     // -------------------------------------------------------------------

@@ -99,8 +99,8 @@ fn lex_line(line: &str, line_num: usize) -> Result<Line, LexError> {
 }
 
 /// Find the position of `>` used as flow direction.
-/// The `>` must be preceded and followed by whitespace to distinguish
-/// from `>` inside parenthesized expressions (which we don't support).
+/// The `>` must be outside parentheses and brackets to distinguish
+/// from `>` inside grouped expressions.
 fn find_flow_arrow(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut paren_depth: i32 = 0;

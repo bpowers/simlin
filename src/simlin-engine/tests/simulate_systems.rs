@@ -93,6 +93,15 @@ fn simulates_projects() {
 }
 
 #[test]
+fn simulates_cross_stock() {
+    simulate_systems_file(
+        "../../test/systems-format/cross_stock.txt",
+        "../../test/systems-format/cross_stock_output.csv",
+        5,
+    );
+}
+
+#[test]
 fn simulates_extended_syntax() {
     simulate_systems_file(
         "../../test/systems-format/extended_syntax.txt",

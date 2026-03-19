@@ -24,12 +24,13 @@ struct ReconstructedFlow {
     flow_type: FlowTypeTag,
     /// The reverse-rewritten rate equation (original stock names).
     rate_equation: String,
-    /// Stocks whose _effective form was used in the raw equation.
-    /// These stocks' outflows must appear BEFORE this flow in the
-    /// output to ensure the translator drains them first (in reverse
-    /// processing, the draining flow runs before the referencing flow).
+    /// Stocks whose drain form (_effective or _drained_N) was used in
+    /// the raw equation. These stocks' outflows must appear BEFORE this
+    /// flow in the output to ensure the translator drains them first
+    /// (in reverse processing, the draining flow runs before the
+    /// referencing flow).
     effective_deps: HashSet<String>,
-    /// Drainable stocks referenced in raw form (no _effective).
+    /// Drainable stocks referenced in raw form (no drain variable).
     /// These stocks' outflows must appear AFTER this flow so that
     /// in reverse processing, the referencing flow runs before the
     /// draining flow (preserving the non-drained semantics).
@@ -146,13 +147,24 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
 
     // Build reverse-rewrite map
     let mut reverse_rewrites: HashMap<String, String> = HashMap::new();
-    // Track which stock names have _effective forms
+    // Track which stock names have drain forms (_effective or _drained_N)
     let mut effective_stock_names: HashSet<String> = HashSet::new();
 
     for stock in &stocks {
+        // Legacy _effective pattern
         let effective = format!("{}_effective", stock.ident);
         reverse_rewrites.insert(effective, stock.ident.to_string());
         effective_stock_names.insert(stock.ident.to_string());
+    }
+
+    // Add _drained_N reverse rewrites for incremental drain variables
+    for &ident in var_by_ident.keys() {
+        for stock in &stocks {
+            let prefix = format!("{}_drained_", stock.ident);
+            if ident.starts_with(&prefix) {
+                reverse_rewrites.insert(ident.to_string(), stock.ident.to_string());
+            }
+        }
     }
 
     for info in &module_infos {
@@ -222,7 +234,7 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
         }
     }
 
-    // Topological sort: order groups so that the translator's _effective
+    // Topological sort: order groups so that the translator's drain
     // rewrite decisions are preserved in the round-trip.
     let ordered_groups = topological_sort_groups(flow_groups);
 
@@ -283,13 +295,13 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
     }
 }
 
-/// Topological sort based on _effective dependency information.
+/// Topological sort based on drain dependency information.
 ///
 /// Two types of ordering constraints:
-/// 1. If a flow used `S_effective` in its rate, S's outflow group must
-///    appear BEFORE that flow's group (effective_deps).
-/// 2. If a flow uses raw stock S (no _effective), S's outflow group must
-///    appear AFTER that flow's group (raw_stock_deps).
+/// 1. If a flow used a drain variable for S in its rate, S's outflow group
+///    must appear BEFORE that flow's group (effective_deps).
+/// 2. If a flow uses raw stock S (no drain variable), S's outflow group
+///    must appear AFTER that flow's group (raw_stock_deps).
 fn topological_sort_groups(groups: Vec<FlowGroup>) -> Vec<FlowGroup> {
     if groups.len() <= 1 {
         return groups;
@@ -305,10 +317,10 @@ fn topological_sort_groups(groups: Vec<FlowGroup>) -> Vec<FlowGroup> {
     let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); groups.len()];
     for (i, group) in groups.iter().enumerate() {
         for flow in &group.flows {
-            // effective_deps: S_effective was used -> in the original, S was
-            // drained when this flow was processed (in reverse). S's outflows
-            // had higher flow_idx (came after in declaration). For the round-trip,
-            // S's group must come AFTER this group.
+            // effective_deps: a drain variable for S was used -> in the original,
+            // S was drained when this flow was processed (in reverse). S's
+            // outflows had higher flow_idx (came after in declaration). For the
+            // round-trip, S's group must come AFTER this group.
             for dep_stock in &flow.effective_deps {
                 if let Some(&dep_group) = stock_to_group.get(dep_stock.as_str())
                     && dep_group != i
@@ -317,10 +329,10 @@ fn topological_sort_groups(groups: Vec<FlowGroup>) -> Vec<FlowGroup> {
                     deps[dep_group].insert(i);
                 }
             }
-            // raw_stock_deps: raw S was used (no _effective) -> in the original,
-            // S was NOT drained when this flow was processed. S's outflows had
-            // lower flow_idx (came before in declaration). For the round-trip,
-            // S's group must come BEFORE this group.
+            // raw_stock_deps: raw S was used (no drain variable) -> in the
+            // original, S was NOT drained when this flow was processed. S's
+            // outflows had lower flow_idx (came before in declaration). For the
+            // round-trip, S's group must come BEFORE this group.
             for dep_stock in &flow.raw_stock_deps {
                 if let Some(&dep_group) = stock_to_group.get(dep_stock.as_str())
                     && dep_group != i
@@ -416,7 +428,7 @@ fn find_chain_source_stock(
 
 /// Extract flow information from a systems module.
 ///
-/// Also detects which stocks were referenced via `_effective` in the
+/// Also detects which stocks were referenced via drain variables in the
 /// original (pre-reverse-rewrite) equation, storing them in `effective_deps`.
 fn extract_flow(
     module: &Module,
@@ -449,23 +461,33 @@ fn extract_flow(
     // Get the raw equation (before reverse-rewrite)
     let raw_equation = get_raw_equation(&rate_ref.src, var_by_ident);
 
-    // Detect which stocks were referenced via _effective (drained) vs raw (not drained).
-    // This determines ordering constraints for the topological sort.
+    // Detect which stocks were referenced via drain variables (_effective
+    // or _drained_N) vs raw (not drained). This determines ordering
+    // constraints for the topological sort.
     let mut effective_deps = HashSet::new();
     let mut raw_stock_deps = HashSet::new();
     let mut effective_in_eq: HashSet<String> = HashSet::new();
 
     for token in tokenize_idents(&raw_equation) {
+        // Check for _effective suffix (legacy)
         if let Some(suffix) = token.strip_suffix("_effective")
             && effective_stock_names.contains(suffix)
         {
             effective_deps.insert(suffix.to_string());
             effective_in_eq.insert(suffix.to_string());
         }
+        // Check for _drained_N pattern (incremental drain variables)
+        else if let Some(pos) = token.find("_drained_") {
+            let stock_name = &token[..pos];
+            if effective_stock_names.contains(stock_name) {
+                effective_deps.insert(stock_name.to_string());
+                effective_in_eq.insert(stock_name.to_string());
+            }
+        }
     }
 
     // Second pass: find raw stock references (stocks that are drainable but
-    // NOT referenced via _effective in this equation)
+    // NOT referenced via a drain variable in this equation)
     let rate_equation = reverse_rewrite_equation(&raw_equation, reverse_rewrites);
     for token in tokenize_idents(&rate_equation) {
         if effective_stock_names.contains(token)
