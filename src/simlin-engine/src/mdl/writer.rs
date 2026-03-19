@@ -61,9 +61,20 @@ fn needs_mdl_quoting(name: &str) -> bool {
 
 fn escape_mdl_quoted_ident(name: &str) -> String {
     let mut escaped = String::with_capacity(name.len());
-    for c in name.chars() {
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
         match c {
-            '\\' => escaped.push_str("\\\\"),
+            // Literal newlines must become the two-character escape `\n`.
+            '\n' => escaped.push_str("\\n"),
+            '\\' => {
+                if chars.peek() == Some(&'n') {
+                    // Already the two-character sequence `\n` — keep as-is.
+                    escaped.push_str("\\n");
+                    chars.next();
+                } else {
+                    escaped.push_str("\\\\");
+                }
+            }
             '"' => escaped.push_str("\\\""),
             _ => escaped.push(c),
         }
@@ -765,6 +776,12 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 
 /// Returns true when the equation text is a placeholder sentinel rather
 /// than a real input expression (standalone lookup definition).
+///
+/// The MDL parser produces these sentinels when a variable is defined as
+/// a pure lookup (no input expression).  Vensim's native representation
+/// is `name(body)` rather than `name = WITH LOOKUP(input, body)`.  The
+/// sentinels `""`, `"0"`, and `"0+0"` are the values the parser emits
+/// for each of the known lookup-only forms.
 fn is_lookup_only_equation(eqn: &str) -> bool {
     let trimmed = eqn.trim();
     trimmed.is_empty() || trimmed == "0+0" || trimmed == "0"
@@ -1850,18 +1867,23 @@ fn split_view_on_groups<'a>(
     let mut current_name = sf.name.clone().unwrap_or_else(|| "View 1".to_string());
     let mut current_elements: Vec<&'a ViewElement> = Vec::new();
 
+    let mut seen_group = false;
     for element in &sf.elements {
         if let ViewElement::Group(group) = element {
-            if !current_elements.is_empty() {
+            // Push the previous segment. Skip the initial pre-Group segment
+            // only if it has no elements (no content before the first Group).
+            if seen_group || !current_elements.is_empty() {
                 segments.push((current_name, current_elements, sf.font.clone()));
                 current_elements = Vec::new();
             }
+            seen_group = true;
             current_name = group.name.clone();
         } else if !matches!(element, ViewElement::Module(_)) {
             current_elements.push(element);
         }
     }
-    if !current_elements.is_empty() {
+    // Push the final segment (may be empty for trailing Groups).
+    if seen_group || !current_elements.is_empty() {
         segments.push((current_name, current_elements, sf.font.clone()));
     }
     segments
@@ -2337,6 +2359,25 @@ mod tests {
         assert_eq!(escape_mdl_quoted_ident(r#"a"b\c"#), r#"a\"b\\c"#,);
 
         assert_eq!(format_mdl_ident(r#"it"s_a_test"#), r#""it\"s a test""#,);
+    }
+
+    #[test]
+    fn quoted_identifiers_handle_newlines() {
+        // Literal newline chars become the two-character escape \n
+        assert_eq!(
+            escape_mdl_quoted_ident("Maximum\nfishery size"),
+            r"Maximum\nfishery size"
+        );
+        // Already-escaped \n (two chars: backslash + n) stays as-is
+        assert_eq!(
+            escape_mdl_quoted_ident(r"Maximum\nfishery size"),
+            r"Maximum\nfishery size"
+        );
+        // Full round through format_mdl_ident: name with literal newline
+        assert_eq!(
+            format_mdl_ident("Maximum\nfishery_size"),
+            r#""Maximum\nfishery size""#
+        );
     }
 
     #[test]

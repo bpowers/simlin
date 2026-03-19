@@ -953,6 +953,81 @@ fn mdl_format_roundtrip() {
     }
 
     // -----------------------------------------------------------------------
+    // AC1.3: Per-element field-level fidelity
+    //
+    // For each type-10 (named) element matched by name between original
+    // and output, compare dimension and shape fields. Skip uid (field 1),
+    // coordinates (fields 3,4), and fields that depend on display state
+    // we don't yet preserve (field 9 = init-link flag, field 11 = varies
+    // by element type, fields 14+ = ghost color/font).
+    // -----------------------------------------------------------------------
+    if orig_views.len() == output_views.len() {
+        for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
+            fn build_name_fields<'a>(
+                lines: &[&'a str],
+            ) -> std::collections::HashMap<&'a str, Vec<&'a str>> {
+                let mut map = std::collections::HashMap::new();
+                for line in lines {
+                    let fields: Vec<&str> = line.split(',').collect();
+                    if fields.len() > 2 && fields[0] == "10" {
+                        map.insert(fields[2], fields);
+                    }
+                }
+                map
+            }
+
+            let orig_fields = build_name_fields(&orig.1);
+            let out_fields = build_name_fields(&out.1);
+
+            // Fields to compare: w(5), h(6), bits(8).
+            // Shape (field 7) is excluded because Vensim allows displaying
+            // any variable type with any shape (e.g. an aux as a stock box).
+            // Our converter classifies variable type from the equation, not
+            // the sketch shape, so non-stock variables displayed as boxes
+            // (shape=3) will roundtrip as shape=8.
+            let compare_indices = [5, 6, 8];
+
+            // Elements that appear in multiple views are converted to
+            // aliases during view composition. Their shape changes from
+            // stock(3) to aux(8) and is not preserved. Collect names that
+            // appear in OTHER views so we can exclude them from shape checks.
+            let mut cross_view_names: HashSet<&str> = HashSet::new();
+            for (j, other) in output_views.iter().enumerate() {
+                if j != i {
+                    for line in &other.1 {
+                        if let Some(n) = extract_element_name(line) {
+                            cross_view_names.insert(n);
+                        }
+                    }
+                }
+            }
+
+            for (name, orig_f) in &orig_fields {
+                if *name == "Time" {
+                    continue;
+                }
+                let is_cross_view = cross_view_names.contains(name);
+                if let Some(out_f) = out_fields.get(name) {
+                    for &idx in &compare_indices {
+                        // Skip shape comparison for cross-view duplicates
+                        // (they become aliases with shape=8).
+                        if idx == 7 && is_cross_view {
+                            continue;
+                        }
+                        if idx < orig_f.len() && idx < out_f.len() && orig_f[idx] != out_f[idx] {
+                            failures.push(format!(
+                                "AC1.3: view[{i}] element {:?} field[{idx}] \
+                                 orig={:?} out={:?}",
+                                name, orig_f[idx], out_f[idx]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // AC1.4: Font specification preserved per view
     // -----------------------------------------------------------------------
     for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
