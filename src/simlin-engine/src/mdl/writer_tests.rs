@@ -1660,7 +1660,7 @@ fn sketch_flow_element_emits_pipe_connectors_from_flow_points() {
 }
 
 #[test]
-fn sketch_flow_element_with_compat_preserves_pipe_points_and_label_position() {
+fn sketch_flow_element_derives_stock_connector_points_from_takeoffs() {
     let flow = view_element::Flow {
         name: "Infection_Rate".to_string(),
         uid: 6,
@@ -1669,12 +1669,12 @@ fn sketch_flow_element_with_compat_preserves_pipe_points_and_label_position() {
         label_side: view_element::LabelSide::Bottom,
         points: vec![
             view_element::FlowPoint {
-                x: 120.0,
+                x: 122.5,
                 y: 100.0,
                 attached_to_uid: Some(1),
             },
             view_element::FlowPoint {
-                x: 180.0,
+                x: 177.5,
                 y: 100.0,
                 attached_to_uid: Some(2),
             },
@@ -1682,29 +1682,10 @@ fn sketch_flow_element_with_compat_preserves_pipe_points_and_label_position() {
         compat: None,
         label_compat: None,
     };
-    let flow_compat = view_element::FlowSketchCompat {
-        uid: 6,
-        valve_x: 150.0,
-        valve_y: 100.0,
-        label_x: 170.0,
-        label_y: 134.0,
-        pipe_points: vec![
-            view_element::FlowSketchPointCompat {
-                connector_x: 90.0,
-                connector_y: 96.0,
-                point_x: 120.0,
-                point_y: 100.0,
-            },
-            view_element::FlowSketchPointCompat {
-                connector_x: 210.0,
-                connector_y: 104.0,
-                point_x: 180.0,
-                point_y: 100.0,
-            },
-        ],
-    };
     let mut buf = String::new();
     let valve_uids = HashMap::from([(6, 100)]);
+    let elem_positions = HashMap::from([(1, (100, 100)), (2, (200, 100))]);
+    let stock_uids = HashSet::from([1, 2]);
     let mut next_connector_uid = 200;
     write_flow_element_with_context(
         &mut buf,
@@ -1713,20 +1694,21 @@ fn sketch_flow_element_with_compat_preserves_pipe_points_and_label_position() {
         &HashSet::new(),
         &mut next_connector_uid,
         SketchTransform::identity(),
-        Some(&flow_compat),
+        &elem_positions,
+        &stock_uids,
     );
 
     assert!(
-        buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(210,104)|"),
-        "sink pipe connector should use preserved raw control point: {buf}"
+        buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
+        "sink pipe connector should be reconstructed from the stock center: {buf}"
     );
     assert!(
-        buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(90,96)|"),
-        "source pipe connector should use preserved raw control point: {buf}"
+        buf.contains("1,201,100,1,4,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
+        "source pipe connector should be reconstructed from the stock center: {buf}"
     );
     assert!(
-        buf.contains("10,6,Infection Rate,170,134,49,8,40,3,0,0,-1,0,0,0"),
-        "flow label should use preserved raw sketch position: {buf}"
+        buf.contains("10,6,Infection Rate,150,116,49,8,40,3,0,0,-1,0,0,0"),
+        "flow label should fall back to the canonical bottom label position: {buf}"
     );
 }
 
@@ -1893,7 +1875,7 @@ fn sketch_link_arc_produces_nonzero_control_point() {
 }
 
 #[test]
-fn sketch_link_with_attached_valve_target_preserves_uid_and_fields() {
+fn sketch_link_with_field_hints_preserves_nonsemantic_flags() {
     let link = view_element::Link {
         uid: 3,
         from_uid: 1,
@@ -1926,11 +1908,11 @@ fn sketch_link_with_attached_valve_target_preserves_uid_and_fields() {
         SketchTransform::identity(),
         &valve_uids,
     );
-    assert_eq!(buf, "1,3,1,100,1,0,0,0,0,64,7,-1--1--1,,1|(0,0)|");
+    assert_eq!(buf, "1,3,1,2,1,0,0,0,0,64,7,-1--1--1,,1|(0,0)|");
 }
 
 #[test]
-fn sketch_link_with_compat_reuses_control_point_delta() {
+fn sketch_link_with_field_hints_still_uses_link_geometry() {
     let link = view_element::Link {
         uid: 3,
         from_uid: 1,
@@ -1962,7 +1944,11 @@ fn sketch_link_with_compat_reuses_control_point_delta() {
         SketchTransform::identity(),
         &HashMap::new(),
     );
-    assert_eq!(buf, "1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(170,70)|");
+    let (ctrl_x, ctrl_y) = compute_control_point((110, 100), (210, 100), 45.0);
+    assert_eq!(
+        buf,
+        format!("1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|({ctrl_x},{ctrl_y})|")
+    );
 }
 
 #[test]
@@ -2424,6 +2410,160 @@ fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
         flow.points.last().and_then(|pt| pt.attached_to_uid),
         stock_uid_by_name.get("Stock_B").copied(),
         "flow sink attachment should roundtrip to Stock_B",
+    );
+}
+
+#[test]
+fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
+    let stock_a = Variable::Stock(Stock {
+        ident: "stock_a".to_owned(),
+        equation: Equation::Scalar("100".to_owned()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec![],
+        outflows: vec!["flow_ab".to_owned()],
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let stock_b = Variable::Stock(Stock {
+        ident: "stock_b".to_owned(),
+        equation: Equation::Scalar("0".to_owned()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec!["flow_ab".to_owned()],
+        outflows: vec![],
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let flow = Variable::Flow(Flow {
+        ident: "flow_ab".to_owned(),
+        equation: Equation::Scalar("driver".to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let driver = Variable::Aux(Aux {
+        ident: "driver".to_owned(),
+        equation: Equation::Scalar("1".to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+
+    let model = datamodel::Model {
+        name: "default".to_owned(),
+        sim_specs: None,
+        variables: vec![stock_a, stock_b, flow, driver],
+        views: vec![View::StockFlow(datamodel::StockFlow {
+            name: Some("View 1".to_owned()),
+            elements: vec![
+                ViewElement::Stock(view_element::Stock {
+                    name: "Stock_A".to_owned(),
+                    uid: 1,
+                    x: 100.0,
+                    y: 100.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Stock(view_element::Stock {
+                    name: "Stock_B".to_owned(),
+                    uid: 2,
+                    x: 300.0,
+                    y: 100.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "Driver".to_owned(),
+                    uid: 3,
+                    x: 200.0,
+                    y: 40.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Flow(view_element::Flow {
+                    name: "Flow_AB".to_owned(),
+                    uid: 6,
+                    x: 200.0,
+                    y: 100.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    points: vec![
+                        view_element::FlowPoint {
+                            x: 122.5,
+                            y: 100.0,
+                            attached_to_uid: Some(1),
+                        },
+                        view_element::FlowPoint {
+                            x: 277.5,
+                            y: 100.0,
+                            attached_to_uid: Some(2),
+                        },
+                    ],
+                    compat: None,
+                    label_compat: None,
+                }),
+                ViewElement::Link(view_element::Link {
+                    uid: 7,
+                    from_uid: 3,
+                    to_uid: 6,
+                    shape: LinkShape::Straight,
+                    polarity: Some(LinkPolarity::Positive),
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    };
+    let project = make_project(vec![model]);
+
+    let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+    let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
+    let View::StockFlow(sf) = &reparsed.models[0].views[0];
+
+    let uid_by_name: HashMap<&str, i32> = sf
+        .elements
+        .iter()
+        .filter_map(|elem| match elem {
+            ViewElement::Aux(aux) => Some((aux.name.as_str(), aux.uid)),
+            ViewElement::Flow(flow) => Some((flow.name.as_str(), flow.uid)),
+            _ => None,
+        })
+        .collect();
+
+    let link = sf
+        .elements
+        .iter()
+        .find_map(|elem| {
+            if let ViewElement::Link(link) = elem {
+                Some(link)
+            } else {
+                None
+            }
+        })
+        .expect("expected link element after roundtrip");
+
+    assert_eq!(
+        link.from_uid,
+        uid_by_name.get("Driver").copied().expect("driver uid"),
+        "causal link source should roundtrip to Driver",
+    );
+    assert_eq!(
+        link.to_uid,
+        uid_by_name.get("Flow_AB").copied().expect("flow uid"),
+        "causal link target should roundtrip to Flow_AB",
     );
 }
 

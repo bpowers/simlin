@@ -114,8 +114,9 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
                 ViewElement::Flow(f) => &f.name,
                 _ => continue,
             };
-            let canonical = crate::common::canonicalize(name).into_owned();
-            let display = underbar_to_space(name);
+            let normalized_name = name.replace("\\n", " ").replace('\n', " ");
+            let canonical = crate::common::canonicalize(&normalized_name).into_owned();
+            let display = underbar_to_space(&normalized_name);
             map.entry(canonical).or_insert(display);
         }
     }
@@ -127,10 +128,11 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
 fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
     match display_names.get(ident) {
         Some(name) => {
-            if needs_mdl_quoting(name) {
-                format!("\"{}\"", escape_mdl_quoted_ident(name))
+            let name = name.replace("\\n", " ").replace('\n', " ");
+            if needs_mdl_quoting(&name) {
+                format!("\"{}\"", escape_mdl_quoted_ident(&name))
             } else {
-                name.clone()
+                name
             }
         }
         None => format_mdl_ident(ident),
@@ -1416,6 +1418,10 @@ fn format_sketch_name(name: &str) -> String {
     name.replace('_', " ").replace('\n', "\\n")
 }
 
+const STOCK_WIDTH: f64 = 45.0;
+const STOCK_HEIGHT: f64 = 35.0;
+const STOCK_EDGE_TOLERANCE: f64 = 1.0;
+
 /// Write a type 10 line for an Aux element.
 /// Sketch element names use `format_sketch_name` (not `format_mdl_ident`)
 /// because MDL sketch lines are comma-delimited positional records where
@@ -1582,6 +1588,17 @@ fn compat_name_field<'a>(
         .unwrap_or(default)
 }
 
+fn default_flow_label_point(flow: &view_element::Flow, transform: SketchTransform) -> (i32, i32) {
+    let (x, y) = match flow.label_side {
+        view_element::LabelSide::Top => (flow.x, flow.y - 16.0),
+        view_element::LabelSide::Left => (flow.x - 16.0, flow.y),
+        view_element::LabelSide::Center => (flow.x, flow.y),
+        view_element::LabelSide::Bottom => (flow.x, flow.y + 16.0),
+        view_element::LabelSide::Right => (flow.x + 16.0, flow.y),
+    };
+    transform.point(x, y)
+}
+
 /// Write a Flow element as type 1 pipe connectors, type 11 (valve), and
 /// type 10 (attached flow variable).
 ///
@@ -1603,10 +1620,12 @@ fn write_flow_element(
         cloud_uids,
         next_connector_uid,
         SketchTransform::identity(),
-        None,
+        &HashMap::new(),
+        &HashSet::new(),
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_flow_element_with_context(
     buf: &mut String,
     flow: &view_element::Flow,
@@ -1614,7 +1633,8 @@ fn write_flow_element_with_context(
     _cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
     transform: SketchTransform,
-    flow_compat: Option<&view_element::FlowSketchCompat>,
+    elem_positions: &HashMap<i32, (i32, i32)>,
+    stock_uids: &HashSet<i32>,
 ) {
     let name = format_sketch_name(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
@@ -1629,7 +1649,8 @@ fn write_flow_element_with_context(
         valve_uid,
         next_connector_uid,
         transform,
-        flow_compat,
+        elem_positions,
+        stock_uids,
     );
 
     let (valve_w, valve_h, valve_shape, valve_bits) = match valve_compat {
@@ -1661,13 +1682,7 @@ fn write_flow_element_with_context(
     )
     .unwrap();
 
-    let (label_x, label_y) = if let Some(compat) = flow_compat {
-        let dx = flow.x - compat.valve_x;
-        let dy = flow.y - compat.valve_y;
-        transform.point(compat.label_x + dx, compat.label_y + dy)
-    } else {
-        transform.point(flow.x, flow.y + 16.0)
-    };
+    let (label_x, label_y) = default_flow_label_point(flow, transform);
     let label_tail = compat_tail(label_compat, "0,0,-1,0,0,0");
     write!(
         buf,
@@ -1693,7 +1708,8 @@ fn write_flow_pipe_connectors(
         valve_uid,
         next_connector_uid,
         SketchTransform::identity(),
-        None,
+        &HashMap::new(),
+        &HashSet::new(),
     )
 }
 
@@ -1703,7 +1719,8 @@ fn write_flow_pipe_connectors_with_context(
     valve_uid: i32,
     next_connector_uid: &mut i32,
     transform: SketchTransform,
-    flow_compat: Option<&view_element::FlowSketchCompat>,
+    elem_positions: &HashMap<i32, (i32, i32)>,
+    stock_uids: &HashSet<i32>,
 ) -> bool {
     let mut wrote_any = false;
 
@@ -1728,27 +1745,52 @@ fn write_flow_pipe_connectors_with_context(
         .unwrap();
     };
 
-    let connector_point = |idx: usize, point: &view_element::FlowPoint| -> (i32, i32) {
-        if let Some(compat) = flow_compat.and_then(|compat| compat.pipe_points.get(idx)) {
-            let dx = point.x - compat.point_x;
-            let dy = point.y - compat.point_y;
-            return transform.point(compat.connector_x + dx, compat.connector_y + dy);
+    let connector_point = |point: &view_element::FlowPoint| -> (i32, i32) {
+        let point_xy = transform.point(point.x, point.y);
+        let Some(endpoint_uid) = point.attached_to_uid else {
+            return point_xy;
+        };
+        if !stock_uids.contains(&endpoint_uid) {
+            return point_xy;
         }
-        transform.point(point.x, point.y)
+
+        let Some(&(stock_x, stock_y)) = elem_positions.get(&endpoint_uid) else {
+            return point_xy;
+        };
+        let dx = f64::from(point_xy.0 - stock_x);
+        let dy = f64::from(point_xy.1 - stock_y);
+        let on_left_or_right = (dx.abs() - STOCK_WIDTH / 2.0).abs() <= STOCK_EDGE_TOLERANCE
+            && dy.abs() <= STOCK_HEIGHT / 2.0 + STOCK_EDGE_TOLERANCE;
+        if on_left_or_right {
+            return (stock_x, point_xy.1);
+        }
+
+        let on_top_or_bottom = (dy.abs() - STOCK_HEIGHT / 2.0).abs() <= STOCK_EDGE_TOLERANCE
+            && dx.abs() <= STOCK_WIDTH / 2.0 + STOCK_EDGE_TOLERANCE;
+        if on_top_or_bottom {
+            return (point_xy.0, stock_y);
+        }
+
+        point_xy
     };
 
     if flow.points.len() > 1
         && let Some(last) = flow.points.last()
         && let Some(endpoint_uid) = last.attached_to_uid
     {
-        let (x, y) = connector_point(flow.points.len() - 1, last);
+        let (x, y) = connector_point(last);
+        let direction = if stock_uids.contains(&endpoint_uid) {
+            4
+        } else {
+            100
+        };
         write_pipe(
             buf,
             !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
-            4,
+            direction,
             x,
             y,
         );
@@ -1756,14 +1798,13 @@ fn write_flow_pipe_connectors_with_context(
         *next_connector_uid += 1;
     }
 
-    for (idx, point) in flow
+    for point in flow
         .points
         .iter()
-        .enumerate()
         .skip(1)
         .take(flow.points.len().saturating_sub(2))
     {
-        let (x, y) = connector_point(idx, point);
+        let (x, y) = connector_point(point);
         write_pipe(
             buf,
             !wrote_any,
@@ -1781,14 +1822,19 @@ fn write_flow_pipe_connectors_with_context(
     if let Some(first) = flow.points.first()
         && let Some(endpoint_uid) = first.attached_to_uid
     {
-        let (x, y) = connector_point(0, first);
+        let (x, y) = connector_point(first);
+        let direction = if stock_uids.contains(&endpoint_uid) {
+            4
+        } else {
+            100
+        };
         write_pipe(
             buf,
             !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
-            100,
+            direction,
             x,
             y,
         );
@@ -1904,7 +1950,7 @@ fn write_link_element_with_context(
     use_lettered_polarity: bool,
     link_compat: Option<&view_element::LinkSketchCompat>,
     transform: SketchTransform,
-    valve_uids: &HashMap<i32, i32>,
+    _valve_uids: &HashMap<i32, i32>,
 ) {
     let polarity_val = match link.polarity {
         Some(LinkPolarity::Positive) if use_lettered_polarity => 83, // 'S'
@@ -1914,14 +1960,8 @@ fn write_link_element_with_context(
         None => 0,
     };
 
-    let from_uid = link_compat
-        .filter(|compat| compat.from_attached_valve)
-        .and_then(|_| valve_uids.get(&link.from_uid).copied())
-        .unwrap_or(link.from_uid);
-    let to_uid = link_compat
-        .filter(|compat| compat.to_attached_valve)
-        .and_then(|_| valve_uids.get(&link.to_uid).copied())
-        .unwrap_or(link.to_uid);
+    let from_uid = link.from_uid;
+    let to_uid = link.to_uid;
     let from_pos = elem_positions.get(&from_uid).copied().unwrap_or((0, 0));
     let to_pos = elem_positions.get(&to_uid).copied().unwrap_or((0, 0));
     let field4 = link_compat.map(|compat| compat.field4).unwrap_or(0);
@@ -1938,18 +1978,7 @@ fn write_link_element_with_context(
             .unwrap();
         }
         LinkShape::Arc(canvas_angle) => {
-            let (ctrl_x, ctrl_y) = if let Some(compat) = link_compat {
-                let delta_x =
-                    ((from_pos.0 as f64 - compat.from_x) + (to_pos.0 as f64 - compat.to_x)) / 2.0;
-                let delta_y =
-                    ((from_pos.1 as f64 - compat.from_y) + (to_pos.1 as f64 - compat.to_y)) / 2.0;
-                (
-                    (compat.control_x + delta_x).round() as i32,
-                    (compat.control_y + delta_y).round() as i32,
-                )
-            } else {
-                compute_control_point(from_pos, to_pos, *canvas_angle)
-            };
+            let (ctrl_x, ctrl_y) = compute_control_point(from_pos, to_pos, *canvas_angle);
             write!(
                 buf,
                 "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|({},{})|",
@@ -2379,7 +2408,7 @@ impl MdlWriter {
         elem_positions: &HashMap<i32, (i32, i32)>,
         name_map: &HashMap<i32, &str>,
         stock_uids: &HashSet<i32>,
-        flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
+        _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
         link_compat_by_uid: &HashMap<i32, &view_element::LinkSketchCompat>,
     ) {
         let view_title = sanitize_view_title_for_mdl(view_name);
@@ -2430,7 +2459,8 @@ impl MdlWriter {
                         &cloud_uids,
                         next_connector_uid,
                         transform,
-                        flow_compat_by_uid.get(&flow.uid).copied(),
+                        elem_positions,
+                        stock_uids,
                     );
                     self.buf.push('\n');
                 }
@@ -2561,7 +2591,7 @@ fn build_element_positions_with_transform(
     valve_uids: &HashMap<i32, i32>,
     transform: SketchTransform,
     stock_uids: &HashSet<i32>,
-    flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
+    _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
 ) -> HashMap<i32, (i32, i32)> {
     let mut positions = HashMap::new();
     for elem in elements {
@@ -2581,15 +2611,8 @@ fn build_element_positions_with_transform(
                 if let Some(&valve_uid) = valve_uids.get(&f.uid) {
                     positions.insert(valve_uid, (valve_x, valve_y));
                 }
-                if let Some(compat) = flow_compat_by_uid.get(&f.uid) {
-                    let dx = f.x - compat.valve_x;
-                    let dy = f.y - compat.valve_y;
-                    let (label_x, label_y) =
-                        transform.point(compat.label_x + dx, compat.label_y + dy);
-                    (f.uid, label_x, label_y)
-                } else {
-                    (f.uid, valve_x, valve_y)
-                }
+                let (label_x, label_y) = default_flow_label_point(f, transform);
+                (f.uid, label_x, label_y)
             }
             ViewElement::Cloud(c) => {
                 let (x, y) = transform.point(c.x, c.y);

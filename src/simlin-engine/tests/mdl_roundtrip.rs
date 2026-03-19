@@ -425,6 +425,49 @@ fn xmile_to_mdl_roundtrip() {
     }
 }
 
+#[test]
+fn default_project_fishbanks_xmile_to_mdl_roundtrip() {
+    let path = "default_projects/fishbanks/model.xmile";
+    let file_path = resolve_path(path);
+    let source = fs::read_to_string(&file_path).expect("read fishbanks model");
+
+    let mut reader = BufReader::new(source.as_bytes());
+    let xmile_project = xmile::project_from_reader(&mut reader).expect("parse fishbanks xmile");
+    assert_eq!(
+        xmile_project.models.len(),
+        1,
+        "fishbanks should be a single-model project"
+    );
+
+    let mdl_text = mdl::project_to_mdl(&xmile_project).expect("write fishbanks mdl");
+    let mdl_project = mdl::parse_mdl(&mdl_text).expect("re-parse fishbanks mdl");
+    assert_eq!(
+        mdl_project.models.len(),
+        1,
+        "fishbanks mdl should stay single-model"
+    );
+    assert!(
+        !mdl_project.models[0].views.is_empty(),
+        "fishbanks mdl should contain a view"
+    );
+
+    let expected_names: HashSet<_> = xmile_project.models[0]
+        .variables
+        .iter()
+        .map(|var| canonical_name(var.get_ident()))
+        .collect();
+    let actual_names: HashSet<_> = mdl_project.models[0]
+        .variables
+        .iter()
+        .map(|var| canonical_name(var.get_ident()))
+        .collect();
+    let missing: Vec<_> = expected_names.difference(&actual_names).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "{path}: missing variables after XMILE->MDL->MDL parse roundtrip: {missing:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Task 3: View/sketch roundtrip
 // ---------------------------------------------------------------------------
@@ -852,9 +895,21 @@ fn normalize_named_sketch_line(line: &str) -> Option<String> {
     if is_time_shadow_line(line) {
         return None;
     }
+    if is_flow_label_line(line) {
+        return None;
+    }
     let fields = line_fields(line);
     if fields.len() > 3 && fields[0] == "10" {
         Some(format!("10,{},{}", fields[2], fields[3..].join(",")))
+    } else {
+        None
+    }
+}
+
+fn normalize_flow_label_line(line: &str) -> Option<String> {
+    let fields = line_fields(line);
+    if fields.len() > 5 && fields[0] == "10" {
+        Some(format!("10,{},{}", fields[2], fields[5..].join(",")))
     } else {
         None
     }
@@ -1031,17 +1086,37 @@ fn build_named_uid_map(lines: &[String]) -> HashMap<String, String> {
 
 fn normalize_pipe_line(
     line: &str,
+    valve_uid: &str,
     named_uids: &HashMap<String, String>,
     cloud_uids: &HashMap<String, String>,
 ) -> String {
     let fields = line_fields(line);
     let endpoint_uid = fields[3];
+    if endpoint_uid == valve_uid {
+        return "1,bend".to_owned();
+    }
     let endpoint = named_uids
         .get(endpoint_uid)
         .cloned()
         .or_else(|| cloud_uids.get(endpoint_uid).cloned())
         .unwrap_or_else(|| format!("uid:{endpoint_uid}"));
-    format!("1,to={endpoint},{}", fields[4..].join(","))
+    format!("1,to={endpoint}")
+}
+
+fn connector_shape(line: &str) -> String {
+    let tail = line.split(",,").nth(1).unwrap_or_default();
+    let point_count = tail.split('|').next().unwrap_or_default();
+    if point_count == "1" {
+        if tail.contains("(0,0)|") {
+            "straight".to_owned()
+        } else {
+            "arc".to_owned()
+        }
+    } else if point_count.is_empty() {
+        "unknown".to_owned()
+    } else {
+        format!("multipoint:{point_count}")
+    }
 }
 
 fn normalize_flow_blocks(view: &SketchView) -> Result<HashMap<String, Vec<String>>, String> {
@@ -1069,7 +1144,7 @@ fn normalize_flow_blocks(view: &SketchView) -> Result<HashMap<String, Vec<String
         let mut records = vec![
             format!(
                 "label:{}",
-                normalize_named_sketch_line(&block.label_line).ok_or_else(|| {
+                normalize_flow_label_line(&block.label_line).ok_or_else(|| {
                     format!(
                         "view {:?}: flow label for {:?} did not normalize: {}",
                         view.name, block.name, block.label_line
@@ -1093,7 +1168,7 @@ fn normalize_flow_blocks(view: &SketchView) -> Result<HashMap<String, Vec<String
             .map(|line| {
                 format!(
                     "pipe:{}",
-                    normalize_pipe_line(line, &named_uids, &cloud_uids)
+                    normalize_pipe_line(line, &block.valve_uid, &named_uids, &cloud_uids)
                 )
             })
             .collect();
@@ -1110,7 +1185,10 @@ fn normalize_flow_blocks(view: &SketchView) -> Result<HashMap<String, Vec<String
 fn normalize_influence_connectors(view: &SketchView) -> Result<Vec<String>, String> {
     let mut uid_labels = build_named_uid_map(&view.element_lines);
     for (flow_name, block) in parse_flow_blocks(view)? {
-        uid_labels.insert(block.valve_uid.clone(), format!("valve:{flow_name}"));
+        uid_labels.insert(block.valve_uid.clone(), flow_name.clone());
+        if let Some(label_uid) = uid_field(&block.label_line) {
+            uid_labels.insert(label_uid.to_owned(), flow_name.clone());
+        }
         for (idx, cloud_line) in block.cloud_lines.iter().enumerate() {
             let cloud_uid = uid_field(cloud_line).ok_or_else(|| {
                 format!(
@@ -1145,7 +1223,11 @@ fn normalize_influence_connectors(view: &SketchView) -> Result<Vec<String>, Stri
         if from == "Time" || to == "Time" {
             continue;
         }
-        connectors.push(format!("1,{from}->{to},{}", fields[4..].join(",")));
+        connectors.push(format!(
+            "1,{from}->{to},pol={},shape={}",
+            fields.get(6).copied().unwrap_or("0"),
+            connector_shape(line)
+        ));
     }
     connectors.sort();
     Ok(connectors)
@@ -1157,8 +1239,8 @@ fn normalize_influence_connectors(view: &SketchView) -> Result<Vec<String>, Stri
 /// Checks:
 /// - AC1.1: Exactly 2 views with correct names
 /// - AC1.2: Raw named sketch lines match as unordered multisets
-/// - AC1.3: Flow blocks preserve raw valve/cloud/pipe records
-/// - AC1.4: Influence connectors preserve resolved endpoint references
+/// - AC1.3: Flow blocks preserve semantic valve/cloud/pipe structure
+/// - AC1.4: Influence connectors preserve resolved endpoint references and shape
 /// - AC1.5: Font specification preserved per view
 /// - AC3.1: Lookup calls use `table ( input )` syntax
 /// - AC3.2: Lookup range bounds preserved
