@@ -1997,12 +1997,17 @@ impl MdlWriter {
             }
         }
 
-        // 3. Ungrouped variables
-        for var in &model.variables {
-            if !grouped_idents.contains(var.get_ident()) {
-                write_variable_entry(&mut self.buf, var, &display_names);
-                self.buf.push('\n');
-            }
+        // 3. Ungrouped variables (alphabetical by ident for deterministic output)
+        let mut ungrouped: Vec<&datamodel::Variable> = model
+            .variables
+            .iter()
+            .filter(|v| !grouped_idents.contains(v.get_ident()))
+            .collect();
+        ungrouped.sort_by_key(|v| v.get_ident());
+
+        for var in ungrouped {
+            write_variable_entry(&mut self.buf, var, &display_names);
+            self.buf.push('\n');
         }
 
         // 4. .Control group header + sim spec variables
@@ -5823,6 +5828,79 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             mdl.contains("Growth Rate = "),
             "Full project MDL should use view element casing on LHS, got: {mdl}"
+        );
+    }
+
+    // ---- Phase 5 Subcomponent C: Variable ordering ----
+
+    #[test]
+    fn ungrouped_variables_sorted_alphabetically() {
+        // Variables inserted in non-alphabetical order: c, a, b
+        let var_c = make_aux("c_var", "3", None, "");
+        let var_a = make_aux("a_var", "1", None, "");
+        let var_b = make_aux("b_var", "2", None, "");
+        let model = make_model(vec![var_c, var_a, var_b]);
+        let project = make_project(vec![model]);
+
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+
+        let pos_a = mdl.find("a var = ").expect("should contain a var");
+        let pos_b = mdl.find("b var = ").expect("should contain b var");
+        let pos_c = mdl.find("c var = ").expect("should contain c var");
+        assert!(
+            pos_a < pos_b && pos_b < pos_c,
+            "ungrouped variables should appear in alphabetical order: a={pos_a}, b={pos_b}, c={pos_c}"
+        );
+    }
+
+    #[test]
+    fn grouped_variables_retain_group_order() {
+        // Group members in a specific order: z, m, a -- should NOT be alphabetized
+        let var_z = make_aux("z_rate", "10", None, "");
+        let var_m = make_aux("m_rate", "20", None, "");
+        let var_a = make_aux("a_rate", "30", None, "");
+        let var_ungrouped = make_aux("ungrouped_x", "40", None, "");
+
+        let group = datamodel::ModelGroup {
+            name: "My Sector".to_owned(),
+            doc: Some("Sector docs".to_owned()),
+            parent: None,
+            members: vec![
+                "z_rate".to_owned(),
+                "m_rate".to_owned(),
+                "a_rate".to_owned(),
+            ],
+            run_enabled: false,
+        };
+
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var_z, var_m, var_a, var_ungrouped],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![group],
+        };
+        let project = make_project(vec![model]);
+
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+
+        // Grouped vars should appear in group order (z, m, a), not alphabetical
+        let pos_z = mdl.find("z rate = ").expect("should contain z rate");
+        let pos_m = mdl.find("m rate = ").expect("should contain m rate");
+        let pos_a = mdl.find("a rate = ").expect("should contain a rate");
+        assert!(
+            pos_z < pos_m && pos_m < pos_a,
+            "grouped variables should retain group order: z={pos_z}, m={pos_m}, a={pos_a}"
+        );
+
+        // Ungrouped variables should come after grouped section
+        let pos_ungrouped = mdl
+            .find("ungrouped x = ")
+            .expect("should contain ungrouped x");
+        assert!(
+            pos_a < pos_ungrouped,
+            "ungrouped variables should come after grouped: a={pos_a}, ungrouped={pos_ungrouped}"
         );
     }
 }
