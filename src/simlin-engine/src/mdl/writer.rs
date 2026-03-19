@@ -68,7 +68,9 @@ fn escape_mdl_quoted_ident(name: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\\' => {
                 if chars.peek() == Some(&'n') {
-                    // Already the two-character sequence `\n` — keep as-is.
+                    // XMILE name attributes may contain the literal two-char
+                    // sequence `\n` (backslash + 'n') as a display newline.
+                    // Preserve it as-is rather than double-escaping to `\\n`.
                     escaped.push_str("\\n");
                     chars.next();
                 } else {
@@ -777,14 +779,15 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 /// Returns true when the equation text is a placeholder sentinel rather
 /// than a real input expression (standalone lookup definition).
 ///
-/// The MDL parser produces these sentinels when a variable is defined as
-/// a pure lookup (no input expression).  Vensim's native representation
-/// is `name(body)` rather than `name = WITH LOOKUP(input, body)`.  The
-/// sentinels `""`, `"0"`, and `"0+0"` are the values the parser emits
-/// for each of the known lookup-only forms.
+/// The MDL parser produces the sentinel `"0+0"` when a variable is
+/// defined as a pure lookup (no input expression) -- see
+/// `MdlEquation::Lookup` in `convert/variables.rs`.  Vensim's native
+/// representation is `name(body)` rather than `name = WITH LOOKUP(input,
+/// body)`.  An empty string covers XMILE variables that have a graphical
+/// function but no equation.
 fn is_lookup_only_equation(eqn: &str) -> bool {
     let trimmed = eqn.trim();
-    trimmed.is_empty() || trimmed == "0+0" || trimmed == "0"
+    trimmed.is_empty() || trimmed == "0+0"
 }
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.

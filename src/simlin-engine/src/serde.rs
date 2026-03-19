@@ -1197,10 +1197,17 @@ fn view_compat_to_proto(
 fn view_compat_from_proto(
     compat: Option<project_io::view_element::ViewElementCompat>,
 ) -> Option<view_element::ViewElementCompat> {
-    compat.map(|c| view_element::ViewElementCompat {
-        width: c.width.unwrap_or(0.0),
-        height: c.height.unwrap_or(0.0),
-        bits: c.bits.unwrap_or(0),
+    compat.and_then(|c| {
+        // Only produce Some if at least one field was explicitly set,
+        // otherwise treat a default-valued proto message as absent.
+        if c.width.is_none() && c.height.is_none() && c.bits.is_none() {
+            return None;
+        }
+        Some(view_element::ViewElementCompat {
+            width: c.width.unwrap_or(0.0),
+            height: c.height.unwrap_or(0.0),
+            bits: c.bits.unwrap_or(0),
+        })
     })
 }
 
