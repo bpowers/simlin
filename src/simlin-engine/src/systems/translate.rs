@@ -103,6 +103,10 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     let mut deferred_capacities: Vec<DeferredCapacity> = Vec::new();
     let mut deferred_rates: Vec<DeferredRate> = Vec::new();
 
+    // Track (source, dest) pair counts for disambiguating duplicate flows.
+    // First occurrence uses the base name; subsequent occurrences append _2, _3, etc.
+    let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+
     // Process each source stock's outflows in reversed declaration order
     for stock in &model.stocks {
         let source_canon = canon(&stock.name);
@@ -119,11 +123,21 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             let flow = &model.flows[flow_idx];
             let dest_canon = canon(&flow.dest);
 
+            // Track duplicate (source, dest) pairs
+            let pair_key = (source_canon.clone(), dest_canon.clone());
+            let occurrence = pair_counts.entry(pair_key).or_insert(0);
+            *occurrence += 1;
+            let suffix = if *occurrence == 1 {
+                String::new()
+            } else {
+                format!("_{}", *occurrence)
+            };
+
             // Module ident: "{source}_outflows_{dest}" or "{source}_outflows" if single
             let module_ident = if has_single_outflow {
-                format!("{source_canon}_outflows")
+                format!("{source_canon}_outflows{suffix}")
             } else {
-                format!("{source_canon}_outflows_{dest_canon}")
+                format!("{source_canon}_outflows_{dest_canon}{suffix}")
             };
 
             // Choose stdlib model based on flow type
@@ -214,7 +228,7 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             }));
 
             // Create the actual transfer flow
-            let flow_ident = format!("{source_canon}_to_{dest_canon}");
+            let flow_ident = format!("{source_canon}_to_{dest_canon}{suffix}");
             let flow_equation = match flow.flow_type {
                 FlowType::Rate | FlowType::Leak => format!("{module_ident}.actual"),
                 FlowType::Conversion => format!("{module_ident}.outflow"),
@@ -241,7 +255,7 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
 
             // For Conversion, create a waste flow (outflow from source, no destination)
             if flow.flow_type == FlowType::Conversion {
-                let waste_ident = format!("{source_canon}_to_{dest_canon}_waste");
+                let waste_ident = format!("{source_canon}_to_{dest_canon}{suffix}_waste");
                 let waste_equation = format!("{module_ident}.waste");
 
                 variables.push(Variable::Flow(Flow {
@@ -262,6 +276,37 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             }
 
             prev_module_ident = Some(module_ident);
+        }
+    }
+
+    // Pre-compute the flow_ident for each flow_idx so drain state and
+    // capacity calculations use the same disambiguated names as the
+    // module/flow generation above.
+    let mut flow_ident_for_idx: HashMap<usize, String> = HashMap::new();
+    {
+        let mut ident_counts: HashMap<(String, String), usize> = HashMap::new();
+        // Walk in the same order as the module generation loop above:
+        // per-source, reversed declaration order.
+        for stock in &model.stocks {
+            let source_canon = canon(&stock.name);
+            let flow_indices = match flows_by_source.get(&source_canon) {
+                Some(indices) => indices,
+                None => continue,
+            };
+            for &flow_idx in flow_indices.iter().rev() {
+                let flow = &model.flows[flow_idx];
+                let dest_canon = canon(&flow.dest);
+                let pair_key = (source_canon.clone(), dest_canon.clone());
+                let occurrence = ident_counts.entry(pair_key).or_insert(0);
+                *occurrence += 1;
+                let suffix = if *occurrence == 1 {
+                    String::new()
+                } else {
+                    format!("_{}", *occurrence)
+                };
+                flow_ident_for_idx
+                    .insert(flow_idx, format!("{source_canon}_to_{dest_canon}{suffix}"));
+            }
         }
     }
 
@@ -291,13 +336,12 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
 
         let flow = &model.flows[flow_idx];
         let source_canon = canon(&flow.source);
-        let dest_canon = canon(&flow.dest);
-        let flow_ident = format!("{source_canon}_to_{dest_canon}");
+        let flow_ident = flow_ident_for_idx[&flow_idx].clone();
 
         let acc = cumulative_outflows.entry(source_canon.clone()).or_default();
-        acc.push(flow_ident);
+        acc.push(flow_ident.clone());
         if flow.flow_type == FlowType::Conversion {
-            let waste_ident = format!("{source_canon}_to_{dest_canon}_waste");
+            let waste_ident = format!("{flow_ident}_waste");
             acc.push(waste_ident);
         }
 
@@ -380,15 +424,13 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     // the pre-computed incremental drain variables from `drain_at_flow`.
 
     // Map flow idents to their declaration indices for ordering checks.
-    // Includes both transfer and waste flow idents (waste maps to the
-    // same flow_idx as its transfer flow).
+    // Uses the pre-computed disambiguated flow_ident names so that
+    // duplicate parallel flows are matched correctly.
     let mut flow_ident_to_idx: HashMap<String, usize> = HashMap::new();
-    for (i, flow) in model.flows.iter().enumerate() {
-        let source = canon(&flow.source);
-        let dest = canon(&flow.dest);
-        flow_ident_to_idx.insert(format!("{source}_to_{dest}"), i);
-        if flow.flow_type == FlowType::Conversion {
-            flow_ident_to_idx.insert(format!("{source}_to_{dest}_waste"), i);
+    for (&idx, ident) in &flow_ident_for_idx {
+        flow_ident_to_idx.insert(ident.clone(), idx);
+        if model.flows[idx].flow_type == FlowType::Conversion {
+            flow_ident_to_idx.insert(format!("{ident}_waste"), idx);
         }
     }
 
@@ -1477,6 +1519,129 @@ mod tests {
     // (parsed as `(A + D) * 2`) would emit `a_effective + d * 2`,
     // which standard math precedence evaluates as `a_effective + (d * 2)`.
     // -------------------------------------------------------------------
+
+    // -------------------------------------------------------------------
+    // Duplicate parallel flows: multiple flows from same source to same dest
+    //
+    // A(10) > B @ 1 and A > B @ 2 should produce distinct module/flow
+    // identifiers. Without disambiguation, both get "a_outflows_b" and
+    // "a_to_b", causing the second declaration to overwrite the first.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_parallel_flows_produce_distinct_idents() {
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "A".to_string(),
+                    initial: Expr::Int(10),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "B".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(1),
+                },
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(2),
+                },
+            ],
+        };
+        let project = translate(&model, 5).unwrap();
+
+        // Both flows should exist as distinct transfer flow variables
+        let flow1 = find_var(&project, "a_to_b");
+        let flow2 = find_var(&project, "a_to_b_2");
+        assert!(flow1.is_some(), "first a_to_b flow should exist");
+        assert!(
+            flow2.is_some(),
+            "second a_to_b flow (a_to_b_2) should exist"
+        );
+
+        // Both modules should exist with distinct idents
+        let mod1 = find_var(&project, "a_outflows_b");
+        let mod2 = find_var(&project, "a_outflows_b_2");
+        assert!(mod1.is_some(), "first module a_outflows_b should exist");
+        assert!(mod2.is_some(), "second module a_outflows_b_2 should exist");
+
+        // Both flows should be in stock outflows
+        let a_outflows = stock_outflows(&project, "a");
+        assert!(
+            a_outflows.contains(&"a_to_b".to_string()),
+            "a_to_b should be in a's outflows: {:?}",
+            a_outflows
+        );
+        assert!(
+            a_outflows.contains(&"a_to_b_2".to_string()),
+            "a_to_b_2 should be in a's outflows: {:?}",
+            a_outflows
+        );
+    }
+
+    #[test]
+    fn duplicate_parallel_flows_simulate_correctly() {
+        // A(10) > B @ 1 and A > B @ 2 should transfer 3 total per step
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "A".to_string(),
+                    initial: Expr::Int(10),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "B".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(1),
+                },
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(2),
+                },
+            ],
+        };
+        let project = translate(&model, 3).unwrap();
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("duplicate parallel flows should compile");
+        let mut vm = crate::Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        // After 1 step: A should lose 3 (1+2), B should gain 3
+        let a_offset = results.offsets[&crate::common::Ident::new("a")];
+        let b_offset = results.offsets[&crate::common::Ident::new("b")];
+        let rows: Vec<&[f64]> = results.iter().collect();
+        // Row 0 is initial (t=0), Row 1 is after first step (t=1)
+        assert_eq!(rows[1][a_offset], 7.0, "A should be 10-3=7 after step 1");
+        assert_eq!(rows[1][b_offset], 3.0, "B should be 0+3=3 after step 1");
+    }
 
     #[test]
     fn rewrite_preserves_mixed_precedence_parens() {

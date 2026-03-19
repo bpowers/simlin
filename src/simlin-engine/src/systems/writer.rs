@@ -52,12 +52,6 @@ struct ReconstructedStock {
     is_infinite: bool,
 }
 
-/// Intermediate group of flows sharing the same source stock.
-struct FlowGroup {
-    source_stock: String,
-    flows: Vec<ReconstructedFlow>,
-}
-
 pub fn project_to_systems(project: &Project) -> Result<String> {
     let model = project
         .get_model("main")
@@ -179,8 +173,12 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
         }
     }
 
-    // Walk chains per source stock and collect flow groups
-    let mut flow_groups: Vec<FlowGroup> = Vec::new();
+    // Walk chains per source stock and collect all flows with chain-order info.
+    // Each flow carries its source stock and chain position for ordering.
+    let mut all_flows: Vec<ReconstructedFlow> = Vec::new();
+    // Track chain boundaries: for same-source flows, flow at chain
+    // position i+1 must come after position i in the output.
+    let mut chain_successors: Vec<Vec<usize>> = Vec::new();
 
     for stock in &stocks {
         let source_ident = stock.ident.as_str();
@@ -213,7 +211,7 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
 
         chain.reverse();
 
-        let mut group_flows = Vec::new();
+        let chain_start = all_flows.len();
         for info in chain {
             if let Some(flow) = extract_flow(
                 info.module,
@@ -223,21 +221,26 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
                 &reverse_rewrites,
                 &effective_stock_names,
             ) {
-                group_flows.push(flow);
+                all_flows.push(flow);
             }
         }
+        let chain_end = all_flows.len();
 
-        if !group_flows.is_empty() {
-            flow_groups.push(FlowGroup {
-                source_stock: source_ident.to_string(),
-                flows: group_flows,
-            });
+        // Add chain-order edges: flow[i] must come before flow[i+1]
+        chain_successors.resize_with(chain_end, Vec::new);
+        if chain_end > chain_start + 1 {
+            for (i, succs) in chain_successors[chain_start..chain_end - 1]
+                .iter_mut()
+                .enumerate()
+            {
+                succs.push(chain_start + i + 1);
+            }
         }
     }
 
-    // Topological sort: order groups so that the translator's drain
-    // rewrite decisions are preserved in the round-trip.
-    let ordered_groups = topological_sort_groups(flow_groups);
+    // Topological sort individual flows, respecting both drain-dependency
+    // constraints and same-source chain ordering.
+    let ordered_flows = topological_sort_flows(all_flows, chain_successors);
 
     // Reconstruct stock information
     let mut reconstructed_stocks: HashMap<&str, ReconstructedStock> = HashMap::new();
@@ -264,20 +267,17 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
     let mut output = String::new();
     let mut emitted_stocks: HashSet<String> = HashSet::new();
 
-    for group in &ordered_groups {
-        for flow in &group.flows {
-            let source_str =
-                format_stock_ref(&flow.source, &reconstructed_stocks, &mut emitted_stocks);
-            let dest_str = format_stock_ref(&flow.dest, &reconstructed_stocks, &mut emitted_stocks);
+    for flow in &ordered_flows {
+        let source_str = format_stock_ref(&flow.source, &reconstructed_stocks, &mut emitted_stocks);
+        let dest_str = format_stock_ref(&flow.dest, &reconstructed_stocks, &mut emitted_stocks);
 
-            let type_str = match flow.flow_type {
-                FlowTypeTag::Rate => format!("Rate({})", flow.rate_equation),
-                FlowTypeTag::Conversion => format!("Conversion({})", flow.rate_equation),
-                FlowTypeTag::Leak => format!("Leak({})", flow.rate_equation),
-            };
+        let type_str = match flow.flow_type {
+            FlowTypeTag::Rate => format!("Rate({})", flow.rate_equation),
+            FlowTypeTag::Conversion => format!("Conversion({})", flow.rate_equation),
+            FlowTypeTag::Leak => format!("Leak({})", flow.rate_equation),
+        };
 
-            writeln!(output, "{source_str} > {dest_str} @ {type_str}").unwrap();
-        }
+        writeln!(output, "{source_str} > {dest_str} @ {type_str}").unwrap();
     }
 
     for stock in &stocks {
@@ -296,58 +296,76 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
     }
 }
 
-/// Topological sort based on drain dependency information.
+/// Topological sort of individual flows based on drain dependency information
+/// and same-source chain ordering constraints.
 ///
-/// Two types of ordering constraints:
-/// 1. If a flow used a drain variable for S in its rate, S's outflow group
-///    must appear BEFORE that flow's group (effective_deps).
-/// 2. If a flow uses raw stock S (no drain variable), S's outflow group
-///    must appear AFTER that flow's group (raw_stock_deps).
-fn topological_sort_groups(groups: Vec<FlowGroup>) -> Vec<FlowGroup> {
-    if groups.len() <= 1 {
-        return groups;
+/// Three types of ordering constraints:
+/// 1. Chain order: same-source flows maintain their chain position (from
+///    `chain_successors`).
+/// 2. effective_deps: if a flow used a drain variable for stock S, ALL
+///    flows from S must appear AFTER this flow (so S is drained by the
+///    time this flow processes in reverse).
+/// 3. raw_stock_deps: if a flow uses raw stock S (no drain variable), ALL
+///    flows from S must appear BEFORE this flow (so S is NOT yet drained).
+fn topological_sort_flows(
+    flows: Vec<ReconstructedFlow>,
+    chain_successors: Vec<Vec<usize>>,
+) -> Vec<ReconstructedFlow> {
+    if flows.len() <= 1 {
+        return flows;
     }
 
-    let mut stock_to_group: HashMap<&str, usize> = HashMap::new();
-    for (i, g) in groups.iter().enumerate() {
-        stock_to_group.insert(g.source_stock.as_str(), i);
+    let n = flows.len();
+
+    // Map source stock -> indices of flows from that stock
+    let mut stock_to_flows: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, flow) in flows.iter().enumerate() {
+        stock_to_flows
+            .entry(flow.source.as_str())
+            .or_default()
+            .push(i);
     }
 
-    // Build dependency graph.
-    // deps[i] = set of groups that must come before group i.
-    let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); groups.len()];
-    for (i, group) in groups.iter().enumerate() {
-        for flow in &group.flows {
-            // effective_deps: a drain variable for S was used -> in the original,
-            // S was drained when this flow was processed (in reverse). S's
-            // outflows had higher flow_idx (came after in declaration). For the
-            // round-trip, S's group must come AFTER this group.
-            for dep_stock in &flow.effective_deps {
-                if let Some(&dep_group) = stock_to_group.get(dep_stock.as_str())
-                    && dep_group != i
-                {
-                    // S's group depends on this group (this group comes first)
-                    deps[dep_group].insert(i);
+    // Build dependency graph: deps[i] = set of flows that must come before flow i.
+    let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+
+    // Chain ordering constraints
+    for (i, succs) in chain_successors.iter().enumerate() {
+        for &succ in succs {
+            deps[succ].insert(i);
+        }
+    }
+
+    // Drain dependency constraints
+    for (i, flow) in flows.iter().enumerate() {
+        // effective_deps: drain variable for S was used -> S's outflows must
+        // come AFTER this flow. In the output, this flow comes first, then
+        // S's flows follow.
+        for dep_stock in &flow.effective_deps {
+            if let Some(stock_flows) = stock_to_flows.get(dep_stock.as_str()) {
+                for &sf in stock_flows {
+                    if sf != i {
+                        deps[sf].insert(i);
+                    }
                 }
             }
-            // raw_stock_deps: raw S was used (no drain variable) -> in the
-            // original, S was NOT drained when this flow was processed. S's
-            // outflows had lower flow_idx (came before in declaration). For the
-            // round-trip, S's group must come BEFORE this group.
-            for dep_stock in &flow.raw_stock_deps {
-                if let Some(&dep_group) = stock_to_group.get(dep_stock.as_str())
-                    && dep_group != i
-                {
-                    // This group depends on S's group (S comes first)
-                    deps[i].insert(dep_group);
+        }
+        // raw_stock_deps: raw S was used -> S's outflows must come BEFORE
+        // this flow. In the output, S's flows come first, then this flow.
+        for dep_stock in &flow.raw_stock_deps {
+            if let Some(stock_flows) = stock_to_flows.get(dep_stock.as_str()) {
+                for &sf in stock_flows {
+                    if sf != i {
+                        deps[i].insert(sf);
+                    }
                 }
             }
         }
     }
 
     // Kahn's algorithm
-    let mut in_degree: Vec<usize> = vec![0; groups.len()];
-    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); groups.len()];
+    let mut in_degree: Vec<usize> = vec![0; n];
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, dep_set) in deps.iter().enumerate() {
         in_degree[i] = dep_set.len();
         for &dep in dep_set {
@@ -356,10 +374,10 @@ fn topological_sort_groups(groups: Vec<FlowGroup>) -> Vec<FlowGroup> {
     }
 
     // Use a stable queue (VecDeque) to preserve relative ordering for
-    // groups with no ordering constraints between them.
+    // flows with no ordering constraints between them.
     let mut queue: std::collections::VecDeque<usize> =
-        (0..groups.len()).filter(|&i| in_degree[i] == 0).collect();
-    let mut order: Vec<usize> = Vec::with_capacity(groups.len());
+        (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
 
     while let Some(node) = queue.pop_front() {
         order.push(node);
@@ -372,19 +390,20 @@ fn topological_sort_groups(groups: Vec<FlowGroup>) -> Vec<FlowGroup> {
     }
 
     // Fall back for cycles (shouldn't happen in valid models)
-    if order.len() < groups.len() {
-        for i in 0..groups.len() {
-            if !order.contains(&i) {
+    if order.len() < n {
+        let ordered: HashSet<usize> = order.iter().copied().collect();
+        for i in 0..n {
+            if !ordered.contains(&i) {
                 order.push(i);
             }
         }
     }
 
-    let mut indexed_groups: Vec<Option<FlowGroup>> = groups.into_iter().map(Some).collect();
-    let mut result = Vec::with_capacity(indexed_groups.len());
+    let mut indexed_flows: Vec<Option<ReconstructedFlow>> = flows.into_iter().map(Some).collect();
+    let mut result = Vec::with_capacity(n);
     for idx in order {
-        if let Some(group) = indexed_groups[idx].take() {
-            result.push(group);
+        if let Some(flow) = indexed_flows[idx].take() {
+            result.push(flow);
         }
     }
     result
@@ -855,6 +874,82 @@ mod tests {
             output.contains("a - b"),
             "should preserve max expression 'a - b': {output}"
         );
+    }
+
+    #[test]
+    fn cross_source_interleaving_preserved() {
+        // A(30) > X @ B, B(10) > Y @ 5, A > Z @ B
+        // The B>Y flow must sit between the two A flows to preserve
+        // drain semantics: A>Z sees raw B, A>X sees drained B.
+        let input = "A(30) > X @ Rate(B)\nB(10) > Y @ Rate(5)\nA > Z @ Rate(B)\n";
+        let output = roundtrip_write(input);
+
+        // Verify all three flows are present
+        assert!(output.contains("> x"), "flow to X missing: {output}");
+        assert!(output.contains("> y"), "flow to Y missing: {output}");
+        assert!(output.contains("> z"), "flow to Z missing: {output}");
+
+        // The two A-source flows must NOT be adjacent: B>Y must be between them.
+        // Find positions of the three flows.
+        let x_pos = output.find("> x").expect("X flow");
+        let y_pos = output.find("> y").expect("Y flow");
+        let z_pos = output.find("> z").expect("Z flow");
+
+        // One A flow before B>Y, the other after
+        let a_flows_before_b = (x_pos < y_pos) as u8 + (z_pos < y_pos) as u8;
+        let a_flows_after_b = (x_pos > y_pos) as u8 + (z_pos > y_pos) as u8;
+        assert_eq!(
+            a_flows_before_b, 1,
+            "exactly one A flow should come before B>Y: {output}"
+        );
+        assert_eq!(
+            a_flows_after_b, 1,
+            "exactly one A flow should come after B>Y: {output}"
+        );
+    }
+
+    /// Round-trip simulation equivalence: cross-source interleaved model
+    /// must produce identical results after parse -> translate -> write -> parse.
+    #[test]
+    fn cross_source_interleaving_simulation_equivalence() {
+        use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+
+        let input = "A(30) > X @ Rate(B)\nB(10) > Y @ Rate(5)\nA > Z @ Rate(B)\n";
+
+        // Simulate original
+        let model1 = crate::systems::parse(input).unwrap();
+        let project1 = crate::systems::translate::translate(&model1, 5).unwrap();
+        let mut db1 = SimlinDb::default();
+        let sync1 = sync_from_datamodel_incremental(&mut db1, &project1, None);
+        let compiled1 = compile_project_incremental(&db1, sync1.project, "main").unwrap();
+        let mut vm1 = crate::Vm::new(compiled1).unwrap();
+        vm1.run_to_end().unwrap();
+        let results1 = vm1.into_results();
+
+        // Round-trip and simulate
+        let written = project_to_systems(&project1).unwrap();
+        let model2 = crate::systems::parse(&written).unwrap();
+        let project2 = crate::systems::translate::translate(&model2, 5).unwrap();
+        let mut db2 = SimlinDb::default();
+        let sync2 = sync_from_datamodel_incremental(&mut db2, &project2, None);
+        let compiled2 = compile_project_incremental(&db2, sync2.project, "main").unwrap();
+        let mut vm2 = crate::Vm::new(compiled2).unwrap();
+        vm2.run_to_end().unwrap();
+        let results2 = vm2.into_results();
+
+        // Compare stock values at each timestep
+        for stock in &["a", "b", "x", "y", "z"] {
+            let ident = crate::common::Ident::new(stock);
+            let off1 = results1.offsets[&ident];
+            let off2 = results2.offsets[&ident];
+            for (step, (row1, row2)) in results1.iter().zip(results2.iter()).enumerate() {
+                assert_eq!(
+                    row1[off1], row2[off2],
+                    "stock {stock} diverges at step {step}: original={}, roundtrip={}",
+                    row1[off1], row2[off2]
+                );
+            }
+        }
     }
 
     #[test]

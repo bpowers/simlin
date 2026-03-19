@@ -1123,6 +1123,9 @@ impl<'module> Compiler<'module> {
                             return Ok(None);
                         }
                         BuiltinFn::AllocateByPriority(requests, priority, _size, width, supply) => {
+                            // _size is a Vensim compatibility parameter that is
+                            // always ignored -- the array size is determined from
+                            // the view dimensions of the requests/priority arrays.
                             self.walk_expr_as_view(requests)?;
                             self.walk_expr_as_view(priority)?;
                             self.walk_expr(width)?.unwrap();
