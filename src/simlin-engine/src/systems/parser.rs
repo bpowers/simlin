@@ -94,6 +94,28 @@ pub fn parse(input: &str) -> Result<SystemsModel> {
                     }
                 };
 
+                // Reject Leak/Conversion from infinite sources: these produce
+                // inf/NaN values because the available stock is infinite.
+                // The Python systems package raises IllegalSourceStock.
+                if source_ref.is_infinite
+                    && matches!(flow_type, FlowType::Leak | FlowType::Conversion)
+                {
+                    return Err(Error::new(
+                        ErrorKind::Import,
+                        ErrorCode::Generic,
+                        Some(format!(
+                            "cannot use {} from infinite stock '[{}]': \
+                             only Rate flows are allowed from infinite sources",
+                            match flow_type {
+                                FlowType::Leak => "Leak",
+                                FlowType::Conversion => "Conversion",
+                                FlowType::Rate => unreachable!(),
+                            },
+                            source_ref.name
+                        )),
+                    ));
+                }
+
                 flows.push(SystemsFlow {
                     source: source_ref.name.clone(),
                     dest: dest_ref.name.clone(),
@@ -798,6 +820,33 @@ mod tests {
         assert_eq!(model.flows[0].source, "A");
         assert_eq!(model.flows[0].dest, "B");
         assert_eq!(model.flows[0].rate, Expr::Int(5));
+    }
+
+    /// Leak from infinite source is rejected
+    #[test]
+    fn leak_from_infinite_source_rejected() {
+        let result = parse("[a] > b @ Leak(0.5)");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.details.as_ref().unwrap().contains("Leak"),
+            "should mention Leak: {:?}",
+            err
+        );
+    }
+
+    /// Conversion from infinite source is rejected
+    #[test]
+    fn conversion_from_infinite_source_rejected() {
+        let result = parse("[a] > b @ 0.5");
+        assert!(result.is_err());
+    }
+
+    /// Rate from infinite source is allowed
+    #[test]
+    fn rate_from_infinite_source_allowed() {
+        let result = parse("[a] > b @ 5");
+        assert!(result.is_ok());
     }
 
     /// FlowNoRate creates both stocks but no flow

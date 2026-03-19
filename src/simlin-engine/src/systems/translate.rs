@@ -364,7 +364,12 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
 
     // Create dest_capacity aux variables.
     //
-    // dest_capacity = max_expr - stock + total_outflows
+    // dest_capacity = max_expr - stock + already_processed_outflows
+    //
+    // Only outflows from the destination stock that correspond to flows
+    // already processed in the reversed declaration order (higher flow_idx)
+    // are counted. Unprocessed outflows haven't freed capacity yet in the
+    // Python sequential model, so including them would overstate capacity.
     //
     // When the max expression references the flow's own source stock,
     // we substitute the flow's `available` value (the chained remaining
@@ -373,6 +378,20 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     //
     // For references to other stocks drained by earlier flows, we use
     // the pre-computed incremental drain variables from `drain_at_flow`.
+
+    // Map flow idents to their declaration indices for ordering checks.
+    // Includes both transfer and waste flow idents (waste maps to the
+    // same flow_idx as its transfer flow).
+    let mut flow_ident_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, flow) in model.flows.iter().enumerate() {
+        let source = canon(&flow.source);
+        let dest = canon(&flow.dest);
+        flow_ident_to_idx.insert(format!("{source}_to_{dest}"), i);
+        if flow.flow_type == FlowType::Conversion {
+            flow_ident_to_idx.insert(format!("{source}_to_{dest}_waste"), i);
+        }
+    }
+
     deferred_capacities.sort_by_key(|dc| std::cmp::Reverse(dc.flow_idx));
     for dc in &deferred_capacities {
         let empty = HashMap::new();
@@ -386,11 +405,24 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
                 max_rewrites.insert(dc.source_canon.clone(), dc.available_src.clone());
                 let rewritten_max = rewrite_expr_to_equation(max_expr, &max_rewrites);
 
-                // Collect all outflow idents for the destination stock
+                // Collect outflow idents for the destination stock, but only
+                // those from flows already processed (higher flow_idx in the
+                // reversed declaration order). Unprocessed outflows haven't
+                // freed capacity yet.
                 let outflows: Vec<&str> = stocks
                     .iter()
                     .find(|s| s.ident == dc.dest_canon)
-                    .map(|s| s.outflows.iter().map(|f| f.as_str()).collect())
+                    .map(|s| {
+                        s.outflows
+                            .iter()
+                            .filter(|f| {
+                                flow_ident_to_idx
+                                    .get(f.as_str())
+                                    .is_some_and(|&idx| idx > dc.flow_idx)
+                            })
+                            .map(|f| f.as_str())
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 if outflows.is_empty() {
@@ -1238,6 +1270,118 @@ mod tests {
     #[test]
     fn test_translate_extended_syntax() {
         parse_translate_compile("extended_syntax.txt");
+    }
+
+    // -------------------------------------------------------------------
+    // dest_capacity only counts destination outflows already processed
+    //
+    // When computing dest_capacity for `a > b`, only outflows from b
+    // that have higher flow_idx (processed earlier in reversed order)
+    // should be counted.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dest_capacity_excludes_unprocessed_outflows() {
+        // b(4,5) > c @ 5 (flow_idx=0, low priority)
+        // a(10) > b @ 10 (flow_idx=1, high priority, processed first)
+        //
+        // dest_cap for a>b: b's outflow b_to_c has flow_idx=0.
+        // Since 0 < 1, b_to_c is NOT yet processed -> NOT counted.
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "a".to_string(),
+                    initial: Expr::Int(10),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "b".to_string(),
+                    initial: Expr::Int(4),
+                    max: Expr::Int(5),
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "c".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                SystemsFlow {
+                    source: "b".to_string(),
+                    dest: "c".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(5),
+                },
+                SystemsFlow {
+                    source: "a".to_string(),
+                    dest: "b".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(10),
+                },
+            ],
+        };
+        let project = translate(&model, 5).unwrap();
+        let cap_eq = scalar_eqn(&project, "a_outflows_dest_capacity")
+            .expect("a_outflows_dest_capacity should exist");
+        assert_eq!(
+            cap_eq, "5 - b",
+            "dest_cap should not include unprocessed b_to_c outflow"
+        );
+    }
+
+    #[test]
+    fn dest_capacity_includes_processed_outflows() {
+        // a(10) > b(0, 5) @ 10 (flow_idx=0, low priority, processed second)
+        // b > c @ 5 (flow_idx=1, high priority, processed first)
+        //
+        // dest_cap for a>b: b's outflow b_to_c has flow_idx=1.
+        // Since 1 > 0, b_to_c IS already processed -> counted.
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "a".to_string(),
+                    initial: Expr::Int(10),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "b".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Int(5),
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "c".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                SystemsFlow {
+                    source: "a".to_string(),
+                    dest: "b".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(10),
+                },
+                SystemsFlow {
+                    source: "b".to_string(),
+                    dest: "c".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(5),
+                },
+            ],
+        };
+        let project = translate(&model, 5).unwrap();
+        let cap_eq = scalar_eqn(&project, "a_outflows_dest_capacity")
+            .expect("a_outflows_dest_capacity should exist");
+        assert_eq!(
+            cap_eq, "5 - b + b_to_c",
+            "dest_cap should include already-processed b_to_c outflow"
+        );
     }
 
     // -------------------------------------------------------------------
