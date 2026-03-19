@@ -1088,10 +1088,19 @@ fn write_single_entry(
         }
     } else {
         let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-        write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
         let mdl_eqn = equation_to_mdl(eqn);
-        buf.push_str("\n\t");
-        buf.push_str(&mdl_eqn);
+
+        // Short, single-line equations use inline format with spaces around
+        // the operator (e.g. `average repayment rate = 0.03`).  Longer or
+        // multiline equations use the traditional Vensim multiline format.
+        let inline_line = format!("{name}{dim_suffix} {assign_op} {mdl_eqn}");
+        if inline_line.len() <= 80 && !mdl_eqn.contains('\n') {
+            buf.push_str(&inline_line);
+        } else {
+            write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
+            buf.push_str("\n\t");
+            buf.push_str(&mdl_eqn);
+        }
     }
 
     write_units_and_comment(buf, units, doc);
@@ -2604,7 +2613,7 @@ mod tests {
         write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
-            "characteristic time=\n\t10\n\t~\tMinutes\n\t~\tHow long\n\t|"
+            "characteristic time = 10\n\t~\tMinutes\n\t~\tHow long\n\t|"
         );
     }
 
@@ -2613,7 +2622,7 @@ mod tests {
         let var = make_aux("$_euro", "10", Some("Dmnl"), "");
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &HashMap::new());
-        assert_eq!(buf, "\"$ euro\"=\n\t10\n\t~\tDmnl\n\t~\t\n\t|");
+        assert_eq!(buf, "\"$ euro\" = 10\n\t~\tDmnl\n\t~\t\n\t|");
     }
 
     #[test]
@@ -2621,7 +2630,78 @@ mod tests {
         let var = make_aux("rate", "a + b", None, "");
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &HashMap::new());
-        assert_eq!(buf, "rate=\n\ta + b\n\t~\t\n\t~\t\n\t|");
+        assert_eq!(buf, "rate = a + b\n\t~\t\n\t~\t\n\t|");
+    }
+
+    // ---- Inline vs multiline equation formatting ----
+
+    #[test]
+    fn short_equation_uses_inline_format() {
+        let var = make_aux("average_repayment_rate", "0.03", Some("1/Year"), "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &HashMap::new());
+        assert!(
+            buf.starts_with("average repayment rate = 0.03\n"),
+            "short equation should use inline format: {buf}"
+        );
+        assert!(
+            !buf.contains("=\n\t0.03"),
+            "short equation should not use multiline format: {buf}"
+        );
+    }
+
+    #[test]
+    fn long_equation_uses_multiline_format() {
+        // Build an equation that, combined with the name, exceeds 80 chars
+        let long_eqn = "very_long_variable_a + very_long_variable_b + very_long_variable_c + very_long_variable_d";
+        let var = make_aux("some_computed_value", long_eqn, None, "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &HashMap::new());
+        assert!(
+            buf.contains("some computed value=\n\t"),
+            "long equation should use multiline format: {buf}"
+        );
+    }
+
+    #[test]
+    fn lookup_always_uses_multiline_format() {
+        let gf = make_gf();
+        let var = Variable::Aux(Aux {
+            ident: "x".to_owned(),
+            equation: Equation::Scalar("TIME".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(gf),
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &HashMap::new());
+        assert!(
+            buf.starts_with("x=\n\t"),
+            "lookup equation should always use multiline format: {buf}"
+        );
+    }
+
+    #[test]
+    fn data_equation_uses_data_equals_inline() {
+        let var = make_aux(
+            "small_data",
+            "{GET_DIRECT_DATA('f.csv',',','A','B')}",
+            None,
+            "",
+        );
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &HashMap::new());
+        assert!(
+            buf.contains(":="),
+            "data equation should use := operator: {buf}"
+        );
+        assert!(
+            buf.contains(" := "),
+            "short data equation should use inline format with spaces: {buf}"
+        );
     }
 
     #[test]
@@ -2776,7 +2856,7 @@ mod tests {
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(
-            buf.contains("imported constants:="),
+            buf.contains(":="),
             "GET DIRECT reconstruction should use := for data equations: {buf}"
         );
         assert!(
@@ -2862,7 +2942,7 @@ mod tests {
         write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
-            "rate a[one dimensional subscript]=\n\t100\n\t~\t\n\t~\t\n\t|"
+            "rate a[one dimensional subscript] = 100\n\t~\t\n\t~\t\n\t|"
         );
     }
 
@@ -2883,7 +2963,7 @@ mod tests {
         });
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &HashMap::new());
-        assert_eq!(buf, "matrix a[dim a,dim b]=\n\t0\n\t~\tDmnl\n\t~\t\n\t|");
+        assert_eq!(buf, "matrix a[dim a,dim b] = 0\n\t~\tDmnl\n\t~\t\n\t|");
     }
 
     #[test]
@@ -3063,7 +3143,7 @@ mod tests {
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &HashMap::new());
         // Data equations use := instead of =
-        assert!(buf.contains("direct data down:="), "expected := in: {buf}");
+        assert!(buf.contains(":="), "expected := in: {buf}");
     }
 
     #[test]
@@ -3071,7 +3151,7 @@ mod tests {
         let var = make_aux("x", "42", None, "");
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &HashMap::new());
-        assert!(buf.starts_with("x="), "expected = in: {buf}");
+        assert!(buf.starts_with("x = "), "expected = in: {buf}");
     }
 
     #[test]
@@ -3256,7 +3336,7 @@ mod tests {
             "MDL should start with UTF-8 marker, got: {:?}",
             mdl.lines().next()
         );
-        assert!(mdl.contains("x="));
+        assert!(mdl.contains("x = "));
         assert!(mdl.contains("\\\\\\---///"));
     }
 
@@ -3384,7 +3464,7 @@ mod tests {
 
         // Variable entries present
         assert!(
-            mdl.contains("growth rate="),
+            mdl.contains("growth rate = "),
             "should contain growth rate variable"
         );
         assert!(
@@ -3405,7 +3485,7 @@ mod tests {
         );
 
         // Ordering: variables before sim specs, sim specs before terminator
-        let var_pos = mdl.find("growth rate=").unwrap();
+        let var_pos = mdl.find("growth rate = ").unwrap();
         let initial_pos = mdl.find("INITIAL TIME").unwrap();
         let terminator_pos = mdl.find("\\\\\\---///").unwrap();
         assert!(
@@ -3455,8 +3535,8 @@ mod tests {
         );
 
         // Grouped variables come before ungrouped
-        let rate_a_pos = mdl.find("rate a=").unwrap();
-        let ungrouped_pos = mdl.find("ungrouped var=").unwrap();
+        let rate_a_pos = mdl.find("rate a = ").unwrap();
+        let ungrouped_pos = mdl.find("ungrouped var = ").unwrap();
         assert!(
             rate_a_pos < ungrouped_pos,
             "grouped variables should come before ungrouped"
@@ -3484,7 +3564,7 @@ mod tests {
             "should contain dimension def"
         );
         let dim_pos = mdl.find("region:").unwrap();
-        let var_pos = mdl.find("x=").unwrap();
+        let var_pos = mdl.find("x = ").unwrap();
         assert!(dim_pos < var_pos, "dimensions should come before variables");
     }
 
@@ -4440,7 +4520,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         let mdl = result.unwrap();
 
         // Section 1: Equations -- contains variable entry
-        assert!(mdl.contains("x="), "should contain equation for x");
+        assert!(mdl.contains("x = "), "should contain equation for x");
         // Equations terminator
         assert!(
             mdl.contains("\\\\\\---/// Sketch information"),
@@ -5451,7 +5531,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &display_names);
         assert!(
-            buf.starts_with("Endogenous Federal Funds Rate="),
+            buf.starts_with("Endogenous Federal Funds Rate = "),
             "LHS should use view element casing, got: {buf}"
         );
     }
@@ -5463,7 +5543,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         let mut buf = String::new();
         write_variable_entry(&mut buf, &var, &display_names);
         assert!(
-            buf.starts_with("unmatched variable="),
+            buf.starts_with("unmatched variable = "),
             "LHS should fall back to format_mdl_ident when no view element matches, got: {buf}"
         );
     }
@@ -5520,7 +5600,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         let project = make_project(vec![model]);
         let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
         assert!(
-            mdl.contains("Growth Rate="),
+            mdl.contains("Growth Rate = "),
             "Full project MDL should use view element casing on LHS, got: {mdl}"
         );
     }
