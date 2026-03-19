@@ -306,7 +306,7 @@ fn convert_view(
 
     // If multi-view, add a group element for this view
     if is_multi_view {
-        let group = create_sector_group(view, uid_offset, start_x, start_y);
+        let group = create_sector_group(view, original_title, uid_offset, start_x, start_y);
         elements.push(group);
     }
 
@@ -762,6 +762,7 @@ fn calculate_link_shape(
 /// datamodel::view_element::Group expects CENTER coordinates.
 fn create_sector_group(
     view: &VensimView,
+    original_title: &str,
     uid_offset: i32,
     start_x: i32,
     start_y: i32,
@@ -780,7 +781,7 @@ fn create_sector_group(
     // Convert to center coordinates for datamodel
     ViewElement::Group(view_element::Group {
         uid: uid_offset,
-        name: view.title().to_string(),
+        name: original_title.to_string(),
         x: top_left_x + width / 2.0,
         y: top_left_y + height / 2.0,
         width,
@@ -911,7 +912,7 @@ mod tests {
     fn test_create_sector_group() {
         let view = create_test_view();
         // Typical starting position: x=100, y=100
-        let group = create_sector_group(&view, 0, 100, 100);
+        let group = create_sector_group(&view, view.title(), 0, 100, 100);
 
         if let ViewElement::Group(g) = group {
             assert_eq!(g.name, "Test View");
