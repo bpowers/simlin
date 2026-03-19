@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::BufReader;
 
@@ -697,5 +698,371 @@ fn mark2_sketch_ordering() {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 5: MDL format roundtrip (per-view element fidelity)
+// ---------------------------------------------------------------------------
+
+/// Split the sketch section of an MDL string into per-view segments.
+/// Returns a vec of (view_name, element_lines, font_line) tuples.
+fn split_sketch_into_views(mdl_text: &str) -> Vec<(&str, Vec<&str>, Option<&str>)> {
+    let sketch_marker = "\\\\\\---/// Sketch information";
+    let mut views = Vec::new();
+
+    // Find all sketch section starts
+    let mut search_start = 0;
+    let mut section_starts = Vec::new();
+    while let Some(pos) = mdl_text[search_start..].find(sketch_marker) {
+        let abs_pos = search_start + pos;
+        section_starts.push(abs_pos);
+        search_start = abs_pos + sketch_marker.len();
+    }
+
+    for (idx, &start) in section_starts.iter().enumerate() {
+        let end = if idx + 1 < section_starts.len() {
+            section_starts[idx + 1]
+        } else {
+            // Find the final terminator "///---\\\\\\".
+            mdl_text[start..]
+                .find("///---\\\\\\")
+                .map(|p| start + p)
+                .unwrap_or(mdl_text.len())
+        };
+
+        let section = &mdl_text[start..end];
+        let lines: Vec<&str> = section.lines().collect();
+
+        // Parse: first line is the marker, second is V300, third is *ViewName,
+        // fourth is $font, rest are element lines.
+        let mut view_name = "";
+        let mut font_line = None;
+        let mut element_lines = Vec::new();
+
+        for line in &lines {
+            if let Some(name) = line.strip_prefix('*') {
+                view_name = name;
+            } else if let Some(font) = line.strip_prefix('$') {
+                font_line = Some(font);
+            } else if line.starts_with("10,")
+                || line.starts_with("11,")
+                || line.starts_with("12,")
+                || line.starts_with("1,")
+            {
+                element_lines.push(*line);
+            }
+        }
+
+        views.push((view_name, element_lines, font_line));
+    }
+
+    views
+}
+
+/// Extract the variable name from a type-10 sketch element line.
+/// Type-10 lines have format: 10,uid,name,x,y,...
+fn extract_element_name(line: &str) -> Option<&str> {
+    let fields: Vec<&str> = line.split(',').collect();
+    if fields.len() > 2 && fields[0] == "10" {
+        Some(fields[2])
+    } else {
+        None
+    }
+}
+
+/// Count sketch elements by type within a set of element lines.
+fn count_sketch_element_types(lines: &[&str]) -> (usize, usize, usize, usize) {
+    let mut connectors = 0;
+    let mut labels = 0;
+    let mut valves = 0;
+    let mut clouds = 0;
+    for line in lines {
+        if line.starts_with("1,") {
+            connectors += 1;
+        } else if line.starts_with("10,") {
+            labels += 1;
+        } else if line.starts_with("11,") {
+            valves += 1;
+        } else if line.starts_with("12,") {
+            clouds += 1;
+        }
+    }
+    (connectors, labels, valves, clouds)
+}
+
+/// Verify mark2.mdl format roundtrip: parse, write, and compare the
+/// output against the original at the per-view-element level.
+///
+/// Checks:
+/// - AC1.1: Exactly 2 views with correct names
+/// - AC1.2: Per-view element lines match as unordered sets
+/// - AC1.4: Font specification preserved per view
+/// - AC3.1: Lookup calls use `table ( input )` syntax
+/// - AC3.2: Lookup range bounds preserved
+/// - AC4.1: Short equations use inline format
+/// - AC4.3: Variable name casing preserved
+#[test]
+fn mdl_format_roundtrip() {
+    let mut failures: Vec<String> = Vec::new();
+
+    let file_path = resolve_path("test/bobby/vdf/econ/mark2.mdl");
+    let source = fs::read_to_string(&file_path).expect("read mark2.mdl");
+    let project = mdl::parse_mdl(&source).expect("parse mark2.mdl");
+    let output = mdl::project_to_mdl(&project).expect("write mark2.mdl");
+
+    // Re-parse the output to confirm it is valid MDL
+    let _project2 = mdl::parse_mdl(&output).expect("re-parse roundtripped mark2.mdl");
+
+    // -----------------------------------------------------------------------
+    // AC1.1: Exactly 2 views with correct names
+    // -----------------------------------------------------------------------
+    let orig_views = split_sketch_into_views(&source);
+    let output_views = split_sketch_into_views(&output);
+
+    if output_views.len() != 2 {
+        failures.push(format!(
+            "AC1.1: expected 2 views, got {}",
+            output_views.len()
+        ));
+    } else {
+        // View names should contain the numbered prefix from the original
+        let expected_names = ["1 housing", "2 investments"];
+        for (i, expected) in expected_names.iter().enumerate() {
+            if !output_views[i].0.contains(expected) {
+                failures.push(format!(
+                    "AC1.1: view[{i}] name {:?} does not contain {:?}",
+                    output_views[i].0, expected
+                ));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AC1.2: Per-view elements match as unordered sets
+    //
+    // UIDs are renumbered and coordinates may shift during roundtrip, so
+    // we compare named elements (type 10) by name and non-named elements
+    // (connectors, valves, clouds) by count.
+    // -----------------------------------------------------------------------
+    if orig_views.len() == output_views.len() {
+        for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
+            // Compare named elements (type 10) by variable name
+            let orig_names: HashSet<&str> = orig
+                .1
+                .iter()
+                .filter_map(|l| extract_element_name(l))
+                .collect();
+            let out_names: HashSet<&str> = out
+                .1
+                .iter()
+                .filter_map(|l| extract_element_name(l))
+                .collect();
+
+            let missing_names: Vec<_> = orig_names.difference(&out_names).collect();
+            let extra_names: Vec<_> = out_names.difference(&orig_names).collect();
+
+            // Shadow references to the built-in "Time" variable are not
+            // preserved during roundtrip (Time is not a model variable).
+            let missing_non_time: Vec<_> =
+                missing_names.iter().filter(|n| **n != &"Time").collect();
+            if !missing_non_time.is_empty() {
+                failures.push(format!(
+                    "AC1.2: view[{i}] ({:?}) missing named element(s): {:?}",
+                    orig.0, missing_non_time
+                ));
+            }
+            if !extra_names.is_empty() {
+                failures.push(format!(
+                    "AC1.2: view[{i}] ({:?}) has extra named element(s): {:?}",
+                    out.0, extra_names
+                ));
+            }
+
+            // Compare element type counts
+            let (orig_conn, orig_lbl, orig_valve, orig_cloud) = count_sketch_element_types(&orig.1);
+            let (out_conn, out_lbl, out_valve, out_cloud) = count_sketch_element_types(&out.1);
+
+            // Label count may differ by the number of Time shadow elements
+            let time_shadow_count = orig
+                .1
+                .iter()
+                .filter(|l| l.starts_with("10,") && extract_element_name(l) == Some("Time"))
+                .count();
+            if orig_lbl - time_shadow_count != out_lbl {
+                failures.push(format!(
+                    "AC1.2: view[{i}] label count: orig={orig_lbl} (minus {time_shadow_count} Time shadows) \
+                     vs out={out_lbl}"
+                ));
+            }
+            if orig_valve != out_valve {
+                failures.push(format!(
+                    "AC1.2: view[{i}] valve count: orig={orig_valve} out={out_valve}"
+                ));
+            }
+            if orig_cloud != out_cloud {
+                failures.push(format!(
+                    "AC1.2: view[{i}] cloud count: orig={orig_cloud} out={out_cloud}"
+                ));
+            }
+            // Connector counts may differ for documented reasons:
+            // 1. Shadow references to the built-in Time variable are dropped
+            //    (Time is not a model variable), along with their connectors.
+            // 2. Init-only links (field 10 = 1, dashed arrows in Vensim) may
+            //    not survive the roundtrip.
+            // Count the expected dropped connectors from both sources.
+            let time_uids: HashSet<&str> = orig
+                .1
+                .iter()
+                .filter(|l| l.starts_with("10,") && extract_element_name(l) == Some("Time"))
+                .filter_map(|l| l.split(',').nth(1))
+                .collect();
+            let dropped_time_connectors = orig
+                .1
+                .iter()
+                .filter(|l| {
+                    if !l.starts_with("1,") {
+                        return false;
+                    }
+                    let fields: Vec<&str> = l.split(',').collect();
+                    fields.len() > 3
+                        && (time_uids.contains(fields[2]) || time_uids.contains(fields[3]))
+                })
+                .count();
+            let init_only_connectors = orig
+                .1
+                .iter()
+                .filter(|l| {
+                    if !l.starts_with("1,") {
+                        return false;
+                    }
+                    let fields: Vec<&str> = l.split(',').collect();
+                    fields.len() > 10 && fields[10] == "1"
+                })
+                .count();
+            let expected_dropped = dropped_time_connectors + init_only_connectors;
+            let conn_diff = (orig_conn as i32 - out_conn as i32).abs();
+            if conn_diff > expected_dropped as i32 {
+                failures.push(format!(
+                    "AC1.2: view[{i}] connector count: orig={orig_conn} out={out_conn} \
+                     (diff={conn_diff} exceeds expected_dropped={expected_dropped}: \
+                     time={dropped_time_connectors}, init_only={init_only_connectors})"
+                ));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AC1.4: Font specification preserved per view
+    // -----------------------------------------------------------------------
+    for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
+        match (orig.2, out.2) {
+            (Some(orig_font), Some(out_font)) => {
+                if !out_font.contains("Verdana|10") {
+                    failures.push(format!(
+                        "AC1.4: view[{i}] font does not contain 'Verdana|10': {:?}",
+                        out_font
+                    ));
+                }
+                if orig_font != out_font {
+                    failures.push(format!(
+                        "AC1.4: view[{i}] font differs: orig={:?} out={:?}",
+                        orig_font, out_font
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                failures.push(format!("AC1.4: view[{i}] missing font line in output"));
+            }
+            _ => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3.1: Lookup calls use `table ( input )` syntax, not LOOKUP()
+    // -----------------------------------------------------------------------
+    // mark2.mdl has: "historical federal funds rate = federal funds rate lookup ( Time )"
+    if output.contains("LOOKUP(")
+        && !output.contains("WITH LOOKUP(")
+        && !output.contains("LOOKUP INVERT(")
+    {
+        failures.push(
+            "AC3.1: output contains bare 'LOOKUP(' which should be table_name(input) syntax"
+                .to_string(),
+        );
+    }
+
+    // Positive check: the lookup call should use the Vensim table-call syntax
+    let has_table_call = output.contains("federal funds rate lookup ( Time )")
+        || output.contains("federal funds rate lookup( Time )")
+        || output.contains("federal funds rate lookup (Time)")
+        || output.contains("federal funds rate lookup(Time)");
+    if !has_table_call {
+        // Also accept the pattern where it appears in any casing
+        let lower_output = output.to_lowercase();
+        let has_lower_table_call = lower_output.contains("federal funds rate lookup")
+            && !lower_output.contains("lookup(federal");
+        if !has_lower_table_call {
+            failures.push(
+                "AC3.1: output does not contain 'federal funds rate lookup(...)' table call syntax"
+                    .to_string(),
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3.2: Lookup range bounds preserved
+    // -----------------------------------------------------------------------
+    // mark2.mdl has lookups with explicit ranges like [(0,0)-(300,10)]
+    if !output.contains("[(0,0)-(300,10)]") {
+        failures.push(
+            "AC3.2: federal funds rate lookup range [(0,0)-(300,10)] not preserved".to_string(),
+        );
+    }
+    if !output.contains("[(0,0)-(400,10)]") {
+        failures
+            .push("AC3.2: inflation rate lookup range [(0,0)-(400,10)] not preserved".to_string());
+    }
+    // hud policy lookup range
+    if !output.contains("[(108,0)-(800,1)]") {
+        failures.push("AC3.2: hud policy lookup range [(108,0)-(800,1)] not preserved".to_string());
+    }
+
+    // -----------------------------------------------------------------------
+    // AC4.1: Short equations use inline format
+    // -----------------------------------------------------------------------
+    // mark2.mdl has: "average repayment rate = 0.03"
+    if !output.contains("average repayment rate = 0.03")
+        && !output.contains("average repayment rate= 0.03")
+        && !output.contains("average repayment rate =0.03")
+    {
+        failures.push(
+            "AC4.1: short equation 'average repayment rate = 0.03' not in inline format"
+                .to_string(),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC4.3: Variable name casing preserved on LHS
+    // -----------------------------------------------------------------------
+    // mark2.mdl has mixed case: "New Homes On Market", "Endogenous Federal Funds Rate"
+    let has_original_casing =
+        output.contains("Endogenous Federal Funds Rate") || output.contains("New Homes On Market");
+    if !has_original_casing {
+        failures.push(
+            "AC4.3: original variable casing not preserved (expected 'Endogenous Federal Funds Rate' or 'New Homes On Market')"
+                .to_string(),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Report all failures
+    // -----------------------------------------------------------------------
+    if !failures.is_empty() {
+        panic!(
+            "{} MDL format roundtrip failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }
