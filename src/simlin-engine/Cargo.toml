@@ -77,6 +77,10 @@ name = "simulate_systems"
 required-features = ["file_io", "testing"]
 
 [[test]]
+name = "systems_roundtrip"
+required-features = ["file_io", "testing"]
+
+[[test]]
 name = "roundtrip"
 
 [[test]]

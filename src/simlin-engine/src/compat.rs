@@ -37,6 +37,10 @@ pub fn to_mdl(project: &Project) -> Result<String> {
     mdl::project_to_mdl(project)
 }
 
+pub fn to_systems(project: &Project) -> Result<String> {
+    systems::project_to_systems(project)
+}
+
 #[cfg(feature = "xmutil")]
 pub fn open_vensim_xmutil(contents: &str) -> Result<Project> {
     use crate::common::{Error, ErrorCode, ErrorKind};

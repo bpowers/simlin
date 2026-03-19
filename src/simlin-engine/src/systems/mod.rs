@@ -12,5 +12,7 @@ pub mod ast;
 mod lexer;
 mod parser;
 pub mod translate;
+pub mod writer;
 
 pub use parser::parse;
+pub use writer::project_to_systems;
