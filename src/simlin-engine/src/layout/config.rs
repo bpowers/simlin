@@ -22,6 +22,8 @@ pub struct LayoutConfig {
     pub aux_height: f64,
     pub cloud_width: f64,
     pub cloud_height: f64,
+    pub module_width: f64,
+    pub module_height: f64,
 
     // Canvas positioning
     /// Starting X position for first chain.
@@ -74,6 +76,8 @@ impl LayoutConfig {
         self.aux_height = self.aux_height.max(1.0);
         self.cloud_width = self.cloud_width.max(1.0);
         self.cloud_height = self.cloud_height.max(1.0);
+        self.module_width = self.module_width.max(1.0);
+        self.module_height = self.module_height.max(1.0);
         self.annealing_cooling_rate = self.annealing_cooling_rate.clamp(0.0, 1.0);
         self.loop_curvature_factor = self.loop_curvature_factor.clamp(0.0, 1.0);
         self.annealing_reheat_period = self.annealing_reheat_period.max(1);
@@ -99,6 +103,8 @@ impl Default for LayoutConfig {
             aux_height: 18.0,
             cloud_width: 20.0,
             cloud_height: 20.0,
+            module_width: 55.0,
+            module_height: 45.0,
             start_x: 100.0,
             start_y: 100.0,
             loop_curvature_factor: 0.3,
@@ -134,6 +140,8 @@ mod tests {
         assert!((config.aux_height - 18.0).abs() < f64::EPSILON);
         assert!((config.cloud_width - 20.0).abs() < f64::EPSILON);
         assert!((config.cloud_height - 20.0).abs() < f64::EPSILON);
+        assert!((config.module_width - 55.0).abs() < f64::EPSILON);
+        assert!((config.module_height - 45.0).abs() < f64::EPSILON);
 
         // Spacing
         assert!((config.horizontal_spacing - 100.0).abs() < f64::EPSILON);
