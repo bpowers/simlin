@@ -97,8 +97,14 @@ pub fn parse(input: &str) -> Result<SystemsModel> {
                 // Reject Leak/Conversion from infinite sources: these produce
                 // inf/NaN values because the available stock is infinite.
                 // The Python systems package raises IllegalSourceStock.
-                if source_ref.is_infinite
-                    && matches!(flow_type, FlowType::Leak | FlowType::Conversion)
+                // Use the resolved stock state (not source_ref.is_infinite)
+                // because the stock may have been declared infinite on an
+                // earlier line without bracket syntax on this line.
+                let source_is_infinite = stock_index
+                    .get(&source_ref.name)
+                    .map(|&idx| stocks[idx].is_infinite)
+                    .unwrap_or(false);
+                if source_is_infinite && matches!(flow_type, FlowType::Leak | FlowType::Conversion)
                 {
                     return Err(Error::new(
                         ErrorKind::Import,
@@ -847,6 +853,25 @@ mod tests {
     fn rate_from_infinite_source_allowed() {
         let result = parse("[a] > b @ 5");
         assert!(result.is_ok());
+    }
+
+    /// Leak/Conversion from infinite source declared on earlier line
+    #[test]
+    fn leak_from_earlier_infinite_source_rejected() {
+        let result = parse("[A]\nA > B @ Leak(0.5)");
+        assert!(
+            result.is_err(),
+            "should reject Leak from earlier-declared infinite source"
+        );
+    }
+
+    #[test]
+    fn conversion_from_earlier_infinite_source_rejected() {
+        let result = parse("[A]\nA > B @ 0.5");
+        assert!(
+            result.is_err(),
+            "should reject Conversion from earlier-declared infinite source"
+        );
     }
 
     /// FlowNoRate creates both stocks but no flow
