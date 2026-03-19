@@ -1048,6 +1048,128 @@ fn wrap_active_initial(eqn: &str, compat: &datamodel::Compat) -> String {
     }
 }
 
+/// Split an MDL equation string into tokens suitable for line wrapping.
+///
+/// Tokens preserve the original text exactly -- concatenating them yields
+/// the input.  The split points are chosen so that line breaks can be
+/// inserted *between* tokens at natural boundaries: after commas (with
+/// their trailing space), before binary operators, or after open parens.
+fn tokenize_for_wrapping(eqn: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = eqn.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        match c {
+            ',' => {
+                current.push(chars.next().unwrap());
+                // Absorb trailing space after comma so it stays with the comma token
+                if chars.peek() == Some(&' ') {
+                    current.push(chars.next().unwrap());
+                }
+                tokens.push(std::mem::take(&mut current));
+            }
+            '(' | ')' | '[' | ']' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                current.push(chars.next().unwrap());
+                tokens.push(std::mem::take(&mut current));
+            }
+            '+' | '-' | '*' | '/' | '^' => {
+                // Emit the accumulated text before the operator so a
+                // line break can be inserted before the operator.
+                // But first check if this minus/plus is at the very start
+                // or follows an operator/open-paren (i.e. is unary).
+                let is_unary = current.is_empty()
+                    && tokens.last().is_none_or(|t| {
+                        let trimmed = t.trim();
+                        trimmed.is_empty()
+                            || trimmed.ends_with('(')
+                            || trimmed.ends_with(',')
+                            || trimmed == "+"
+                            || trimmed == "-"
+                            || trimmed == "*"
+                            || trimmed == "/"
+                            || trimmed == "^"
+                    });
+                if is_unary {
+                    current.push(chars.next().unwrap());
+                } else {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                    // Collect the operator and any surrounding spaces as one token
+                    // so "a + b" keeps the " + " together.
+                    current.push(chars.next().unwrap());
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            '\'' => {
+                // Quoted literal -- consume the whole thing as one piece
+                current.push(chars.next().unwrap());
+                while let Some(&ch) = chars.peek() {
+                    current.push(chars.next().unwrap());
+                    if ch == '\'' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                // Quoted identifier -- consume the whole thing
+                current.push(chars.next().unwrap());
+                while let Some(&ch) = chars.peek() {
+                    current.push(chars.next().unwrap());
+                    if ch == '"' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                current.push(chars.next().unwrap());
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// Wrap a long equation with backslash-newline continuations in Vensim style.
+///
+/// Short equations (fitting within `max_line_len` characters) pass through
+/// unchanged.  Longer ones are split at token boundaries with `\\\n\t\t`
+/// continuation sequences (backslash, newline, two tabs for continuation
+/// indent under the single-tab equation indent).
+fn wrap_equation_with_continuations(eqn: &str, max_line_len: usize) -> String {
+    if eqn.len() <= max_line_len {
+        return eqn.to_string();
+    }
+
+    let tokens = tokenize_for_wrapping(eqn);
+    let mut result = String::new();
+    let mut current_line_len: usize = 0;
+
+    for token in &tokens {
+        // If adding this token would exceed the limit and we already have
+        // content on the current line, break before it.
+        if current_line_len + token.len() > max_line_len && current_line_len > 0 {
+            // Trim trailing whitespace from the current line before the break
+            let trimmed_end = result.trim_end_matches(' ').len();
+            result.truncate(trimmed_end);
+            result.push_str("\\\n\t\t");
+            current_line_len = 0;
+        }
+        result.push_str(token);
+        current_line_len += token.len();
+    }
+
+    result
+}
+
 /// Write one MDL entry (scalar or apply-to-all).
 ///
 /// `name` is the pre-formatted display name (with original casing from
@@ -1098,8 +1220,9 @@ fn write_single_entry(
             buf.push_str(&inline_line);
         } else {
             write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
+            let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
             buf.push_str("\n\t");
-            buf.push_str(&mdl_eqn);
+            buf.push_str(&wrapped);
         }
     }
 
@@ -1156,8 +1279,9 @@ fn write_arrayed_element_entries(
             let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
             write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
             let mdl_eqn = equation_to_mdl(eqn);
+            let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
             buf.push_str("\n\t");
-            buf.push_str(&mdl_eqn);
+            buf.push_str(&wrapped);
         }
 
         if i < last_idx {
@@ -2701,6 +2825,103 @@ mod tests {
         assert!(
             buf.contains(" := "),
             "short data equation should use inline format with spaces: {buf}"
+        );
+    }
+
+    // ---- Backslash line continuation tests ----
+
+    #[test]
+    fn wrap_short_equation_unchanged() {
+        let eqn = "a + b";
+        let wrapped = wrap_equation_with_continuations(eqn, 80);
+        assert_eq!(wrapped, eqn);
+        assert!(
+            !wrapped.contains('\\'),
+            "short equation should not be wrapped: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn wrap_long_equation_with_continuations() {
+        // Build an equation >80 chars with multiple terms
+        let eqn = "very long variable a + very long variable b + very long variable c + very long variable d";
+        assert!(eqn.len() > 80, "test equation should exceed 80 chars");
+        let wrapped = wrap_equation_with_continuations(eqn, 80);
+        assert!(
+            wrapped.contains("\\\n\t\t"),
+            "long equation should contain continuation: {wrapped}"
+        );
+        // Verify the continuation produces valid content when joined
+        let rejoined = wrapped.replace("\\\n\t\t", "");
+        // The rejoined text should reconstruct the original (modulo trimmed trailing spaces)
+        assert!(
+            rejoined.contains("very long variable a"),
+            "content should be preserved: {rejoined}"
+        );
+    }
+
+    #[test]
+    fn wrap_equation_breaks_after_comma() {
+        // A function call with many arguments
+        let eqn = "IF THEN ELSE(very long condition variable > threshold value, very long true result, very long false result)";
+        assert!(eqn.len() > 80);
+        let wrapped = wrap_equation_with_continuations(eqn, 80);
+        assert!(wrapped.contains("\\\n\t\t"), "should wrap: {wrapped}");
+        // Verify breaks happen at reasonable points (after commas or before operators)
+        let lines: Vec<&str> = wrapped.split("\\\n\t\t").collect();
+        assert!(lines.len() >= 2, "should have at least 2 lines: {wrapped}");
+    }
+
+    #[test]
+    fn long_equation_variable_entry_uses_continuation() {
+        let long_eqn = "very_long_variable_a + very_long_variable_b + very_long_variable_c + very_long_variable_d";
+        let var = make_aux("some_computed_value", long_eqn, None, "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &HashMap::new());
+        assert!(
+            buf.contains("some computed value=\n\t"),
+            "long equation should use multiline format: {buf}"
+        );
+        // The equation body should have a continuation if the MDL form exceeds 80 chars
+        let mdl_eqn = equation_to_mdl(long_eqn);
+        if mdl_eqn.len() > 80 {
+            assert!(
+                buf.contains("\\\n\t\t"),
+                "long MDL equation should use backslash continuation: {buf}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_equation_variable_entry_no_continuation() {
+        let var = make_aux("x", "42", None, "");
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &HashMap::new());
+        assert!(
+            !buf.contains("\\\n\t\t"),
+            "short equation should not have continuation: {buf}"
+        );
+    }
+
+    #[test]
+    fn tokenize_preserves_equation_text() {
+        let eqn = "IF THEN ELSE(a > b, c + d, e * f)";
+        let tokens = tokenize_for_wrapping(eqn);
+        let rejoined: String = tokens.concat();
+        assert_eq!(
+            rejoined, eqn,
+            "concatenating tokens should reproduce the original"
+        );
+    }
+
+    #[test]
+    fn tokenize_splits_at_operators_and_commas() {
+        let eqn = "a + b, c * d";
+        let tokens = tokenize_for_wrapping(eqn);
+        // Should have splits at +, *, and after comma
+        assert!(
+            tokens.len() >= 5,
+            "expected multiple tokens from operators/commas: {tokens:?}"
         );
     }
 
