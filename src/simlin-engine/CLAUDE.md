@@ -50,7 +50,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 
 ## Format import/export
 
-- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_vensim_with_data()`, `open_xmile()`, `to_xmile()`, `.dat`/CSV loading
+- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_vensim_with_data()`, `open_xmile()`, `open_systems()`, `to_xmile()`, `to_systems()`, `.dat`/CSV loading
 - **`src/data_provider/`** - `DataProvider` trait for resolving external data references (GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT). `NullDataProvider` (default), `FilesystemDataProvider` (CSV/Excel via calamine; feature-gated on `file_io`)
 - **`src/xmile/`** - XMILE (XML interchange format) parsing and generation. Submodules: `model.rs`, `variables.rs`, `dimensions.rs`, `views.rs`. Uses `simlin:` vendor-extension elements for features beyond the XMILE spec: `simlin:mapping`/`simlin:elem` for element-level dimension mappings, `simlin:data-source` for external data references, `simlin:except` for EXCEPT equation metadata
 - **`src/mdl/`** - Native Rust Vensim MDL parser and writer (replaces C++ xmutil):
@@ -62,6 +62,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
   - `xmile_compat.rs` - Expression formatting for XMILE output
   - `settings.rs` - Integration settings parser
 - **`src/vdf.rs`** - Vensim VDF (binary data file) parser. Parses all structural elements (sections, records, name/slot/offset tables, data blocks). Model-guided name-to-OT mapping via `build_section6_guided_ot_map()` uses section-6 OT class codes to identify contiguous stock/non-stock blocks, classifies variables using the parsed model, and assigns OT indices by alphabetical sort within each block. See `docs/design/vdf.md` for the format specification and reverse-engineering history.
+- **`src/systems/`** - Systems format (`.txt`) parser, translator, and writer. A line-oriented notation for stock-and-flow models with implicit flow typing (Rate, Conversion, Leak). Pipeline: `lexer.rs` -> `parser.rs` -> `ast.rs` (IR) -> `translate.rs` (to `datamodel::Project`). Each systems flow becomes a stdlib module instance (`systems_rate`, `systems_leak`, or `systems_conversion`), with chained `available`/`remaining` wiring for multi-outflow stocks. `writer.rs` reconstructs `.txt` format from a translated `datamodel::Project` by inspecting module structure. Public API: `systems::parse()`, `systems::translate::translate()`, `systems::project_to_systems()`
 - **`src/json.rs`** - JSON serialization matching Go `sd` package schema
 - **`src/json_sdai.rs`** - JSON schema for AI metadata augmentation
 - **`src/serde.rs`** - Generic serde utilities
@@ -78,7 +79,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
-- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management)
+- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters including `module_width`/`module_height`), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management). Generates view elements for modules (not just stocks/flows/auxes).
 
 ## Cargo features
 
@@ -90,7 +91,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 ## Generated files (do not edit by hand)
 
 - **`src/project_io.gen.rs`** - Protobuf bindings from `project_io.proto`
-- **`src/stdlib.gen.rs`** - Embedded standard library models from `stdlib/*.stmx`
+- **`src/stdlib.gen.rs`** - Embedded standard library models from `stdlib/*.stmx` (includes `systems_rate`, `systems_leak`, `systems_conversion` for systems format flow types)
 
 ## Tests
 
@@ -100,9 +101,13 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/unit_checking_test.rs`** - Unit checking regression tests
 - **`src/test_sir_xmile.rs`** - SIR epidemiology model integration tests
 - **`src/test_open_vensim.rs`** - Vensim compatibility tests (requires `xmutil` feature)
+- **`src/systems_stdlib_tests.rs`** - Systems format stdlib module tests (rate, leak, conversion wiring)
+- **`tests/test_helpers.rs`** - Shared test helper module (`open_systems_fixture()`, CSV comparison)
 - **`tests/simulate.rs`** - End-to-end simulation integration tests
+- **`tests/simulate_systems.rs`** - Systems format simulation integration tests (fixtures in `test/systems-format/`)
 - **`tests/simulate_ltm.rs`** - LTM feature tests
-- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, LTM metadata, dominant periods)
+- **`tests/systems_roundtrip.rs`** - Systems format parse-translate-write round-trip tests
+- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, modules, LTM metadata, dominant periods)
 - **`tests/json_roundtrip.rs`** - JSON serialization roundtrip
 - **`tests/roundtrip.rs`** - XMILE/MDL roundtrip tests
 - **`tests/vm_alloc.rs`** - VM memory allocation tests
