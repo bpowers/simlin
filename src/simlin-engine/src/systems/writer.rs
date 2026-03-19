@@ -79,9 +79,10 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
         })
         .collect();
 
-    if modules.is_empty() {
-        return Ok(String::new());
-    }
+    // Note: we do NOT return early for empty modules. Stock-only systems
+    // models (no flows) translate to projects with stocks but zero modules.
+    // The code below handles this by emitting stock declarations from the
+    // final loop when no flow groups exist.
 
     let var_by_ident: HashMap<&str, &Variable> =
         model.variables.iter().map(|v| (v.get_ident(), v)).collect();
@@ -488,7 +489,11 @@ fn extract_flow(
 
     // Second pass: find raw stock references (stocks that are drainable but
     // NOT referenced via a drain variable in this equation)
-    let rate_equation = reverse_rewrite_equation(&raw_equation, reverse_rewrites);
+    // Replace internal inf() with systems-format inf (no parens).
+    // The internal representation uses inf() but the systems parser only
+    // accepts bare inf.
+    let rate_equation =
+        reverse_rewrite_equation(&raw_equation, reverse_rewrites).replace("inf()", "inf");
     for token in tokenize_idents(&rate_equation) {
         if effective_stock_names.contains(token)
             && !effective_in_eq.contains(token)
@@ -638,12 +643,22 @@ fn find_stock_max(
             continue;
         }
 
+        // Match " - {stock}" exactly: the stock ident must not be a prefix
+        // of a longer identifier (e.g., " - a" must not match within " - ab").
         let stock_pattern = format!(" - {}", stock.ident);
-        if !cap_eq.contains(&stock_pattern) {
-            continue;
+        let pattern_idx = match cap_eq.find(&stock_pattern) {
+            Some(idx) => idx,
+            None => continue,
+        };
+        let after = pattern_idx + stock_pattern.len();
+        if after < cap_eq.len() {
+            let next_byte = cap_eq.as_bytes()[after];
+            if next_byte.is_ascii_alphanumeric() || next_byte == b'_' {
+                continue; // prefix match, not exact
+            }
         }
 
-        let max_part = cap_eq.split(&stock_pattern).next()?;
+        let max_part = &cap_eq[..pattern_idx];
         return Some(reverse_rewrite_equation(max_part, reverse_rewrites));
     }
     None
@@ -799,6 +814,32 @@ mod tests {
             reverse_rewrite_equation("a + b * 3", &rewrites),
             "a + b * 3"
         );
+    }
+
+    #[test]
+    fn stock_only_model_emits_declarations() {
+        let input = "[Candidates]\nRecruiter(5)\n";
+        let output = roundtrip_write(input);
+        assert!(!output.is_empty(), "stock-only model should produce output");
+        assert!(
+            output.contains("recruiter"),
+            "should contain recruiter stock: {output}"
+        );
+        assert!(
+            output.contains("[candidates]"),
+            "should contain infinite stock: {output}"
+        );
+    }
+
+    #[test]
+    fn inf_rate_not_emitted_as_inf_parens() {
+        let input = "A > B @ inf\n";
+        let output = roundtrip_write(input);
+        assert!(
+            !output.contains("inf()"),
+            "should not contain inf(): {output}"
+        );
+        assert!(output.contains("inf"), "should contain inf: {output}");
     }
 
     #[test]
