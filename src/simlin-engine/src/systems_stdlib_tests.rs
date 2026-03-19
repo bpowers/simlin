@@ -379,7 +379,11 @@ fn test_conversion_with_truncation() {
 
 #[test]
 fn test_conversion_limited_by_dest_capacity() {
-    // available=10, rate=0.5, dest_capacity=3 -> outflow=3, waste=7, remaining=0
+    // available=10, rate=0.5, dest_capacity=3
+    // Python reference: max_src_change = min(10, floor(3/0.5)) = min(10, 6) = 6
+    //   outflow = floor(6 * 0.5) = 3
+    //   waste = 6 - 3 = 3
+    //   remaining = 10 - 6 = 4
     let project = conversion_project(10.0, 0.5, 3.0);
     let outflow = run_and_get(&project, "out_outflow");
     let waste = run_and_get(&project, "out_waste");
@@ -389,12 +393,12 @@ fn test_conversion_limited_by_dest_capacity() {
         "expected outflow=3.0, got {outflow}"
     );
     assert!(
-        (waste - 7.0).abs() < 1e-6,
-        "expected waste=7.0, got {waste}"
+        (waste - 3.0).abs() < 1e-6,
+        "expected waste=3.0, got {waste}"
     );
     assert!(
-        (remaining - 0.0).abs() < 1e-6,
-        "expected remaining=0.0, got {remaining}"
+        (remaining - 4.0).abs() < 1e-6,
+        "expected remaining=4.0, got {remaining}"
     );
 }
 

@@ -103,9 +103,34 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     let mut deferred_capacities: Vec<DeferredCapacity> = Vec::new();
     let mut deferred_rates: Vec<DeferredRate> = Vec::new();
 
-    // Track (source, dest) pair counts for disambiguating duplicate flows.
-    // First occurrence uses the base name; subsequent occurrences append _2, _3, etc.
-    let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+    // Pre-compute disambiguated suffixes for all flows. Flows with
+    // the same (source, dest) pair get numbered: first occurrence has
+    // no suffix, subsequent get _2, _3, etc.
+    let flow_suffixes: HashMap<usize, String> = {
+        let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+        let mut suffixes = HashMap::new();
+        for stock in &model.stocks {
+            let source_canon = canon(&stock.name);
+            let flow_indices = match flows_by_source.get(&source_canon) {
+                Some(indices) => indices,
+                None => continue,
+            };
+            for &flow_idx in flow_indices.iter().rev() {
+                let flow = &model.flows[flow_idx];
+                let dest_canon = canon(&flow.dest);
+                let pair_key = (source_canon.clone(), dest_canon.clone());
+                let occurrence = pair_counts.entry(pair_key).or_insert(0);
+                *occurrence += 1;
+                let suffix = if *occurrence == 1 {
+                    String::new()
+                } else {
+                    format!("_{}", *occurrence)
+                };
+                suffixes.insert(flow_idx, suffix);
+            }
+        }
+        suffixes
+    };
 
     // Process each source stock's outflows in reversed declaration order
     for stock in &model.stocks {
@@ -122,16 +147,7 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
         for &flow_idx in flow_indices.iter().rev() {
             let flow = &model.flows[flow_idx];
             let dest_canon = canon(&flow.dest);
-
-            // Track duplicate (source, dest) pairs
-            let pair_key = (source_canon.clone(), dest_canon.clone());
-            let occurrence = pair_counts.entry(pair_key).or_insert(0);
-            *occurrence += 1;
-            let suffix = if *occurrence == 1 {
-                String::new()
-            } else {
-                format!("_{}", *occurrence)
-            };
+            let suffix = &flow_suffixes[&flow_idx];
 
             // Module ident: "{source}_outflows_{dest}" or "{source}_outflows" if single
             let module_ident = if has_single_outflow {
@@ -279,36 +295,16 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
         }
     }
 
-    // Pre-compute the flow_ident for each flow_idx so drain state and
-    // capacity calculations use the same disambiguated names as the
-    // module/flow generation above.
-    let mut flow_ident_for_idx: HashMap<usize, String> = HashMap::new();
-    {
-        let mut ident_counts: HashMap<(String, String), usize> = HashMap::new();
-        // Walk in the same order as the module generation loop above:
-        // per-source, reversed declaration order.
-        for stock in &model.stocks {
-            let source_canon = canon(&stock.name);
-            let flow_indices = match flows_by_source.get(&source_canon) {
-                Some(indices) => indices,
-                None => continue,
-            };
-            for &flow_idx in flow_indices.iter().rev() {
-                let flow = &model.flows[flow_idx];
-                let dest_canon = canon(&flow.dest);
-                let pair_key = (source_canon.clone(), dest_canon.clone());
-                let occurrence = ident_counts.entry(pair_key).or_insert(0);
-                *occurrence += 1;
-                let suffix = if *occurrence == 1 {
-                    String::new()
-                } else {
-                    format!("_{}", *occurrence)
-                };
-                flow_ident_for_idx
-                    .insert(flow_idx, format!("{source_canon}_to_{dest_canon}{suffix}"));
-            }
-        }
-    }
+    // Build flow_ident for each flow_idx using the pre-computed suffixes.
+    let flow_ident_for_idx: HashMap<usize, String> = flow_suffixes
+        .iter()
+        .map(|(&idx, suffix)| {
+            let flow = &model.flows[idx];
+            let source_canon = canon(&flow.source);
+            let dest_canon = canon(&flow.dest);
+            (idx, format!("{source_canon}_to_{dest_canon}{suffix}"))
+        })
+        .collect();
 
     // Pre-compute incremental drain states for cross-stock references.
     //

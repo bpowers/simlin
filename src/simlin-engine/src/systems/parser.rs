@@ -102,7 +102,7 @@ pub fn parse(input: &str) -> Result<SystemsModel> {
                 // earlier line without bracket syntax on this line.
                 let source_is_infinite = stock_index
                     .get(&source_ref.name)
-                    .map(|&idx| stocks[idx].is_infinite)
+                    .map(|&idx| stocks[idx].is_infinite || stocks[idx].initial == Expr::Inf)
                     .unwrap_or(false);
                 if source_is_infinite && matches!(flow_type, FlowType::Leak | FlowType::Conversion)
                 {
@@ -871,6 +871,26 @@ mod tests {
         assert!(
             result.is_err(),
             "should reject Conversion from earlier-declared infinite source"
+        );
+    }
+
+    /// Leak from stock with infinite initial value (not bracket syntax)
+    #[test]
+    fn leak_from_inf_initial_value_rejected() {
+        let result = parse("A(inf) > B @ Leak(0.5)");
+        assert!(
+            result.is_err(),
+            "should reject Leak from stock with inf initial value"
+        );
+    }
+
+    /// Conversion from stock with infinite initial value (not bracket syntax)
+    #[test]
+    fn conversion_from_inf_initial_value_rejected() {
+        let result = parse("A(inf) > B @ 0.5");
+        assert!(
+            result.is_err(),
+            "should reject Conversion from stock with inf initial value"
         );
     }
 

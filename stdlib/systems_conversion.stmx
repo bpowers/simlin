@@ -21,19 +21,25 @@
             <aux name="dest_capacity">
                 <eqn>INF</eqn>
             </aux>
+            <!-- max_src_change: how many source units to consume.
+                 When the destination is uncapped (dest_capacity = INF),
+                 consume all available source.  When capped, only consume
+                 enough to fill the remaining capacity at the given rate:
+                 floor(dest_capacity / rate).  Clamp to [0, available]. -->
+            <aux name="max_src_change">
+                <eqn>IF dest_capacity = INF THEN available ELSE MIN(available, MAX(0, INT(dest_capacity / rate)))</eqn>
+            </aux>
             <aux name="outflow">
-                <eqn>MIN(INT(available * rate), dest_capacity)</eqn>
+                <eqn>INT(max_src_change * rate)</eqn>
             </aux>
             <aux name="waste">
-                <eqn>available - outflow</eqn>
+                <eqn>max_src_change - outflow</eqn>
             </aux>
-            <!-- remaining is always 0: conversion fully consumes the source stock.
-                 The converted fraction goes to the destination via outflow,
-                 and everything else is removed via the waste flow. This matches
-                 the Python systems package semantics where conversion drains
-                 the entire available amount from the source. -->
+            <!-- remaining: source units NOT consumed.  When the destination
+                 has finite capacity, some source may be left over because
+                 less was needed than available. -->
             <aux name="remaining">
-                <eqn>0</eqn>
+                <eqn>available - max_src_change</eqn>
             </aux>
         </variables>
         <views>
