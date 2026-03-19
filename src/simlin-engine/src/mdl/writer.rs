@@ -85,6 +85,45 @@ fn format_mdl_ident(name: &str) -> String {
     }
 }
 
+/// Build a mapping from canonical variable ident to display name (with
+/// original casing, spaces instead of underscores) by walking view elements.
+///
+/// The first occurrence of a name wins, so if a variable appears in multiple
+/// views the first view's casing is used.
+fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for view in views {
+        let View::StockFlow(sf) = view;
+        for element in &sf.elements {
+            let name = match element {
+                ViewElement::Aux(a) => &a.name,
+                ViewElement::Stock(s) => &s.name,
+                ViewElement::Flow(f) => &f.name,
+                _ => continue,
+            };
+            let canonical = crate::common::canonicalize(name).into_owned();
+            let display = underbar_to_space(name);
+            map.entry(canonical).or_insert(display);
+        }
+    }
+    map
+}
+
+/// Look up the display name for a canonical ident, falling back to
+/// `format_mdl_ident` if no view element provides original casing.
+fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
+    match display_names.get(ident) {
+        Some(name) => {
+            if needs_mdl_quoting(name) {
+                format!("\"{}\"", escape_mdl_quoted_ident(name))
+            } else {
+                name.clone()
+            }
+        }
+        None => format_mdl_ident(ident),
+    }
+}
+
 /// Arrayed element keys encode multidimensional indices as comma-separated
 /// canonical names (for example `c,a,f`). Preserve tuple structure so MDL
 /// parsers can split indices, and format each token independently.
@@ -752,10 +791,14 @@ fn format_f64(v: f64) -> String {
 /// ```text
 /// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
 /// ```
-pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
+pub fn write_variable_entry(
+    buf: &mut String,
+    var: &datamodel::Variable,
+    display_names: &HashMap<String, String>,
+) {
     match var {
         datamodel::Variable::Stock(s) => {
-            write_stock_variable(buf, s);
+            write_stock_variable(buf, s, display_names);
             return;
         }
         datamodel::Variable::Module(_) => return,
@@ -784,13 +827,14 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
 
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
+    let name = display_name_for_ident(ident, display_names);
 
     match equation {
         Equation::Scalar(eqn) => {
             let effective_eqn = data_source_eqn
                 .clone()
                 .unwrap_or_else(|| wrap_active_initial(eqn, compat));
-            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, effective_gf);
+            write_single_entry(buf, &name, &effective_eqn, &[], units, doc, effective_gf);
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
@@ -799,7 +843,7 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
                 .unwrap_or_else(|| wrap_active_initial(eqn, compat));
             write_single_entry(
                 buf,
-                ident,
+                &name,
                 &effective_eqn,
                 &dim_names,
                 units,
@@ -808,7 +852,7 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
             );
         }
         Equation::Arrayed(dims, elements, default_eq, _) => {
-            write_arrayed_entries(buf, ident, dims, elements, default_eq, units, doc);
+            write_arrayed_entries(buf, &name, dims, elements, default_eq, units, doc);
         }
     }
 }
@@ -868,7 +912,11 @@ fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
 /// The datamodel stores stocks with the initial value in `equation` and
 /// inflows/outflows as separate string vectors.  The MDL format requires
 /// `INTEG(net_flow, initial_value)`.
-fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
+fn write_stock_variable(
+    buf: &mut String,
+    stock: &datamodel::Stock,
+    display_names: &HashMap<String, String>,
+) {
     let mut net_flow = String::new();
     for (i, inflow) in stock.inflows.iter().enumerate() {
         if i > 0 {
@@ -884,10 +932,12 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
         net_flow.push('0');
     }
 
+    let name = display_name_for_ident(&stock.ident, display_names);
+
     match &stock.equation {
         Equation::Scalar(eqn) => write_stock_entry(
             buf,
-            &stock.ident,
+            &name,
             &net_flow,
             &equation_to_mdl(eqn),
             &[],
@@ -898,7 +948,7 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
             write_stock_entry(
                 buf,
-                &stock.ident,
+                &name,
                 &net_flow,
                 &equation_to_mdl(eqn),
                 &dim_names,
@@ -909,7 +959,7 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
         Equation::Arrayed(dims, elements, default_eq, _) => {
             write_arrayed_stock_entries(
                 buf,
-                &stock.ident,
+                &name,
                 &net_flow,
                 dims,
                 elements,
@@ -929,16 +979,16 @@ fn normalized_stock_initial(initial: &str) -> String {
     }
 }
 
+/// `name` is the pre-formatted display name (with original casing).
 fn write_stock_entry(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     net_flow: &str,
     initial: &str,
     dims: &[&str],
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = format_mdl_ident(ident);
     let initial = normalized_stock_initial(initial);
 
     if dims.is_empty() {
@@ -956,7 +1006,7 @@ fn write_stock_entry(
 #[allow(clippy::too_many_arguments)]
 fn write_arrayed_stock_entries(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     net_flow: &str,
     _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
@@ -964,7 +1014,6 @@ fn write_arrayed_stock_entries(
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = format_mdl_ident(ident);
     let last_idx = elements.len().saturating_sub(1);
 
     for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
@@ -1000,16 +1049,18 @@ fn wrap_active_initial(eqn: &str, compat: &datamodel::Compat) -> String {
 }
 
 /// Write one MDL entry (scalar or apply-to-all).
+///
+/// `name` is the pre-formatted display name (with original casing from
+/// view elements, or `format_mdl_ident` fallback).
 fn write_single_entry(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     eqn: &str,
     dims: &[&str],
     units: &Option<String>,
     doc: &str,
     gf: Option<&GraphicalFunction>,
 ) {
-    let name = format_mdl_ident(ident);
     let dim_suffix = if dims.is_empty() {
         String::new()
     } else {
@@ -1055,15 +1106,14 @@ fn write_single_entry(
 /// element entries and leave omitted elements implicit.
 fn write_arrayed_entries(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
     _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = format_mdl_ident(ident);
-    write_arrayed_element_entries(buf, &name, elements, units, doc);
+    write_arrayed_element_entries(buf, name, elements, units, doc);
 }
 
 fn write_arrayed_element_entries(
@@ -1774,6 +1824,8 @@ impl MdlWriter {
             write_dimension_def(&mut self.buf, dim);
         }
 
+        let display_names = build_display_name_map(&model.views);
+
         // Build a set of variable idents that belong to any group
         // (skip .Control -- those vars are sim specs emitted separately)
         let mut grouped_idents: HashSet<&str> = HashSet::new();
@@ -1806,7 +1858,7 @@ impl MdlWriter {
                     .iter()
                     .find(|v| v.get_ident() == member_ident)
                 {
-                    write_variable_entry(&mut self.buf, var);
+                    write_variable_entry(&mut self.buf, var, &display_names);
                     self.buf.push('\n');
                 }
             }
@@ -1815,7 +1867,7 @@ impl MdlWriter {
         // 3. Ungrouped variables
         for var in &model.variables {
             if !grouped_idents.contains(var.get_ident()) {
-                write_variable_entry(&mut self.buf, var);
+                write_variable_entry(&mut self.buf, var, &display_names);
                 self.buf.push('\n');
             }
         }
@@ -2549,7 +2601,7 @@ mod tests {
     fn scalar_aux_entry() {
         let var = make_aux("characteristic_time", "10", Some("Minutes"), "How long");
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
             "characteristic time=\n\t10\n\t~\tMinutes\n\t~\tHow long\n\t|"
@@ -2560,7 +2612,7 @@ mod tests {
     fn scalar_aux_entry_quotes_special_identifier_name() {
         let var = make_aux("$_euro", "10", Some("Dmnl"), "");
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(buf, "\"$ euro\"=\n\t10\n\t~\tDmnl\n\t~\t\n\t|");
     }
 
@@ -2568,7 +2620,7 @@ mod tests {
     fn scalar_aux_no_units() {
         let var = make_aux("rate", "a + b", None, "");
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(buf, "rate=\n\ta + b\n\t~\t\n\t~\t\n\t|");
     }
 
@@ -2589,7 +2641,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
             "teacup temperature=\n\tINTEG(-heat loss to room, 180)\n\t~\tDegrees Fahrenheit\n\t~\tTemperature of tea\n\t|"
@@ -2610,7 +2662,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(
             buf.contains("INTEG(births-deaths, 1000)"),
             "Expected INTEG with both inflow and outflow: {}",
@@ -2632,7 +2684,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(
             buf.contains("inventory[region]=\n\tINTEG(inflow-outflow, 100)"),
             "ApplyToAll stock should emit arrayed INTEG with initial value: {}",
@@ -2662,7 +2714,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(
             buf.contains("inventory[north]=\n\tINTEG(inflow-outflow, 100)"),
             "First arrayed stock element should retain initial value: {}",
@@ -2691,7 +2743,7 @@ mod tests {
             },
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(
             buf.contains("ACTIVE INITIAL(y * 2, 100)"),
             "Expected ACTIVE INITIAL wrapper: {}",
@@ -2722,7 +2774,7 @@ mod tests {
         });
 
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(
             buf.contains("imported constants:="),
             "GET DIRECT reconstruction should use := for data equations: {buf}"
@@ -2751,7 +2803,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
             "effect of x=\n\tWITH LOOKUP(Time, ([(0,0)-(2,1)],(0,0),(1,0.5),(2,1)))\n\t~\t\n\t~\tLookup effect\n\t|"
@@ -2781,7 +2833,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         // Standalone lookup: name(\n\tbody)
         assert_eq!(
             buf,
@@ -2807,7 +2859,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
             "rate a[one dimensional subscript]=\n\t100\n\t~\t\n\t~\t\n\t|"
@@ -2830,7 +2882,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(buf, "matrix a[dim a,dim b]=\n\t0\n\t~\tDmnl\n\t~\t\n\t|");
     }
 
@@ -2856,7 +2908,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert_eq!(
             buf,
             "rate a[entry 1]=\n\t0.01\n\t~~|\nrate a[entry 2]=\n\t0.2\n\t~~|\nrate a[entry 3]=\n\t0.3\n\t~\t\n\t~\t\n\t|"
@@ -2884,7 +2936,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         // Underscored element names should appear with spaces
         assert!(buf.contains("[north america]"));
         assert!(buf.contains("[south america]"));
@@ -2921,7 +2973,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
 
         assert!(
             buf.contains("power5[c,a,f]="),
@@ -2959,7 +3011,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         // Element "a" has empty equation + gf → standalone lookup
         assert!(buf.contains("tbl[a](\n\t[(0,0)-(2,1)]"));
         assert!(buf.contains("tbl[b]=\n\t5"));
@@ -3009,7 +3061,7 @@ mod tests {
             "",
         );
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         // Data equations use := instead of =
         assert!(buf.contains("direct data down:="), "expected := in: {buf}");
     }
@@ -3018,7 +3070,7 @@ mod tests {
     fn non_data_equation_uses_equals() {
         let var = make_aux("x", "42", None, "");
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(buf.starts_with("x="), "expected = in: {buf}");
     }
 
@@ -3055,7 +3107,7 @@ mod tests {
             "",
         );
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         // The equation content must preserve underscores in quoted strings
         assert!(
             buf.contains("GET DIRECT DATA('data_file.csv',',','A','B2')"),
@@ -3100,7 +3152,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         // Flow with equation "TIME" + gf → WITH LOOKUP
         assert!(buf.contains("flow rate=\n\tWITH LOOKUP(Time, ([(0,0)-(2,1)]"));
         assert!(buf.contains("~\twidgets/year"));
@@ -3120,7 +3172,7 @@ mod tests {
             compat: Compat::default(),
         });
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
         assert!(buf.is_empty());
     }
 
@@ -4459,7 +4511,7 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         });
 
         let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
+        write_variable_entry(&mut buf, &var, &HashMap::new());
 
         // Must NOT contain dimension-level default (would apply to excepted elements)
         assert!(
@@ -5279,6 +5331,197 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,1
         assert!(
             buf.contains(",40,20,8,2,"),
             "alias without compat should use default 40,20,8,2: {buf}"
+        );
+    }
+
+    // ---- Phase 4 Task 3/4: Equation LHS casing from view element names ----
+
+    #[test]
+    fn build_display_name_map_extracts_view_element_names() {
+        let views = vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![
+                ViewElement::Aux(view_element::Aux {
+                    name: "Endogenous Federal Funds Rate".to_owned(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Stock(view_element::Stock {
+                    name: "Population Level".to_owned(),
+                    uid: 2,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Flow(view_element::Flow {
+                    name: "Birth Rate".to_owned(),
+                    uid: 3,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    points: vec![],
+                    compat: None,
+                    label_compat: None,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+        })];
+        let map = build_display_name_map(&views);
+        assert_eq!(
+            map.get("endogenous_federal_funds_rate").map(|s| s.as_str()),
+            Some("Endogenous Federal Funds Rate"),
+        );
+        assert_eq!(
+            map.get("population_level").map(|s| s.as_str()),
+            Some("Population Level"),
+        );
+        assert_eq!(
+            map.get("birth_rate").map(|s| s.as_str()),
+            Some("Birth Rate"),
+        );
+    }
+
+    #[test]
+    fn build_display_name_map_first_occurrence_wins() {
+        // If a name appears in multiple views, the first one wins
+        let views = vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![
+                ViewElement::Aux(view_element::Aux {
+                    name: "Growth Rate".to_owned(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "growth rate".to_owned(),
+                    uid: 5,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+        })];
+        let map = build_display_name_map(&views);
+        // The first element's casing wins
+        assert_eq!(
+            map.get("growth_rate").map(|s| s.as_str()),
+            Some("Growth Rate"),
+        );
+    }
+
+    #[test]
+    fn equation_lhs_uses_view_element_casing() {
+        let var = make_aux(
+            "endogenous_federal_funds_rate",
+            "0.05",
+            Some("1/Year"),
+            "Rate var",
+        );
+        let views = vec![View::StockFlow(StockFlow {
+            name: None,
+            elements: vec![ViewElement::Aux(view_element::Aux {
+                name: "Endogenous Federal Funds Rate".to_owned(),
+                uid: 1,
+                x: 0.0,
+                y: 0.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            })],
+            view_box: Default::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+        })];
+        let display_names = build_display_name_map(&views);
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &display_names);
+        assert!(
+            buf.starts_with("Endogenous Federal Funds Rate="),
+            "LHS should use view element casing, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn equation_lhs_fallback_without_view_element() {
+        let var = make_aux("unmatched_variable", "42", None, "");
+        let display_names = HashMap::new();
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &display_names);
+        assert!(
+            buf.starts_with("unmatched variable="),
+            "LHS should fall back to format_mdl_ident when no view element matches, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn equation_lhs_casing_for_stock() {
+        let var = Variable::Stock(Stock {
+            ident: "population_level".to_owned(),
+            equation: Equation::Scalar("1000".to_owned()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["births".to_owned()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut display_names = HashMap::new();
+        display_names.insert("population_level".to_owned(), "Population Level".to_owned());
+        let mut buf = String::new();
+        write_variable_entry(&mut buf, &var, &display_names);
+        assert!(
+            buf.starts_with("Population Level="),
+            "Stock LHS should use view element casing, got: {buf}"
+        );
+    }
+
+    #[test]
+    fn equation_lhs_casing_in_full_project_roundtrip() {
+        let var = make_aux("growth_rate", "0.05", Some("1/Year"), "Rate");
+        let elements = vec![ViewElement::Aux(view_element::Aux {
+            name: "Growth Rate".to_owned(),
+            uid: 1,
+            x: 100.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        })];
+        let model = datamodel::Model {
+            name: "default".to_owned(),
+            sim_specs: None,
+            variables: vec![var],
+            views: vec![View::StockFlow(datamodel::StockFlow {
+                name: None,
+                elements,
+                view_box: Default::default(),
+                zoom: 1.0,
+                use_lettered_polarity: false,
+                font: None,
+            })],
+            loop_metadata: vec![],
+            groups: vec![],
+        };
+        let project = make_project(vec![model]);
+        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+        assert!(
+            mdl.contains("Growth Rate="),
+            "Full project MDL should use view element casing on LHS, got: {mdl}"
         );
     }
 }
