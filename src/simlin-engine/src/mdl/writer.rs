@@ -1099,8 +1099,7 @@ fn tokenize_for_wrapping(eqn: &str) -> Vec<String> {
                     if !current.is_empty() {
                         tokens.push(std::mem::take(&mut current));
                     }
-                    // Collect the operator and any surrounding spaces as one token
-                    // so "a + b" keeps the " + " together.
+                    // Emit the operator as its own token so line breaks can be inserted before it.
                     current.push(chars.next().unwrap());
                     tokens.push(std::mem::take(&mut current));
                 }
