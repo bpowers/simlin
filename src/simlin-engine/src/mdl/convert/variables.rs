@@ -11,6 +11,7 @@ use crate::datamodel::{
     GraphicalFunctionScale, Model, ModelGroup, Project, Variable, View,
 };
 
+use crate::mdl::LOOKUP_SENTINEL;
 use crate::mdl::view;
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
@@ -619,7 +620,7 @@ impl<'input> ConversionContext<'input> {
                 Ok((eq_str, None, None))
             }
             MdlEquation::Lookup(_, table) => Ok((
-                "0+0".to_string(),
+                LOOKUP_SENTINEL.to_string(),
                 None,
                 Some(self.build_graphical_function(var_name, table)),
             )),
@@ -628,7 +629,7 @@ impl<'input> ConversionContext<'input> {
                 None,
                 Some(self.build_graphical_function(var_name, table)),
             )),
-            MdlEquation::EmptyRhs(_, _) => Ok(("0+0".to_string(), None, None)),
+            MdlEquation::EmptyRhs(_, _) => Ok((LOOKUP_SENTINEL.to_string(), None, None)),
             MdlEquation::Implicit(_) => {
                 let gf = self.make_default_lookup();
                 Ok(("TIME".to_string(), None, Some(gf)))

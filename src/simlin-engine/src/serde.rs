@@ -1701,6 +1701,7 @@ impl From<project_io::view_element::Group> for view_element::Group {
             y: v.y,
             width: v.width,
             height: v.height,
+            is_mdl_view_marker: v.is_mdl_view_marker,
         }
     }
 }
@@ -1714,6 +1715,7 @@ impl From<view_element::Group> for project_io::view_element::Group {
             y: v.y,
             width: v.width,
             height: v.height,
+            is_mdl_view_marker: v.is_mdl_view_marker,
         }
     }
 }
@@ -1816,6 +1818,7 @@ fn test_view_element_roundtrip() {
             y: 175.0,
             width: 200.0,
             height: 150.0,
+            is_mdl_view_marker: false,
         }),
     ];
     for expected in cases {

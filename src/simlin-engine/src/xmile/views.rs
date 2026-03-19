@@ -1611,6 +1611,7 @@ pub mod view_element {
                 y: v.y + v.height / 2.0,
                 width: v.width,
                 height: v.height,
+                is_mdl_view_marker: false,
             }
         }
     }
@@ -1638,6 +1639,7 @@ pub mod view_element {
             y: 175.0,
             width: 200.0,
             height: 150.0,
+            is_mdl_view_marker: false,
         }];
         for expected in cases {
             let expected = expected.clone();

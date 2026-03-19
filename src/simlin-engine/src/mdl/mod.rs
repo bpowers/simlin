@@ -34,6 +34,12 @@ use crate::datamodel::{Project, Variable};
 use convert::convert_mdl_with_data;
 use writer::MdlWriter;
 
+/// Sentinel equation produced by the MDL parser for variables that are
+/// pure lookup definitions (no input expression) or have an empty RHS.
+/// The writer recognises this to emit native Vensim `name(body)` syntax
+/// instead of `name = WITH LOOKUP(input, body)`.
+pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
+
 /// Convert a Project to Vensim MDL text.
 pub fn project_to_mdl(project: &Project) -> Result<String> {
     if project.models.len() != 1 {

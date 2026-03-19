@@ -442,6 +442,7 @@ mod tests {
             y: 200.0,
             width: 300.0,
             height: 200.0,
+            is_mdl_view_marker: false,
         };
         let svg = render_group(&element);
         assert!(svg.contains("simlin-group"));
@@ -458,6 +459,7 @@ mod tests {
             y: 200.0,
             width: 300.0,
             height: 200.0,
+            is_mdl_view_marker: false,
         };
         let bounds = group_bounds(&element);
         assert_eq!(bounds.left, 50.0);

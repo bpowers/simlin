@@ -414,6 +414,8 @@ pub struct GroupViewElement {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_mdl_view_marker: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1141,6 +1143,7 @@ impl From<ViewElement> for datamodel::ViewElement {
                     y: g.y + g.height / 2.0,
                     width: g.width,
                     height: g.height,
+                    is_mdl_view_marker: g.is_mdl_view_marker,
                 })
             }
         }
@@ -1784,6 +1787,7 @@ impl From<datamodel::ViewElement> for ViewElement {
                     y: g.y - g.height / 2.0,
                     width: g.width,
                     height: g.height,
+                    is_mdl_view_marker: g.is_mdl_view_marker,
                 })
             }
         }
@@ -2558,6 +2562,7 @@ mod tests {
                     y: 0.0,
                     width: 100.0,
                     height: 80.0,
+                    is_mdl_view_marker: false,
                 }),
             ),
         ];
@@ -2614,6 +2619,7 @@ mod tests {
             y: 100.0, // top-left y
             width: 200.0,
             height: 150.0,
+            is_mdl_view_marker: false,
         });
 
         // Roundtrip through datamodel and back

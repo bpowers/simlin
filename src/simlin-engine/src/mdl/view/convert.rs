@@ -786,6 +786,7 @@ fn create_sector_group(
         y: top_left_y + height / 2.0,
         width,
         height,
+        is_mdl_view_marker: true,
     })
 }
 

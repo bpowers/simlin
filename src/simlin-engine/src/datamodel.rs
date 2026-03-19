@@ -590,6 +590,11 @@ pub mod view_element {
         pub y: f64,
         pub width: f64,
         pub height: f64,
+        /// When true, this Group was synthesized during MDL multi-view merge
+        /// to mark a view boundary.  The MDL writer splits on these markers
+        /// to reconstruct the original per-view structure.  XMILE-sourced
+        /// groups (organizational containers) leave this `false`.
+        pub is_mdl_view_marker: bool,
     }
 }
 

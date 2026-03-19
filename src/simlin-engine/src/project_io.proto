@@ -255,6 +255,7 @@ message ViewElement {
     double y = 4;
     double width = 5;
     double height = 6;
+    bool is_mdl_view_marker = 7;
   };
 
   oneof element {
