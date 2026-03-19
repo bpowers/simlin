@@ -1987,7 +1987,7 @@ impl MdlWriter {
         // (skip .Control -- those vars are sim specs emitted separately)
         let mut grouped_idents: HashSet<&str> = HashSet::new();
         for group in &model.groups {
-            if group.name == "Control" || group.name == "control" {
+            if group.name.eq_ignore_ascii_case("Control") {
                 continue;
             }
             for member in &group.members {
@@ -1997,7 +1997,7 @@ impl MdlWriter {
 
         // 2. Variables in group order (skip .Control -- emitted with sim specs)
         for group in &model.groups {
-            if group.name == "Control" || group.name == "control" {
+            if group.name.eq_ignore_ascii_case("Control") {
                 continue;
             }
             // Group marker
