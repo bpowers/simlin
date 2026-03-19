@@ -643,10 +643,12 @@ fn find_stock_max(
             continue;
         }
 
-        // Match " - {stock}" exactly: the stock ident must not be a prefix
-        // of a longer identifier (e.g., " - a" must not match within " - ab").
+        // Match " - {stock}" exactly at the LAST occurrence: the translator
+        // appends " - {dest_stock}" after the max expression, so when the
+        // max expression itself references the dest stock (e.g., max = A - B
+        // produces "a - b - b"), the last match is the separator.
         let stock_pattern = format!(" - {}", stock.ident);
-        let pattern_idx = match cap_eq.find(&stock_pattern) {
+        let pattern_idx = match cap_eq.rfind(&stock_pattern) {
             Some(idx) => idx,
             None => continue,
         };
@@ -840,6 +842,19 @@ mod tests {
             "should not contain inf(): {output}"
         );
         assert!(output.contains("inf"), "should contain inf: {output}");
+    }
+
+    #[test]
+    fn max_referencing_dest_stock_roundtrips() {
+        // B(0, A - B) means max = A - B. The capacity equation is
+        // "a - b - b". The writer must split at the LAST " - b" to
+        // reconstruct max = "a - b", not truncate to "a".
+        let input = "[Source] > B(0, A - B) @ Rate(1)\nA(10)\n";
+        let output = roundtrip_write(input);
+        assert!(
+            output.contains("a - b"),
+            "should preserve max expression 'a - b': {output}"
+        );
     }
 
     #[test]
