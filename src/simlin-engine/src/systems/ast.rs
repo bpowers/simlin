@@ -41,7 +41,9 @@ pub enum BinOp {
 impl BinOp {
     /// Standard mathematical precedence group.
     /// Add/Sub = 1, Mul/Div = 2.
-    fn precedence(self) -> u8 {
+    /// `pub(super)` so that `translate.rs` can apply the same parenthesization
+    /// logic as `Expr::to_equation_string` when rewriting expressions.
+    pub(super) fn precedence(self) -> u8 {
         match self {
             BinOp::Add | BinOp::Sub => 1,
             BinOp::Mul | BinOp::Div => 2,

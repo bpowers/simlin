@@ -5,7 +5,7 @@
 // because they reference simulation system variables (TIME, TIME STEP, INITIAL TIME).
 // Those models are defined in this file and re-emitted verbatim by gen_stdlib.rs.
 //
-// Stdlib SHA256: fcb9d2ab3499f5fcec9f3ca2787f3da346a584bb297272c794402fd2414f9895
+// Stdlib SHA256: 6d0025d9e146ef0d40b2af047014f99dc8f42118d18b3ede3625a88bfefc36b0
 
 #![allow(
     clippy::approx_constant,

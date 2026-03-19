@@ -102,7 +102,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/test_sir_xmile.rs`** - SIR epidemiology model integration tests
 - **`src/test_open_vensim.rs`** - Vensim compatibility tests (requires `xmutil` feature)
 - **`src/systems_stdlib_tests.rs`** - Systems format stdlib module tests (rate, leak, conversion wiring)
-- **`tests/test_helpers.rs`** - Shared test helper module (`open_systems_fixture()`, CSV comparison)
+- **`tests/test_helpers.rs`** - Shared test helper module (`ensure_results` for CSV result comparison)
 - **`tests/simulate.rs`** - End-to-end simulation integration tests
 - **`tests/simulate_systems.rs`** - Systems format simulation integration tests (fixtures in `test/systems-format/`)
 - **`tests/simulate_ltm.rs`** - LTM feature tests

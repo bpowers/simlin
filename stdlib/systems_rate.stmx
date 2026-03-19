@@ -21,6 +21,12 @@
             <aux name="dest_capacity">
                 <eqn>INF</eqn>
             </aux>
+            <!-- actual clamps the transfer to [0, min(requested, available, dest_capacity)].
+                 The MAX(0, ...) guard rejects negative requested values (which can arise
+                 from formula errors or unusual model configurations) rather than allowing
+                 a negative flow to act as a reverse transfer. This is a deliberate
+                 defensive deviation from the original specification, which only specifies
+                 MIN(requested, available). -->
             <aux name="actual">
                 <eqn>MIN(dest_capacity, MAX(0, MIN(requested, available)))</eqn>
             </aux>

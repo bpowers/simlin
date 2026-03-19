@@ -19,7 +19,7 @@ use crate::datamodel::{
     Stock, Variable,
 };
 
-use super::ast::{Expr, FlowType, SystemsModel};
+use super::ast::{BinOp, Expr, FlowType, SystemsModel};
 
 /// Default number of simulation rounds when no explicit value is given.
 pub const DEFAULT_ROUNDS: u64 = 10;
@@ -451,7 +451,22 @@ fn canon(name: &str) -> String {
 /// Unlike `Expr::to_equation_string`, this avoids re-canonicalizing the
 /// substituted targets, preserving `.` separators in module references
 /// like `module.remaining`.
+///
+/// Applies the same left-to-right parenthesization logic as
+/// `Expr::to_equation_string`: when the left child of a BinOp has lower
+/// precedence than the outer operator, it is wrapped in parentheses so
+/// that the emitted equation string preserves the left-to-right evaluation
+/// semantics of the systems format.
 fn rewrite_expr_to_equation(expr: &Expr, rewrites: &HashMap<String, String>) -> String {
+    // Returns true when the left operand of `outer_op` needs explicit
+    // parentheses to preserve left-to-right evaluation order.
+    fn needs_parens_in_rewrite(expr: &Expr, outer_op: BinOp) -> bool {
+        match expr {
+            Expr::BinOp(_, inner_op, _) => inner_op.precedence() < outer_op.precedence(),
+            _ => false,
+        }
+    }
+
     match expr {
         Expr::Ref(name) => {
             let canon_name = canonicalize(name).into_owned();
@@ -469,7 +484,11 @@ fn rewrite_expr_to_equation(expr: &Expr, rewrites: &HashMap<String, String>) -> 
         Expr::Inf => "inf()".to_string(),
         Expr::Paren(inner) => format!("({})", rewrite_expr_to_equation(inner, rewrites)),
         Expr::BinOp(left, op, right) => {
-            let left_str = rewrite_expr_to_equation(left, rewrites);
+            let left_str = if needs_parens_in_rewrite(left, *op) {
+                format!("({})", rewrite_expr_to_equation(left, rewrites))
+            } else {
+                rewrite_expr_to_equation(left, rewrites)
+            };
             let right_str = rewrite_expr_to_equation(right, rewrites);
             format!("{left_str} {op} {right_str}")
         }
@@ -1206,5 +1225,93 @@ mod tests {
     #[test]
     fn test_translate_extended_syntax() {
         parse_translate_compile("extended_syntax.txt");
+    }
+
+    // -------------------------------------------------------------------
+    // Critical: rewrite_expr_to_equation preserves left-to-right parens
+    //
+    // When a rate formula has mixed-precedence operators and the source
+    // stock gets rewritten (e.g., `A` -> `a_effective`), the emitted
+    // equation must retain the parenthesization that preserves
+    // left-to-right evaluation semantics. Without the fix, `A + D * 2`
+    // (parsed as `(A + D) * 2`) would emit `a_effective + d * 2`,
+    // which standard math precedence evaluates as `a_effective + (d * 2)`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rewrite_preserves_mixed_precedence_parens() {
+        // Model: A > B @ A + D * 2
+        //        A > E @ 1
+        // Parsed left-to-right: "A + D * 2" => BinOp(BinOp(A, Add, D), Mul, 2)
+        // With two outflows from A, E is processed first (highest priority).
+        // After E is processed, A's ref in B's rate gets rewritten to a_effective.
+        // The correct equation string is "(a_effective + d) * 2".
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "A".to_string(),
+                    initial: Expr::Int(10),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "B".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "D".to_string(),
+                    initial: Expr::Int(3),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "E".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                // B flow: rate = A + D * 2 (left-to-right: (A + D) * 2)
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::BinOp(
+                        Box::new(Expr::BinOp(
+                            Box::new(Expr::Ref("A".to_string())),
+                            BinOp::Add,
+                            Box::new(Expr::Ref("D".to_string())),
+                        )),
+                        BinOp::Mul,
+                        Box::new(Expr::Int(2)),
+                    ),
+                },
+                // E flow: rate = 1 (simple, no rewrite needed)
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "E".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(1),
+                },
+            ],
+        };
+        let project = translate(&model, 10).unwrap();
+
+        // A has two outflows so chained module remaining is used for B.
+        // E is processed first (last declared = highest priority, gets available=a).
+        // B is processed second; its source stock `a` is rewritten to
+        // `a_outflows_e_remaining` (the chained remaining after E drains A).
+        // The rate expr (A + D) * 2 must retain its parentheses after rewrite.
+        // Without the parenthesization fix: "a_outflows_e_remaining + d * 2"
+        // With the fix:                    "(a_outflows_e_remaining + d) * 2"
+        let eqn = scalar_eqn(&project, "a_outflows_b_requested")
+            .expect("a_outflows_b_requested should exist");
+        assert_eq!(
+            eqn, "(a_outflows_e_remaining + d) * 2",
+            "mixed-precedence rewrite must parenthesize the lower-precedence left subexpr"
+        );
     }
 }
