@@ -1177,6 +1177,7 @@ impl From<View> for datamodel::View {
             zoom: if view.zoom == 0.0 { 1.0 } else { view.zoom },
             use_lettered_polarity: view.use_lettered_polarity,
             font: None,
+            sketch_compat: None,
         })
     }
 }

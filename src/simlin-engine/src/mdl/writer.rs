@@ -1420,33 +1420,53 @@ fn format_sketch_name(name: &str) -> String {
 /// Sketch element names use `format_sketch_name` (not `format_mdl_ident`)
 /// because MDL sketch lines are comma-delimited positional records where
 /// quoting is not used.
+#[cfg(test)]
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
+    write_aux_element_with_context(buf, aux, SketchTransform::identity());
+}
+
+fn write_aux_element_with_context(
+    buf: &mut String,
+    aux: &view_element::Aux,
+    transform: SketchTransform,
+) {
     let name = format_sketch_name(&aux.name);
-    let (w, h, bits) = match &aux.compat {
-        Some(c) => (c.width as i32, c.height as i32, c.bits),
-        None => (40, 20, 3),
+    let (w, h, shape, bits) = match &aux.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (40, 20, 8, 3),
     };
-    // shape=8 (has equation)
+    let (x, y) = transform.point(aux.x, aux.y);
+    let tail = compat_tail(aux.compat.as_ref(), "0,0,-1,0,0,0");
     write!(
         buf,
-        "10,{},{},{},{},{},{},8,{},0,0,-1,0,0,0",
-        aux.uid, name, aux.x as i32, aux.y as i32, w, h, bits,
+        "10,{},{},{},{},{},{},{},{},{}",
+        aux.uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
 
 /// Write a type 10 line for a Stock element.
+#[cfg(test)]
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
+    write_stock_element_with_context(buf, stock, SketchTransform::identity());
+}
+
+fn write_stock_element_with_context(
+    buf: &mut String,
+    stock: &view_element::Stock,
+    transform: SketchTransform,
+) {
     let name = format_sketch_name(&stock.name);
-    let (w, h, bits) = match &stock.compat {
-        Some(c) => (c.width as i32, c.height as i32, c.bits),
-        None => (40, 20, 3),
+    let (w, h, shape, bits) = match &stock.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (40, 20, 3, 3),
     };
-    // shape=3 (box/stock shape)
+    let (x, y) = transform.point(stock.x, stock.y);
+    let tail = compat_tail(stock.compat.as_ref(), "0,0,0,0,0,0");
     write!(
         buf,
-        "10,{},{},{},{},{},{},3,{},0,0,0,0,0,0",
-        stock.uid, name, stock.x as i32, stock.y as i32, w, h, bits,
+        "10,{},{},{},{},{},{},{},{},{}",
+        stock.uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1524,12 +1544,51 @@ fn sanitize_view_title_for_mdl(title: &str) -> String {
     out
 }
 
+#[derive(Clone, Copy)]
+struct SketchTransform {
+    x_offset: f64,
+    y_offset: f64,
+}
+
+impl SketchTransform {
+    fn identity() -> Self {
+        Self {
+            x_offset: 0.0,
+            y_offset: 0.0,
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (i32, i32) {
+        (
+            (x - self.x_offset).round() as i32,
+            (y - self.y_offset).round() as i32,
+        )
+    }
+}
+
+fn compat_tail<'a>(
+    compat: Option<&'a view_element::ViewElementCompat>,
+    default: &'a str,
+) -> &'a str {
+    compat.and_then(|c| c.tail.as_deref()).unwrap_or(default)
+}
+
+fn compat_name_field<'a>(
+    compat: Option<&'a view_element::ViewElementCompat>,
+    default: &'a str,
+) -> &'a str {
+    compat
+        .and_then(|c| c.name_field.as_deref())
+        .unwrap_or(default)
+}
+
 /// Write a Flow element as type 1 pipe connectors, type 11 (valve), and
 /// type 10 (attached flow variable).
 ///
 /// Vensim requires this exact ordering: pipe connectors first, then valve,
 /// then flow label. The valve UID is looked up from the pre-allocated
 /// valve_uids map to avoid collisions.
+#[cfg(test)]
 fn write_flow_element(
     buf: &mut String,
     flow: &view_element::Flow,
@@ -1537,52 +1596,114 @@ fn write_flow_element(
     cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
 ) {
+    write_flow_element_with_context(
+        buf,
+        flow,
+        valve_uids,
+        cloud_uids,
+        next_connector_uid,
+        SketchTransform::identity(),
+        None,
+    );
+}
+
+fn write_flow_element_with_context(
+    buf: &mut String,
+    flow: &view_element::Flow,
+    valve_uids: &HashMap<i32, i32>,
+    _cloud_uids: &HashSet<i32>,
+    next_connector_uid: &mut i32,
+    transform: SketchTransform,
+    flow_compat: Option<&view_element::FlowSketchCompat>,
+) {
     let name = format_sketch_name(&flow.name);
     let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
+    let valve_compat = flow.compat.as_ref();
+    let label_compat = flow.label_compat.as_ref();
+    let (valve_x, valve_y) = transform.point(flow.x, flow.y);
 
     // Pipe connectors must come before the valve and flow label.
-    let had_pipes =
-        write_flow_pipe_connectors(buf, flow, valve_uid, cloud_uids, next_connector_uid);
+    let had_pipes = write_flow_pipe_connectors_with_context(
+        buf,
+        flow,
+        valve_uid,
+        next_connector_uid,
+        transform,
+        flow_compat,
+    );
 
-    let (valve_w, valve_h, valve_bits) = match &flow.compat {
-        Some(c) => (c.width as i32, c.height as i32, c.bits),
-        None => (6, 8, 3),
+    let (valve_w, valve_h, valve_shape, valve_bits) = match valve_compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (6, 8, 34, 3),
     };
-    let (label_w, label_h, label_bits) = match &flow.label_compat {
-        Some(c) => (c.width as i32, c.height as i32, c.bits),
-        None => (49, 8, 3),
+    let (label_w, label_h, label_shape, label_bits) = match label_compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (49, 8, 40, 3),
     };
+    let valve_name = compat_name_field(valve_compat, "0");
+    let valve_tail = compat_tail(valve_compat, "0,0,1,0,0,0");
 
-    // Type 11 (valve): field 3 is always 0 in Vensim-generated files.
-    // Prefix with \n only if pipes were emitted (otherwise caller handles separation).
     if had_pipes {
         buf.push('\n');
     }
     write!(
         buf,
-        "11,{},0,{},{},{},{},34,{},0,0,1,0,0,0",
-        valve_uid, flow.x as i32, flow.y as i32, valve_w, valve_h, valve_bits,
+        "11,{},{},{},{},{},{},{},{},{}",
+        valve_uid,
+        valve_name,
+        valve_x,
+        valve_y,
+        valve_w,
+        valve_h,
+        valve_shape,
+        valve_bits,
+        valve_tail,
     )
     .unwrap();
 
-    // Type 10 (attached flow variable): shape=40 (bit 3 = equation, bit 5 = attached)
-    // The variable is positioned slightly below the valve.
-    let var_y = flow.y as i32 + 16;
+    let (label_x, label_y) = if let Some(compat) = flow_compat {
+        let dx = flow.x - compat.valve_x;
+        let dy = flow.y - compat.valve_y;
+        transform.point(compat.label_x + dx, compat.label_y + dy)
+    } else {
+        transform.point(flow.x, flow.y + 16.0)
+    };
+    let label_tail = compat_tail(label_compat, "0,0,-1,0,0,0");
     write!(
         buf,
-        "\n10,{},{},{},{},{},{},40,{},0,0,-1,0,0,0",
-        flow.uid, name, flow.x as i32, var_y, label_w, label_h, label_bits,
+        "\n10,{},{},{},{},{},{},{},{},{}",
+        flow.uid, name, label_x, label_y, label_w, label_h, label_shape, label_bits, label_tail,
     )
     .unwrap();
 }
 
 /// Returns true if any pipe connectors were written.
+#[cfg(test)]
+#[allow(dead_code)]
 fn write_flow_pipe_connectors(
     buf: &mut String,
     flow: &view_element::Flow,
     valve_uid: i32,
-    cloud_uids: &HashSet<i32>,
+    _cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
+) -> bool {
+    write_flow_pipe_connectors_with_context(
+        buf,
+        flow,
+        valve_uid,
+        next_connector_uid,
+        SketchTransform::identity(),
+        None,
+    )
+}
+
+fn write_flow_pipe_connectors_with_context(
+    buf: &mut String,
+    flow: &view_element::Flow,
+    valve_uid: i32,
+    next_connector_uid: &mut i32,
+    transform: SketchTransform,
+    flow_compat: Option<&view_element::FlowSketchCompat>,
 ) -> bool {
     let mut wrote_any = false;
 
@@ -1607,34 +1728,42 @@ fn write_flow_pipe_connectors(
         .unwrap();
     };
 
-    if let Some(first) = flow.points.first()
-        && let Some(endpoint_uid) = first.attached_to_uid
+    let connector_point = |idx: usize, point: &view_element::FlowPoint| -> (i32, i32) {
+        if let Some(compat) = flow_compat.and_then(|compat| compat.pipe_points.get(idx)) {
+            let dx = point.x - compat.point_x;
+            let dy = point.y - compat.point_y;
+            return transform.point(compat.connector_x + dx, compat.connector_y + dy);
+        }
+        transform.point(point.x, point.y)
+    };
+
+    if flow.points.len() > 1
+        && let Some(last) = flow.points.last()
+        && let Some(endpoint_uid) = last.attached_to_uid
     {
-        let flag = if cloud_uids.contains(&endpoint_uid) {
-            100
-        } else {
-            4
-        };
+        let (x, y) = connector_point(flow.points.len() - 1, last);
         write_pipe(
             buf,
             !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
-            flag,
-            first.x as i32,
-            first.y as i32,
+            4,
+            x,
+            y,
         );
         wrote_any = true;
         *next_connector_uid += 1;
     }
 
-    for point in flow
+    for (idx, point) in flow
         .points
         .iter()
+        .enumerate()
         .skip(1)
         .take(flow.points.len().saturating_sub(2))
     {
+        let (x, y) = connector_point(idx, point);
         write_pipe(
             buf,
             !wrote_any,
@@ -1642,31 +1771,26 @@ fn write_flow_pipe_connectors(
             valve_uid,
             valve_uid,
             0,
-            point.x as i32,
-            point.y as i32,
+            x,
+            y,
         );
         wrote_any = true;
         *next_connector_uid += 1;
     }
 
-    if flow.points.len() > 1
-        && let Some(last) = flow.points.last()
-        && let Some(endpoint_uid) = last.attached_to_uid
+    if let Some(first) = flow.points.first()
+        && let Some(endpoint_uid) = first.attached_to_uid
     {
-        let flag = if cloud_uids.contains(&endpoint_uid) {
-            100
-        } else {
-            4
-        };
+        let (x, y) = connector_point(0, first);
         write_pipe(
             buf,
             !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
-            flag,
-            last.x as i32,
-            last.y as i32,
+            100,
+            x,
+            y,
         );
         wrote_any = true;
         *next_connector_uid += 1;
@@ -1676,39 +1800,77 @@ fn write_flow_pipe_connectors(
 }
 
 /// Write a type 12 line for a Cloud element.
+#[cfg(test)]
 fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
-    let (w, h, bits) = match &cloud.compat {
-        Some(c) => (c.width as i32, c.height as i32, c.bits),
-        None => (10, 8, 3),
+    write_cloud_element_with_context(buf, cloud, SketchTransform::identity());
+}
+
+fn write_cloud_element_with_context(
+    buf: &mut String,
+    cloud: &view_element::Cloud,
+    transform: SketchTransform,
+) {
+    let (w, h, shape, bits) = match &cloud.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (10, 8, 0, 3),
     };
-    // Clouds: field 3 is 48 (ASCII '0') in Vensim-generated files, shape=0
+    let (x, y) = transform.point(cloud.x, cloud.y);
+    let name_field = compat_name_field(cloud.compat.as_ref(), "48");
+    let tail = compat_tail(cloud.compat.as_ref(), "0,0,-1,0,0,0");
     write!(
         buf,
-        "12,{},48,{},{},{},{},0,{},0,0,-1,0,0,0",
-        cloud.uid, cloud.x as i32, cloud.y as i32, w, h, bits,
+        "12,{},{},{},{},{},{},{},{},{}",
+        cloud.uid, name_field, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
 
 /// Write a type 10 line for an Alias (ghost) element.
+#[cfg(test)]
 fn write_alias_element(
     buf: &mut String,
     alias: &view_element::Alias,
     name_map: &HashMap<i32, &str>,
 ) {
+    write_alias_element_with_context(
+        buf,
+        alias,
+        name_map,
+        &HashSet::new(),
+        SketchTransform::identity(),
+    );
+}
+
+fn write_alias_element_with_context(
+    buf: &mut String,
+    alias: &view_element::Alias,
+    name_map: &HashMap<i32, &str>,
+    stock_uids: &HashSet<i32>,
+    transform: SketchTransform,
+) {
     let name = name_map
         .get(&alias.alias_of_uid)
         .map(|n| format_sketch_name(n))
         .unwrap_or_default();
-    let (w, h, bits) = match &alias.compat {
-        Some(c) => (c.width as i32, c.height as i32, c.bits),
-        None => (40, 20, 2),
+    let (w, h, shape, bits) = match &alias.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (40, 20, 8, 2),
     };
+    let (alias_x, alias_y) = if stock_uids.contains(&alias.alias_of_uid) {
+        (alias.x + 22.0, alias.y + 17.0)
+    } else {
+        (alias.x, alias.y)
+    };
+    let (x, y) = transform.point(alias_x, alias_y);
+    let tail = compat_tail(
+        alias.compat.as_ref(),
+        "0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
+    );
     // shape=8
     write!(
         buf,
-        "10,{},{},{},{},{},{},8,{},0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
-        alias.uid, name, alias.x as i32, alias.y as i32, w, h, bits,
+        "10,{},{},{},{},{},{},{},{},{}",
+        alias.uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1717,11 +1879,32 @@ fn write_alias_element(
 ///
 /// For arc connectors, we reverse-compute a control point from the stored
 /// canvas angle using the endpoints of the connected elements.
+#[cfg(test)]
 fn write_link_element(
     buf: &mut String,
     link: &view_element::Link,
     elem_positions: &HashMap<i32, (i32, i32)>,
     use_lettered_polarity: bool,
+) {
+    write_link_element_with_context(
+        buf,
+        link,
+        elem_positions,
+        use_lettered_polarity,
+        None,
+        SketchTransform::identity(),
+        &HashMap::new(),
+    );
+}
+
+fn write_link_element_with_context(
+    buf: &mut String,
+    link: &view_element::Link,
+    elem_positions: &HashMap<i32, (i32, i32)>,
+    use_lettered_polarity: bool,
+    link_compat: Option<&view_element::LinkSketchCompat>,
+    transform: SketchTransform,
+    valve_uids: &HashMap<i32, i32>,
 ) {
     let polarity_val = match link.polarity {
         Some(LinkPolarity::Positive) if use_lettered_polarity => 83, // 'S'
@@ -1731,28 +1914,46 @@ fn write_link_element(
         None => 0,
     };
 
-    let from_pos = elem_positions
-        .get(&link.from_uid)
-        .copied()
-        .unwrap_or((0, 0));
-    let to_pos = elem_positions.get(&link.to_uid).copied().unwrap_or((0, 0));
+    let from_uid = link_compat
+        .filter(|compat| compat.from_attached_valve)
+        .and_then(|_| valve_uids.get(&link.from_uid).copied())
+        .unwrap_or(link.from_uid);
+    let to_uid = link_compat
+        .filter(|compat| compat.to_attached_valve)
+        .and_then(|_| valve_uids.get(&link.to_uid).copied())
+        .unwrap_or(link.to_uid);
+    let from_pos = elem_positions.get(&from_uid).copied().unwrap_or((0, 0));
+    let to_pos = elem_positions.get(&to_uid).copied().unwrap_or((0, 0));
+    let field4 = link_compat.map(|compat| compat.field4).unwrap_or(0);
+    let field10 = link_compat.map(|compat| compat.field10).unwrap_or(0);
 
     // Field 9 = 64 marks influence (causal) connectors in Vensim sketches.
     match &link.shape {
         LinkShape::Straight => {
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,64,0,-1--1--1,,1|(0,0)|",
-                link.uid, link.from_uid, link.to_uid, polarity_val,
+                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|(0,0)|",
+                link.uid, from_uid, to_uid, field4, polarity_val, field10,
             )
             .unwrap();
         }
         LinkShape::Arc(canvas_angle) => {
-            let (ctrl_x, ctrl_y) = compute_control_point(from_pos, to_pos, *canvas_angle);
+            let (ctrl_x, ctrl_y) = if let Some(compat) = link_compat {
+                let delta_x =
+                    ((from_pos.0 as f64 - compat.from_x) + (to_pos.0 as f64 - compat.to_x)) / 2.0;
+                let delta_y =
+                    ((from_pos.1 as f64 - compat.from_y) + (to_pos.1 as f64 - compat.to_y)) / 2.0;
+                (
+                    (compat.control_x + delta_x).round() as i32,
+                    (compat.control_y + delta_y).round() as i32,
+                )
+            } else {
+                compute_control_point(from_pos, to_pos, *canvas_angle)
+            };
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,64,0,-1--1--1,,1|({},{})|",
-                link.uid, link.from_uid, link.to_uid, polarity_val, ctrl_x, ctrl_y,
+                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|({},{})|",
+                link.uid, from_uid, to_uid, field4, polarity_val, field10, ctrl_x, ctrl_y,
             )
             .unwrap();
         }
@@ -1760,12 +1961,13 @@ fn write_link_element(
             let npoints = points.len();
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,64,0,-1--1--1,,{}|",
-                link.uid, link.from_uid, link.to_uid, polarity_val, npoints,
+                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,{}|",
+                link.uid, from_uid, to_uid, field4, polarity_val, field10, npoints,
             )
             .unwrap();
             for pt in points {
-                write!(buf, "({},{})|", pt.x as i32, pt.y as i32).unwrap();
+                let (x, y) = transform.point(pt.x, pt.y);
+                write!(buf, "({},{})|", x, y).unwrap();
             }
         }
     }
@@ -2085,11 +2287,48 @@ impl MdlWriter {
             // references (links, aliases) resolve correctly.
             let valve_uids = allocate_valve_uids(&sf.elements);
             let mut next_connector_uid = max_sketch_uid(&sf.elements, &valve_uids) + 1;
-            let elem_positions = build_element_positions(&sf.elements, &valve_uids);
             let name_map = build_name_map(&sf.elements);
+            let mut flow_compat_by_uid: HashMap<i32, &view_element::FlowSketchCompat> =
+                HashMap::new();
+            let mut link_compat_by_uid: HashMap<i32, &view_element::LinkSketchCompat> =
+                HashMap::new();
+            let mut stock_uids: HashSet<i32> = HashSet::new();
+            if let Some(sketch_compat) = sf.sketch_compat.as_ref() {
+                for flow in &sketch_compat.flows {
+                    flow_compat_by_uid.insert(flow.uid, flow);
+                }
+                for link in &sketch_compat.links {
+                    link_compat_by_uid.insert(link.uid, link);
+                }
+            }
+            for elem in &sf.elements {
+                if let ViewElement::Stock(stock) = elem {
+                    stock_uids.insert(stock.uid);
+                }
+            }
 
             let segments = split_view_on_groups(sf);
-            for (view_name, elements, font) in &segments {
+            let mut elem_positions = HashMap::new();
+            for (segment_ix, (_, elements, _)) in segments.iter().enumerate() {
+                let transform = sf
+                    .sketch_compat
+                    .as_ref()
+                    .and_then(|compat| compat.segments.get(segment_ix))
+                    .map(|compat| SketchTransform {
+                        x_offset: compat.x_offset,
+                        y_offset: compat.y_offset,
+                    })
+                    .unwrap_or_else(SketchTransform::identity);
+                elem_positions.extend(build_element_positions_with_transform(
+                    elements,
+                    &valve_uids,
+                    transform,
+                    &stock_uids,
+                    &flow_compat_by_uid,
+                ));
+            }
+
+            for (segment_ix, (view_name, elements, font)) in segments.iter().enumerate() {
                 if segment_idx > 0 {
                     self.buf.push_str(
                         "\\\\\\---/// Sketch information - do not modify anything except names\n",
@@ -2105,8 +2344,19 @@ impl MdlWriter {
                     sf.use_lettered_polarity,
                     &valve_uids,
                     &mut next_connector_uid,
+                    sf.sketch_compat
+                        .as_ref()
+                        .and_then(|compat| compat.segments.get(segment_ix))
+                        .map(|compat| SketchTransform {
+                            x_offset: compat.x_offset,
+                            y_offset: compat.y_offset,
+                        })
+                        .unwrap_or_else(SketchTransform::identity),
                     &elem_positions,
                     &name_map,
+                    &stock_uids,
+                    &flow_compat_by_uid,
+                    &link_compat_by_uid,
                 );
                 segment_idx += 1;
             }
@@ -2125,8 +2375,12 @@ impl MdlWriter {
         use_lettered_polarity: bool,
         valve_uids: &HashMap<i32, i32>,
         next_connector_uid: &mut i32,
+        transform: SketchTransform,
         elem_positions: &HashMap<i32, (i32, i32)>,
         name_map: &HashMap<i32, &str>,
+        stock_uids: &HashSet<i32>,
+        flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
+        link_compat_by_uid: &HashMap<i32, &view_element::LinkSketchCompat>,
     ) {
         let view_title = sanitize_view_title_for_mdl(view_name);
         writeln!(self.buf, "*{}", view_title).unwrap();
@@ -2154,38 +2408,54 @@ impl MdlWriter {
         for elem in elements {
             match elem {
                 ViewElement::Aux(aux) => {
-                    write_aux_element(&mut self.buf, aux);
+                    write_aux_element_with_context(&mut self.buf, aux, transform);
                     self.buf.push('\n');
                 }
                 ViewElement::Stock(stock) => {
-                    write_stock_element(&mut self.buf, stock);
+                    write_stock_element_with_context(&mut self.buf, stock, transform);
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
                     // Emit associated clouds before the flow pipes
                     if let Some(clouds) = flow_clouds.get(&flow.uid) {
                         for cloud in clouds {
-                            write_cloud_element(&mut self.buf, cloud);
+                            write_cloud_element_with_context(&mut self.buf, cloud, transform);
                             self.buf.push('\n');
                         }
                     }
-                    write_flow_element(
+                    write_flow_element_with_context(
                         &mut self.buf,
                         flow,
                         valve_uids,
                         &cloud_uids,
                         next_connector_uid,
+                        transform,
+                        flow_compat_by_uid.get(&flow.uid).copied(),
                     );
                     self.buf.push('\n');
                 }
                 ViewElement::Link(link) => {
-                    write_link_element(&mut self.buf, link, elem_positions, use_lettered_polarity);
+                    write_link_element_with_context(
+                        &mut self.buf,
+                        link,
+                        elem_positions,
+                        use_lettered_polarity,
+                        link_compat_by_uid.get(&link.uid).copied(),
+                        transform,
+                        valve_uids,
+                    );
                     self.buf.push('\n');
                 }
                 // Clouds are emitted with their associated flow above
                 ViewElement::Cloud(_) => {}
                 ViewElement::Alias(alias) => {
-                    write_alias_element(&mut self.buf, alias, name_map);
+                    write_alias_element_with_context(
+                        &mut self.buf,
+                        alias,
+                        name_map,
+                        stock_uids,
+                        transform,
+                    );
                     self.buf.push('\n');
                 }
                 ViewElement::Module(_) | ViewElement::Group(_) => {}
@@ -2271,26 +2541,72 @@ impl MdlWriter {
 /// For flow elements, `write_flow_element` emits a synthetic valve using the
 /// pre-allocated `valve_uids` map. We register that valve UID here so that any
 /// connector whose endpoint is the valve can resolve a position.
+#[cfg(test)]
+#[allow(dead_code)]
 fn build_element_positions(
     elements: &[ViewElement],
     valve_uids: &HashMap<i32, i32>,
 ) -> HashMap<i32, (i32, i32)> {
+    build_element_positions_with_transform(
+        &elements.iter().collect::<Vec<_>>(),
+        valve_uids,
+        SketchTransform::identity(),
+        &HashSet::new(),
+        &HashMap::new(),
+    )
+}
+
+fn build_element_positions_with_transform(
+    elements: &[&ViewElement],
+    valve_uids: &HashMap<i32, i32>,
+    transform: SketchTransform,
+    stock_uids: &HashSet<i32>,
+    flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
+) -> HashMap<i32, (i32, i32)> {
     let mut positions = HashMap::new();
     for elem in elements {
         let (uid, x, y) = match elem {
-            ViewElement::Aux(a) => (a.uid, a.x as i32, a.y as i32),
-            ViewElement::Stock(s) => (s.uid, s.x as i32, s.y as i32),
+            ViewElement::Aux(a) => {
+                let (x, y) = transform.point(a.x, a.y);
+                (a.uid, x, y)
+            }
+            ViewElement::Stock(s) => {
+                let (x, y) = transform.point(s.x, s.y);
+                (s.uid, x, y)
+            }
             ViewElement::Flow(f) => {
+                let (valve_x, valve_y) = transform.point(f.x, f.y);
                 // Also register the allocated valve UID so connectors that
                 // reference the valve position can resolve.
                 if let Some(&valve_uid) = valve_uids.get(&f.uid) {
-                    positions.insert(valve_uid, (f.x as i32, f.y as i32));
+                    positions.insert(valve_uid, (valve_x, valve_y));
                 }
-                (f.uid, f.x as i32, f.y as i32)
+                if let Some(compat) = flow_compat_by_uid.get(&f.uid) {
+                    let dx = f.x - compat.valve_x;
+                    let dy = f.y - compat.valve_y;
+                    let (label_x, label_y) =
+                        transform.point(compat.label_x + dx, compat.label_y + dy);
+                    (f.uid, label_x, label_y)
+                } else {
+                    (f.uid, valve_x, valve_y)
+                }
             }
-            ViewElement::Cloud(c) => (c.uid, c.x as i32, c.y as i32),
-            ViewElement::Alias(a) => (a.uid, a.x as i32, a.y as i32),
-            ViewElement::Module(m) => (m.uid, m.x as i32, m.y as i32),
+            ViewElement::Cloud(c) => {
+                let (x, y) = transform.point(c.x, c.y);
+                (c.uid, x, y)
+            }
+            ViewElement::Alias(a) => {
+                let (x, y) = if stock_uids.contains(&a.alias_of_uid) {
+                    transform.point(a.x + 22.0, a.y + 17.0)
+                } else {
+                    transform.point(a.x, a.y)
+                };
+                (a.uid, x, y)
+            }
+            ViewElement::Module(m) => {
+                let (x, y) = transform.point(m.x, m.y);
+                (m.uid, x, y)
+            }
             ViewElement::Link(_) | ViewElement::Group(_) => continue,
         };
         positions.insert(uid, (x, y));

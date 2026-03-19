@@ -127,6 +127,7 @@ mod tests {
                     zoom: 1.0,
                     use_lettered_polarity: false,
                     font: None,
+                    sketch_compat: None,
                 })],
                 loop_metadata: vec![],
                 groups: vec![],

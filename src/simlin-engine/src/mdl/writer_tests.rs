@@ -1660,6 +1660,77 @@ fn sketch_flow_element_emits_pipe_connectors_from_flow_points() {
 }
 
 #[test]
+fn sketch_flow_element_with_compat_preserves_pipe_points_and_label_position() {
+    let flow = view_element::Flow {
+        name: "Infection_Rate".to_string(),
+        uid: 6,
+        x: 150.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        points: vec![
+            view_element::FlowPoint {
+                x: 120.0,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+            view_element::FlowPoint {
+                x: 180.0,
+                y: 100.0,
+                attached_to_uid: Some(2),
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    };
+    let flow_compat = view_element::FlowSketchCompat {
+        uid: 6,
+        valve_x: 150.0,
+        valve_y: 100.0,
+        label_x: 170.0,
+        label_y: 134.0,
+        pipe_points: vec![
+            view_element::FlowSketchPointCompat {
+                connector_x: 90.0,
+                connector_y: 96.0,
+                point_x: 120.0,
+                point_y: 100.0,
+            },
+            view_element::FlowSketchPointCompat {
+                connector_x: 210.0,
+                connector_y: 104.0,
+                point_x: 180.0,
+                point_y: 100.0,
+            },
+        ],
+    };
+    let mut buf = String::new();
+    let valve_uids = HashMap::from([(6, 100)]);
+    let mut next_connector_uid = 200;
+    write_flow_element_with_context(
+        &mut buf,
+        &flow,
+        &valve_uids,
+        &HashSet::new(),
+        &mut next_connector_uid,
+        SketchTransform::identity(),
+        Some(&flow_compat),
+    );
+
+    assert!(
+        buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(210,104)|"),
+        "sink pipe connector should use preserved raw control point: {buf}"
+    );
+    assert!(
+        buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(90,96)|"),
+        "source pipe connector should use preserved raw control point: {buf}"
+    );
+    assert!(
+        buf.contains("10,6,Infection Rate,170,134,49,8,40,3,0,0,-1,0,0,0"),
+        "flow label should use preserved raw sketch position: {buf}"
+    );
+}
+
+#[test]
 fn valve_uids_do_not_collide_with_existing_elements() {
     // stock uid=1, flow uid=2 -> valve must NOT get uid=1
     let elements = vec![
@@ -1720,6 +1791,32 @@ fn sketch_alias_element() {
     write_alias_element(&mut buf, &alias, &name_map);
     assert!(buf.starts_with("10,10,Growth Rate,200,300,40,20,8,2,0,3,-1,0,0,0,"));
     assert!(buf.contains("128-128-128"));
+}
+
+#[test]
+fn sketch_alias_element_offsets_stock_ghost_coordinates() {
+    let alias = view_element::Alias {
+        uid: 10,
+        alias_of_uid: 1,
+        x: 200.0,
+        y: 300.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    };
+    let mut name_map = HashMap::new();
+    name_map.insert(1, "Population");
+    let mut buf = String::new();
+    write_alias_element_with_context(
+        &mut buf,
+        &alias,
+        &name_map,
+        &HashSet::from([1]),
+        SketchTransform::identity(),
+    );
+    assert!(
+        buf.starts_with("10,10,Population,222,317,40,20,8,2,0,3,-1,0,0,0,"),
+        "stock ghosts should serialize using Vensim's stock-alias offset: {buf}"
+    );
 }
 
 // ---- Phase 5 Task 2: Connector serialization (type 1) ----
@@ -1796,6 +1893,79 @@ fn sketch_link_arc_produces_nonzero_control_point() {
 }
 
 #[test]
+fn sketch_link_with_attached_valve_target_preserves_uid_and_fields() {
+    let link = view_element::Link {
+        uid: 3,
+        from_uid: 1,
+        to_uid: 2,
+        shape: LinkShape::Straight,
+        polarity: None,
+    };
+    let positions = HashMap::from([(1, (100, 100)), (2, (200, 116)), (100, (200, 100))]);
+    let valve_uids = HashMap::from([(2, 100)]);
+    let compat = view_element::LinkSketchCompat {
+        uid: 3,
+        field4: 1,
+        field10: 7,
+        from_attached_valve: false,
+        to_attached_valve: true,
+        control_x: 150.0,
+        control_y: 80.0,
+        from_x: 100.0,
+        from_y: 100.0,
+        to_x: 200.0,
+        to_y: 100.0,
+    };
+    let mut buf = String::new();
+    write_link_element_with_context(
+        &mut buf,
+        &link,
+        &positions,
+        false,
+        Some(&compat),
+        SketchTransform::identity(),
+        &valve_uids,
+    );
+    assert_eq!(buf, "1,3,1,100,1,0,0,0,0,64,7,-1--1--1,,1|(0,0)|");
+}
+
+#[test]
+fn sketch_link_with_compat_reuses_control_point_delta() {
+    let link = view_element::Link {
+        uid: 3,
+        from_uid: 1,
+        to_uid: 2,
+        shape: LinkShape::Arc(45.0),
+        polarity: None,
+    };
+    let positions = HashMap::from([(1, (110, 100)), (2, (210, 100))]);
+    let compat = view_element::LinkSketchCompat {
+        uid: 3,
+        field4: 0,
+        field10: 0,
+        from_attached_valve: false,
+        to_attached_valve: false,
+        control_x: 160.0,
+        control_y: 70.0,
+        from_x: 100.0,
+        from_y: 100.0,
+        to_x: 200.0,
+        to_y: 100.0,
+    };
+    let mut buf = String::new();
+    write_link_element_with_context(
+        &mut buf,
+        &link,
+        &positions,
+        false,
+        Some(&compat),
+        SketchTransform::identity(),
+        &HashMap::new(),
+    );
+    assert_eq!(buf, "1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(170,70)|");
+}
+
+#[test]
 fn sketch_link_multipoint_emits_all_points() {
     let points = vec![
         view_element::FlowPoint {
@@ -1868,6 +2038,7 @@ fn sketch_section_structure() {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     };
     let views = vec![View::StockFlow(sf)];
 
@@ -1926,6 +2097,7 @@ fn sketch_section_in_full_project() {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -2102,6 +2274,7 @@ fn sketch_roundtrip_sanitizes_multiline_view_title() {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -2207,6 +2380,7 @@ fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -2483,6 +2657,7 @@ fn full_assembly_has_all_three_sections() {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -2959,6 +3134,7 @@ fn make_stock_flow(elements: Vec<ViewElement>) -> StockFlow {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     }
 }
 
@@ -2981,6 +3157,71 @@ fn split_view_no_groups_uses_stockflow_name() {
     let segments = split_view_on_groups(&sf);
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].0, "My Custom View");
+}
+
+#[test]
+fn write_sketch_section_reapplies_segment_offsets() {
+    let sf = StockFlow {
+        name: None,
+        elements: vec![
+            make_view_group("1 housing", 100),
+            ViewElement::Aux(view_element::Aux {
+                name: "First_Aux".to_string(),
+                uid: 1,
+                x: 120.0,
+                y: 130.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            }),
+            make_view_group("2 investments", 200),
+            ViewElement::Aux(view_element::Aux {
+                name: "Second_Aux".to_string(),
+                uid: 2,
+                x: 340.0,
+                y: 470.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            }),
+        ],
+        view_box: Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: Some(view_element::StockFlowSketchCompat {
+            segments: vec![
+                view_element::SketchSegmentCompat {
+                    x_offset: 20.0,
+                    y_offset: 30.0,
+                },
+                view_element::SketchSegmentCompat {
+                    x_offset: 240.0,
+                    y_offset: 370.0,
+                },
+            ],
+            flows: vec![],
+            links: vec![],
+        }),
+    };
+    let mut writer = MdlWriter::new();
+    writer.write_sketch_section(&[View::StockFlow(sf)]);
+    let output = writer.buf;
+
+    assert!(
+        output.contains("*1 housing"),
+        "missing first view header: {output}"
+    );
+    assert!(
+        output.contains("*2 investments"),
+        "missing second view header: {output}"
+    );
+    assert!(
+        output.contains("10,1,First Aux,100,100,40,20,8,3,0,0,-1,0,0,0"),
+        "first segment should subtract its stored offset: {output}"
+    );
+    assert!(
+        output.contains("10,2,Second Aux,100,100,40,20,8,3,0,0,-1,0,0,0"),
+        "second segment should subtract its stored offset: {output}"
+    );
 }
 
 #[test]
@@ -3177,7 +3418,10 @@ fn stock_compat_dimensions_emitted() {
         compat: Some(view_element::ViewElementCompat {
             width: 53.0,
             height: 32.0,
+            shape: 3,
             bits: 131,
+            name_field: None,
+            tail: None,
         }),
     };
     let mut buf = String::new();
@@ -3217,7 +3461,10 @@ fn aux_compat_dimensions_emitted() {
         compat: Some(view_element::ViewElementCompat {
             width: 45.0,
             height: 18.0,
+            shape: 8,
             bits: 131,
+            name_field: None,
+            tail: None,
         }),
     };
     let mut buf = String::new();
@@ -3258,12 +3505,18 @@ fn flow_valve_compat_dimensions_emitted() {
         compat: Some(view_element::ViewElementCompat {
             width: 12.0,
             height: 18.0,
+            shape: 34,
             bits: 131,
+            name_field: None,
+            tail: None,
         }),
         label_compat: Some(view_element::ViewElementCompat {
             width: 55.0,
             height: 14.0,
+            shape: 40,
             bits: 35,
+            name_field: None,
+            tail: None,
         }),
     };
     let mut buf = String::new();
@@ -3332,7 +3585,10 @@ fn cloud_compat_dimensions_emitted() {
         compat: Some(view_element::ViewElementCompat {
             width: 20.0,
             height: 14.0,
+            shape: 0,
             bits: 131,
+            name_field: None,
+            tail: None,
         }),
     };
     let mut buf = String::new();
@@ -3371,7 +3627,10 @@ fn alias_compat_dimensions_emitted() {
         compat: Some(view_element::ViewElementCompat {
             width: 45.0,
             height: 18.0,
+            shape: 8,
             bits: 66,
+            name_field: None,
+            tail: None,
         }),
     };
     let mut name_map = HashMap::new();
@@ -3442,6 +3701,7 @@ fn build_display_name_map_extracts_view_element_names() {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     })];
     let map = build_display_name_map(&views);
     assert_eq!(
@@ -3485,6 +3745,7 @@ fn build_display_name_map_first_occurrence_wins() {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     })];
     let map = build_display_name_map(&views);
     // The first element's casing wins
@@ -3516,6 +3777,7 @@ fn equation_lhs_uses_view_element_casing() {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     })];
     let display_names = build_display_name_map(&views);
     let mut buf = String::new();
@@ -3583,6 +3845,7 @@ fn equation_lhs_casing_in_full_project_roundtrip() {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],

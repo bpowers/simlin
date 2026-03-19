@@ -1049,6 +1049,7 @@ pub mod view_element {
             zoom: 0.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
         for expected in cases {
             let expected = expected.clone();
@@ -1085,6 +1086,7 @@ pub mod view_element {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
 
         let link = datamodel::view_element::Link {
@@ -1141,6 +1143,7 @@ pub mod view_element {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
 
         let link = datamodel::view_element::Link {
@@ -1191,6 +1194,7 @@ pub mod view_element {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
 
         // Create an XMILE link with angle = 0 (straight horizontal right)
@@ -1243,6 +1247,7 @@ pub mod view_element {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
 
         // Create an XMILE link with angle = 45 (curved, not straight)
@@ -1305,6 +1310,7 @@ pub mod view_element {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
 
         // Angle very close to straight (within epsilon) should become Straight
@@ -1508,6 +1514,7 @@ pub mod view_element {
             zoom: 0.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
         for expected in cases {
             let expected = expected.clone();
@@ -2202,6 +2209,7 @@ impl From<View> for datamodel::View {
                 },
                 use_lettered_polarity: false,
                 font: None,
+                sketch_compat: None,
             })
         } else {
             unreachable!("only stock_flow supported for now -- should be filtered out before here")
@@ -2260,6 +2268,7 @@ fn test_view_roundtrip() {
         zoom: 1.6,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     })];
     for expected in cases {
         let expected = expected.clone();

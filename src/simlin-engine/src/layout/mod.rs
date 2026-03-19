@@ -167,6 +167,7 @@ impl<'a> LayoutEngine<'a> {
                 zoom: 1.0,
                 use_lettered_polarity: false,
                 font: None,
+                sketch_compat: None,
             });
         }
 
@@ -226,6 +227,7 @@ impl<'a> LayoutEngine<'a> {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         })
     }
 
@@ -3157,6 +3159,7 @@ mod tests {
                     zoom: 1.0,
                     use_lettered_polarity: false,
                     font: None,
+                    sketch_compat: None,
                 },
                 crossings: 5,
                 seed: 42,
@@ -3174,6 +3177,7 @@ mod tests {
                     zoom: 1.0,
                     use_lettered_polarity: false,
                     font: None,
+                    sketch_compat: None,
                 },
                 crossings: 2,
                 seed: 123,
@@ -3207,6 +3211,7 @@ mod tests {
                     zoom: 1.0,
                     use_lettered_polarity: false,
                     font: None,
+                    sketch_compat: None,
                 },
                 crossings: 3,
                 seed: 123,
@@ -3231,6 +3236,7 @@ mod tests {
                     zoom: 1.0,
                     use_lettered_polarity: false,
                     font: None,
+                    sketch_compat: None,
                 },
                 crossings: 3,
                 seed: 42,
@@ -3790,6 +3796,7 @@ mod tests {
             zoom: 1.0,
             use_lettered_polarity: false,
             font: None,
+            sketch_compat: None,
         };
 
         assert_eq!(count_view_crossings(&view), 0);

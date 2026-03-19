@@ -37,6 +37,7 @@ pub struct VensimVariable {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub shape: i32,
     /// Whether this variable is attached to a valve (shape bit 5).
     /// For flows, this indicates the variable is connected to a valve element.
     pub attached: bool,
@@ -45,6 +46,8 @@ pub struct VensimVariable {
     pub is_ghost: bool,
     /// Raw bits field from MDL sketch for roundtrip fidelity.
     pub bits: i32,
+    /// Raw sketch fields following `bits`.
+    pub tail: String,
 }
 
 /// A valve element in the view (type 11).
@@ -59,10 +62,13 @@ pub struct VensimValve {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub shape: i32,
     /// Whether this valve is attached to a flow (shape bit 5).
     pub attached: bool,
     /// Raw bits field from MDL sketch for roundtrip fidelity.
     pub bits: i32,
+    /// Raw sketch fields following `bits`.
+    pub tail: String,
 }
 
 /// A comment element in the view (type 12).
@@ -76,11 +82,14 @@ pub struct VensimComment {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub shape: i32,
     /// If true, the actual text content was on the next line (scratch_name).
     /// This is set when bits & (1 << 2) is true.
     pub scratch_name: bool,
     /// Raw bits field from MDL sketch for roundtrip fidelity.
     pub bits: i32,
+    /// Raw sketch fields following `bits`.
+    pub tail: String,
 }
 
 /// A connector element in the view (type 1).
@@ -91,6 +100,8 @@ pub struct VensimConnector {
     pub uid: i32,
     pub from_uid: i32,
     pub to_uid: i32,
+    /// Raw field 4 in the sketch record.
+    pub field4: i32,
     /// Polarity: Some('+') for positive, Some('-') for negative, None if unspecified.
     pub polarity: Option<char>,
     /// Whether the original polarity was specified using letter notation (S/O)
@@ -99,6 +110,8 @@ pub struct VensimConnector {
     pub letter_polarity: bool,
     /// Control point for curved connectors. (0, 0) indicates a straight line.
     pub control_point: (i32, i32),
+    /// Raw field 10 in the sketch record.
+    pub field10: i32,
 }
 
 /// A parsed view element.
@@ -212,6 +225,9 @@ pub struct VensimView {
     pub elements: Vec<Option<VensimElement>>,
     /// UID offset for multi-view composition.
     pub uid_offset: i32,
+    /// Translation applied by MDL view composition.
+    pub x_offset: i32,
+    pub y_offset: i32,
 }
 
 impl VensimView {
@@ -221,6 +237,8 @@ impl VensimView {
             header,
             elements: Vec::new(),
             uid_offset: 0,
+            x_offset: 0,
+            y_offset: 0,
         }
     }
 
@@ -354,6 +372,8 @@ mod tests {
             attached: false,
             is_ghost: false,
             bits: 3,
+            shape: 0,
+            tail: String::new(),
         };
 
         view.insert(5, VensimElement::Variable(var));
@@ -391,6 +411,8 @@ mod tests {
                 attached: false,
                 is_ghost: false,
                 bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -405,6 +427,8 @@ mod tests {
                 attached: false,
                 is_ghost: false,
                 bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -426,6 +450,8 @@ mod tests {
             attached: true,
             is_ghost: false,
             bits: 3,
+            shape: 0,
+            tail: String::new(),
         });
 
         assert_eq!(var.uid(), 1);

@@ -1206,7 +1206,10 @@ fn view_compat_from_proto(
         Some(view_element::ViewElementCompat {
             width: c.width.unwrap_or(0.0),
             height: c.height.unwrap_or(0.0),
+            shape: 0,
             bits: c.bits.unwrap_or(0),
+            name_field: None,
+            tail: None,
         })
     })
 }
@@ -1884,6 +1887,7 @@ impl From<project_io::View> for View {
             },
             use_lettered_polarity,
             font,
+            sketch_compat: None,
         })
     }
 }
@@ -1897,6 +1901,7 @@ fn test_view_roundtrip_preserves_explicit_empty_title() {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     });
 
     let roundtrip = View::from(project_io::View::from(view));
@@ -1917,6 +1922,7 @@ fn test_view_roundtrip_preserves_absent_title() {
         zoom: 1.0,
         use_lettered_polarity: false,
         font: None,
+        sketch_compat: None,
     });
 
     let roundtrip = View::from(project_io::View::from(view));

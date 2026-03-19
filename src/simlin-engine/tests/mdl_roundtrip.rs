@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::BufReader;
 
@@ -505,6 +505,50 @@ fn view_element_roundtrip() {
             }
         };
 
+        let source_views = split_sketch_into_views(&source);
+        let output_views = split_sketch_into_views(&mdl_text);
+        if source_views.len() != output_views.len() {
+            failures.push(format!(
+                "{path}: raw sketch view count differs: {} vs {}",
+                source_views.len(),
+                output_views.len()
+            ));
+        } else {
+            for (j, (source_view, output_view)) in
+                source_views.iter().zip(&output_views).enumerate()
+            {
+                if source_view.name != output_view.name {
+                    failures.push(format!(
+                        "{path}: raw sketch view[{j}] name differs: {:?} vs {:?}",
+                        source_view.name, output_view.name
+                    ));
+                }
+
+                if source_view.font_line != output_view.font_line {
+                    failures.push(format!(
+                        "{path}: raw sketch view[{j}] font differs: {:?} vs {:?}",
+                        source_view.font_line, output_view.font_line
+                    ));
+                }
+
+                let expected_named: Vec<_> = source_view
+                    .element_lines
+                    .iter()
+                    .filter_map(|line| normalize_named_sketch_line(line))
+                    .collect();
+                let actual_named: Vec<_> = output_view
+                    .element_lines
+                    .iter()
+                    .filter_map(|line| normalize_named_sketch_line(line))
+                    .collect();
+                if let Some(diff) = diff_multiset(&expected_named, &actual_named) {
+                    failures.push(format!(
+                        "{path}: raw sketch view[{j}] named lines differ: {diff}"
+                    ));
+                }
+            }
+        }
+
         for (i, (m1, m2)) in project1.models.iter().zip(&project2.models).enumerate() {
             if m1.views.len() != m2.views.len() {
                 failures.push(format!(
@@ -706,8 +750,14 @@ fn mark2_sketch_ordering() {
 // ---------------------------------------------------------------------------
 
 /// Split the sketch section of an MDL string into per-view segments.
-/// Returns a vec of (view_name, element_lines, font_line) tuples.
-fn split_sketch_into_views(mdl_text: &str) -> Vec<(&str, Vec<&str>, Option<&str>)> {
+#[derive(Debug, Clone)]
+struct SketchView {
+    name: String,
+    element_lines: Vec<String>,
+    font_line: Option<String>,
+}
+
+fn split_sketch_into_views(mdl_text: &str) -> Vec<SketchView> {
     let sketch_marker = "\\\\\\---/// Sketch information";
     let mut views = Vec::new();
 
@@ -736,34 +786,42 @@ fn split_sketch_into_views(mdl_text: &str) -> Vec<(&str, Vec<&str>, Option<&str>
 
         // Parse: first line is the marker, second is V300, third is *ViewName,
         // fourth is $font, rest are element lines.
-        let mut view_name = "";
+        let mut view_name = String::new();
         let mut font_line = None;
         let mut element_lines = Vec::new();
 
         for line in &lines {
             if let Some(name) = line.strip_prefix('*') {
-                view_name = name;
+                view_name = name.to_owned();
             } else if let Some(font) = line.strip_prefix('$') {
-                font_line = Some(font);
+                font_line = Some(font.to_owned());
             } else if line.starts_with("10,")
                 || line.starts_with("11,")
                 || line.starts_with("12,")
                 || line.starts_with("1,")
             {
-                element_lines.push(*line);
+                element_lines.push((*line).to_owned());
             }
         }
 
-        views.push((view_name, element_lines, font_line));
+        views.push(SketchView {
+            name: view_name,
+            element_lines,
+            font_line,
+        });
     }
 
     views
 }
 
+fn line_fields(line: &str) -> Vec<&str> {
+    line.split(',').collect()
+}
+
 /// Extract the variable name from a type-10 sketch element line.
 /// Type-10 lines have format: 10,uid,name,x,y,...
 fn extract_element_name(line: &str) -> Option<&str> {
-    let fields: Vec<&str> = line.split(',').collect();
+    let fields = line_fields(line);
     if fields.len() > 2 && fields[0] == "10" {
         Some(fields[2])
     } else {
@@ -771,24 +829,326 @@ fn extract_element_name(line: &str) -> Option<&str> {
     }
 }
 
-/// Count sketch elements by type within a set of element lines.
-fn count_sketch_element_types(lines: &[&str]) -> (usize, usize, usize, usize) {
-    let mut connectors = 0;
-    let mut labels = 0;
-    let mut valves = 0;
-    let mut clouds = 0;
-    for line in lines {
-        if line.starts_with("1,") {
-            connectors += 1;
-        } else if line.starts_with("10,") {
-            labels += 1;
-        } else if line.starts_with("11,") {
-            valves += 1;
-        } else if line.starts_with("12,") {
-            clouds += 1;
+fn is_time_shadow_line(line: &str) -> bool {
+    extract_element_name(line) == Some("Time")
+}
+
+fn is_flow_label_line(line: &str) -> bool {
+    let fields = line_fields(line);
+    fields.len() > 7 && fields[0] == "10" && fields[7] == "40"
+}
+
+fn is_pipe_connector(line: &str) -> bool {
+    let fields = line_fields(line);
+    fields.len() > 7 && fields[0] == "1" && fields[7] == "22"
+}
+
+fn is_influence_connector(line: &str) -> bool {
+    let fields = line_fields(line);
+    fields.len() > 7 && fields[0] == "1" && fields[7] != "22"
+}
+
+fn normalize_named_sketch_line(line: &str) -> Option<String> {
+    if is_time_shadow_line(line) {
+        return None;
+    }
+    let fields = line_fields(line);
+    if fields.len() > 3 && fields[0] == "10" {
+        Some(format!("10,{},{}", fields[2], fields[3..].join(",")))
+    } else {
+        None
+    }
+}
+
+fn normalize_valve_line(line: &str) -> String {
+    let fields = line_fields(line);
+    format!("11,{}", fields[2..].join(","))
+}
+
+fn normalize_cloud_line(line: &str) -> String {
+    let fields = line_fields(line);
+    format!("12,{}", fields[2..].join(","))
+}
+
+fn uid_field(line: &str) -> Option<&str> {
+    line_fields(line).get(1).copied()
+}
+
+fn multiset(items: &[String]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for item in items {
+        *counts.entry(item.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn multiset_delta(lhs: &HashMap<String, usize>, rhs: &HashMap<String, usize>) -> Vec<String> {
+    let mut delta = Vec::new();
+    let mut items: Vec<_> = lhs.iter().collect();
+    items.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (item, lhs_count) in items {
+        let rhs_count = rhs.get(item).copied().unwrap_or(0);
+        for _ in 0..lhs_count.saturating_sub(rhs_count) {
+            delta.push(item.clone());
         }
     }
-    (connectors, labels, valves, clouds)
+    delta
+}
+
+fn preview_items(items: &[String]) -> String {
+    const LIMIT: usize = 4;
+    if items.is_empty() {
+        return "[]".to_owned();
+    }
+    let shown = items
+        .iter()
+        .take(LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if items.len() > LIMIT {
+        format!("[{shown} | ... +{} more]", items.len() - LIMIT)
+    } else {
+        format!("[{shown}]")
+    }
+}
+
+fn diff_multiset(expected: &[String], actual: &[String]) -> Option<String> {
+    let expected_counts = multiset(expected);
+    let actual_counts = multiset(actual);
+    let missing = multiset_delta(&expected_counts, &actual_counts);
+    let extra = multiset_delta(&actual_counts, &expected_counts);
+    if missing.is_empty() && extra.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "missing={} extra={}",
+            preview_items(&missing),
+            preview_items(&extra)
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FlowBlock {
+    name: String,
+    valve_uid: String,
+    valve_line: String,
+    label_line: String,
+    cloud_lines: Vec<String>,
+    pipe_lines: Vec<String>,
+}
+
+fn parse_flow_blocks(view: &SketchView) -> Result<HashMap<String, FlowBlock>, String> {
+    let mut blocks = HashMap::new();
+    for (idx, line) in view.element_lines.iter().enumerate() {
+        if !line.starts_with("11,") {
+            continue;
+        }
+
+        let Some(label_line) = view.element_lines.get(idx + 1) else {
+            return Err(format!(
+                "view {:?}: valve at line {} is missing its flow label",
+                view.name, idx
+            ));
+        };
+        if !is_flow_label_line(label_line) {
+            return Err(format!(
+                "view {:?}: valve at line {} is followed by a non-flow label line: {}",
+                view.name, idx, label_line
+            ));
+        }
+
+        let mut start = idx;
+        while start > 0 {
+            let prev = &view.element_lines[start - 1];
+            if prev.starts_with("12,") || is_pipe_connector(prev) {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let name = extract_element_name(label_line)
+            .ok_or_else(|| {
+                format!(
+                    "view {:?}: missing flow name for block at {}",
+                    view.name, idx
+                )
+            })?
+            .to_owned();
+        let valve_uid = uid_field(line)
+            .ok_or_else(|| {
+                format!(
+                    "view {:?}: missing valve uid for flow {:?}",
+                    view.name, name
+                )
+            })?
+            .to_owned();
+
+        let mut cloud_lines = Vec::new();
+        let mut pipe_lines = Vec::new();
+        for block_line in &view.element_lines[start..idx] {
+            if block_line.starts_with("12,") {
+                cloud_lines.push(block_line.clone());
+            } else if is_pipe_connector(block_line) {
+                pipe_lines.push(block_line.clone());
+            } else {
+                return Err(format!(
+                    "view {:?}: unexpected line inside flow block {:?}: {}",
+                    view.name, name, block_line
+                ));
+            }
+        }
+
+        let block = FlowBlock {
+            name: name.clone(),
+            valve_uid,
+            valve_line: line.clone(),
+            label_line: label_line.clone(),
+            cloud_lines,
+            pipe_lines,
+        };
+        if blocks.insert(name.clone(), block).is_some() {
+            return Err(format!(
+                "view {:?}: duplicate flow block for {:?}",
+                view.name, name
+            ));
+        }
+    }
+    Ok(blocks)
+}
+
+fn build_named_uid_map(lines: &[String]) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    for line in lines {
+        if let (Some(uid), Some(name)) = (uid_field(line), extract_element_name(line)) {
+            names.insert(uid.to_owned(), name.to_owned());
+        }
+    }
+    names
+}
+
+fn normalize_pipe_line(
+    line: &str,
+    named_uids: &HashMap<String, String>,
+    cloud_uids: &HashMap<String, String>,
+) -> String {
+    let fields = line_fields(line);
+    let endpoint_uid = fields[3];
+    let endpoint = named_uids
+        .get(endpoint_uid)
+        .cloned()
+        .or_else(|| cloud_uids.get(endpoint_uid).cloned())
+        .unwrap_or_else(|| format!("uid:{endpoint_uid}"));
+    format!("1,to={endpoint},{}", fields[4..].join(","))
+}
+
+fn normalize_flow_blocks(view: &SketchView) -> Result<HashMap<String, Vec<String>>, String> {
+    let named_uids = build_named_uid_map(&view.element_lines);
+    let flow_blocks = parse_flow_blocks(view)?;
+    let mut normalized = HashMap::new();
+
+    for (name, block) in flow_blocks {
+        let mut cloud_uids = HashMap::new();
+        for (idx, cloud_line) in block.cloud_lines.iter().enumerate() {
+            let cloud_uid = uid_field(cloud_line).ok_or_else(|| {
+                format!(
+                    "view {:?}: cloud line in flow {:?} is missing a uid: {}",
+                    view.name, block.name, cloud_line
+                )
+            })?;
+            let label = if block.cloud_lines.len() == 1 {
+                format!("cloud:{name}")
+            } else {
+                format!("cloud:{name}:{}", idx + 1)
+            };
+            cloud_uids.insert(cloud_uid.to_owned(), label);
+        }
+
+        let mut records = vec![
+            format!(
+                "label:{}",
+                normalize_named_sketch_line(&block.label_line).ok_or_else(|| {
+                    format!(
+                        "view {:?}: flow label for {:?} did not normalize: {}",
+                        view.name, block.name, block.label_line
+                    )
+                })?
+            ),
+            format!("valve:{}", normalize_valve_line(&block.valve_line)),
+        ];
+
+        let mut clouds: Vec<_> = block
+            .cloud_lines
+            .iter()
+            .map(|line| format!("cloud:{}", normalize_cloud_line(line)))
+            .collect();
+        clouds.sort();
+        records.extend(clouds);
+
+        let mut pipes: Vec<_> = block
+            .pipe_lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "pipe:{}",
+                    normalize_pipe_line(line, &named_uids, &cloud_uids)
+                )
+            })
+            .collect();
+        pipes.sort();
+        records.extend(pipes);
+
+        records.sort();
+        normalized.insert(name, records);
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_influence_connectors(view: &SketchView) -> Result<Vec<String>, String> {
+    let mut uid_labels = build_named_uid_map(&view.element_lines);
+    for (flow_name, block) in parse_flow_blocks(view)? {
+        uid_labels.insert(block.valve_uid.clone(), format!("valve:{flow_name}"));
+        for (idx, cloud_line) in block.cloud_lines.iter().enumerate() {
+            let cloud_uid = uid_field(cloud_line).ok_or_else(|| {
+                format!(
+                    "view {:?}: cloud line in flow {:?} is missing a uid: {}",
+                    view.name, flow_name, cloud_line
+                )
+            })?;
+            let label = if block.cloud_lines.len() == 1 {
+                format!("cloud:{flow_name}")
+            } else {
+                format!("cloud:{flow_name}:{}", idx + 1)
+            };
+            uid_labels.insert(cloud_uid.to_owned(), label);
+        }
+    }
+
+    let mut connectors = Vec::new();
+    for line in view
+        .element_lines
+        .iter()
+        .filter(|line| is_influence_connector(line))
+    {
+        let fields = line_fields(line);
+        let from = uid_labels
+            .get(fields[2])
+            .cloned()
+            .unwrap_or_else(|| format!("uid:{}", fields[2]));
+        let to = uid_labels
+            .get(fields[3])
+            .cloned()
+            .unwrap_or_else(|| format!("uid:{}", fields[3]));
+        if from == "Time" || to == "Time" {
+            continue;
+        }
+        connectors.push(format!("1,{from}->{to},{}", fields[4..].join(",")));
+    }
+    connectors.sort();
+    Ok(connectors)
 }
 
 /// Verify mark2.mdl format roundtrip: parse, write, and compare the
@@ -796,8 +1156,10 @@ fn count_sketch_element_types(lines: &[&str]) -> (usize, usize, usize, usize) {
 ///
 /// Checks:
 /// - AC1.1: Exactly 2 views with correct names
-/// - AC1.2: Per-view element lines match as unordered sets
-/// - AC1.4: Font specification preserved per view
+/// - AC1.2: Raw named sketch lines match as unordered multisets
+/// - AC1.3: Flow blocks preserve raw valve/cloud/pipe records
+/// - AC1.4: Influence connectors preserve resolved endpoint references
+/// - AC1.5: Font specification preserved per view
 /// - AC3.1: Lookup calls use `table ( input )` syntax
 /// - AC3.2: Lookup range bounds preserved
 /// - AC4.1: Short equations use inline format
@@ -826,228 +1188,131 @@ fn mdl_format_roundtrip() {
             output_views.len()
         ));
     } else {
-        // View names should contain the numbered prefix from the original
         let expected_names = ["1 housing", "2 investments"];
         for (i, expected) in expected_names.iter().enumerate() {
-            if !output_views[i].0.contains(expected) {
+            if output_views[i].name != *expected {
                 failures.push(format!(
-                    "AC1.1: view[{i}] name {:?} does not contain {:?}",
-                    output_views[i].0, expected
+                    "AC1.1: view[{i}] name {:?} != {:?}",
+                    output_views[i].name, expected
                 ));
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // AC1.2: Per-view elements match as unordered sets
-    //
-    // UIDs are renumbered and coordinates may shift during roundtrip, so
-    // we compare named elements (type 10) by name and non-named elements
-    // (connectors, valves, clouds) by count.
+    // AC1.2: Raw named sketch lines match as unordered multisets
     // -----------------------------------------------------------------------
     if orig_views.len() == output_views.len() {
         for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
-            // Compare named elements (type 10) by variable name
-            let orig_names: HashSet<&str> = orig
-                .1
+            let expected_named: Vec<_> = orig
+                .element_lines
                 .iter()
-                .filter_map(|l| extract_element_name(l))
+                .filter_map(|line| normalize_named_sketch_line(line))
                 .collect();
-            let out_names: HashSet<&str> = out
-                .1
+            let actual_named: Vec<_> = out
+                .element_lines
                 .iter()
-                .filter_map(|l| extract_element_name(l))
+                .filter_map(|line| normalize_named_sketch_line(line))
                 .collect();
-
-            let missing_names: Vec<_> = orig_names.difference(&out_names).collect();
-            let extra_names: Vec<_> = out_names.difference(&orig_names).collect();
-
-            // Shadow references to the built-in "Time" variable are not
-            // preserved during roundtrip (Time is not a model variable).
-            let missing_non_time: Vec<_> =
-                missing_names.iter().filter(|n| **n != &"Time").collect();
-            if !missing_non_time.is_empty() {
+            if let Some(diff) = diff_multiset(&expected_named, &actual_named) {
                 failures.push(format!(
-                    "AC1.2: view[{i}] ({:?}) missing named element(s): {:?}",
-                    orig.0, missing_non_time
-                ));
-            }
-            if !extra_names.is_empty() {
-                failures.push(format!(
-                    "AC1.2: view[{i}] ({:?}) has extra named element(s): {:?}",
-                    out.0, extra_names
-                ));
-            }
-
-            // Compare element type counts
-            let (orig_conn, orig_lbl, orig_valve, orig_cloud) = count_sketch_element_types(&orig.1);
-            let (out_conn, out_lbl, out_valve, out_cloud) = count_sketch_element_types(&out.1);
-
-            // Label count may differ by the number of Time shadow elements
-            let time_shadow_count = orig
-                .1
-                .iter()
-                .filter(|l| l.starts_with("10,") && extract_element_name(l) == Some("Time"))
-                .count();
-            if orig_lbl - time_shadow_count != out_lbl {
-                failures.push(format!(
-                    "AC1.2: view[{i}] label count: orig={orig_lbl} (minus {time_shadow_count} Time shadows) \
-                     vs out={out_lbl}"
-                ));
-            }
-            if orig_valve != out_valve {
-                failures.push(format!(
-                    "AC1.2: view[{i}] valve count: orig={orig_valve} out={out_valve}"
-                ));
-            }
-            if orig_cloud != out_cloud {
-                failures.push(format!(
-                    "AC1.2: view[{i}] cloud count: orig={orig_cloud} out={out_cloud}"
-                ));
-            }
-            // Connector counts may differ for documented reasons:
-            // 1. Shadow references to the built-in Time variable are dropped
-            //    (Time is not a model variable), along with their connectors.
-            // 2. Init-only links (field 10 = 1, dashed arrows in Vensim) may
-            //    not survive the roundtrip.
-            // Count the expected dropped connectors from both sources.
-            let time_uids: HashSet<&str> = orig
-                .1
-                .iter()
-                .filter(|l| l.starts_with("10,") && extract_element_name(l) == Some("Time"))
-                .filter_map(|l| l.split(',').nth(1))
-                .collect();
-            let dropped_time_connectors = orig
-                .1
-                .iter()
-                .filter(|l| {
-                    if !l.starts_with("1,") {
-                        return false;
-                    }
-                    let fields: Vec<&str> = l.split(',').collect();
-                    fields.len() > 3
-                        && (time_uids.contains(fields[2]) || time_uids.contains(fields[3]))
-                })
-                .count();
-            let init_only_connectors = orig
-                .1
-                .iter()
-                .filter(|l| {
-                    if !l.starts_with("1,") {
-                        return false;
-                    }
-                    let fields: Vec<&str> = l.split(',').collect();
-                    fields.len() > 10 && fields[10] == "1"
-                })
-                .count();
-            let expected_dropped = dropped_time_connectors + init_only_connectors;
-            let conn_diff = (orig_conn as i32 - out_conn as i32).abs();
-            if conn_diff > expected_dropped as i32 {
-                failures.push(format!(
-                    "AC1.2: view[{i}] connector count: orig={orig_conn} out={out_conn} \
-                     (diff={conn_diff} exceeds expected_dropped={expected_dropped}: \
-                     time={dropped_time_connectors}, init_only={init_only_connectors})"
+                    "AC1.2: view[{i}] ({:?}) raw named sketch lines differ: {diff}",
+                    orig.name
                 ));
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // AC1.3: Per-element field-level fidelity
-    //
-    // For each type-10 (named) element matched by name between original
-    // and output, compare dimension and shape fields. Skip uid (field 1),
-    // coordinates (fields 3,4), and fields that depend on display state
-    // we don't yet preserve (field 9 = init-link flag, field 11 = varies
-    // by element type, fields 14+ = ghost color/font).
+    // AC1.3: Flow blocks preserve raw valve/cloud/pipe records
     // -----------------------------------------------------------------------
     if orig_views.len() == output_views.len() {
         for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
-            fn build_name_fields<'a>(
-                lines: &[&'a str],
-            ) -> std::collections::HashMap<&'a str, Vec<&'a str>> {
-                let mut map = std::collections::HashMap::new();
-                for line in lines {
-                    let fields: Vec<&str> = line.split(',').collect();
-                    if fields.len() > 2 && fields[0] == "10" {
-                        map.insert(fields[2], fields);
+            match (normalize_flow_blocks(orig), normalize_flow_blocks(out)) {
+                (Ok(expected_blocks), Ok(actual_blocks)) => {
+                    let expected_names: HashSet<_> = expected_blocks.keys().cloned().collect();
+                    let actual_names: HashSet<_> = actual_blocks.keys().cloned().collect();
+
+                    for missing_name in expected_names.difference(&actual_names) {
+                        failures.push(format!(
+                            "AC1.3: view[{i}] ({:?}) missing flow block {:?}",
+                            orig.name, missing_name
+                        ));
                     }
-                }
-                map
-            }
-
-            let orig_fields = build_name_fields(&orig.1);
-            let out_fields = build_name_fields(&out.1);
-
-            // Fields to compare: w(5), h(6), bits(8).
-            // Shape (field 7) is excluded because Vensim allows displaying
-            // any variable type with any shape (e.g. an aux as a stock box).
-            // Our converter classifies variable type from the equation, not
-            // the sketch shape, so non-stock variables displayed as boxes
-            // (shape=3) will roundtrip as shape=8.
-            let compare_indices = [5, 6, 8];
-
-            // Elements that appear in multiple views are converted to
-            // aliases during view composition. Their shape changes from
-            // stock(3) to aux(8) and is not preserved. Collect names that
-            // appear in OTHER views so we can exclude them from shape checks.
-            let mut cross_view_names: HashSet<&str> = HashSet::new();
-            for (j, other) in output_views.iter().enumerate() {
-                if j != i {
-                    for line in &other.1 {
-                        if let Some(n) = extract_element_name(line) {
-                            cross_view_names.insert(n);
-                        }
+                    for extra_name in actual_names.difference(&expected_names) {
+                        failures.push(format!(
+                            "AC1.3: view[{i}] ({:?}) has extra flow block {:?}",
+                            out.name, extra_name
+                        ));
                     }
-                }
-            }
 
-            for (name, orig_f) in &orig_fields {
-                if *name == "Time" {
-                    continue;
-                }
-                let is_cross_view = cross_view_names.contains(name);
-                if let Some(out_f) = out_fields.get(name) {
-                    for &idx in &compare_indices {
-                        // Skip shape comparison for cross-view duplicates
-                        // (they become aliases with shape=8).
-                        if idx == 7 && is_cross_view {
-                            continue;
-                        }
-                        if idx < orig_f.len() && idx < out_f.len() && orig_f[idx] != out_f[idx] {
+                    for flow_name in expected_names.intersection(&actual_names) {
+                        let expected = expected_blocks
+                            .get(flow_name)
+                            .expect("expected flow block by name");
+                        let actual = actual_blocks
+                            .get(flow_name)
+                            .expect("actual flow block by name");
+                        if let Some(diff) = diff_multiset(expected, actual) {
                             failures.push(format!(
-                                "AC1.3: view[{i}] element {:?} field[{idx}] \
-                                 orig={:?} out={:?}",
-                                name, orig_f[idx], out_f[idx]
+                                "AC1.3: view[{i}] ({:?}) flow block {:?} differs: {diff}",
+                                orig.name, flow_name
                             ));
                         }
                     }
                 }
+                (Err(e), _) => failures.push(format!("AC1.3: source flow block parse failed: {e}")),
+                (_, Err(e)) => failures.push(format!("AC1.3: output flow block parse failed: {e}")),
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // AC1.4: Font specification preserved per view
+    // AC1.4: Influence connectors preserve resolved endpoint references
     // -----------------------------------------------------------------------
     for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
-        match (orig.2, out.2) {
+        match (
+            normalize_influence_connectors(orig),
+            normalize_influence_connectors(out),
+        ) {
+            (Ok(expected), Ok(actual)) => {
+                if let Some(diff) = diff_multiset(&expected, &actual) {
+                    failures.push(format!(
+                        "AC1.4: view[{i}] ({:?}) influence connectors differ: {diff}",
+                        orig.name
+                    ));
+                }
+            }
+            (Err(e), _) => {
+                failures.push(format!("AC1.4: source connector normalization failed: {e}"))
+            }
+            (_, Err(e)) => {
+                failures.push(format!("AC1.4: output connector normalization failed: {e}"))
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AC1.5: Font specification preserved per view
+    // -----------------------------------------------------------------------
+    for (i, (orig, out)) in orig_views.iter().zip(&output_views).enumerate() {
+        match (&orig.font_line, &out.font_line) {
             (Some(orig_font), Some(out_font)) => {
                 if !out_font.contains("Verdana|10") {
                     failures.push(format!(
-                        "AC1.4: view[{i}] font does not contain 'Verdana|10': {:?}",
+                        "AC1.5: view[{i}] font does not contain 'Verdana|10': {:?}",
                         out_font
                     ));
                 }
                 if orig_font != out_font {
                     failures.push(format!(
-                        "AC1.4: view[{i}] font differs: orig={:?} out={:?}",
+                        "AC1.5: view[{i}] font differs: orig={:?} out={:?}",
                         orig_font, out_font
                     ));
                 }
             }
             (Some(_), None) => {
-                failures.push(format!("AC1.4: view[{i}] missing font line in output"));
+                failures.push(format!("AC1.5: view[{i}] missing font line in output"));
             }
             _ => {}
         }
