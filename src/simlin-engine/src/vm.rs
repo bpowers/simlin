@@ -2265,6 +2265,79 @@ impl Vm {
                         }
                     }
                 }
+
+                Opcode::AllocateByPriority { write_temp_id } => {
+                    // Pops supply and width from the stack (supply was pushed last, so popped first)
+                    let supply = stack.pop();
+                    let width = stack.pop();
+
+                    let priority_view = &view_stack[view_stack.len() - 1];
+                    let requests_view = &view_stack[view_stack.len() - 2];
+
+                    if !requests_view.is_valid || !priority_view.is_valid {
+                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
+                    } else {
+                        // Collect request values
+                        let req_size = requests_view.size();
+                        let req_n_dims = requests_view.dims.len();
+                        let mut requests: SmallVec<[f64; 32]> = SmallVec::with_capacity(req_size);
+                        let mut req_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; req_n_dims];
+                        for _ in 0..req_size {
+                            let flat_off = requests_view.flat_offset(&req_indices);
+                            let val = Self::read_view_element(
+                                requests_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            requests.push(val);
+                            increment_indices(&mut req_indices, &requests_view.dims);
+                        }
+
+                        let n = requests.len();
+
+                        // Collect priority values
+                        let pri_size = priority_view.size();
+                        let pri_n_dims = priority_view.dims.len();
+                        let mut priorities: SmallVec<[f64; 32]> = SmallVec::with_capacity(pri_size);
+                        let mut pri_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; pri_n_dims];
+                        for _ in 0..pri_size {
+                            let flat_off = priority_view.flat_offset(&pri_indices);
+                            let val = Self::read_view_element(
+                                priority_view,
+                                flat_off,
+                                curr,
+                                temp_storage,
+                                context,
+                            );
+                            priorities.push(val);
+                            increment_indices(&mut pri_indices, &priority_view.dims);
+                        }
+
+                        // Construct rectangular priority profiles:
+                        // (ptype=1, ppriority=priority[i], pwidth=width, pextra=0)
+                        let mut profiles: SmallVec<[(f64, f64, f64, f64); 32]> =
+                            SmallVec::with_capacity(n);
+                        for i in 0..n {
+                            let ppriority = if i < priorities.len() {
+                                priorities[i]
+                            } else {
+                                0.0
+                            };
+                            profiles.push((1.0, ppriority, width, 0.0));
+                        }
+
+                        let result = allocate_available(&requests, &profiles, supply);
+
+                        let temp_off = context.temp_offsets[*write_temp_id as usize];
+                        for (i, &val) in result.iter().enumerate() {
+                            temp_storage[temp_off + i] = val;
+                        }
+                    }
+                }
             }
 
             pc += 1;

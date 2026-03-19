@@ -102,6 +102,10 @@ pub enum BuiltinFn<Expr> {
     VectorSortOrder(Box<Expr>, Box<Expr>),
     // ALLOCATE AVAILABLE(request, priority_profile, avail)
     AllocateAvailable(Box<Expr>, Box<Expr>, Box<Expr>),
+    // ALLOCATE BY PRIORITY(request, priority, size, width, supply)
+    // Desugars to AllocateAvailable at runtime by constructing rectangular
+    // priority profiles: (ptype=1, ppriority=priority[i], pwidth=width, pextra=0)
+    AllocateByPriority(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
     // builtins replacing stdlib modules
     Previous(Box<Expr>, Box<Expr>),
     Init(Box<Expr>),
@@ -152,6 +156,7 @@ impl<Expr> BuiltinFn<Expr> {
             VectorElmMap(_, _) => "vector_elm_map",
             VectorSortOrder(_, _) => "vector_sort_order",
             AllocateAvailable(_, _, _) => "allocate_available",
+            AllocateByPriority(_, _, _, _, _) => "allocate_by_priority",
             // builtins replacing stdlib modules
             Previous(_, _) => "previous",
             Init(_) => "init",
@@ -242,6 +247,13 @@ impl<Expr> BuiltinFn<Expr> {
             AllocateAvailable(a, b, c) => {
                 AllocateAvailable(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?))
             }
+            AllocateByPriority(a, b, c, d, e) => AllocateByPriority(
+                Box::new(f(*a)?),
+                Box::new(f(*b)?),
+                Box::new(f(*c)?),
+                Box::new(f(*d)?),
+                Box::new(f(*e)?),
+            ),
             Previous(a, b) => Previous(Box::new(f(*a)?), Box::new(f(*b)?)),
             Init(a) => Init(Box::new(f(*a)?)),
         })
@@ -328,6 +340,13 @@ impl<Expr> BuiltinFn<Expr> {
                 f(b);
                 f(c);
             }
+            AllocateByPriority(a, b, c, d, e) => {
+                f(a);
+                f(b);
+                f(c);
+                f(d);
+                f(e);
+            }
         }
     }
 }
@@ -400,6 +419,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "vector_elm_map"
         | "vector_sort_order"
         | "allocate_available"
+        | "allocate_by_priority"
         // builtins replacing stdlib modules
         | "previous"
         | "init"
@@ -498,6 +518,13 @@ where
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
             cb(BuiltinContents::Expr(c));
+        }
+        BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
+            cb(BuiltinContents::Expr(a));
+            cb(BuiltinContents::Expr(b));
+            cb(BuiltinContents::Expr(c));
+            cb(BuiltinContents::Expr(d));
+            cb(BuiltinContents::Expr(e));
         }
     }
 }

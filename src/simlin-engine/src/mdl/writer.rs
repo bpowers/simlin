@@ -424,10 +424,25 @@ fn recognize_sample_if_true(
     None
 }
 
-/// Match ALLOCATE BY PRIORITY:
-/// `allocate(supply, last_subscript_ident, demand_with_star, priority, width)`.
+/// Match ALLOCATE BY PRIORITY in both forms:
+/// - Native: `allocate_by_priority(request, priority, size, width, supply)`
+/// - Legacy: `allocate(supply, last_subscript_ident, demand_with_star, priority, width)`
 fn recognize_allocate(expr: &Expr0, walk: &mut impl FnMut(&Expr0) -> String) -> Option<String> {
     if let Expr0::App(UntypedBuiltinFn(f, args), _) = expr {
+        // Native form: allocate_by_priority(request, priority, size, width, supply)
+        // Args are already in MDL order.
+        if f == "allocate_by_priority" && args.len() == 5 {
+            let request = walk(&args[0]);
+            let priority = walk(&args[1]);
+            let size = walk(&args[2]);
+            let width = walk(&args[3]);
+            let supply = walk(&args[4]);
+            return Some(format!(
+                "ALLOCATE BY PRIORITY({request}, {priority}, {size}, {width}, {supply})"
+            ));
+        }
+
+        // Legacy form: allocate(supply, last_subscript, demand_with_star, priority, width)
         if f != "allocate" || args.len() != 5 {
             return None;
         }

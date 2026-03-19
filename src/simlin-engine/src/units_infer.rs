@@ -514,7 +514,8 @@ impl UnitInferer<'_> {
                     self.gen_constraints(source, prefix, current_var, constraints)
                 }
                 BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
-                BuiltinFn::AllocateAvailable(req, _, _) => {
+                BuiltinFn::AllocateAvailable(req, _, _)
+                | BuiltinFn::AllocateByPriority(req, _, _, _, _) => {
                     self.gen_constraints(req, prefix, current_var, constraints)
                 }
                 // Previous(x, fallback) and Init(x) preserve the units of the

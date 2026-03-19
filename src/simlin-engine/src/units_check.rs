@@ -221,7 +221,8 @@ impl UnitEvaluator<'_> {
                     BuiltinFn::VectorSelect(_, expr_array, _, _, _) => self.check(expr_array),
                     BuiltinFn::VectorElmMap(source, _) => self.check(source),
                     BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
-                    BuiltinFn::AllocateAvailable(req, _, _) => self.check(req),
+                    BuiltinFn::AllocateAvailable(req, _, _)
+                    | BuiltinFn::AllocateByPriority(req, _, _, _, _) => self.check(req),
                     // Previous(x, init) preserves the units of x and requires
                     // the fallback to be compatible with it.
                     BuiltinFn::Previous(a, b) => {

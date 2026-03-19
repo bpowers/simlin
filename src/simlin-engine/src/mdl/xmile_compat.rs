@@ -538,69 +538,12 @@ impl XmileFormatter {
         args: &[Expr<'_>],
         ctx: Option<&ElementContext>,
     ) -> String {
-        // ALLOCATE BY PRIORITY(demand, priority, ignore, width, supply)
-        // -> ALLOCATE(supply, last_subscript, demand_with_star, priority, width)
-        if args.len() != 5 {
-            // Fallback: pass through as-is
-            let formatted: Vec<String> =
-                args.iter().map(|a| self.format_expr_ctx(a, ctx)).collect();
-            return format!("ALLOCATE_BY_PRIORITY({})", formatted.join(", "));
-        }
-
-        let supply = self.format_expr_ctx(&args[4], ctx);
-        let demand = &args[0];
-        let priority = self.format_expr_ctx(&args[1], ctx);
-        let width = self.format_expr_ctx(&args[3], ctx);
-
-        // Extract last subscript from demand if it's a subscripted variable
-        let (last_subscript, demand_str) = if let Expr::Var(name, subscripts, _) = demand {
-            if subscripts.is_empty() {
-                // No subscripts - use empty string for dimension, format normally
-                (String::new(), self.format_name(name))
-            } else {
-                let last = subscripts
-                    .last()
-                    .map(|s| match s {
-                        Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
-                            space_to_underbar(n)
-                        }
-                    })
-                    .unwrap_or_default();
-
-                // Format with final star on last subscript
-                let demand_formatted = self.format_var_with_final_star(name, subscripts);
-                (last, demand_formatted)
-            }
-        } else {
-            // Demand is not a simple variable - format normally, empty subscript
-            (String::new(), self.format_expr_ctx(demand, ctx))
-        };
-
-        format!(
-            "ALLOCATE({}, {}, {}, {}, {})",
-            supply, last_subscript, demand_str, priority, width
-        )
-    }
-
-    fn format_var_with_final_star(&self, name: &str, subscripts: &[Subscript<'_>]) -> String {
-        let formatted_name = self.format_name(name);
-        if subscripts.is_empty() {
-            return formatted_name;
-        }
-
-        let mut subs: Vec<String> = subscripts
-            .iter()
-            .map(|s| match s {
-                Subscript::Element(n, _) | Subscript::BangElement(n, _) => space_to_underbar(n),
-            })
-            .collect();
-
-        // Append .* to last subscript to indicate "all elements"
-        if let Some(last) = subs.last_mut() {
-            *last = format!("{}.*", last);
-        }
-
-        format!("{}[{}]", formatted_name, subs.join(", "))
+        // MDL: ALLOCATE BY PRIORITY(demand, priority, size, width, supply)
+        // XMILE: allocate_by_priority(demand, priority, size, width, supply)
+        // The engine now handles this as a native builtin, so args pass
+        // through in the same order without rewriting to ALLOCATE().
+        let formatted: Vec<String> = args.iter().map(|a| self.format_expr_ctx(a, ctx)).collect();
+        format!("allocate_by_priority({})", formatted.join(", "))
     }
 
     /// Format a single subscript with optional context for substitution.
@@ -1188,7 +1131,8 @@ mod tests {
     #[test]
     fn test_format_allocate_by_priority() {
         // ALLOCATE BY PRIORITY(demand[region], priority, ignore, width, supply)
-        // -> ALLOCATE(supply, region, demand[region.*], priority, width)
+        // -> allocate_by_priority(demand[region], priority, 0, width, supply)
+        // The engine now handles this as a native builtin with args in MDL order.
         let formatter = XmileFormatter::new();
         let expr = Expr::App(
             Cow::Borrowed("ALLOCATE BY PRIORITY"),
@@ -1214,14 +1158,14 @@ mod tests {
         );
         assert_eq!(
             formatter.format_expr(&expr),
-            "ALLOCATE(supply, region, demand[region.*], priority, width)"
+            "allocate_by_priority(demand[region], priority, 0, width, supply)"
         );
     }
 
     #[test]
     fn test_format_allocate_by_priority_multidim() {
         // ALLOCATE BY PRIORITY(demand[region, product], priority, ignore, width, supply)
-        // -> ALLOCATE(supply, product, demand[region, product.*], priority, width)
+        // -> allocate_by_priority(demand[region, product], priority, 0, width, supply)
         let formatter = XmileFormatter::new();
         let expr = Expr::App(
             Cow::Borrowed("ALLOCATE BY PRIORITY"),
@@ -1250,7 +1194,7 @@ mod tests {
         );
         assert_eq!(
             formatter.format_expr(&expr),
-            "ALLOCATE(supply, product, demand[region, product.*], priority, width)"
+            "allocate_by_priority(demand[region, product], priority, 0, width, supply)"
         );
     }
 

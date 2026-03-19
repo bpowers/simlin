@@ -138,7 +138,8 @@ impl ModuleEvaluator<'_> {
                 BuiltinFn::Rank(arr, _) => Self::find_array_dims(arr),
                 BuiltinFn::VectorSortOrder(arr, _) => Self::find_array_dims(arr),
                 // Array-producing: output has same dims as request
-                BuiltinFn::AllocateAvailable(req, _, _) => Self::find_array_dims(req),
+                BuiltinFn::AllocateAvailable(req, _, _)
+                | BuiltinFn::AllocateByPriority(req, _, _, _, _) => Self::find_array_dims(req),
                 _ => None,
             },
             _ => None,
@@ -376,6 +377,32 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::AllocateAvailable(req_expr, pp_expr, avail_expr) => {
                         let allocations =
                             self.compute_allocate_available(req_expr, pp_expr, avail_expr);
+                        let elem_idx = match &**req_expr {
+                            Expr::Var(off, _) => self
+                                .find_var_range(*off)
+                                .map(|(base, _)| off - base + index)
+                                .unwrap_or(index),
+                            _ => index,
+                        };
+                        if elem_idx < allocations.len() {
+                            allocations[elem_idx]
+                        } else {
+                            f64::NAN
+                        }
+                    }
+                    BuiltinFn::AllocateByPriority(
+                        req_expr,
+                        priority_expr,
+                        _size,
+                        width_expr,
+                        supply_expr,
+                    ) => {
+                        let allocations = self.compute_allocate_by_priority(
+                            req_expr,
+                            priority_expr,
+                            width_expr,
+                            supply_expr,
+                        );
                         let elem_idx = match &**req_expr {
                             Expr::Var(off, _) => self
                                 .find_var_range(*off)
@@ -803,6 +830,44 @@ impl ModuleEvaluator<'_> {
         }
 
         allocate_available(requests, &profiles, avail)
+    }
+
+    /// ALLOCATE BY PRIORITY(request, priority, size, width, supply) desugars to
+    /// ALLOCATE AVAILABLE with rectangular priority profiles at runtime.
+    /// Each requester i gets profile (ptype=1, ppriority=priority[i], pwidth=width, pextra=0).
+    fn compute_allocate_by_priority(
+        &mut self,
+        req_expr: &Expr,
+        priority_expr: &Expr,
+        width_expr: &Expr,
+        supply_expr: &Expr,
+    ) -> Vec<f64> {
+        let supply = self.eval(supply_expr);
+        let width = self.eval(width_expr);
+
+        let mut requests = Vec::new();
+        self.iter_array_elements(req_expr, |val| requests.push(val));
+        let n = requests.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        let mut priorities = Vec::new();
+        self.iter_array_elements(priority_expr, |val| priorities.push(val));
+
+        // Construct rectangular priority profiles: (ptype=1, ppriority, pwidth=width, pextra=0)
+        let profiles: Vec<(f64, f64, f64, f64)> = (0..n)
+            .map(|i| {
+                let ppriority = if i < priorities.len() {
+                    priorities[i]
+                } else {
+                    0.0
+                };
+                (1.0, ppriority, width, 0.0)
+            })
+            .collect();
+
+        allocate_available(&requests, &profiles, supply)
     }
 
     /// Extract the table identifier and element offset from a lookup table expression.
@@ -1416,6 +1481,34 @@ impl ModuleEvaluator<'_> {
                             f64::NAN
                         }
                     }
+                    BuiltinFn::AllocateByPriority(
+                        req_expr,
+                        priority_expr,
+                        _size,
+                        width_expr,
+                        supply_expr,
+                    ) => {
+                        let allocations = self.compute_allocate_by_priority(
+                            req_expr,
+                            priority_expr,
+                            width_expr,
+                            supply_expr,
+                        );
+                        let elem_idx = match &**req_expr {
+                            Expr::Var(off, _) => self
+                                .find_var_range(*off)
+                                .map(|(base, _)| off - base)
+                                .unwrap_or(0),
+                            _ => 0,
+                        };
+                        if elem_idx < allocations.len() {
+                            allocations[elem_idx]
+                        } else if !allocations.is_empty() {
+                            allocations[0]
+                        } else {
+                            f64::NAN
+                        }
+                    }
                     BuiltinFn::Previous(arg, fallback) => {
                         if crate::float::approx_eq(self.curr[TIME_OFF], self.curr[INITIAL_TIME_OFF])
                         {
@@ -1553,6 +1646,21 @@ impl ModuleEvaluator<'_> {
                     Expr::App(BuiltinFn::AllocateAvailable(req_expr, pp_expr, avail_expr), _) => {
                         Some(self.compute_allocate_available(req_expr, pp_expr, avail_expr))
                     }
+                    Expr::App(
+                        BuiltinFn::AllocateByPriority(
+                            req_expr,
+                            priority_expr,
+                            _size,
+                            width_expr,
+                            supply_expr,
+                        ),
+                        _,
+                    ) => Some(self.compute_allocate_by_priority(
+                        req_expr,
+                        priority_expr,
+                        width_expr,
+                        supply_expr,
+                    )),
                     _ => None,
                 };
 
