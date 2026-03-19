@@ -401,6 +401,16 @@ fn pattern_allocate_by_priority_no_subscript() {
     );
 }
 
+#[test]
+fn pattern_allocate_by_priority_native() {
+    // Native XMILE form: allocate_by_priority(request, priority, size, width, supply)
+    // Args are already in MDL order -- no reordering needed.
+    assert_mdl(
+        "allocate_by_priority(demand[region], priority, 0, width, supply)",
+        "ALLOCATE BY PRIORITY(demand[region], priority, 0, width, supply)",
+    );
+}
+
 // ---- lookup call syntax tests ----
 
 #[test]

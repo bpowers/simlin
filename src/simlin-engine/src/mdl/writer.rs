@@ -2781,3 +2781,4 @@ fn build_name_map(elements: &[ViewElement]) -> HashMap<i32, &str> {
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod tests;
+
