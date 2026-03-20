@@ -1418,6 +1418,67 @@ fn format_sketch_name(name: &str) -> String {
     name.replace('_', " ").replace('\n', "\\n")
 }
 
+/// Remap merged/global datamodel UIDs into dense, view-local sketch IDs.
+///
+/// Vensim sketches use small, contiguous IDs within each `V300` section.
+/// After multi-view MDL files are merged into a single StockFlow, the
+/// datamodel UIDs remain globally unique across the merged view. Re-using
+/// those sparse IDs when serializing a single segment produces valid-looking
+/// records that Vensim misrenders. The writer therefore assigns fresh,
+/// per-segment IDs while leaving geometry lookups on the original IDs.
+struct SketchUidRemap {
+    element_uids: HashMap<i32, i32>,
+    valve_uids: HashMap<i32, i32>,
+}
+
+impl SketchUidRemap {
+    fn dense_for_segment(elements: &[&ViewElement]) -> Self {
+        let mut element_uids = HashMap::new();
+        let mut flow_uids = Vec::new();
+        let mut next_uid = 1;
+
+        for element in elements {
+            let old_uid = match element {
+                ViewElement::Aux(aux) => aux.uid,
+                ViewElement::Stock(stock) => stock.uid,
+                ViewElement::Flow(flow) => {
+                    flow_uids.push(flow.uid);
+                    flow.uid
+                }
+                ViewElement::Link(link) => link.uid,
+                ViewElement::Alias(alias) => alias.uid,
+                ViewElement::Cloud(cloud) => cloud.uid,
+                ViewElement::Module(_) | ViewElement::Group(_) => continue,
+            };
+            element_uids.insert(old_uid, next_uid);
+            next_uid += 1;
+        }
+
+        let mut valve_uids = HashMap::new();
+        for flow_uid in flow_uids {
+            valve_uids.insert(flow_uid, next_uid);
+            next_uid += 1;
+        }
+
+        Self {
+            element_uids,
+            valve_uids,
+        }
+    }
+
+    fn element_uid(&self, old_uid: i32) -> i32 {
+        self.element_uids.get(&old_uid).copied().unwrap_or(old_uid)
+    }
+
+    fn valve_uid(&self, flow_uid: i32) -> Option<i32> {
+        self.valve_uids.get(&flow_uid).copied()
+    }
+
+    fn next_connector_uid(&self) -> i32 {
+        (self.element_uids.len() + self.valve_uids.len()) as i32 + 1
+    }
+}
+
 const STOCK_WIDTH: f64 = 45.0;
 const STOCK_HEIGHT: f64 = 35.0;
 const STOCK_EDGE_TOLERANCE: f64 = 1.0;
@@ -1428,13 +1489,14 @@ const STOCK_EDGE_TOLERANCE: f64 = 1.0;
 /// quoting is not used.
 #[cfg(test)]
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
-    write_aux_element_with_context(buf, aux, SketchTransform::identity());
+    write_aux_element_with_context(buf, aux, SketchTransform::identity(), None);
 }
 
 fn write_aux_element_with_context(
     buf: &mut String,
     aux: &view_element::Aux,
     transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let name = format_sketch_name(&aux.name);
     let (w, h, shape, bits) = match &aux.compat {
@@ -1443,10 +1505,11 @@ fn write_aux_element_with_context(
     };
     let (x, y) = transform.point(aux.x, aux.y);
     let tail = compat_tail(aux.compat.as_ref(), "0,0,-1,0,0,0");
+    let uid = uid_remap.map_or(aux.uid, |ids| ids.element_uid(aux.uid));
     write!(
         buf,
         "10,{},{},{},{},{},{},{},{},{}",
-        aux.uid, name, x, y, w, h, shape, bits, tail,
+        uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1454,13 +1517,14 @@ fn write_aux_element_with_context(
 /// Write a type 10 line for a Stock element.
 #[cfg(test)]
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
-    write_stock_element_with_context(buf, stock, SketchTransform::identity());
+    write_stock_element_with_context(buf, stock, SketchTransform::identity(), None);
 }
 
 fn write_stock_element_with_context(
     buf: &mut String,
     stock: &view_element::Stock,
     transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let name = format_sketch_name(&stock.name);
     let (w, h, shape, bits) = match &stock.compat {
@@ -1469,10 +1533,11 @@ fn write_stock_element_with_context(
     };
     let (x, y) = transform.point(stock.x, stock.y);
     let tail = compat_tail(stock.compat.as_ref(), "0,0,0,0,0,0");
+    let uid = uid_remap.map_or(stock.uid, |ids| ids.element_uid(stock.uid));
     write!(
         buf,
         "10,{},{},{},{},{},{},{},{},{}",
-        stock.uid, name, x, y, w, h, shape, bits, tail,
+        uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1510,6 +1575,7 @@ fn allocate_valve_uids(elements: &[ViewElement]) -> HashMap<i32, i32> {
     valve_uids
 }
 
+#[allow(dead_code)]
 fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i32 {
     let mut max_uid = valve_uids.values().copied().max().unwrap_or(0);
     for elem in elements {
@@ -1622,6 +1688,7 @@ fn write_flow_element(
         SketchTransform::identity(),
         &HashMap::new(),
         &HashSet::new(),
+        None,
     );
 }
 
@@ -1635,9 +1702,13 @@ fn write_flow_element_with_context(
     transform: SketchTransform,
     elem_positions: &HashMap<i32, (i32, i32)>,
     stock_uids: &HashSet<i32>,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let name = format_sketch_name(&flow.name);
-    let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
+    let valve_uid = uid_remap
+        .and_then(|ids| ids.valve_uid(flow.uid))
+        .or_else(|| valve_uids.get(&flow.uid).copied())
+        .unwrap_or(flow.uid - 1);
     let valve_compat = flow.compat.as_ref();
     let label_compat = flow.label_compat.as_ref();
     let (valve_x, valve_y) = transform.point(flow.x, flow.y);
@@ -1648,9 +1719,12 @@ fn write_flow_element_with_context(
         flow,
         valve_uid,
         next_connector_uid,
-        transform,
-        elem_positions,
-        stock_uids,
+        FlowConnectorContext {
+            transform,
+            elem_positions,
+            stock_uids,
+            uid_remap,
+        },
     );
 
     let (valve_w, valve_h, valve_shape, valve_bits) = match valve_compat {
@@ -1684,10 +1758,11 @@ fn write_flow_element_with_context(
 
     let (label_x, label_y) = default_flow_label_point(flow, transform);
     let label_tail = compat_tail(label_compat, "0,0,-1,0,0,0");
+    let label_uid = uid_remap.map_or(flow.uid, |ids| ids.element_uid(flow.uid));
     write!(
         buf,
         "\n10,{},{},{},{},{},{},{},{},{}",
-        flow.uid, name, label_x, label_y, label_w, label_h, label_shape, label_bits, label_tail,
+        label_uid, name, label_x, label_y, label_w, label_h, label_shape, label_bits, label_tail,
     )
     .unwrap();
 }
@@ -1707,10 +1782,20 @@ fn write_flow_pipe_connectors(
         flow,
         valve_uid,
         next_connector_uid,
-        SketchTransform::identity(),
-        &HashMap::new(),
-        &HashSet::new(),
+        FlowConnectorContext {
+            transform: SketchTransform::identity(),
+            elem_positions: &HashMap::new(),
+            stock_uids: &HashSet::new(),
+            uid_remap: None,
+        },
     )
+}
+
+struct FlowConnectorContext<'a> {
+    transform: SketchTransform,
+    elem_positions: &'a HashMap<i32, (i32, i32)>,
+    stock_uids: &'a HashSet<i32>,
+    uid_remap: Option<&'a SketchUidRemap>,
 }
 
 fn write_flow_pipe_connectors_with_context(
@@ -1718,9 +1803,7 @@ fn write_flow_pipe_connectors_with_context(
     flow: &view_element::Flow,
     valve_uid: i32,
     next_connector_uid: &mut i32,
-    transform: SketchTransform,
-    elem_positions: &HashMap<i32, (i32, i32)>,
-    stock_uids: &HashSet<i32>,
+    ctx: FlowConnectorContext<'_>,
 ) -> bool {
     let mut wrote_any = false;
 
@@ -1746,15 +1829,15 @@ fn write_flow_pipe_connectors_with_context(
     };
 
     let connector_point = |point: &view_element::FlowPoint| -> (i32, i32) {
-        let point_xy = transform.point(point.x, point.y);
+        let point_xy = ctx.transform.point(point.x, point.y);
         let Some(endpoint_uid) = point.attached_to_uid else {
             return point_xy;
         };
-        if !stock_uids.contains(&endpoint_uid) {
+        if !ctx.stock_uids.contains(&endpoint_uid) {
             return point_xy;
         }
 
-        let Some(&(stock_x, stock_y)) = elem_positions.get(&endpoint_uid) else {
+        let Some(&(stock_x, stock_y)) = ctx.elem_positions.get(&endpoint_uid) else {
             return point_xy;
         };
         let dx = f64::from(point_xy.0 - stock_x);
@@ -1779,11 +1862,14 @@ fn write_flow_pipe_connectors_with_context(
         && let Some(endpoint_uid) = last.attached_to_uid
     {
         let (x, y) = connector_point(last);
-        let direction = if stock_uids.contains(&endpoint_uid) {
+        let direction = if ctx.stock_uids.contains(&endpoint_uid) {
             4
         } else {
             100
         };
+        let endpoint_uid = ctx
+            .uid_remap
+            .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
         write_pipe(
             buf,
             !wrote_any,
@@ -1823,11 +1909,14 @@ fn write_flow_pipe_connectors_with_context(
         && let Some(endpoint_uid) = first.attached_to_uid
     {
         let (x, y) = connector_point(first);
-        let direction = if stock_uids.contains(&endpoint_uid) {
+        let direction = if ctx.stock_uids.contains(&endpoint_uid) {
             4
         } else {
             100
         };
+        let endpoint_uid = ctx
+            .uid_remap
+            .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
         write_pipe(
             buf,
             !wrote_any,
@@ -1848,13 +1937,14 @@ fn write_flow_pipe_connectors_with_context(
 /// Write a type 12 line for a Cloud element.
 #[cfg(test)]
 fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
-    write_cloud_element_with_context(buf, cloud, SketchTransform::identity());
+    write_cloud_element_with_context(buf, cloud, SketchTransform::identity(), None);
 }
 
 fn write_cloud_element_with_context(
     buf: &mut String,
     cloud: &view_element::Cloud,
     transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let (w, h, shape, bits) = match &cloud.compat {
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
@@ -1863,10 +1953,11 @@ fn write_cloud_element_with_context(
     let (x, y) = transform.point(cloud.x, cloud.y);
     let name_field = compat_name_field(cloud.compat.as_ref(), "48");
     let tail = compat_tail(cloud.compat.as_ref(), "0,0,-1,0,0,0");
+    let uid = uid_remap.map_or(cloud.uid, |ids| ids.element_uid(cloud.uid));
     write!(
         buf,
         "12,{},{},{},{},{},{},{},{},{}",
-        cloud.uid, name_field, x, y, w, h, shape, bits, tail,
+        uid, name_field, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1884,6 +1975,7 @@ fn write_alias_element(
         name_map,
         &HashSet::new(),
         SketchTransform::identity(),
+        None,
     );
 }
 
@@ -1893,6 +1985,7 @@ fn write_alias_element_with_context(
     name_map: &HashMap<i32, &str>,
     stock_uids: &HashSet<i32>,
     transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let name = name_map
         .get(&alias.alias_of_uid)
@@ -1912,11 +2005,12 @@ fn write_alias_element_with_context(
         alias.compat.as_ref(),
         "0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
     );
+    let uid = uid_remap.map_or(alias.uid, |ids| ids.element_uid(alias.uid));
     // shape=8
     write!(
         buf,
         "10,{},{},{},{},{},{},{},{},{}",
-        alias.uid, name, x, y, w, h, shape, bits, tail,
+        uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1939,7 +2033,7 @@ fn write_link_element(
         use_lettered_polarity,
         None,
         SketchTransform::identity(),
-        &HashMap::new(),
+        None,
     );
 }
 
@@ -1950,7 +2044,7 @@ fn write_link_element_with_context(
     use_lettered_polarity: bool,
     link_compat: Option<&view_element::LinkSketchCompat>,
     transform: SketchTransform,
-    _valve_uids: &HashMap<i32, i32>,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let polarity_val = match link.polarity {
         Some(LinkPolarity::Positive) if use_lettered_polarity => 83, // 'S'
@@ -1964,6 +2058,9 @@ fn write_link_element_with_context(
     let to_uid = link.to_uid;
     let from_pos = elem_positions.get(&from_uid).copied().unwrap_or((0, 0));
     let to_pos = elem_positions.get(&to_uid).copied().unwrap_or((0, 0));
+    let link_uid = uid_remap.map_or(link.uid, |ids| ids.element_uid(link.uid));
+    let from_uid = uid_remap.map_or(from_uid, |ids| ids.element_uid(from_uid));
+    let to_uid = uid_remap.map_or(to_uid, |ids| ids.element_uid(to_uid));
     let field4 = link_compat.map(|compat| compat.field4).unwrap_or(0);
     let field10 = link_compat.map(|compat| compat.field10).unwrap_or(0);
 
@@ -1973,7 +2070,7 @@ fn write_link_element_with_context(
             write!(
                 buf,
                 "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|(0,0)|",
-                link.uid, from_uid, to_uid, field4, polarity_val, field10,
+                link_uid, from_uid, to_uid, field4, polarity_val, field10,
             )
             .unwrap();
         }
@@ -1982,7 +2079,7 @@ fn write_link_element_with_context(
             write!(
                 buf,
                 "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|({},{})|",
-                link.uid, from_uid, to_uid, field4, polarity_val, field10, ctrl_x, ctrl_y,
+                link_uid, from_uid, to_uid, field4, polarity_val, field10, ctrl_x, ctrl_y,
             )
             .unwrap();
         }
@@ -1991,7 +2088,7 @@ fn write_link_element_with_context(
             write!(
                 buf,
                 "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,{}|",
-                link.uid, from_uid, to_uid, field4, polarity_val, field10, npoints,
+                link_uid, from_uid, to_uid, field4, polarity_val, field10, npoints,
             )
             .unwrap();
             for pt in points {
@@ -2315,7 +2412,6 @@ impl MdlWriter {
             // Build shared maps from ALL elements so that cross-view
             // references (links, aliases) resolve correctly.
             let valve_uids = allocate_valve_uids(&sf.elements);
-            let mut next_connector_uid = max_sketch_uid(&sf.elements, &valve_uids) + 1;
             let name_map = build_name_map(&sf.elements);
             let mut flow_compat_by_uid: HashMap<i32, &view_element::FlowSketchCompat> =
                 HashMap::new();
@@ -2371,8 +2467,6 @@ impl MdlWriter {
                     elements,
                     font.as_deref(),
                     sf.use_lettered_polarity,
-                    &valve_uids,
-                    &mut next_connector_uid,
                     sf.sketch_compat
                         .as_ref()
                         .and_then(|compat| compat.segments.get(segment_ix))
@@ -2402,8 +2496,6 @@ impl MdlWriter {
         elements: &[&ViewElement],
         font: Option<&str>,
         use_lettered_polarity: bool,
-        valve_uids: &HashMap<i32, i32>,
-        next_connector_uid: &mut i32,
         transform: SketchTransform,
         elem_positions: &HashMap<i32, (i32, i32)>,
         name_map: &HashMap<i32, &str>,
@@ -2411,6 +2503,8 @@ impl MdlWriter {
         _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
         link_compat_by_uid: &HashMap<i32, &view_element::LinkSketchCompat>,
     ) {
+        let uid_remap = SketchUidRemap::dense_for_segment(elements);
+        let mut next_connector_uid = uid_remap.next_connector_uid();
         let view_title = sanitize_view_title_for_mdl(view_name);
         writeln!(self.buf, "*{}", view_title).unwrap();
 
@@ -2437,30 +2531,41 @@ impl MdlWriter {
         for elem in elements {
             match elem {
                 ViewElement::Aux(aux) => {
-                    write_aux_element_with_context(&mut self.buf, aux, transform);
+                    write_aux_element_with_context(&mut self.buf, aux, transform, Some(&uid_remap));
                     self.buf.push('\n');
                 }
                 ViewElement::Stock(stock) => {
-                    write_stock_element_with_context(&mut self.buf, stock, transform);
+                    write_stock_element_with_context(
+                        &mut self.buf,
+                        stock,
+                        transform,
+                        Some(&uid_remap),
+                    );
                     self.buf.push('\n');
                 }
                 ViewElement::Flow(flow) => {
                     // Emit associated clouds before the flow pipes
                     if let Some(clouds) = flow_clouds.get(&flow.uid) {
                         for cloud in clouds {
-                            write_cloud_element_with_context(&mut self.buf, cloud, transform);
+                            write_cloud_element_with_context(
+                                &mut self.buf,
+                                cloud,
+                                transform,
+                                Some(&uid_remap),
+                            );
                             self.buf.push('\n');
                         }
                     }
                     write_flow_element_with_context(
                         &mut self.buf,
                         flow,
-                        valve_uids,
+                        &uid_remap.valve_uids,
                         &cloud_uids,
-                        next_connector_uid,
+                        &mut next_connector_uid,
                         transform,
                         elem_positions,
                         stock_uids,
+                        Some(&uid_remap),
                     );
                     self.buf.push('\n');
                 }
@@ -2472,7 +2577,7 @@ impl MdlWriter {
                         use_lettered_polarity,
                         link_compat_by_uid.get(&link.uid).copied(),
                         transform,
-                        valve_uids,
+                        Some(&uid_remap),
                     );
                     self.buf.push('\n');
                 }
@@ -2485,6 +2590,7 @@ impl MdlWriter {
                         name_map,
                         stock_uids,
                         transform,
+                        Some(&uid_remap),
                     );
                     self.buf.push('\n');
                 }

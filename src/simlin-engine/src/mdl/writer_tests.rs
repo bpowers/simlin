@@ -1696,6 +1696,7 @@ fn sketch_flow_element_derives_stock_connector_points_from_takeoffs() {
         SketchTransform::identity(),
         &elem_positions,
         &stock_uids,
+        None,
     );
 
     assert!(
@@ -1794,6 +1795,7 @@ fn sketch_alias_element_offsets_stock_ghost_coordinates() {
         &name_map,
         &HashSet::from([1]),
         SketchTransform::identity(),
+        None,
     );
     assert!(
         buf.starts_with("10,10,Population,222,317,40,20,8,2,0,3,-1,0,0,0,"),
@@ -1884,7 +1886,6 @@ fn sketch_link_with_field_hints_preserves_nonsemantic_flags() {
         polarity: None,
     };
     let positions = HashMap::from([(1, (100, 100)), (2, (200, 116)), (100, (200, 100))]);
-    let valve_uids = HashMap::from([(2, 100)]);
     let compat = view_element::LinkSketchCompat {
         uid: 3,
         field4: 1,
@@ -1906,7 +1907,7 @@ fn sketch_link_with_field_hints_preserves_nonsemantic_flags() {
         false,
         Some(&compat),
         SketchTransform::identity(),
-        &valve_uids,
+        None,
     );
     assert_eq!(buf, "1,3,1,2,1,0,0,0,0,64,7,-1--1--1,,1|(0,0)|");
 }
@@ -1942,7 +1943,7 @@ fn sketch_link_with_field_hints_still_uses_link_geometry() {
         false,
         Some(&compat),
         SketchTransform::identity(),
-        &HashMap::new(),
+        None,
     );
     let (ctrl_x, ctrl_y) = compute_control_point((110, 100), (210, 100), 45.0);
     assert_eq!(
@@ -3278,6 +3279,29 @@ fn make_stock_flow(elements: Vec<ViewElement>) -> StockFlow {
     }
 }
 
+fn sketch_record_uids_for_view(output: &str, view_title: &str) -> Vec<i32> {
+    let marker = format!("*{view_title}\n");
+    let start = output.find(&marker).expect("view marker should exist");
+    let section = &output[start + marker.len()..];
+    let end = section
+        .find("\\\\\\---/// Sketch information - do not modify anything except names\n")
+        .or_else(|| section.find("///---\\\\\\\n"))
+        .expect("view should end at the next sketch boundary");
+    let section = &section[..end];
+
+    let mut ids = section
+        .lines()
+        .filter_map(|line| {
+            let record_type = line.split(',').next()?;
+            matches!(record_type, "1" | "10" | "11" | "12")
+                .then(|| line.split(',').nth(1)?.parse::<i32>().ok())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
 #[test]
 fn split_view_no_groups_returns_single_segment() {
     let sf = make_stock_flow(vec![
@@ -3359,9 +3383,97 @@ fn write_sketch_section_reapplies_segment_offsets() {
         "first segment should subtract its stored offset: {output}"
     );
     assert!(
-        output.contains("10,2,Second Aux,100,100,40,20,8,3,0,0,-1,0,0,0"),
+        output.contains("10,1,Second Aux,100,100,40,20,8,3,0,0,-1,0,0,0"),
         "second segment should subtract its stored offset: {output}"
     );
+}
+
+#[test]
+fn write_sketch_section_reassigns_dense_uids_per_view() {
+    let sf = StockFlow {
+        name: None,
+        elements: vec![
+            make_view_group("1 housing", 100),
+            ViewElement::Stock(view_element::Stock {
+                name: "Homes".to_string(),
+                uid: 10,
+                x: 100.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            }),
+            ViewElement::Stock(view_element::Stock {
+                name: "Inventory".to_string(),
+                uid: 20,
+                x: 300.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            }),
+            ViewElement::Flow(view_element::Flow {
+                name: "Sales".to_string(),
+                uid: 60,
+                x: 200.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                points: vec![
+                    view_element::FlowPoint {
+                        x: 122.5,
+                        y: 100.0,
+                        attached_to_uid: Some(10),
+                    },
+                    view_element::FlowPoint {
+                        x: 277.5,
+                        y: 100.0,
+                        attached_to_uid: Some(20),
+                    },
+                ],
+                compat: None,
+                label_compat: None,
+            }),
+            ViewElement::Link(view_element::Link {
+                uid: 80,
+                from_uid: 10,
+                to_uid: 60,
+                shape: LinkShape::Straight,
+                polarity: Some(LinkPolarity::Positive),
+            }),
+            make_view_group("2 investments", 200),
+            ViewElement::Aux(view_element::Aux {
+                name: "Risk".to_string(),
+                uid: 300,
+                x: 100.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            }),
+            ViewElement::Flow(view_element::Flow {
+                name: "Funding".to_string(),
+                uid: 400,
+                x: 200.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                points: vec![],
+                compat: None,
+                label_compat: None,
+            }),
+        ],
+        view_box: Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    };
+
+    let mut writer = MdlWriter::new();
+    writer.write_sketch_section(&[View::StockFlow(sf)]);
+    let output = writer.buf;
+
+    let housing_ids = sketch_record_uids_for_view(&output, "1 housing");
+    assert_eq!(housing_ids, vec![1, 2, 3, 4, 5, 6, 7]);
+
+    let investment_ids = sketch_record_uids_for_view(&output, "2 investments");
+    assert_eq!(investment_ids, vec![1, 2, 3]);
 }
 
 #[test]
