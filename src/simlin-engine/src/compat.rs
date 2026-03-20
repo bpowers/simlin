@@ -26,6 +26,7 @@ use crate::results::Method;
 use crate::results::{Results, Specs};
 
 use crate::mdl;
+use crate::systems;
 use crate::xmile;
 
 pub fn to_xmile(project: &Project) -> Result<String> {
@@ -34,6 +35,10 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 
 pub fn to_mdl(project: &Project) -> Result<String> {
     mdl::project_to_mdl(project)
+}
+
+pub fn to_systems(project: &Project) -> Result<String> {
+    systems::project_to_systems(project)
 }
 
 #[cfg(feature = "xmutil")]
@@ -70,6 +75,16 @@ pub fn open_vensim_with_data(
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
     xmile::project_from_reader(reader)
+}
+
+/// Parse a systems format file and translate it to a Project.
+///
+/// Uses a default simulation duration of 10 rounds. Callers that
+/// need a different duration should use `systems::parse` and
+/// `systems::translate::translate` directly.
+pub fn open_systems(contents: &str) -> Result<Project> {
+    let model = systems::parse(contents)?;
+    systems::translate::translate(&model, systems::translate::DEFAULT_ROUNDS)
 }
 
 #[cfg(feature = "file_io")]

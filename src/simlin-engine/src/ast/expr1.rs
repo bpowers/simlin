@@ -252,6 +252,23 @@ impl Expr1 {
                     "vector_elm_map" => check_arity!(VectorElmMap, 2),
                     "vector_sort_order" => check_arity!(VectorSortOrder, 2),
                     "allocate_available" => check_arity!(AllocateAvailable, 3),
+                    "allocate_by_priority" => {
+                        if args.len() != 5 {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                        let e = args.remove(4);
+                        let d = args.remove(3);
+                        let c = args.remove(2);
+                        let b = args.remove(1);
+                        let a = args.remove(0);
+                        BuiltinFn::AllocateByPriority(
+                            Box::new(a),
+                            Box::new(b),
+                            Box::new(c),
+                            Box::new(d),
+                            Box::new(e),
+                        )
+                    }
                     // Unary PREVIOUS(x) desugars to PREVIOUS(x, 0).
                     // builtins_visitor may have already added the fallback
                     // at Expr0 level, so both 1-arg and 2-arg forms are valid.
@@ -428,6 +445,13 @@ impl Expr1 {
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),
                         Box::new(c.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::AllocateByPriority(a, b, c, d, e) => BuiltinFn::AllocateByPriority(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        Box::new(c.constify_dimensions(scope)),
+                        Box::new(d.constify_dimensions(scope)),
+                        Box::new(e.constify_dimensions(scope)),
                     ),
                     BuiltinFn::Previous(a, b) => BuiltinFn::Previous(
                         Box::new(a.constify_dimensions(scope)),

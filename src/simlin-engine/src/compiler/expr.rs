@@ -216,6 +216,13 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         Box::new(c.strip_loc()),
                     ),
+                    BuiltinFn::AllocateByPriority(a, b, c, d, e) => BuiltinFn::AllocateByPriority(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        Box::new(c.strip_loc()),
+                        Box::new(d.strip_loc()),
+                        Box::new(e.strip_loc()),
+                    ),
                     BuiltinFn::Previous(a, b) => {
                         BuiltinFn::Previous(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
                     }

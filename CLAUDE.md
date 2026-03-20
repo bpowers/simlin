@@ -121,7 +121,7 @@ Treat these as generated output unless the task explicitly targets them:
 
 ## Test Models
 
-The `test/` directory contains model files (XMILE, Vensim `.mdl`) with expected simulation outputs. These integration tests ensure engine behavior matches known-good results from other SD software.
+The `test/` directory contains model files (XMILE, Vensim `.mdl`, systems format `.txt`) with expected simulation outputs. These integration tests ensure engine behavior matches known-good results from other SD software.
 
 ## Protobuf Generation
 

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>systems_rate</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler" time_units="time unit">
+        <start>0</start>
+        <stop>1</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model name="stdlib⁚systems_rate">
+        <variables>
+            <aux name="available">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="requested">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="dest_capacity">
+                <eqn>INF</eqn>
+            </aux>
+            <!-- actual clamps the transfer to [0, min(requested, available, dest_capacity)].
+                 The MAX(0, ...) guard rejects negative requested values (which can arise
+                 from formula errors or unusual model configurations) rather than allowing
+                 a negative flow to act as a reverse transfer. This is a deliberate
+                 defensive deviation from the original specification, which only specifies
+                 MIN(requested, available). -->
+            <aux name="actual">
+                <eqn>MIN(dest_capacity, MAX(0, MIN(requested, available)))</eqn>
+            </aux>
+            <aux name="remaining">
+                <eqn>available - actual</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <aux name="available" x="100" y="100" label_side="bottom"></aux>
+                <aux name="requested" x="200" y="100" label_side="bottom"></aux>
+                <aux name="dest capacity" x="300" y="100" label_side="bottom"></aux>
+                <aux name="actual" x="200" y="200" label_side="bottom"></aux>
+                <aux name="remaining" x="300" y="200" label_side="bottom"></aux>
+            </view>
+        </views>
+    </model>
+</xmile>

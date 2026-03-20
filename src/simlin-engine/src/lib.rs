@@ -55,6 +55,10 @@ mod results;
 pub mod serde;
 #[path = "stdlib.gen.rs"]
 mod stdlib;
+pub mod systems;
+#[cfg(test)]
+#[path = "systems_stdlib_tests.rs"]
+mod systems_stdlib_tests;
 pub mod test_common;
 #[cfg(all(test, feature = "xmutil"))]
 mod test_open_vensim;

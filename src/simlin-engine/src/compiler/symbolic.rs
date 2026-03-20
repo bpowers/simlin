@@ -219,6 +219,9 @@ pub(crate) enum SymbolicOpcode {
     AllocateAvailable {
         write_temp_id: TempId,
     },
+    AllocateByPriority {
+        write_temp_id: TempId,
+    },
 
     // === BROADCASTING ITERATION (unchanged) ===
     BeginBroadcastIter {
@@ -630,6 +633,9 @@ pub(crate) fn symbolize_opcode(
         Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
             write_temp_id: *write_temp_id,
         }),
+        Opcode::AllocateByPriority { write_temp_id } => Ok(SymbolicOpcode::AllocateByPriority {
+            write_temp_id: *write_temp_id,
+        }),
         Opcode::BeginBroadcastIter {
             n_sources,
             dest_temp_id,
@@ -930,6 +936,9 @@ pub(crate) fn resolve_opcode(
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::AllocateAvailable { write_temp_id } => Ok(Opcode::AllocateAvailable {
+            write_temp_id: *write_temp_id,
+        }),
+        SymbolicOpcode::AllocateByPriority { write_temp_id } => Ok(Opcode::AllocateByPriority {
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::BeginBroadcastIter {
@@ -1355,6 +1364,11 @@ pub(crate) fn renumber_opcode(
         SymbolicOpcode::AllocateAvailable { write_temp_id } => SymbolicOpcode::AllocateAvailable {
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
+        SymbolicOpcode::AllocateByPriority { write_temp_id } => {
+            SymbolicOpcode::AllocateByPriority {
+                write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+            }
+        }
         // All other opcodes have no resource IDs to renumber
         other => other.clone(),
     })

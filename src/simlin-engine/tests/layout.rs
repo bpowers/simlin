@@ -49,6 +49,7 @@ fn verify_layout(
             ViewElement::Stock(s) => Some(normalize(&s.name)),
             ViewElement::Flow(f) => Some(normalize(&f.name)),
             ViewElement::Aux(a) => Some(normalize(&a.name)),
+            ViewElement::Module(m) => Some(normalize(&m.name)),
             _ => None,
         })
         .collect();
@@ -131,6 +132,22 @@ fn verify_layout(
                     a.y
                 );
             }
+            ViewElement::Module(m) => {
+                assert!(
+                    m.x > 0.0,
+                    "[{}] module '{}' has non-positive x: {}",
+                    label,
+                    m.name,
+                    m.x
+                );
+                assert!(
+                    m.y > 0.0,
+                    "[{}] module '{}' has non-positive y: {}",
+                    label,
+                    m.name,
+                    m.y
+                );
+            }
             ViewElement::Cloud(c) => {
                 assert!(
                     c.x > 0.0,
@@ -147,10 +164,7 @@ fn verify_layout(
                     c.y
                 );
             }
-            ViewElement::Link(_)
-            | ViewElement::Module(_)
-            | ViewElement::Alias(_)
-            | ViewElement::Group(_) => {}
+            ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => {}
         }
     }
 
@@ -161,11 +175,9 @@ fn verify_layout(
             ViewElement::Stock(s) => (s.x, s.y),
             ViewElement::Flow(f) => (f.x, f.y),
             ViewElement::Aux(a) => (a.x, a.y),
+            ViewElement::Module(m) => (m.x, m.y),
             ViewElement::Cloud(c) => (c.x, c.y),
-            ViewElement::Link(_)
-            | ViewElement::Module(_)
-            | ViewElement::Alias(_)
-            | ViewElement::Group(_) => continue,
+            ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => continue,
         };
         assert!(
             x >= vb.x && x <= vb.x + vb.width,
@@ -752,4 +764,66 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
         !source_project.ltm_enabled(&db),
         "ltm_enabled should be false after compute_metadata completes"
     );
+}
+
+/// Verify that a systems-format model with modules produces a complete,
+/// renderable diagram with ViewElement::Module for each Variable::Module.
+#[test]
+fn test_systems_format_layout_with_modules() {
+    use simlin_engine::datamodel;
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("could not determine repo root");
+    let file_path = repo_root.join("test/systems-format/hiring.txt");
+    let contents = std::fs::read_to_string(&file_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", file_path.display(), e));
+
+    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+    let project = simlin_engine::systems::translate::translate(&systems_model, 5).unwrap();
+
+    let view = generate_layout(&project, MAIN_MODEL, None)
+        .expect("layout generation should succeed for systems format model");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+
+    // Count expected module elements
+    let module_count = model
+        .variables
+        .iter()
+        .filter(|v| matches!(v, datamodel::Variable::Module(_)))
+        .count();
+    let view_module_count = view
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Module(_)))
+        .count();
+    assert_eq!(
+        module_count, view_module_count,
+        "every Variable::Module should have a ViewElement::Module"
+    );
+
+    // Systems format models use stdlib modules for flows, so there
+    // should be a non-trivial number of modules.
+    assert!(
+        module_count > 0,
+        "hiring model should have at least one module (got {})",
+        module_count
+    );
+
+    // Verify all modules have valid, finite positions
+    for elem in &view.elements {
+        if let ViewElement::Module(m) = elem {
+            assert!(
+                m.x.is_finite() && m.y.is_finite(),
+                "module '{}' should have finite coordinates ({}, {})",
+                m.name,
+                m.x,
+                m.y
+            );
+        }
+    }
+
+    // Use the shared verify_layout helper which now includes Module coverage
+    verify_layout(&view, model, "systems_hiring");
 }

@@ -810,6 +810,18 @@ impl Expr2 {
                         ctx.set_allow_dimension_union(prev);
                         result
                     }
+                    AllocateByPriority(req, priority, size, width, supply) => {
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = AllocateByPriority(
+                            Box::new(Expr2::from(*req, ctx)?),
+                            Box::new(Expr2::from(*priority, ctx)?),
+                            Box::new(Expr2::from(*size, ctx)?),
+                            Box::new(Expr2::from(*width, ctx)?),
+                            Box::new(Expr2::from(*supply, ctx)?),
+                        );
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
                     Previous(a, b) => Previous(
                         Box::new(Expr2::from(*a, ctx)?),
                         Box::new(Expr2::from(*b, ctx)?),

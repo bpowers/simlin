@@ -786,7 +786,8 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
             BuiltinFn::VectorElmMap(_, _)
                 | BuiltinFn::VectorSortOrder(_, _)
                 | BuiltinFn::Rank(_, _)
-                | BuiltinFn::AllocateAvailable(_, _, _),
+                | BuiltinFn::AllocateAvailable(_, _, _)
+                | BuiltinFn::AllocateByPriority(_, _, _, _, _),
             _
         )
     )
@@ -806,7 +807,8 @@ fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
             BuiltinFn::VectorSortOrder(arr, _) | BuiltinFn::Rank(arr, _) => {
                 find_expr_array_view(arr)
             }
-            BuiltinFn::AllocateAvailable(req, _, _) => find_expr_array_view(req),
+            BuiltinFn::AllocateAvailable(req, _, _)
+            | BuiltinFn::AllocateByPriority(req, _, _, _, _) => find_expr_array_view(req),
             BuiltinFn::Abs(e)
             | BuiltinFn::Arccos(e)
             | BuiltinFn::Arcsin(e)
@@ -1355,6 +1357,55 @@ fn replace_nested_builtins_for_element(
                         )),
                         Box::new(replace_nested_builtins_for_element(
                             *avail,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            scalar_child_mode,
+                        )),
+                    )
+                }
+                BuiltinFn::AllocateByPriority(requests, priority, size, width, supply) => {
+                    BuiltinFn::AllocateByPriority(
+                        Box::new(replace_nested_builtins_for_element(
+                            *requests,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *priority,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            NestedBuiltinArgMode::ArrayValue,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *size,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            scalar_child_mode,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *width,
+                            var_idx,
+                            var_view,
+                            temp_id,
+                            hoisted,
+                            collect_hoisted,
+                            scalar_child_mode,
+                        )),
+                        Box::new(replace_nested_builtins_for_element(
+                            *supply,
                             var_idx,
                             var_view,
                             temp_id,
@@ -2151,6 +2202,13 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
             extract_temp_sizes(a, temp_sizes_map);
             extract_temp_sizes(b, temp_sizes_map);
             extract_temp_sizes(c, temp_sizes_map);
+        }
+        BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            extract_temp_sizes(c, temp_sizes_map);
+            extract_temp_sizes(d, temp_sizes_map);
+            extract_temp_sizes(e, temp_sizes_map);
         }
         BuiltinFn::Inf
         | BuiltinFn::Pi

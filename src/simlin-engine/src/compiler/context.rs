@@ -722,6 +722,13 @@ impl Context<'_> {
                 Box::new(self.lower_pass0(b)),
                 Box::new(self.lower_pass0(c)),
             ),
+            AllocateByPriority(a, b, c, d, e) => AllocateByPriority(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                Box::new(self.lower_pass0(c)),
+                Box::new(self.lower_pass0(d)),
+                Box::new(self.lower_pass0(e)),
+            ),
             // Single expression builtins replacing stdlib modules
             Previous(a, b) => {
                 Previous(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
@@ -2228,6 +2235,16 @@ impl Context<'_> {
                     Box::new(lowered_req),
                     Box::new(lowered_pp),
                     Box::new(self.lower_from_expr3(avail)?),
+                )
+            }
+            BFn::AllocateByPriority(req, priority, size, width, supply) => {
+                let ctx = self.with_vector_builtin_wildcards();
+                BuiltinFn::AllocateByPriority(
+                    Box::new(ctx.lower_from_expr3(req)?),
+                    Box::new(ctx.lower_from_expr3(priority)?),
+                    Box::new(self.lower_from_expr3(size)?),
+                    Box::new(self.lower_from_expr3(width)?),
+                    Box::new(self.lower_from_expr3(supply)?),
                 )
             }
             BFn::Previous(a, b) => BuiltinFn::Previous(

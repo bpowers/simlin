@@ -833,6 +833,14 @@ pub(crate) enum Opcode {
         write_temp_id: TempId,
     },
 
+    /// ALLOCATE BY PRIORITY desugaring: constructs rectangular priority
+    /// profiles from (request, priority, width, supply) and delegates to
+    /// allocate_available. Pops 2 scalars (width, supply) from the stack,
+    /// reads request and priority from the top two views.
+    AllocateByPriority {
+        write_temp_id: TempId,
+    },
+
     // === BROADCASTING ITERATION ===
     // For operations like A[DimA, DimB] * B[DimA] where dims must match by name.
     /// Begin broadcast iteration over multiple source views.
@@ -992,6 +1000,8 @@ impl Opcode {
             Opcode::VectorSortOrder { .. } => (1, 0),
             Opcode::Rank { .. } => (1, 0),
             Opcode::AllocateAvailable { .. } => (1, 0),
+            // AllocateByPriority pops 2 scalars (width, supply) from the stack
+            Opcode::AllocateByPriority { .. } => (2, 0),
 
             // Broadcasting
             Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),

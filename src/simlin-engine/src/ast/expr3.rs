@@ -227,6 +227,13 @@ impl Expr3 {
                             || b.references_a2a_dimension()
                             || c.references_a2a_dimension()
                     }
+                    AllocateByPriority(a, b, c, d, e) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.references_a2a_dimension()
+                            || d.references_a2a_dimension()
+                            || e.references_a2a_dimension()
+                    }
                     Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
                         false
                     }
@@ -949,6 +956,23 @@ impl<'a> Pass1Context<'a> {
                 (
                     AllocateAvailable(Box::new(new_req), Box::new(new_pp), Box::new(new_avail)),
                     req_a2a || pp_a2a || avail_a2a,
+                )
+            }
+            AllocateByPriority(req, priority, size, width, supply) => {
+                let (new_req, req_a2a) = self.maybe_decompose_array_arg_inner(*req);
+                let (new_priority, priority_a2a) = self.maybe_decompose_array_arg_inner(*priority);
+                let (new_size, size_a2a) = self.transform_inner(*size);
+                let (new_width, width_a2a) = self.transform_inner(*width);
+                let (new_supply, supply_a2a) = self.transform_inner(*supply);
+                (
+                    AllocateByPriority(
+                        Box::new(new_req),
+                        Box::new(new_priority),
+                        Box::new(new_size),
+                        Box::new(new_width),
+                        Box::new(new_supply),
+                    ),
+                    req_a2a || priority_a2a || size_a2a || width_a2a || supply_a2a,
                 )
             }
             Previous(a, b) => {

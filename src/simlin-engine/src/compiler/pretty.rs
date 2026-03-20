@@ -212,6 +212,16 @@ pub fn pretty(expr: &Expr) -> String {
                     pretty(c)
                 )
             }
+            BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
+                format!(
+                    "allocate_by_priority({}, {}, {}, {}, {})",
+                    pretty(a),
+                    pretty(b),
+                    pretty(c),
+                    pretty(d),
+                    pretty(e)
+                )
+            }
             BuiltinFn::Previous(a, b) => format!("previous({}, {})", pretty(a), pretty(b)),
             BuiltinFn::Init(a) => format!("init({})", pretty(a)),
         },

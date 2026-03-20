@@ -352,3 +352,125 @@ fn nested_allocate_available_inside_sum_in_array_context_vm() {
 
     project.assert_vm_result("result", &[40.0, 40.0, 40.0]);
 }
+
+// ---------------------------------------------------------------------------
+// AC5 - AllocateByPriority: native engine builtin
+// ---------------------------------------------------------------------------
+//
+// ALLOCATE BY PRIORITY(request, priority, size, width, supply) desugars to
+// ALLOCATE AVAILABLE at runtime by constructing rectangular (ptype=1) priority
+// profiles from each requester's priority value and the shared width.
+//
+// Test scenario:
+//   3 requesters with requests [10, 20, 30], priorities [3, 1, 2],
+//   width=1, supply=35. Higher priority gets served first:
+//     priority 3 (request=10): gets full 10
+//     priority 2 (request=30): gets full 30 if supply allows, else remainder
+//     priority 1 (request=20): gets remainder
+//   With supply=35: requester 0 (pri=3) gets 10, requester 2 (pri=2) gets 25,
+//   requester 1 (pri=1) gets 0. Total = 35.
+
+fn make_alloc_by_priority_project(name: &str) -> TestProject {
+    TestProject::new(name)
+        .indexed_dimension("D", 3)
+        .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("priority[D]", vec![("1", "3"), ("2", "1"), ("3", "2")])
+        .scalar_const("supply", 35.0)
+        .scalar_const("width", 1.0)
+        .array_aux(
+            "result[D]",
+            "allocate_by_priority(request[*], priority[*], 0, width, supply)",
+        )
+        .scalar_aux("total_alloc", "result[1] + result[2] + result[3]")
+}
+
+#[test]
+fn allocate_by_priority_compiles_and_runs_vm() {
+    // AC5.1: allocate_by_priority in XMILE equations compiles and executes correctly
+    let project = make_alloc_by_priority_project("alloc_by_pri_vm");
+    // Total allocated should equal supply
+    project.assert_scalar_result("total_alloc", 35.0);
+}
+
+#[test]
+fn allocate_by_priority_compiles_and_runs_interpreter() {
+    // AC5.1: same via interpreter
+    let project = make_alloc_by_priority_project("alloc_by_pri_interp");
+    project.assert_scalar_result("total_alloc", 35.0);
+}
+
+#[test]
+fn allocate_by_priority_matches_allocate_available() {
+    // AC5.2: Results must match ALLOCATE AVAILABLE with equivalent rectangular
+    // priority profiles. For allocate_by_priority(req, priority, 0, width, supply),
+    // the equivalent is allocate_available(req, pp, supply) where
+    // pp[i] = (1, priority[i], width, 0).
+
+    let by_priority = TestProject::new("alloc_equiv_by_pri")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("priority[D]", vec![("1", "3"), ("2", "1"), ("3", "2")])
+        .scalar_const("supply", 35.0)
+        .scalar_const("width", 1.0)
+        .array_aux(
+            "result[D]",
+            "allocate_by_priority(request[*], priority[*], 0, width, supply)",
+        );
+
+    // Equivalent using allocate_available with explicit rectangular profiles
+    let by_available = TestProject::new("alloc_equiv_avail")
+        .indexed_dimension("D", 3)
+        .indexed_dimension("XP", 4)
+        .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .scalar_const("supply", 35.0)
+        .array_with_ranges(
+            "pp[D,XP]",
+            vec![
+                // Requester 1: ptype=1, ppriority=3, pwidth=1, pextra=0
+                ("1,1", "1"),
+                ("1,2", "3"),
+                ("1,3", "1"),
+                ("1,4", "0"),
+                // Requester 2: ptype=1, ppriority=1, pwidth=1, pextra=0
+                ("2,1", "1"),
+                ("2,2", "1"),
+                ("2,3", "1"),
+                ("2,4", "0"),
+                // Requester 3: ptype=1, ppriority=2, pwidth=1, pextra=0
+                ("3,1", "1"),
+                ("3,2", "2"),
+                ("3,3", "1"),
+                ("3,4", "0"),
+            ],
+        )
+        .array_aux(
+            "result[D]",
+            "allocate_available(request[*], pp[*,1], supply)",
+        );
+
+    let pri_results = by_priority
+        .run_vm()
+        .expect("allocate_by_priority VM should succeed");
+    let avail_results = by_available
+        .run_vm()
+        .expect("allocate_available VM should succeed");
+
+    let pri_vals = pri_results
+        .get("result")
+        .expect("result should exist in by_priority");
+    let avail_vals = avail_results
+        .get("result")
+        .expect("result should exist in by_available");
+
+    assert_eq!(
+        pri_vals.len(),
+        avail_vals.len(),
+        "result array lengths should match"
+    );
+    for (i, (p, a)) in pri_vals.iter().zip(avail_vals.iter()).enumerate() {
+        assert!(
+            (p - a).abs() < 1e-6,
+            "result[{i}] mismatch: allocate_by_priority={p}, allocate_available={a}"
+        );
+    }
+}

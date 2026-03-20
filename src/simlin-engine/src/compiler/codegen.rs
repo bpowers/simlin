@@ -915,7 +915,8 @@ impl<'module> Compiler<'module> {
                     // mixed builtin types in an Arrayed equation).
                     BuiltinFn::VectorElmMap(_, _)
                     | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _) => {
+                    | BuiltinFn::AllocateAvailable(_, _, _)
+                    | BuiltinFn::AllocateByPriority(_, _, _, _, _) => {
                         return sim_err!(
                             TodoArrayBuiltin,
                             "array-producing builtin outside AssignTemp context".to_owned()
@@ -977,7 +978,8 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::VectorSelect(_, _, _, _, _) => unreachable!(),
                     BuiltinFn::VectorElmMap(_, _)
                     | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _) => {
+                    | BuiltinFn::AllocateAvailable(_, _, _)
+                    | BuiltinFn::AllocateByPriority(_, _, _, _, _) => {
                         return sim_err!(
                             TodoArrayBuiltin,
                             "array-producing builtin outside AssignTemp context".to_owned()
@@ -1114,6 +1116,21 @@ impl<'module> Compiler<'module> {
                             self.walk_expr_as_view(profile)?;
                             self.walk_expr(avail)?.unwrap();
                             self.push(Opcode::AllocateAvailable {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        BuiltinFn::AllocateByPriority(requests, priority, _size, width, supply) => {
+                            // _size is a Vensim compatibility parameter that is
+                            // always ignored -- the array size is determined from
+                            // the view dimensions of the requests/priority arrays.
+                            self.walk_expr_as_view(requests)?;
+                            self.walk_expr_as_view(priority)?;
+                            self.walk_expr(width)?.unwrap();
+                            self.walk_expr(supply)?.unwrap();
+                            self.push(Opcode::AllocateByPriority {
                                 write_temp_id: *id as TempId,
                             });
                             self.push(Opcode::PopView {});
@@ -1359,6 +1376,13 @@ impl<'module> Compiler<'module> {
                 self.collect_iter_source_views_impl(a, views, seen);
                 self.collect_iter_source_views_impl(b, views, seen);
                 self.collect_iter_source_views_impl(c, views, seen);
+            }
+            AllocateByPriority(a, b, c, d, e) => {
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
+                self.collect_iter_source_views_impl(c, views, seen);
+                self.collect_iter_source_views_impl(d, views, seen);
+                self.collect_iter_source_views_impl(e, views, seen);
             }
             // Scalar lag/initial builtins
             Previous(a, b) => {

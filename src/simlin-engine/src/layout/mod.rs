@@ -117,9 +117,6 @@ impl<'a> LayoutEngine<'a> {
         let mut display_names = HashMap::new();
 
         for var in &model.variables {
-            if matches!(var, datamodel::Variable::Module(_)) {
-                continue;
-            }
             let ident = var.get_ident();
             let canonical = canonicalize(ident).into_owned();
             display_names.insert(canonical, ident.to_string());
@@ -732,6 +729,9 @@ impl<'a> LayoutEngine<'a> {
         // Create auxiliary view elements for any not yet created
         self.create_missing_auxiliary_elements(&layout, &var_to_node)?;
 
+        // Create module view elements for any not yet created
+        self.create_missing_module_elements(&layout, &var_to_node)?;
+
         // Create connector (link) view elements
         self.create_connectors()?;
 
@@ -1166,9 +1166,6 @@ impl<'a> LayoutEngine<'a> {
             .variables
             .iter()
             .filter_map(|var| {
-                if matches!(var, datamodel::Variable::Module(_)) {
-                    return None;
-                }
                 let ident = canonicalize(var.get_ident()).into_owned();
                 self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
             })
@@ -1212,6 +1209,15 @@ impl<'a> LayoutEngine<'a> {
                         aux.x = pos.x;
                         aux.y = pos.y;
                         self.positions.insert(aux.uid, pos);
+                    }
+                }
+                ViewElement::Module(module) => {
+                    if let Some(ident) = uid_to_ident.get(&module.uid)
+                        && let Some(&pos) = layout_by_ident.get(ident)
+                    {
+                        module.x = pos.x;
+                        module.y = pos.y;
+                        self.positions.insert(module.uid, pos);
                     }
                 }
                 ViewElement::Cloud(cloud) => {
@@ -1276,6 +1282,50 @@ impl<'a> LayoutEngine<'a> {
         Ok(())
     }
 
+    /// Create module view elements for variables not yet in the elements list.
+    /// Follows the same pattern as `create_missing_auxiliary_elements`.
+    fn create_missing_module_elements(
+        &mut self,
+        layout: &Layout<String>,
+        var_to_node: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
+
+        for var in &self.model.variables {
+            if let datamodel::Variable::Module(m) = var {
+                let canonical = canonicalize(&m.ident);
+                let uid = self.uid_manager.alloc(&canonical);
+                if existing_uids.contains(&uid) {
+                    continue;
+                }
+
+                let pos = var_to_node
+                    .get(canonical.as_ref())
+                    .and_then(|node_id| layout.get(node_id))
+                    .copied()
+                    .ok_or_else(|| {
+                        format!(
+                            "create_missing_module_elements: no layout position for module '{}'",
+                            canonical.as_ref()
+                        )
+                    })?;
+
+                let name = self.display_name(&canonical);
+                let formatted = format_label_with_line_breaks(&name);
+                let elem = ViewElement::Module(view_element::Module {
+                    name: formatted,
+                    uid,
+                    x: pos.x,
+                    y: pos.y,
+                    label_side: LabelSide::Bottom,
+                });
+                self.elements.push(elem);
+                self.positions.insert(uid, pos);
+            }
+        }
+        Ok(())
+    }
+
     /// Create link view elements for all non-structural dependency edges.
     fn create_connectors(&mut self) -> Result<(), String> {
         let mut link_set: HashSet<String> = HashSet::new();
@@ -1284,7 +1334,6 @@ impl<'a> LayoutEngine<'a> {
             .model
             .variables
             .iter()
-            .filter(|v| !matches!(v, datamodel::Variable::Module(_)))
             .map(|v| canonicalize(v.get_ident()).into_owned())
             .collect();
 
@@ -1395,9 +1444,6 @@ impl<'a> LayoutEngine<'a> {
             .variables
             .iter()
             .filter_map(|var| {
-                if matches!(var, datamodel::Variable::Module(_)) {
-                    return None;
-                }
                 let ident = canonicalize(var.get_ident()).into_owned();
                 self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
             })
@@ -1460,6 +1506,12 @@ impl<'a> LayoutEngine<'a> {
                     let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
                     Some((i, side))
                 }
+                ViewElement::Module(module) => {
+                    // Modules use the same unconstrained placement as auxiliaries
+                    let ident = uid_to_ident.get(&module.uid)?;
+                    let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
+                    Some((i, side))
+                }
                 _ => None,
             })
             .collect();
@@ -1469,6 +1521,7 @@ impl<'a> LayoutEngine<'a> {
                 ViewElement::Stock(s) => s.label_side = side,
                 ViewElement::Flow(f) => f.label_side = side,
                 ViewElement::Aux(a) => a.label_side = side,
+                ViewElement::Module(m) => m.label_side = side,
                 _ => {}
             }
         }
@@ -1569,9 +1622,6 @@ impl<'a> LayoutEngine<'a> {
             .variables
             .iter()
             .filter_map(|var| {
-                if matches!(var, datamodel::Variable::Module(_)) {
-                    return None;
-                }
                 let ident = canonicalize(var.get_ident()).into_owned();
                 self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
             })
@@ -1720,6 +1770,24 @@ impl<'a> LayoutEngine<'a> {
                     );
                     bounds.update(lx0, ly0, lx1, ly1);
                 }
+                ViewElement::Module(m) => {
+                    update(
+                        &mut bounds,
+                        m.x,
+                        m.y,
+                        self.config.module_width,
+                        self.config.module_height,
+                    );
+                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                        &m.name,
+                        m.x,
+                        m.y,
+                        m.label_side,
+                        self.config.module_width,
+                        self.config.module_height,
+                    );
+                    bounds.update(lx0, ly0, lx1, ly1);
+                }
                 ViewElement::Cloud(c) => {
                     update(
                         &mut bounds,
@@ -1755,12 +1823,13 @@ impl<'a> LayoutEngine<'a> {
             .unwrap_or_else(|| canonical_ident.to_string())
     }
 
-    /// Ensure every stock/flow/aux variable in the model has a corresponding
-    /// rendered view element.
+    /// Ensure every stock/flow/aux/module variable in the model has a
+    /// corresponding rendered view element.
     fn validate_view_completeness(&self) -> Result<(), String> {
         let mut expected_stocks = BTreeSet::new();
         let mut expected_flows = BTreeSet::new();
         let mut expected_auxes = BTreeSet::new();
+        let mut expected_modules = BTreeSet::new();
 
         for var in &self.model.variables {
             match var {
@@ -1773,13 +1842,16 @@ impl<'a> LayoutEngine<'a> {
                 datamodel::Variable::Aux(a) => {
                     expected_auxes.insert(canonicalize(&a.ident).into_owned());
                 }
-                datamodel::Variable::Module(_) => {}
+                datamodel::Variable::Module(m) => {
+                    expected_modules.insert(canonicalize(&m.ident).into_owned());
+                }
             }
         }
 
         let mut found_stocks = BTreeSet::new();
         let mut found_flows = BTreeSet::new();
         let mut found_auxes = BTreeSet::new();
+        let mut found_modules = BTreeSet::new();
 
         for elem in &self.elements {
             match elem {
@@ -1791,6 +1863,9 @@ impl<'a> LayoutEngine<'a> {
                 }
                 ViewElement::Aux(a) => {
                     found_auxes.insert(canonicalize(&a.name).into_owned());
+                }
+                ViewElement::Module(m) => {
+                    found_modules.insert(canonicalize(&m.name).into_owned());
                 }
                 _ => {}
             }
@@ -1805,6 +1880,9 @@ impl<'a> LayoutEngine<'a> {
         }
         for ident in expected_auxes.difference(&found_auxes) {
             missing.push(format!("aux '{}'", ident));
+        }
+        for ident in expected_modules.difference(&found_modules) {
+            missing.push(format!("module '{}'", ident));
         }
 
         if missing.is_empty() {
@@ -2155,7 +2233,11 @@ pub fn compute_metadata(
                     uid_to_ident.insert(uid, canonicalize(&aux.ident).into_owned());
                 }
             }
-            datamodel::Variable::Module(_) => {}
+            datamodel::Variable::Module(module) => {
+                if let Some(uid) = module.uid {
+                    uid_to_ident.insert(uid, canonicalize(&module.ident).into_owned());
+                }
+            }
         }
     }
 
@@ -2174,16 +2256,31 @@ pub fn compute_metadata(
     let all_idents: HashSet<String> = model
         .variables
         .iter()
-        .filter(|v| !matches!(v, datamodel::Variable::Module(_)))
         .map(|v| canonicalize(v.get_ident()).into_owned())
         .collect();
 
     for var in &model.variables {
-        if matches!(var, datamodel::Variable::Module(_)) {
-            continue;
-        }
         let var_ident = canonicalize(var.get_ident()).into_owned();
         dep_graph.entry(var_ident.clone()).or_default();
+
+        // Modules derive dependencies from their reference bindings
+        // rather than from equation parsing.
+        if let datamodel::Variable::Module(module) = var {
+            for reference in &module.references {
+                let src_ident = canonicalize(&reference.src).into_owned();
+                if src_ident != var_ident && all_idents.contains(&src_ident) {
+                    dep_graph
+                        .entry(var_ident.clone())
+                        .or_default()
+                        .insert(src_ident.clone());
+                    reverse_dep_graph
+                        .entry(src_ident)
+                        .or_default()
+                        .insert(var_ident.clone());
+                }
+            }
+            continue;
+        }
 
         // Use salsa dependency extraction when the source model and
         // variable are available. Only fall back to string heuristics
@@ -3666,7 +3763,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_layout_ignores_module_dependencies_for_connectors() {
+    fn test_generate_layout_includes_module_elements_and_connectors() {
         let model = datamodel::Model {
             name: TEST_MODEL.to_string(),
             sim_specs: None,
@@ -3720,6 +3817,7 @@ mod tests {
         let result = generate_layout(&project, TEST_MODEL, None).unwrap();
         let element_uids: HashSet<i32> = result.elements.iter().map(|e| e.get_uid()).collect();
 
+        // All link endpoints should reference rendered elements
         for elem in &result.elements {
             if let ViewElement::Link(link) = elem {
                 assert!(
@@ -3735,12 +3833,32 @@ mod tests {
             }
         }
 
+        // Module should produce a ViewElement::Module
+        let module_count = result
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Module(_)))
+            .count();
+        assert_eq!(module_count, 1, "module 'm' should be rendered");
+
+        // Auxiliaries should still be present
         let aux_count = result
             .elements
             .iter()
             .filter(|e| matches!(e, ViewElement::Aux(_)))
             .count();
-        assert_eq!(aux_count, 2, "only non-module variables should be rendered");
+        assert_eq!(aux_count, 2, "both auxiliaries should be rendered");
+
+        // Module should have finite coordinates from SFDP
+        for elem in &result.elements {
+            if let ViewElement::Module(m) = elem {
+                assert!(
+                    m.x.is_finite() && m.y.is_finite(),
+                    "module '{}' should have finite coordinates",
+                    m.name
+                );
+            }
+        }
     }
 
     #[test]

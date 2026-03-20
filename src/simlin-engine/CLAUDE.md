@@ -11,17 +11,17 @@ Equation text flows through these stages in order:
 1. **`src/lexer/`** - Tokenizer for equation syntax
 2. **`src/parser/`** - Recursive descent parser producing `Expr0` AST
 3. **`src/ast/`** - AST type system with progressive lowering: `Expr0` (parsed) -> `Expr1` (modules expanded) -> `Expr2` (dimensions resolved) -> `Expr3` (subscripts expanded). `array_view.rs` tracks array dimensions and sparsity. `Expr2Context` trait includes `has_mapping_to()` for cross-dimension mapping lookups during `find_matching_dimension`.
-4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `VECTOR RANK`, `ALLOCATE AVAILABLE`, `NPV`, `MODULO`, `PREVIOUS`, `INIT`). `is_stdlib_module_function()` is the authoritative predicate for deciding whether a function name expands to a stdlib module; shared by `equation_is_stdlib_call()` (pre-scan) and `contains_stdlib_call()` (walk-time). `builtins_visitor.rs` handles implicit module instantiation and PREVIOUS/INIT helper rewriting: unary `PREVIOUS(x)` desugars to `PREVIOUS(x, 0)`, direct scalar args compile to `LoadPrev`, and module-backed or expression args are first rewritten through synthesized scalar helper auxes. `INIT(x)` compiles to `LoadInitial`, using the same helper rewrite when needed. Tracks `module_idents` so `PREVIOUS(module_var)` never reads a multi-slot module directly.
+4. **`src/builtins.rs`** - Builtin function definitions (e.g. `MIN`, `PULSE`, `LOOKUP`, `QUANTUM`, `SSHAPE`, `VECTOR SELECT`, `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `VECTOR RANK`, `ALLOCATE AVAILABLE`, `ALLOCATE BY PRIORITY`, `NPV`, `MODULO`, `PREVIOUS`, `INIT`). `is_stdlib_module_function()` is the authoritative predicate for deciding whether a function name expands to a stdlib module; shared by `equation_is_stdlib_call()` (pre-scan) and `contains_stdlib_call()` (walk-time). `builtins_visitor.rs` handles implicit module instantiation and PREVIOUS/INIT helper rewriting: unary `PREVIOUS(x)` desugars to `PREVIOUS(x, 0)`, direct scalar args compile to `LoadPrev`, and module-backed or expression args are first rewritten through synthesized scalar helper auxes. `INIT(x)` compiles to `LoadInitial`, using the same helper rewrite when needed. Tracks `module_idents` so `PREVIOUS(module_var)` never reads a multi-slot module directly.
 5. **`src/compiler/`** - Multi-pass compilation to bytecode:
-   - `mod.rs` - Orchestration; includes A2A hoisting logic that detects array-producing builtins (VectorElmMap, VectorSortOrder, Rank, AllocateAvailable) during array expansion, hoists them into `AssignTemp` pre-computations, and emits per-element `TempArrayElement` reads
+   - `mod.rs` - Orchestration; includes A2A hoisting logic that detects array-producing builtins (VectorElmMap, VectorSortOrder, Rank, AllocateAvailable, AllocateByPriority) during array expansion, hoists them into `AssignTemp` pre-computations, and emits per-element `TempArrayElement` reads
    - `context.rs` - Symbol tables and variable metadata; `lower_preserving_dimensions()` skips Pass 1 dimension resolution to keep full array views for array-producing builtins. Handles `@N` position syntax resolution: in scalar context (no active A2A dimension, not inside an array-reducing builtin), `DimPosition(@N)` resolves to a concrete element offset; inside array-reducing builtins (`preserve_wildcards_for_iteration`), dimension views are preserved for iteration. Two wildcard-preservation contexts: `with_preserved_wildcards()` for reducers (SUM, MEAN, etc.) where `ActiveDimRef` resolves to a concrete offset, and `with_vector_builtin_wildcards()` for array-producing builtins (VectorSortOrder, VectorElmMap, etc.) where `ActiveDimRef` is promoted to `Wildcard` to preserve the full array view
    - `expr.rs` - Expression compilation
    - `codegen.rs` - Bytecode emission; routes array-producing builtins through dedicated opcodes instead of element-wise iteration. `emit_array_reduce()` is the shared helper for single-argument array builtins (SUM, SIZE, STDDEV, MIN, MAX, MEAN): pushes view, emits reduction opcode, pops view
    - `dimensions.rs` - Dimension checking/inference
    - `subscript.rs` - Array subscript expansion and iteration
    - `pretty.rs` - Debug pretty-printing
-6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.). Includes `LoadPrev`/`LoadInitial` opcodes for `PREVIOUS()`/`INIT()` intrinsics and vector operation opcodes (`VectorSelect`, `VectorElmMap`, `VectorSortOrder`, `Rank`, `AllocateAvailable`) that operate on view-stack arrays and write results to temp storage.
-7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`. Maintains `prev_values` and `initial_values` snapshot buffers for `LoadPrev`/`LoadInitial` opcodes. Implements vector operation dispatch (VectorSelect, VectorElmMap, VectorSortOrder, Rank, AllocateAvailable). Array reducers (ArrayMax, ArrayMin, ArrayMean, ArrayStddev) return NaN for empty views; ArraySum returns 0.0 (additive identity).
+6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.). Includes `LoadPrev`/`LoadInitial` opcodes for `PREVIOUS()`/`INIT()` intrinsics and vector operation opcodes (`VectorSelect`, `VectorElmMap`, `VectorSortOrder`, `Rank`, `AllocateAvailable`, `AllocateByPriority`) that operate on view-stack arrays and write results to temp storage.
+7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`. Maintains `prev_values` and `initial_values` snapshot buffers for `LoadPrev`/`LoadInitial` opcodes. Implements vector operation dispatch (VectorSelect, VectorElmMap, VectorSortOrder, Rank, AllocateAvailable, AllocateByPriority). Array reducers (ArrayMax, ArrayMin, ArrayMean, ArrayStddev) return NaN for empty views; ArraySum returns 0.0 (additive identity).
 8. **`src/interpreter.rs`** - AST-walking interpreter. Retained as a reference spec for VM correctness verification via `Simulation::new()` + `run_to_end()`. Production compilation uses `db::compile_project_incremental`.
 9. **`src/alloc.rs`** - Allocation helpers shared by interpreter and VM: `allocate_available()` (bisection-based priority allocation), `alloc_curve()` (per-requester allocation curves for 6 profile types), `normal_cdf()`/`erfc_approx()`.
 
@@ -50,7 +50,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 
 ## Format import/export
 
-- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_vensim_with_data()`, `open_xmile()`, `to_xmile()`, `.dat`/CSV loading
+- **`src/compat.rs`** - Top-level format entry points: `open_vensim()`, `open_vensim_with_data()`, `open_xmile()`, `open_systems()`, `to_xmile()`, `to_systems()`, `.dat`/CSV loading
 - **`src/data_provider/`** - `DataProvider` trait for resolving external data references (GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT). `NullDataProvider` (default), `FilesystemDataProvider` (CSV/Excel via calamine; feature-gated on `file_io`)
 - **`src/xmile/`** - XMILE (XML interchange format) parsing and generation. Submodules: `model.rs`, `variables.rs`, `dimensions.rs`, `views.rs`. Uses `simlin:` vendor-extension elements for features beyond the XMILE spec: `simlin:mapping`/`simlin:elem` for element-level dimension mappings, `simlin:data-source` for external data references, `simlin:except` for EXCEPT equation metadata
 - **`src/mdl/`** - Native Rust Vensim MDL parser and writer (replaces C++ xmutil):
@@ -62,6 +62,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
   - `xmile_compat.rs` - Expression formatting for XMILE output
   - `settings.rs` - Integration settings parser
 - **`src/vdf.rs`** - Vensim VDF (binary data file) parser. Parses all structural elements (sections, records, name/slot/offset tables, data blocks). Model-guided name-to-OT mapping via `build_section6_guided_ot_map()` uses section-6 OT class codes to identify contiguous stock/non-stock blocks, classifies variables using the parsed model, and assigns OT indices by alphabetical sort within each block. See `docs/design/vdf.md` for the format specification and reverse-engineering history.
+- **`src/systems/`** - Systems format (`.txt`) parser, translator, and writer. A line-oriented notation for stock-and-flow models with implicit flow typing (Rate, Conversion, Leak). Pipeline: `lexer.rs` -> `parser.rs` -> `ast.rs` (IR) -> `translate.rs` (to `datamodel::Project`). Each systems flow becomes a stdlib module instance (`systems_rate`, `systems_leak`, or `systems_conversion`), with chained `available`/`remaining` wiring for multi-outflow stocks. `writer.rs` reconstructs `.txt` format from a translated `datamodel::Project` by inspecting module structure. Public API: `systems::parse()`, `systems::translate::translate()`, `systems::project_to_systems()`
 - **`src/json.rs`** - JSON serialization matching Go `sd` package schema
 - **`src/json_sdai.rs`** - JSON schema for AI metadata augmentation
 - **`src/serde.rs`** - Generic serde utilities
@@ -78,7 +79,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
-- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management)
+- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters including `module_width`/`module_height`), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management). Generates view elements for modules (not just stocks/flows/auxes).
 
 ## Cargo features
 
@@ -90,7 +91,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 ## Generated files (do not edit by hand)
 
 - **`src/project_io.gen.rs`** - Protobuf bindings from `project_io.proto`
-- **`src/stdlib.gen.rs`** - Embedded standard library models from `stdlib/*.stmx`
+- **`src/stdlib.gen.rs`** - Embedded standard library models from `stdlib/*.stmx` (includes `systems_rate`, `systems_leak`, `systems_conversion` for systems format flow types)
 
 ## Tests
 
@@ -100,9 +101,13 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/unit_checking_test.rs`** - Unit checking regression tests
 - **`src/test_sir_xmile.rs`** - SIR epidemiology model integration tests
 - **`src/test_open_vensim.rs`** - Vensim compatibility tests (requires `xmutil` feature)
+- **`src/systems_stdlib_tests.rs`** - Systems format stdlib module tests (rate, leak, conversion wiring)
+- **`tests/test_helpers.rs`** - Shared test helper module (`ensure_results` for CSV result comparison)
 - **`tests/simulate.rs`** - End-to-end simulation integration tests
+- **`tests/simulate_systems.rs`** - Systems format simulation integration tests (fixtures in `test/systems-format/`)
 - **`tests/simulate_ltm.rs`** - LTM feature tests
-- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, LTM metadata, dominant periods)
+- **`tests/systems_roundtrip.rs`** - Systems format parse-translate-write round-trip tests
+- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, modules, LTM metadata, dominant periods)
 - **`tests/json_roundtrip.rs`** - JSON serialization roundtrip
 - **`tests/roundtrip.rs`** - XMILE/MDL roundtrip tests
 - **`tests/vm_alloc.rs`** - VM memory allocation tests
