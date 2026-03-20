@@ -250,7 +250,13 @@ pub fn project_to_systems(project: &Project) -> Result<String> {
             _ => "0",
         };
         let is_infinite = eq_str == "inf()";
-        let max_eq = find_stock_max(stock, &modules, &var_by_ident, &reverse_rewrites);
+        let max_eq = find_stock_max(
+            stock,
+            &modules,
+            &var_by_ident,
+            &reverse_rewrites,
+            &inflow_stocks,
+        );
 
         reconstructed_stocks.insert(
             stock.ident.as_str(),
@@ -496,8 +502,9 @@ fn extract_flow(
             effective_deps.insert(suffix.to_string());
             effective_in_eq.insert(suffix.to_string());
         }
-        // Check for _drained_N pattern (incremental drain variables)
-        else if let Some(pos) = token.find("_drained_") {
+        // Check for _drained_N pattern (incremental drain variables).
+        // Use rfind so a stock named "x_drained_y" wouldn't be truncated.
+        else if let Some(pos) = token.rfind("_drained_") {
             let stock_name = &token[..pos];
             if effective_stock_names.contains(stock_name) {
                 effective_deps.insert(stock_name.to_string());
@@ -635,8 +642,33 @@ fn find_stock_max(
     modules: &[&Module],
     var_by_ident: &HashMap<&str, &Variable>,
     reverse_rewrites: &HashMap<String, String>,
+    inflow_stocks: &HashMap<&str, &str>,
 ) -> Option<String> {
     for module in modules {
+        // Verify this module's transfer flow actually feeds into the queried
+        // stock. Without this check, a module targeting stock D whose max
+        // expression references stock B could false-positive when querying B.
+        let actual_suffix = if module.model_name.contains("conversion") {
+            "outflow"
+        } else {
+            "actual"
+        };
+        let transfer_eq = format!("{}.{actual_suffix}", module.ident);
+        let targets_this_stock = var_by_ident.values().any(|v| {
+            if let Variable::Flow(f) = v
+                && let Equation::Scalar(eq) = &f.equation
+                && eq == &transfer_eq
+            {
+                return inflow_stocks
+                    .get(f.ident.as_str())
+                    .is_some_and(|&s| s == stock.ident);
+            }
+            false
+        });
+        if !targets_this_stock {
+            continue;
+        }
+
         let dest_cap_ref = match module
             .references
             .iter()
@@ -959,6 +991,23 @@ mod tests {
         assert!(
             !output.contains("_remaining"),
             "should not contain _remaining: {output}"
+        );
+    }
+
+    /// find_stock_max must not match a module targeting a different stock
+    /// whose max expression happens to reference the queried stock name.
+    ///
+    /// D(0, A - B) produces dest_capacity = "a - b - d". When querying
+    /// B's max, the writer must not match this module (it targets D, not B).
+    #[test]
+    fn find_stock_max_does_not_match_wrong_stock() {
+        // B has no max, D has max = A - B
+        let input = "[Source]\nSource > D(0, A - B) @ Rate(1)\nA(10)\nB(5)\n";
+        let output = roundtrip_write(input);
+        // B should NOT have a max in the output
+        assert!(
+            !output.contains("b(5,") && !output.contains("b(5, "),
+            "B should have no max constraint but writer assigned one: {output}"
         );
     }
 }

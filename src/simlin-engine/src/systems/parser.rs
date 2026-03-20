@@ -43,6 +43,7 @@ fn is_default_max(expr: &Expr) -> bool {
 fn implicit_flow_type(expr: &Expr) -> FlowType {
     match expr {
         Expr::Float(_) => FlowType::Conversion,
+        Expr::Paren(inner) => implicit_flow_type(inner),
         _ => FlowType::Rate,
     }
 }
@@ -327,6 +328,14 @@ mod tests {
         let flow = &model.flows[0];
         assert_eq!(flow.flow_type, FlowType::Conversion);
         assert_eq!(flow.rate, Expr::Float(1.0));
+    }
+
+    /// Parenthesized decimal should still be classified as Conversion
+    #[test]
+    fn implicit_conversion_parenthesized_float() {
+        let model = parse("A > B @ (0.5)").unwrap();
+        let flow = &model.flows[0];
+        assert_eq!(flow.flow_type, FlowType::Conversion);
     }
 
     // -----------------------------------------------------------------------

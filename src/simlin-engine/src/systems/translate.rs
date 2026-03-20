@@ -1715,4 +1715,76 @@ mod tests {
             "mixed-precedence rewrite must parenthesize the lower-precedence left subexpr"
         );
     }
+
+    // -------------------------------------------------------------------
+    // Negative dest_capacity produces reverse flows (by design)
+    //
+    // When a stock exceeds its dynamic max (e.g., multiple concurrent
+    // inflows), negative dest_capacity causes a reverse transfer that
+    // brings the stock back toward its maximum. This matches the Python
+    // systems package behavior (see extended_syntax.txt test fixture).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn negative_dest_capacity_produces_reverse_flow() {
+        // Two sources each send 10 into B(0, 5). After step 1, B=10>5.
+        // In step 2, dest_cap = 5-10 = -5, so actual = MIN(-5, ...) = -5:
+        // a reverse transfer drains B back toward its max.
+        let model = SystemsModel {
+            stocks: vec![
+                SystemsStock {
+                    name: "A".to_string(),
+                    initial: Expr::Int(20),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "B".to_string(),
+                    initial: Expr::Int(0),
+                    max: Expr::Int(5),
+                    is_infinite: false,
+                },
+                SystemsStock {
+                    name: "C".to_string(),
+                    initial: Expr::Int(20),
+                    max: Expr::Inf,
+                    is_infinite: false,
+                },
+            ],
+            flows: vec![
+                SystemsFlow {
+                    source: "A".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(10),
+                },
+                SystemsFlow {
+                    source: "C".to_string(),
+                    dest: "B".to_string(),
+                    flow_type: FlowType::Rate,
+                    rate: Expr::Int(10),
+                },
+            ],
+        };
+        let project = translate(&model, 3).unwrap();
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main").expect("should compile");
+        let mut vm = crate::Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let b_off = results.offsets[&crate::common::Ident::new("b")];
+        let rows: Vec<&[f64]> = results.iter().collect();
+
+        // Step 1: B = 0 + 5 + 5 = 10 (each flow capped at dest_cap=5)
+        assert_eq!(rows[1][b_off], 10.0, "B should be 10 after step 1");
+        // Step 2: dest_cap = 5-10 = -5, reverse flows drain B
+        assert!(
+            rows[2][b_off] < rows[1][b_off],
+            "B should decrease in step 2 due to reverse flow (negative dest_capacity)"
+        );
+    }
 }
