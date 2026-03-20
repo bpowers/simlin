@@ -1584,6 +1584,163 @@ def _vensim_sort_key(name: str) -> str:
     return name.lower()
 
 
+def _name_looks_lookupish(name: str) -> bool:
+    lower = name.lower()
+    return "lookup" in lower or "table" in lower or "graphical function" in lower
+
+
+def _name_allowed_for_block(name: str, block: OwnerRecordBlock) -> bool:
+    if classify_name(name):
+        return False
+    if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+        return False
+    # Lookup/table names that land on stock-coded owner blocks behave like
+    # internal aliases, not visible stock variables. Keep them out of the
+    # stock ordering pass; standalone lookup extraction is handled separately.
+    if (
+        block.ot_codes
+        and all(code == OT_CODE_STOCK for code in block.ot_codes)
+        and _name_looks_lookupish(name)
+    ):
+        return False
+    return True
+
+
+def _group_ot_positions(codes: list[int], *, want_stock: bool) -> list[int]:
+    return [
+        ot_idx for ot_idx, code in enumerate(codes)
+        if ot_idx > 0 and ((code == OT_CODE_STOCK) == want_stock)
+    ]
+
+
+def _assign_group_positions(
+    items: list[tuple[str, int, Optional[int]]],
+    positions: list[int],
+) -> Optional[dict[str, int]]:
+    """
+    Assign ordered named items into the available OT positions.
+
+    Anchored items carry a concrete OT start and must land there. Unanchored
+    items are placed greedily at the earliest position that still leaves room
+    for the remaining anchored items. This is a linear feasibility check over
+    the real OT layout, allowing anonymous helper gaps anywhere in the group.
+    """
+    total_len = sum(length for _, length, _ in items)
+    if total_len > len(positions):
+        return None
+
+    pos_index = {pos: i for i, pos in enumerate(positions)}
+    anchored_start_indices: list[Optional[int]] = [None] * len(items)
+    anchored_after_lengths = [0] * len(items)
+
+    next_anchor_idx: Optional[int] = None
+    lengths_before_next_anchor = 0
+    for item_idx in range(len(items) - 1, -1, -1):
+        _, length, start = items[item_idx]
+        anchored_after_lengths[item_idx] = lengths_before_next_anchor
+        if start is not None:
+            start_idx = pos_index.get(start)
+            if start_idx is None or start_idx + length > len(positions):
+                return None
+            if positions[start_idx:start_idx + length] != list(range(start, start + length)):
+                return None
+            anchored_start_indices[item_idx] = start_idx
+            next_anchor_idx = item_idx
+            lengths_before_next_anchor = 0
+        else:
+            lengths_before_next_anchor += length
+
+    assigned: dict[str, int] = {}
+    cursor = 0
+    for item_idx, (name, length, start) in enumerate(items):
+        start_idx = anchored_start_indices[item_idx]
+        if start_idx is not None and start is not None:
+            if cursor > start_idx:
+                return None
+            assigned[name] = start
+            cursor = start_idx + length
+            continue
+
+        if cursor + length > len(positions):
+            return None
+        remaining_before_anchor = anchored_after_lengths[item_idx]
+        next_anchor_pos = None
+        for future_idx in range(item_idx + 1, len(items)):
+            future_start_idx = anchored_start_indices[future_idx]
+            if future_start_idx is not None:
+                next_anchor_pos = future_start_idx
+                break
+        if next_anchor_pos is not None and cursor + length + remaining_before_anchor > next_anchor_pos:
+            return None
+        assigned[name] = positions[cursor]
+        cursor += length
+
+    return assigned
+
+
+def _nonstock_assignment_items(
+    name_to_block: dict[str, OwnerRecordBlock],
+) -> list[tuple[str, int, Optional[int]]]:
+    nonstock_names = sorted(
+        (
+            name for name, block in name_to_block.items()
+            if not (block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes))
+        ),
+        key=_vensim_sort_key,
+    )
+    system_names_sorted = sorted(
+        (name for name in SYSTEM_NAMES if name != "Time"),
+        key=_vensim_sort_key,
+    )
+
+    items: list[tuple[str, int, Optional[int]]] = []
+    i = 0
+    j = 0
+    while i < len(nonstock_names) or j < len(system_names_sorted):
+        if j >= len(system_names_sorted):
+            name = nonstock_names[i]
+            block = name_to_block[name]
+            items.append((name, block.length(), block.start))
+            i += 1
+            continue
+        if i >= len(nonstock_names):
+            items.append((system_names_sorted[j], 1, None))
+            j += 1
+            continue
+        if _vensim_sort_key(nonstock_names[i]) <= _vensim_sort_key(system_names_sorted[j]):
+            name = nonstock_names[i]
+            block = name_to_block[name]
+            items.append((name, block.length(), block.start))
+            i += 1
+        else:
+            items.append((system_names_sorted[j], 1, None))
+            j += 1
+    return items
+
+
+def _lookup_record_names(vdf: VdfFile) -> list[str]:
+    """
+    Return lookup/table names in slotted name-table order.
+
+    Section-6 lookup records are written 1:1 with these lookupish name-table
+    entries, so an old-school linear pass can pair them by position without
+    searching.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in vdf.names[:len(vdf.slot_table)]:
+        if classify_name(name):
+            continue
+        if not _name_looks_lookupish(name):
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
 def _validate_name_block_assignment(
     name_to_block: dict[str, OwnerRecordBlock],
     vdf: VdfFile,
@@ -1597,47 +1754,27 @@ def _validate_name_block_assignment(
     actual OT start position.
     """
     codes = vdf.section6_ot_class_codes() or []
-    stock_count = sum(1 for c in codes[1:] if c == OT_CODE_STOCK)
+    if not codes:
+        return False
 
-    stock_names: list[str] = []
-    nonstock_names: list[str] = []
-    for name, block in name_to_block.items():
-        if block.ot_codes and all(c == OT_CODE_STOCK for c in block.ot_codes):
-            stock_names.append(name)
-        else:
-            nonstock_names.append(name)
+    stock_names = sorted(
+        (
+            name for name, block in name_to_block.items()
+            if block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes)
+        ),
+        key=_vensim_sort_key,
+    )
+    stock_items = [
+        (name, name_to_block[name].length(), name_to_block[name].start)
+        for name in stock_names
+    ]
+    stock_positions = _group_ot_positions(codes, want_stock=True)
+    if _assign_group_positions(stock_items, stock_positions) is None:
+        return False
 
-    stock_names.sort(key=_vensim_sort_key)
-    system_names_sorted = sorted(
-        (n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key)
-    all_nonstock = sorted(nonstock_names + system_names_sorted,
-                          key=_vensim_sort_key)
-
-    # Expected stock OT positions. Hidden stock blocks (SMOOTH/DELAY helpers)
-    # occupy OT slots before visible stocks, so start after them.
-    hidden_stock_ots = 0
-    if hasattr(vdf, '_hidden_stock_ot_count'):
-        hidden_stock_ots = vdf._hidden_stock_ot_count
-    expected_stock_pos = 1 + hidden_stock_ots
-    for name in stock_names:
-        block = name_to_block[name]
-        if block.start != expected_stock_pos:
-            return False
-        expected_stock_pos += block.length()
-
-    # Expected non-stock OT positions
-    expected_nonstock_pos = stock_count + 1
-    for name in all_nonstock:
-        block = name_to_block.get(name)
-        if block is not None:
-            if block.start != expected_nonstock_pos:
-                return False
-            expected_nonstock_pos += block.length()
-        else:
-            # System variable: occupies 1 OT entry
-            expected_nonstock_pos += 1
-
-    return True
+    nonstock_items = _nonstock_assignment_items(name_to_block)
+    nonstock_positions = _group_ot_positions(codes, want_stock=False)
+    return _assign_group_positions(nonstock_items, nonstock_positions) is not None
 
 
 def _recover_dimension_element_names(vdf: VdfFile) -> set[str]:
@@ -1824,6 +1961,93 @@ def _score_excluded_as_dimensions(
     return (matched / len(cardinalities)) + score * 0.1
 
 
+def _offset_sort_key_breaks(
+    sorted_recs: list[tuple[int, VdfRecord]],
+    offset: int,
+    vdf: VdfFile,
+) -> int:
+    pairs: list[tuple[int, str]] = []
+    for rank, (_, rec) in enumerate(sorted_recs):
+        name_idx = rank + offset
+        if not (0 <= name_idx < len(vdf.names)):
+            continue
+        name = vdf.names[name_idx]
+        if classify_name(name):
+            continue
+        if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+            continue
+        sort_key = rec.fields[10]
+        if sort_key > 0:
+            pairs.append((sort_key, name))
+
+    pairs.sort()
+    breaks = 0
+    prev_key: Optional[str] = None
+    for _, name in pairs:
+        name_key = _vensim_sort_key(name)
+        if prev_key is not None and prev_key > name_key:
+            breaks += 1
+        prev_key = name_key
+    return breaks
+
+
+def _mapping_from_record_names(
+    sorted_recs: list[tuple[int, VdfRecord]],
+    offset: int,
+    vdf: VdfFile,
+    visible_blocks: list[OwnerRecordBlock],
+) -> dict[str, OwnerRecordBlock]:
+    rec_to_name: dict[int, str] = {}
+    rec_sort_names: dict[int, list[tuple[int, VdfRecord, str]]] = {}
+    for rank, (ri, rec) in enumerate(sorted_recs):
+        name_idx = rank + offset
+        if not (0 <= name_idx < len(vdf.names)):
+            continue
+        name = vdf.names[name_idx]
+        rec_to_name[ri] = name
+        rec_sort_names.setdefault(rec.fields[10], []).append((ri, rec, name))
+
+    ordered_blocks = sorted(
+        visible_blocks,
+        key=lambda block: (
+            block.attached_sort_keys[0] if block.attached_sort_keys else math.inf,
+            block.start,
+            block.end,
+        ),
+    )
+
+    used_names: set[str] = set()
+    name_to_block: dict[str, OwnerRecordBlock] = {}
+
+    for block in ordered_blocks:
+        chosen: Optional[str] = None
+        for sort_key in block.attached_sort_keys:
+            candidates = [
+                name
+                for _, _, name in rec_sort_names.get(sort_key, [])
+                if name not in used_names and _name_allowed_for_block(name, block)
+            ]
+            if candidates:
+                chosen = candidates[0]
+                break
+
+        if chosen is None:
+            for rec_idx in block.sentinel_record_indices:
+                name = rec_to_name.get(rec_idx)
+                if name is None or name in used_names:
+                    continue
+                if _name_allowed_for_block(name, block):
+                    chosen = name
+                    break
+
+        if chosen is None:
+            continue
+        used_names.add(chosen)
+        name_to_block[chosen] = block
+
+    return name_to_block
+
+
 def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
     """
     Deterministic record-to-name mapping via the f[2]-offset formula.
@@ -1846,45 +2070,22 @@ def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]
     all_blocks = build_owner_record_blocks(vdf)
     visible_blocks = [b for b in all_blocks if not b.hidden]
 
-    # The nominal offset is slot_count - record_count. Try a small range
-    # around it to handle cases where the offset shifts due to insertions.
     nominal_offset = n_slots - n_recs
+    candidates: list[tuple[int, int, int, dict[str, OwnerRecordBlock]]] = []
     for offset in range(max(0, nominal_offset - 3), nominal_offset + 4):
-        result = _try_f2_with_offset(sorted_recs, offset, vdf, visible_blocks)
-        if result is not None:
-            return result
+        trial = _mapping_from_record_names(sorted_recs, offset, vdf, visible_blocks)
+        if not _validate_name_block_assignment(trial, vdf):
+            continue
+        mapped_count = len(trial)
+        sort_breaks = _offset_sort_key_breaks(sorted_recs, offset, vdf)
+        distance = abs(offset - nominal_offset)
+        candidates.append((mapped_count, -sort_breaks, -distance, trial))
 
-    return None
-
-
-def _try_f2_with_offset(
-    sorted_recs: list[tuple[int, VdfRecord]],
-    offset: int,
-    vdf: VdfFile,
-    visible_blocks: list[OwnerRecordBlock],
-) -> Optional[dict[str, OwnerRecordBlock]]:
-    """Try a specific offset for the f[2]-based record-to-name mapping."""
-    rec_to_name: dict[int, str] = {}
-    for rank, (ri, rec) in enumerate(sorted_recs):
-        name_idx = rank + offset
-        if 0 <= name_idx < len(vdf.names):
-            rec_to_name[ri] = vdf.names[name_idx]
-
-    name_to_block: dict[str, OwnerRecordBlock] = {}
-    for block in visible_blocks:
-        for ri in block.sentinel_record_indices:
-            name = rec_to_name.get(ri)
-            if name and classify_name(name) == "":
-                name_to_block[name] = block
-                break
-
-    if not name_to_block:
+    if not candidates:
         return None
 
-    if _validate_name_block_assignment(name_to_block, vdf):
-        return name_to_block
-
-    return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return candidates[0][3]
 
 
 def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
@@ -1892,102 +2093,40 @@ def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
     Map visible variable names to owner blocks using the stocks-first-
     alphabetical ordering rule, validated against actual OT positions.
 
-    First tries the deterministic f[2]-offset formula. Falls back to
-    exhaustive search with scoring when the formula doesn't produce
-    a valid result (e.g., incrementally edited models).
+    Uses the f[2]-offset formula plus sort-key anchored block ownership.
+    This stays linear in the number of records/blocks and avoids the
+    combinatorial fallback entirely.
     """
     all_blocks = build_owner_record_blocks(vdf)
     visible_blocks = [b for b in all_blocks if not b.hidden]
-    hidden_blocks = [b for b in all_blocks if b.hidden]
-    candidates = visible_variable_candidates(vdf)
 
-    # Compute hidden stock OT count for validation
-    hidden_stock_ots = sum(
-        b.length() for b in hidden_blocks
-        if b.ot_codes and all(c == OT_CODE_STOCK for c in b.ot_codes))
-    vdf._hidden_stock_ot_count = hidden_stock_ots  # type: ignore[attr-defined]
-
-    if not visible_blocks or not candidates:
+    if not visible_blocks:
         return NameMapping(
-            variable_names=sorted(candidates),
+            variable_names=[],
             owner_blocks=[],
             name_to_block={},
             system_ot_indices=set(),
-            unmapped_blocks=visible_blocks,
+            unmapped_blocks=[],
         )
 
-    # Try deterministic f[2]-offset mapping first
     f2_result = _try_f2_offset_mapping(vdf)
-    if f2_result is not None:
-        mapped_names = sorted(f2_result.keys(), key=_vensim_sort_key)
-        mapped_blocks = [f2_result[n] for n in mapped_names]
-        mapped_set = set(id(b) for b in mapped_blocks)
-        sys_blocks = [b for b in visible_blocks if id(b) not in mapped_set]
-        sys_ots: set[int] = set()
-        for b in sys_blocks:
-            sys_ots.update(range(b.start, b.end))
-        return NameMapping(
-            variable_names=mapped_names,
-            owner_blocks=mapped_blocks,
-            name_to_block=f2_result,
-            system_ot_indices=sys_ots,
-            unmapped_blocks=sys_blocks,
-        )
+    if f2_result is None:
+        return None
 
-    # Fallback: exhaustive search with scoring
-    B = len(visible_blocks)
-
-    # When there are excess blocks (system records that leaked through),
-    # try to select the right B blocks. First attempt: use all visible blocks.
-    # If that fails, try subsets.
-    system_blocks: list[OwnerRecordBlock] = []
-
-    # Fast path: if candidate count matches block count, try direct mapping
-    if len(candidates) == B:
-        sorted_names = sorted(candidates, key=_vensim_sort_key)
-        trial = _try_name_block_mapping(sorted_names, visible_blocks, vdf)
-        if trial is not None:
-            return _build_result(sorted_names, trial, system_blocks, vdf)
-
-    # General case: try all subsets of B candidates from the full candidate
-    # list. This handles dimension/element filtering and excess system blocks
-    # simultaneously. For C(14,4) = 1001 this is fast.
-    # Collect ALL valid solutions and pick the best one by scoring.
-    import itertools
-    solutions: list[tuple[float, list[str], dict[str, OwnerRecordBlock]]] = []
-    for subset in itertools.combinations(range(len(candidates)), B):
-        trial_names = sorted([candidates[i] for i in subset],
-                             key=_vensim_sort_key)
-        trial = _try_name_block_mapping(trial_names, visible_blocks, vdf)
-        if trial is not None:
-            score = _score_variable_name_set(trial_names, candidates, vdf)
-            solutions.append((score, trial_names, trial))
-    if solutions:
-        solutions.sort(key=lambda s: -s[0])
-        _, best_names, best_mapping = solutions[0]
-        return _build_result(best_names, best_mapping, system_blocks, vdf)
-
-    # If no subset of candidates matches all visible blocks, some visible
-    # blocks may be system-record artifacts. Try with fewer blocks.
-    # Collect all solutions and pick the best by scoring.
-    for fewer in range(min(B, len(candidates)), 0, -1):
-        fewer_solutions: list[tuple[float, list[str], dict[str, OwnerRecordBlock], list[OwnerRecordBlock]]] = []
-        for block_subset in itertools.combinations(visible_blocks, fewer):
-            block_list = list(block_subset)
-            for name_subset in itertools.combinations(range(len(candidates)), fewer):
-                trial_names = sorted([candidates[i] for i in name_subset],
-                                     key=_vensim_sort_key)
-                trial = _try_name_block_mapping(trial_names, block_list, vdf)
-                if trial is not None:
-                    sys_blocks = [b for b in visible_blocks if b not in block_list]
-                    score = _score_variable_name_set(trial_names, candidates, vdf)
-                    fewer_solutions.append((score, trial_names, trial, sys_blocks))
-        if fewer_solutions:
-            fewer_solutions.sort(key=lambda s: -s[0])
-            _, best_names, best_mapping, best_sys = fewer_solutions[0]
-            return _build_result(best_names, best_mapping, best_sys, vdf)
-
-    return None
+    mapped_names = sorted(f2_result.keys(), key=_vensim_sort_key)
+    mapped_blocks = [f2_result[name] for name in mapped_names]
+    mapped_ranges = {(block.start, block.end) for block in mapped_blocks}
+    sys_blocks = [block for block in visible_blocks if (block.start, block.end) not in mapped_ranges]
+    sys_ots: set[int] = set()
+    for block in sys_blocks:
+        sys_ots.update(range(block.start, block.end))
+    return NameMapping(
+        variable_names=mapped_names,
+        owner_blocks=mapped_blocks,
+        name_to_block=f2_result,
+        system_ot_indices=sys_ots,
+        unmapped_blocks=sys_blocks,
+    )
 
 
 def _build_result(
@@ -2039,12 +2178,15 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
     time_values = [f32(vdf.data, data_start + i * 4) for i in range(time_count)]
 
     results: list[NamedResult] = []
+    emitted_names: set[str] = set()
+    emitted_ot_indices: set[int] = set()
 
     # Time itself
     results.append(NamedResult(name="Time", ot_index=0, values=time_values))
+    emitted_names.add("Time")
+    emitted_ot_indices.add(0)
 
     # Mapped variable results
-    codes = vdf.section6_ot_class_codes() or []
     for name in mapping.variable_names:
         block = mapping.name_to_block.get(name)
         if block is None:
@@ -2062,6 +2204,8 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
                 const_val = u32_as_f32(raw)
                 series = [const_val] * len(time_values)
             results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+            emitted_names.add(name)
+            emitted_ot_indices.add(ot_idx)
         else:
             # Arrayed variable: one result per OT element
             for elem_offset in range(block.length()):
@@ -2077,35 +2221,45 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
                 elem_name = f"{name}[{elem_offset}]"
                 results.append(NamedResult(
                     name=elem_name, ot_index=ot_idx, values=series))
+                emitted_names.add(elem_name)
+                emitted_ot_indices.add(ot_idx)
 
-    # System variables (the unmapped OT entries that are inline constants)
-    system_names_sorted = sorted(
-        n for n in SYSTEM_NAMES if n != "Time")
-    system_ot_indices: list[int] = []
-    for ot_idx in range(1, vdf.offset_table_count):
-        if ot_idx in mapping.system_ot_indices:
-            system_ot_indices.append(ot_idx)
+    # Standalone lookup/table outputs have direct OT bindings in section 6.
+    lookup_names = _lookup_record_names(vdf)
+    lookup_records = vdf.section6_lookup_records() or []
+    if len(lookup_names) == len(lookup_records):
+        for name, record in zip(lookup_names, lookup_records):
+            ot_idx = record.ot_index()
+            if name in emitted_names or ot_idx in emitted_ot_indices:
+                continue
+            raw = vdf.offset_table_entry(ot_idx)
+            if raw is None:
+                continue
+            if vdf.is_data_block_offset(raw):
+                series = vdf.extract_block_series(raw, time_values)
+            else:
+                const_val = u32_as_f32(raw)
+                series = [const_val] * len(time_values)
+            results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+            emitted_names.add(name)
+            emitted_ot_indices.add(ot_idx)
+
+    # System variables share the same gap-aware non-stock placement logic as
+    # named variables. This keeps helper/lookup gaps from shifting the system
+    # names onto the wrong OT slots.
+    codes = vdf.section6_ot_class_codes() or []
+    nonstock_positions = _group_ot_positions(codes, want_stock=False)
+    system_positions = _assign_group_positions(
+        _nonstock_assignment_items(mapping.name_to_block),
+        nonstock_positions,
+    )
+    if system_positions is None:
+        return None
+
+    for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key):
+        ot_idx = system_positions.get(name)
+        if ot_idx is None:
             continue
-        # Check if this OT is covered by any mapped block
-        covered = any(
-            block.start <= ot_idx < block.end
-            for block in mapping.owner_blocks
-        )
-        if not covered:
-            # Also check hidden blocks
-            hidden_covered = any(
-                block.start <= ot_idx < block.end
-                for block in build_owner_record_blocks(vdf)
-                if block.hidden
-            )
-            if not hidden_covered:
-                system_ot_indices.append(ot_idx)
-
-    # Map system names alphabetically to system OT indices
-    for i, name in enumerate(system_names_sorted):
-        if i >= len(system_ot_indices):
-            break
-        ot_idx = system_ot_indices[i]
         raw = vdf.offset_table_entry(ot_idx)
         if raw is None:
             continue
@@ -2115,6 +2269,8 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
             const_val = u32_as_f32(raw)
             series = [const_val] * len(time_values)
         results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+        emitted_names.add(name)
+        emitted_ot_indices.add(ot_idx)
 
     return results
 

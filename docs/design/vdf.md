@@ -496,6 +496,15 @@ for that lookup table. This is the authoritative VDF-native mechanism for
 identifying which names are lookup definitions and mapping them to OT entries.
 All lookup definitions have OT entries as inline constants (code 0x17).
 
+**Conservative extraction rule**: on larger models (`econ`, `WRLD3`) these
+lookup-record OT indices land on otherwise-unclaimed OT slots, so the
+name-table order of lookupish names can be paired directly with the section-6
+record order to recover missing lookup outputs. On small fixtures like
+`lookup_ex`, the parsed lookup-record OTs overlap already-owned variable slots,
+so generic extraction should only auto-add lookup names when their OT index is
+otherwise unused. The record payload clearly carries more structure, but that
+name/payload binding is not decoded yet.
+
 Validated counts:
 
 | Model | Lookup mapping records | Lookup definitions in name table | Match |

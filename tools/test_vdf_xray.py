@@ -569,6 +569,103 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(slot_to_names[204], ["SAVEPER"])
         self.assertEqual(slot_to_names[220], ["sub1"])
 
+    def test_run2_name_mapping_treats_visible_const_block_as_system_only(self) -> None:
+        run2 = parse_fixture("test/bobby/vdf/model_editing/run_2.vdf")
+
+        mapping = vdf_xray.map_names_to_owner_blocks(run2)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.variable_names, [])
+        self.assertEqual(mapping.system_ot_indices, {1})
+        self.assertEqual(
+            [(block.start, block.end) for block in mapping.unmapped_blocks],
+            [(1, 2)],
+        )
+
+    def test_run3_name_mapping_prefers_nominal_offset_and_recovers_v(self) -> None:
+        run3 = parse_fixture("test/bobby/vdf/model_editing/run_3.vdf")
+
+        mapping = vdf_xray.map_names_to_owner_blocks(run3)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.variable_names, ["v"])
+        self.assertEqual(mapping.name_to_block["v"].start, 5)
+        self.assertEqual(mapping.system_ot_indices, {1})
+
+    def test_mark2_name_mapping_uses_scored_offset_and_skips_stock_lookup_aliases(self) -> None:
+        mark2 = parse_fixture("test/bobby/vdf/econ/mark2.vdf")
+
+        mapping = vdf_xray.map_names_to_owner_blocks(mark2)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(len(mapping.variable_names), 60)
+        self.assertEqual(mapping.name_to_block["home price index"].start, 7)
+        self.assertEqual(mapping.name_to_block["homes being built"].start, 8)
+        self.assertEqual(mapping.name_to_block["risk taking behavior"].start, 12)
+        self.assertEqual(mapping.name_to_block["perceived mortgage balance"].start, 73)
+        self.assertNotIn("hud policy lookup", mapping.name_to_block)
+        self.assertNotIn("inflation rate lookup", mapping.name_to_block)
+        self.assertNotIn("loan standards impact on insolvency table", mapping.name_to_block)
+        self.assertEqual(
+            [(block.start, block.end) for block in mapping.unmapped_blocks],
+            [(1, 2), (2, 3), (3, 4), (13, 14)],
+        )
+
+    def test_lookup_ex_name_mapping_keeps_inline_lookup_variable_and_excludes_definition(self) -> None:
+        lookup_ex = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
+
+        mapping = vdf_xray.map_names_to_owner_blocks(lookup_ex)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertIn("inline lookup table", mapping.name_to_block)
+        self.assertIn("net change", mapping.name_to_block)
+        self.assertIn("stock", mapping.name_to_block)
+        self.assertNotIn("lookup table 1", mapping.name_to_block)
+
+    def test_run3_extract_named_results_assigns_system_slots_from_gap_aware_layout(self) -> None:
+        run3 = parse_fixture("test/bobby/vdf/model_editing/run_3.vdf")
+
+        results = vdf_xray.extract_named_results(run3)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        by_name = {result.name: result.ot_index for result in results}
+        self.assertEqual(by_name["Time"], 0)
+        self.assertEqual(by_name["FINAL TIME"], 1)
+        self.assertEqual(by_name["INITIAL TIME"], 2)
+        self.assertEqual(by_name["SAVEPER"], 3)
+        self.assertEqual(by_name["TIME STEP"], 4)
+        self.assertEqual(by_name["v"], 5)
+
+    def test_lookup_ex_extract_named_results_does_not_duplicate_lookupish_owner_slots(self) -> None:
+        lookup_ex = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
+
+        results = vdf_xray.extract_named_results(lookup_ex)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        by_name = {result.name: result.ot_index for result in results}
+        self.assertEqual(by_name["inline lookup table"], 4)
+        self.assertEqual(by_name["net change"], 5)
+        self.assertNotIn("lookup table 1", by_name)
+
+    def test_mark2_extract_named_results_adds_lookup_record_outputs(self) -> None:
+        mark2 = parse_fixture("test/bobby/vdf/econ/mark2.vdf")
+
+        results = vdf_xray.extract_named_results(mark2)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        by_name = {result.name: result.ot_index for result in results}
+        self.assertEqual(by_name["federal funds rate lookup"], 39)
+        self.assertEqual(by_name["inflation rate lookup"], 53)
+        self.assertNotIn("hud policy lookup", by_name)
+        self.assertNotIn("loan standards impact on insolvency table", by_name)
+
 
 if __name__ == "__main__":
     unittest.main()
