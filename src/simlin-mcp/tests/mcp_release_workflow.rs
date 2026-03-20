@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-fn load_workflow() -> serde_yml::Value {
+fn load_workflow() -> serde_yaml::Value {
     // CARGO_MANIFEST_DIR is src/simlin-mcp; repo root is two levels up.
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -19,7 +19,7 @@ fn load_workflow() -> serde_yml::Value {
         .unwrap();
     let wf_path = repo_root.join(".github/workflows/mcp-release.yml");
     let contents = std::fs::read_to_string(&wf_path).expect("read workflow YAML");
-    serde_yml::from_str(&contents).expect("parse workflow YAML")
+    serde_yaml::from_str(&contents).expect("parse workflow YAML")
 }
 
 fn load_workflow_text() -> String {

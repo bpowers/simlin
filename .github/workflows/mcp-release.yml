@@ -128,6 +128,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Intentionally omit registry-url: it injects a token-based .npmrc that
+      # conflicts with npm's OIDC provenance flow.  Trusted publishing handles auth.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -203,6 +205,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Intentionally omit registry-url: trusted publishing handles auth (see publish-platform)
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

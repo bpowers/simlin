@@ -72,6 +72,8 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
     # input with a timeout.  timeout exits 124 when it kills a running process
     # (expected), and the binary itself may exit non-zero on empty input.
     # Fatal failures are: 126 (cannot execute), 127 (not found), >= 128 (signal).
+    # Note: exit 124 is excluded because that's timeout's own "I killed it" code.
+    # Codes >= 128 (e.g. 137=SIGKILL, 139=SIGSEGV) indicate real problems.
     set +e
     echo '' | timeout 2 "$DIST_DIR/x86_64-unknown-linux-musl/simlin-mcp" 2>/dev/null
     EXIT_CODE=$?
