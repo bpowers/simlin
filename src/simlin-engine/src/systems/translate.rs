@@ -1220,7 +1220,7 @@ mod tests {
 
     fn read_example(name: &str) -> String {
         let path = format!(
-            "{}/../../third_party/systems/examples/{}",
+            "{}/../../test/systems-format/{}",
             env!("CARGO_MANIFEST_DIR"),
             name
         );

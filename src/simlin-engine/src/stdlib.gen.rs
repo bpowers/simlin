@@ -1034,6 +1034,7 @@ fn systems_conversion() -> Model {
                 x: 100_f64,
                 y: 100_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Aux(view_element::Aux {
                 name: "rate".to_string(),
@@ -1041,6 +1042,7 @@ fn systems_conversion() -> Model {
                 x: 200_f64,
                 y: 100_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Aux(view_element::Aux {
                 name: "dest capacity".to_string(),
@@ -1048,6 +1050,7 @@ fn systems_conversion() -> Model {
                 x: 300_f64,
                 y: 100_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Aux(view_element::Aux {
                 name: "outflow".to_string(),
@@ -1055,6 +1058,7 @@ fn systems_conversion() -> Model {
                 x: 100_f64,
                 y: 200_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Aux(view_element::Aux {
                 name: "waste".to_string(),
@@ -1062,6 +1066,7 @@ fn systems_conversion() -> Model {
                 x: 200_f64,
                 y: 200_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Aux(view_element::Aux {
                 name: "remaining".to_string(),
@@ -1069,10 +1074,13 @@ fn systems_conversion() -> Model {
                 x: 300_f64,
                 y: 200_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             })],
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -1144,6 +1152,7 @@ fn systems_leak() -> Model {
                     x: 100_f64,
                     y: 100_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "rate".to_string(),
@@ -1151,6 +1160,7 @@ fn systems_leak() -> Model {
                     x: 200_f64,
                     y: 100_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "dest capacity".to_string(),
@@ -1158,6 +1168,7 @@ fn systems_leak() -> Model {
                     x: 300_f64,
                     y: 100_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "actual".to_string(),
@@ -1165,6 +1176,7 @@ fn systems_leak() -> Model {
                     x: 200_f64,
                     y: 200_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "remaining".to_string(),
@@ -1172,6 +1184,7 @@ fn systems_leak() -> Model {
                     x: 300_f64,
                     y: 200_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
             ],
             view_box: Rect {
@@ -1182,6 +1195,8 @@ fn systems_leak() -> Model {
             },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -1255,6 +1270,7 @@ fn systems_rate() -> Model {
                     x: 100_f64,
                     y: 100_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "requested".to_string(),
@@ -1262,6 +1278,7 @@ fn systems_rate() -> Model {
                     x: 200_f64,
                     y: 100_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "dest capacity".to_string(),
@@ -1269,6 +1286,7 @@ fn systems_rate() -> Model {
                     x: 300_f64,
                     y: 100_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "actual".to_string(),
@@ -1276,6 +1294,7 @@ fn systems_rate() -> Model {
                     x: 200_f64,
                     y: 200_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "remaining".to_string(),
@@ -1283,6 +1302,7 @@ fn systems_rate() -> Model {
                     x: 300_f64,
                     y: 200_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
             ],
             view_box: Rect {
@@ -1293,6 +1313,8 @@ fn systems_rate() -> Model {
             },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
