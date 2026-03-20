@@ -1033,6 +1033,9 @@
         "height": {
           "type": "number",
           "format": "double"
+        },
+        "isMdlViewMarker": {
+          "type": "boolean"
         }
       },
       "required": [

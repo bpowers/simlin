@@ -195,6 +195,8 @@ mod tests {
                     attached_to_uid: attached,
                 })
                 .collect(),
+            compat: None,
+            label_compat: None,
         }
     }
 
@@ -204,6 +206,7 @@ mod tests {
             flow_uid: 10,
             x,
             y,
+            compat: None,
         })
     }
 
@@ -214,6 +217,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         })
     }
 

@@ -158,12 +158,19 @@ message ViewElement {
     RIGHT = 4;
   };
 
+  message ViewElementCompat {
+    optional double width = 1;
+    optional double height = 2;
+    optional uint32 bits = 3;
+  }
+
   message Aux {
     string name = 1;
     int32 uid = 2;
     double x = 3;
     double y = 4;
     LabelSide label_side = 5;
+    ViewElementCompat compat = 6;
   };
 
   message Stock {
@@ -172,6 +179,7 @@ message ViewElement {
     double x = 3;
     double y = 4;
     LabelSide label_side = 5;
+    ViewElementCompat compat = 6;
   };
 
   message FlowPoint {
@@ -189,6 +197,8 @@ message ViewElement {
     // int32 segmentWithAux = 3;
     // double auxPercentageIntoSegment = 4;
     repeated FlowPoint points = 6;
+    ViewElementCompat compat = 7;
+    ViewElementCompat label_compat = 8;
   };
 
   message Link {
@@ -225,6 +235,7 @@ message ViewElement {
     double x = 3;
     double y = 4;
     LabelSide label_side = 5;
+    ViewElementCompat compat = 6;
   };
 
   message Cloud {
@@ -232,6 +243,7 @@ message ViewElement {
     int32 flow_uid = 2;
     double x = 3;
     double y = 4;
+    ViewElementCompat compat = 5;
   };
 
   // Visual container for grouping related model elements.
@@ -243,6 +255,7 @@ message ViewElement {
     double y = 4;
     double width = 5;
     double height = 6;
+    bool is_mdl_view_marker = 7;
   };
 
   oneof element {
@@ -280,6 +293,7 @@ message View {
   bool use_lettered_polarity = 6;
   string name = 7;
   bool has_name = 8;
+  optional string font = 9;
 };
 
 message LoopMetadata {

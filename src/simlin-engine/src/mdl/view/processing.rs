@@ -206,6 +206,8 @@ pub fn transform_view_coordinates(
     // Calculate offsets to shift origin to start position
     let off_x = start_x as f64 - (min_x as f64 * x_ratio);
     let off_y = start_y as f64 - (min_y as f64 * y_ratio);
+    view.x_offset = off_x.round() as i32;
+    view.y_offset = off_y.round() as i32;
 
     // Transform all elements
     for elem in view.elements.iter_mut().flatten() {
@@ -667,6 +669,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -681,6 +684,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -703,6 +709,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -718,6 +725,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -733,6 +743,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true,
+                bits: 2,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -768,6 +781,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -782,6 +796,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -797,6 +814,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -824,6 +844,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -839,6 +860,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -853,6 +877,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -868,6 +895,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -881,6 +911,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (150, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -917,6 +949,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -932,6 +965,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -947,6 +983,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -961,6 +1000,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -976,6 +1018,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -989,6 +1034,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (100, 100), // x=100, different from connector to Stock B
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1002,6 +1049,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (200, 100), // x=200, different from connector to Stock A
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1042,6 +1091,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1057,6 +1107,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1072,6 +1125,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1086,6 +1142,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1101,6 +1160,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1114,6 +1176,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (100, 100), // same x=100 as connector to Stock B
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1127,6 +1191,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (100, 200), // same x=100 as connector to Stock A
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1166,6 +1232,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1180,6 +1247,9 @@ mod tests {
                 width: 15,
                 height: 15,
                 scratch_name: false,
+                bits: 0,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1195,6 +1265,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1209,6 +1282,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1224,6 +1300,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1237,6 +1316,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (100, 100), // x=100, different from other connector
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1250,6 +1331,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (200, 100), // x=200, different from other connector
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1283,6 +1366,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1298,6 +1382,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1313,6 +1400,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1327,6 +1417,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1342,6 +1435,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1355,6 +1451,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (100, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1368,6 +1466,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (200, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1400,6 +1500,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1415,6 +1516,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // ghost
+                bits: 2,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1430,6 +1534,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // ghost
+                bits: 2,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 

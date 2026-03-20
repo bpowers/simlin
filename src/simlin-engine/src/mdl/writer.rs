@@ -61,9 +61,22 @@ fn needs_mdl_quoting(name: &str) -> bool {
 
 fn escape_mdl_quoted_ident(name: &str) -> String {
     let mut escaped = String::with_capacity(name.len());
-    for c in name.chars() {
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
         match c {
-            '\\' => escaped.push_str("\\\\"),
+            // Literal newlines must become the two-character escape `\n`.
+            '\n' => escaped.push_str("\\n"),
+            '\\' => {
+                if chars.peek() == Some(&'n') {
+                    // XMILE name attributes may contain the literal two-char
+                    // sequence `\n` (backslash + 'n') as a display newline.
+                    // Preserve it as-is rather than double-escaping to `\\n`.
+                    escaped.push_str("\\n");
+                    chars.next();
+                } else {
+                    escaped.push_str("\\\\");
+                }
+            }
             '"' => escaped.push_str("\\\""),
             _ => escaped.push(c),
         }
@@ -82,6 +95,47 @@ fn format_mdl_ident(name: &str) -> String {
         format!("\"{}\"", escape_mdl_quoted_ident(&display))
     } else {
         display
+    }
+}
+
+/// Build a mapping from canonical variable ident to display name (with
+/// original casing, spaces instead of underscores) by walking view elements.
+///
+/// The first occurrence of a name wins, so if a variable appears in multiple
+/// views the first view's casing is used.
+fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for view in views {
+        let View::StockFlow(sf) = view;
+        for element in &sf.elements {
+            let name = match element {
+                ViewElement::Aux(a) => &a.name,
+                ViewElement::Stock(s) => &s.name,
+                ViewElement::Flow(f) => &f.name,
+                _ => continue,
+            };
+            let normalized_name = name.replace("\\n", " ").replace('\n', " ");
+            let canonical = crate::common::canonicalize(&normalized_name).into_owned();
+            let display = underbar_to_space(&normalized_name);
+            map.entry(canonical).or_insert(display);
+        }
+    }
+    map
+}
+
+/// Look up the display name for a canonical ident, falling back to
+/// `format_mdl_ident` if no view element provides original casing.
+fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
+    match display_names.get(ident) {
+        Some(name) => {
+            let name = name.replace("\\n", " ").replace('\n', " ");
+            if needs_mdl_quoting(&name) {
+                format!("\"{}\"", escape_mdl_quoted_ident(&name))
+            } else {
+                name
+            }
+        }
+        None => format_mdl_ident(ident),
     }
 }
 
@@ -554,6 +608,16 @@ impl Visitor<String> for MdlPrintVisitor {
                 {
                     return kw.to_owned();
                 }
+                // Vensim lookup calls use `table_name ( input )` syntax
+                // rather than `LOOKUP(table_name, input)`.
+                if func == "lookup"
+                    && args.len() == 2
+                    && let Expr0::Var(table_ident, _) = &args[0]
+                {
+                    let table_name = format_mdl_ident(table_ident.as_str());
+                    let input = self.walk(&args[1]);
+                    return format!("{table_name} ( {input} )");
+                }
                 // safediv with 3+ args is XIDZ (3-arg form), not ZIDZ (2-arg)
                 let mdl_name = if func == "safediv" && args.len() >= 3 {
                     "XIDZ".to_owned()
@@ -673,10 +737,10 @@ fn is_data_equation(xmile_eqn: &str) -> bool {
         || s.starts_with("GET_123")
 }
 
-/// Write a graphical-function (lookup table) body into `buf`.
+/// Write the inner body of a lookup table into `buf` (no outer parens).
 ///
-/// Format: `([(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...)`
-fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
+/// Format: `[(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...`
+fn write_lookup_body(buf: &mut String, gf: &GraphicalFunction) {
     let xs: Vec<f64> = match &gf.x_points {
         Some(pts) => pts.clone(),
         None => {
@@ -692,7 +756,7 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 
     write!(
         buf,
-        "([({},{})-({},{})]",
+        "[({},{})-({},{})]",
         format_f64(gf.x_scale.min),
         format_f64(gf.y_scale.min),
         format_f64(gf.x_scale.max),
@@ -703,7 +767,29 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
     for (x, y) in xs.iter().zip(gf.y_points.iter()) {
         write!(buf, ",({},{})", format_f64(*x), format_f64(*y)).unwrap();
     }
+}
+
+/// Write a graphical-function (lookup table) wrapped in parens.
+///
+/// Format: `([(xmin,ymin)-(xmax,ymax)],(x1,y1),(x2,y2),...)`
+fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
+    buf.push('(');
+    write_lookup_body(buf, gf);
     buf.push(')');
+}
+
+/// Returns true when the equation text is a placeholder sentinel rather
+/// than a real input expression (standalone lookup definition).
+///
+/// The MDL parser produces [`LOOKUP_SENTINEL`](super::LOOKUP_SENTINEL)
+/// when a variable is defined as a pure lookup (no input expression) --
+/// see `MdlEquation::Lookup` in `convert/variables.rs`.  Vensim's native
+/// representation is `name(body)` rather than `name = WITH LOOKUP(input,
+/// body)`.  An empty string covers XMILE variables that have a graphical
+/// function but no equation.
+fn is_lookup_only_equation(eqn: &str) -> bool {
+    let trimmed = eqn.trim();
+    trimmed.is_empty() || trimmed == super::LOOKUP_SENTINEL
 }
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.
@@ -727,10 +813,14 @@ fn format_f64(v: f64) -> String {
 /// ```text
 /// Name=\n\tequation\n\t~\tunits\n\t~\tcomment\n\t|
 /// ```
-pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
+pub fn write_variable_entry(
+    buf: &mut String,
+    var: &datamodel::Variable,
+    display_names: &HashMap<String, String>,
+) {
     match var {
         datamodel::Variable::Stock(s) => {
-            write_stock_variable(buf, s);
+            write_stock_variable(buf, s, display_names);
             return;
         }
         datamodel::Variable::Module(_) => return,
@@ -759,13 +849,14 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
 
     let data_source_eqn = compat_get_direct_equation(compat);
     let effective_gf = if data_source_eqn.is_some() { None } else { gf };
+    let name = display_name_for_ident(ident, display_names);
 
     match equation {
         Equation::Scalar(eqn) => {
             let effective_eqn = data_source_eqn
                 .clone()
                 .unwrap_or_else(|| wrap_active_initial(eqn, compat));
-            write_single_entry(buf, ident, &effective_eqn, &[], units, doc, effective_gf);
+            write_single_entry(buf, &name, &effective_eqn, &[], units, doc, effective_gf);
         }
         Equation::ApplyToAll(dims, eqn) => {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
@@ -774,7 +865,7 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
                 .unwrap_or_else(|| wrap_active_initial(eqn, compat));
             write_single_entry(
                 buf,
-                ident,
+                &name,
                 &effective_eqn,
                 &dim_names,
                 units,
@@ -783,7 +874,7 @@ pub fn write_variable_entry(buf: &mut String, var: &datamodel::Variable) {
             );
         }
         Equation::Arrayed(dims, elements, default_eq, _) => {
-            write_arrayed_entries(buf, ident, dims, elements, default_eq, units, doc);
+            write_arrayed_entries(buf, &name, dims, elements, default_eq, units, doc);
         }
     }
 }
@@ -843,7 +934,11 @@ fn compat_get_direct_equation(compat: &datamodel::Compat) -> Option<String> {
 /// The datamodel stores stocks with the initial value in `equation` and
 /// inflows/outflows as separate string vectors.  The MDL format requires
 /// `INTEG(net_flow, initial_value)`.
-fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
+fn write_stock_variable(
+    buf: &mut String,
+    stock: &datamodel::Stock,
+    display_names: &HashMap<String, String>,
+) {
     let mut net_flow = String::new();
     for (i, inflow) in stock.inflows.iter().enumerate() {
         if i > 0 {
@@ -859,10 +954,12 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
         net_flow.push('0');
     }
 
+    let name = display_name_for_ident(&stock.ident, display_names);
+
     match &stock.equation {
         Equation::Scalar(eqn) => write_stock_entry(
             buf,
-            &stock.ident,
+            &name,
             &net_flow,
             &equation_to_mdl(eqn),
             &[],
@@ -873,7 +970,7 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
             let dim_names: Vec<&str> = dims.iter().map(|d| d.as_str()).collect();
             write_stock_entry(
                 buf,
-                &stock.ident,
+                &name,
                 &net_flow,
                 &equation_to_mdl(eqn),
                 &dim_names,
@@ -884,7 +981,7 @@ fn write_stock_variable(buf: &mut String, stock: &datamodel::Stock) {
         Equation::Arrayed(dims, elements, default_eq, _) => {
             write_arrayed_stock_entries(
                 buf,
-                &stock.ident,
+                &name,
                 &net_flow,
                 dims,
                 elements,
@@ -904,16 +1001,16 @@ fn normalized_stock_initial(initial: &str) -> String {
     }
 }
 
+/// `name` is the pre-formatted display name (with original casing).
 fn write_stock_entry(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     net_flow: &str,
     initial: &str,
     dims: &[&str],
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = format_mdl_ident(ident);
     let initial = normalized_stock_initial(initial);
 
     if dims.is_empty() {
@@ -931,7 +1028,7 @@ fn write_stock_entry(
 #[allow(clippy::too_many_arguments)]
 fn write_arrayed_stock_entries(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     net_flow: &str,
     _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
@@ -939,7 +1036,6 @@ fn write_arrayed_stock_entries(
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = format_mdl_ident(ident);
     let last_idx = elements.len().saturating_sub(1);
 
     for (i, (elem_name, eqn, _comment, _gf)) in elements.iter().enumerate() {
@@ -974,34 +1070,181 @@ fn wrap_active_initial(eqn: &str, compat: &datamodel::Compat) -> String {
     }
 }
 
+/// Split an MDL equation string into tokens suitable for line wrapping.
+///
+/// Tokens preserve the original text exactly -- concatenating them yields
+/// the input.  The split points are chosen so that line breaks can be
+/// inserted *between* tokens at natural boundaries: after commas (with
+/// their trailing space), before binary operators, or after open parens.
+fn tokenize_for_wrapping(eqn: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = eqn.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        match c {
+            ',' => {
+                current.push(chars.next().unwrap());
+                // Absorb trailing space after comma so it stays with the comma token
+                if chars.peek() == Some(&' ') {
+                    current.push(chars.next().unwrap());
+                }
+                tokens.push(std::mem::take(&mut current));
+            }
+            '(' | ')' | '[' | ']' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                current.push(chars.next().unwrap());
+                tokens.push(std::mem::take(&mut current));
+            }
+            '+' | '-' | '*' | '/' | '^' => {
+                // Emit the accumulated text before the operator so a
+                // line break can be inserted before the operator.
+                // But first check if this minus/plus is at the very start
+                // or follows an operator/open-paren (i.e. is unary).
+                let is_unary = current.is_empty()
+                    && tokens.last().is_none_or(|t| {
+                        let trimmed = t.trim();
+                        trimmed.is_empty()
+                            || trimmed.ends_with('(')
+                            || trimmed.ends_with(',')
+                            || trimmed == "+"
+                            || trimmed == "-"
+                            || trimmed == "*"
+                            || trimmed == "/"
+                            || trimmed == "^"
+                    });
+                if is_unary {
+                    current.push(chars.next().unwrap());
+                } else {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                    // Emit the operator as its own token so line breaks can be inserted before it.
+                    current.push(chars.next().unwrap());
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            '\'' => {
+                // Quoted literal -- consume the whole thing as one piece
+                current.push(chars.next().unwrap());
+                while let Some(&ch) = chars.peek() {
+                    current.push(chars.next().unwrap());
+                    if ch == '\'' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                // Quoted identifier -- consume the whole thing
+                current.push(chars.next().unwrap());
+                while let Some(&ch) = chars.peek() {
+                    current.push(chars.next().unwrap());
+                    if ch == '"' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                current.push(chars.next().unwrap());
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// Wrap a long equation with backslash-newline continuations in Vensim style.
+///
+/// Short equations (fitting within `max_line_len` characters) pass through
+/// unchanged.  Longer ones are split at token boundaries with `\\\n\t\t`
+/// continuation sequences (backslash, newline, two tabs for continuation
+/// indent under the single-tab equation indent).
+fn wrap_equation_with_continuations(eqn: &str, max_line_len: usize) -> String {
+    if eqn.len() <= max_line_len {
+        return eqn.to_string();
+    }
+
+    let tokens = tokenize_for_wrapping(eqn);
+    let mut result = String::new();
+    let mut current_line_len: usize = 0;
+
+    for token in &tokens {
+        // If adding this token would exceed the limit and we already have
+        // content on the current line, break before it.
+        if current_line_len + token.len() > max_line_len && current_line_len > 0 {
+            // Trim trailing whitespace from the current line before the break
+            let trimmed_end = result.trim_end_matches(' ').len();
+            result.truncate(trimmed_end);
+            result.push_str("\\\n\t\t");
+            current_line_len = 0;
+        }
+        result.push_str(token);
+        current_line_len += token.len();
+    }
+
+    result
+}
+
 /// Write one MDL entry (scalar or apply-to-all).
+///
+/// `name` is the pre-formatted display name (with original casing from
+/// view elements, or `format_mdl_ident` fallback).
 fn write_single_entry(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     eqn: &str,
     dims: &[&str],
     units: &Option<String>,
     doc: &str,
     gf: Option<&GraphicalFunction>,
 ) {
-    let name = format_mdl_ident(ident);
-    let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-    if dims.is_empty() {
-        write!(buf, "{name}{assign_op}").unwrap();
+    let dim_suffix = if dims.is_empty() {
+        String::new()
     } else {
         let dim_strs: Vec<String> = dims.iter().map(|d| format_mdl_ident(d)).collect();
-        write!(buf, "{name}[{}]{assign_op}", dim_strs.join(",")).unwrap();
-    }
+        format!("[{}]", dim_strs.join(","))
+    };
 
     if let Some(gf) = gf {
-        // Lookup table replaces the equation
-        buf.push_str("\n\t");
-        write_lookup(buf, gf);
+        if is_lookup_only_equation(eqn) {
+            // Standalone lookup definition: name(\n\tbody)
+            write!(buf, "{name}{dim_suffix}(").unwrap();
+            buf.push_str("\n\t");
+            write_lookup_body(buf, gf);
+            buf.push(')');
+        } else {
+            // Embedded lookup: name=\n\tWITH LOOKUP(input, (body))
+            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+            write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
+            let mdl_eqn = equation_to_mdl(eqn);
+            buf.push_str("\n\tWITH LOOKUP(");
+            buf.push_str(&mdl_eqn);
+            buf.push_str(", ");
+            write_lookup(buf, gf);
+            buf.push(')');
+        }
     } else {
+        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
         let mdl_eqn = equation_to_mdl(eqn);
-        buf.push_str("\n\t");
-        buf.push_str(&mdl_eqn);
+
+        // Short, single-line equations use inline format with spaces around
+        // the operator (e.g. `average repayment rate = 0.03`).  Longer or
+        // multiline equations use the traditional Vensim multiline format.
+        let inline_line = format!("{name}{dim_suffix} {assign_op} {mdl_eqn}");
+        if inline_line.len() <= 80 && !mdl_eqn.contains('\n') {
+            buf.push_str(&inline_line);
+        } else {
+            write!(buf, "{name}{dim_suffix}{assign_op}").unwrap();
+            let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
+            buf.push_str("\n\t");
+            buf.push_str(&wrapped);
+        }
     }
 
     write_units_and_comment(buf, units, doc);
@@ -1016,15 +1259,14 @@ fn write_single_entry(
 /// element entries and leave omitted elements implicit.
 fn write_arrayed_entries(
     buf: &mut String,
-    ident: &str,
+    name: &str,
     _dims: &[String],
     elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
     _default_equation: &Option<String>,
     units: &Option<String>,
     doc: &str,
 ) {
-    let name = format_mdl_ident(ident);
-    write_arrayed_element_entries(buf, &name, elements, units, doc);
+    write_arrayed_element_entries(buf, name, elements, units, doc);
 }
 
 fn write_arrayed_element_entries(
@@ -1037,17 +1279,30 @@ fn write_arrayed_element_entries(
     let last_idx = elements.len().saturating_sub(1);
     for (i, (elem_name, eqn, _comment, elem_gf)) in elements.iter().enumerate() {
         let elem_display = format_mdl_element_key(elem_name);
-        let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
-
-        write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
 
         if let Some(gf) = elem_gf {
-            buf.push_str("\n\t");
-            write_lookup(buf, gf);
+            if is_lookup_only_equation(eqn) {
+                write!(buf, "{name}[{elem_display}](").unwrap();
+                buf.push_str("\n\t");
+                write_lookup_body(buf, gf);
+                buf.push(')');
+            } else {
+                let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+                write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
+                let mdl_eqn = equation_to_mdl(eqn);
+                buf.push_str("\n\tWITH LOOKUP(");
+                buf.push_str(&mdl_eqn);
+                buf.push_str(", ");
+                write_lookup(buf, gf);
+                buf.push(')');
+            }
         } else {
+            let assign_op = if is_data_equation(eqn) { ":=" } else { "=" };
+            write!(buf, "{name}[{elem_display}]{assign_op}").unwrap();
             let mdl_eqn = equation_to_mdl(eqn);
+            let wrapped = wrap_equation_with_continuations(&mdl_eqn, 80);
             buf.push_str("\n\t");
-            buf.push_str(&mdl_eqn);
+            buf.push_str(&wrapped);
         }
 
         if i < last_idx {
@@ -1152,30 +1407,137 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 
 // ---- Sketch element serialization ----
 
+/// Format a view element name for sketch output.
+///
+/// Sketch names need underscores replaced with spaces (like `underbar_to_space`),
+/// but also must escape actual newline characters as the literal two-character
+/// sequence `\n`. XMILE sources may contain real newlines in view element name
+/// attributes; Vensim MDL sketch lines are single-line records, so a real
+/// newline in a name would break parsing.
+fn format_sketch_name(name: &str) -> String {
+    name.replace('_', " ").replace('\n', "\\n")
+}
+
+/// Remap merged/global datamodel UIDs into dense, view-local sketch IDs.
+///
+/// Vensim sketches use small, contiguous IDs within each `V300` section.
+/// After multi-view MDL files are merged into a single StockFlow, the
+/// datamodel UIDs remain globally unique across the merged view. Re-using
+/// those sparse IDs when serializing a single segment produces valid-looking
+/// records that Vensim misrenders. The writer therefore assigns fresh,
+/// per-segment IDs while leaving geometry lookups on the original IDs.
+struct SketchUidRemap {
+    element_uids: HashMap<i32, i32>,
+    valve_uids: HashMap<i32, i32>,
+}
+
+impl SketchUidRemap {
+    fn dense_for_segment(elements: &[&ViewElement]) -> Self {
+        let mut element_uids = HashMap::new();
+        let mut flow_uids = Vec::new();
+        let mut next_uid = 1;
+
+        for element in elements {
+            let old_uid = match element {
+                ViewElement::Aux(aux) => aux.uid,
+                ViewElement::Stock(stock) => stock.uid,
+                ViewElement::Flow(flow) => {
+                    flow_uids.push(flow.uid);
+                    flow.uid
+                }
+                ViewElement::Link(link) => link.uid,
+                ViewElement::Alias(alias) => alias.uid,
+                ViewElement::Cloud(cloud) => cloud.uid,
+                ViewElement::Module(_) | ViewElement::Group(_) => continue,
+            };
+            element_uids.insert(old_uid, next_uid);
+            next_uid += 1;
+        }
+
+        let mut valve_uids = HashMap::new();
+        for flow_uid in flow_uids {
+            valve_uids.insert(flow_uid, next_uid);
+            next_uid += 1;
+        }
+
+        Self {
+            element_uids,
+            valve_uids,
+        }
+    }
+
+    fn element_uid(&self, old_uid: i32) -> i32 {
+        self.element_uids.get(&old_uid).copied().unwrap_or(old_uid)
+    }
+
+    fn valve_uid(&self, flow_uid: i32) -> Option<i32> {
+        self.valve_uids.get(&flow_uid).copied()
+    }
+
+    fn next_connector_uid(&self) -> i32 {
+        (self.element_uids.len() + self.valve_uids.len()) as i32 + 1
+    }
+}
+
+const STOCK_WIDTH: f64 = 45.0;
+const STOCK_HEIGHT: f64 = 35.0;
+const STOCK_EDGE_TOLERANCE: f64 = 1.0;
+
 /// Write a type 10 line for an Aux element.
-/// Sketch element names use bare `underbar_to_space` (not `format_mdl_ident`)
+/// Sketch element names use `format_sketch_name` (not `format_mdl_ident`)
 /// because MDL sketch lines are comma-delimited positional records where
 /// quoting is not used.
+#[cfg(test)]
 fn write_aux_element(buf: &mut String, aux: &view_element::Aux) {
-    let name = underbar_to_space(&aux.name);
-    // shape=8 (has equation), bits=3 (visible, primary)
+    write_aux_element_with_context(buf, aux, SketchTransform::identity(), None);
+}
+
+fn write_aux_element_with_context(
+    buf: &mut String,
+    aux: &view_element::Aux,
+    transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
+) {
+    let name = format_sketch_name(&aux.name);
+    let (w, h, shape, bits) = match &aux.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (40, 20, 8, 3),
+    };
+    let (x, y) = transform.point(aux.x, aux.y);
+    let tail = compat_tail(aux.compat.as_ref(), "0,0,-1,0,0,0");
+    let uid = uid_remap.map_or(aux.uid, |ids| ids.element_uid(aux.uid));
     write!(
         buf,
-        "10,{},{},{},{},40,20,8,3,0,0,-1,0,0,0",
-        aux.uid, name, aux.x as i32, aux.y as i32,
+        "10,{},{},{},{},{},{},{},{},{}",
+        uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
 
-/// Write a type 10 line for a Stock element.  See `write_aux_element` for
-/// why sketch names use `underbar_to_space` instead of `format_mdl_ident`.
+/// Write a type 10 line for a Stock element.
+#[cfg(test)]
 fn write_stock_element(buf: &mut String, stock: &view_element::Stock) {
-    let name = underbar_to_space(&stock.name);
-    // shape=3 (box/stock shape), bits=3 (visible, primary)
+    write_stock_element_with_context(buf, stock, SketchTransform::identity(), None);
+}
+
+fn write_stock_element_with_context(
+    buf: &mut String,
+    stock: &view_element::Stock,
+    transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
+) {
+    let name = format_sketch_name(&stock.name);
+    let (w, h, shape, bits) = match &stock.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (40, 20, 3, 3),
+    };
+    let (x, y) = transform.point(stock.x, stock.y);
+    let tail = compat_tail(stock.compat.as_ref(), "0,0,0,0,0,0");
+    let uid = uid_remap.map_or(stock.uid, |ids| ids.element_uid(stock.uid));
     write!(
         buf,
-        "10,{},{},{},{},40,20,3,3,0,0,0,0,0,0",
-        stock.uid, name, stock.x as i32, stock.y as i32,
+        "10,{},{},{},{},{},{},{},{},{}",
+        uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1213,6 +1575,7 @@ fn allocate_valve_uids(elements: &[ViewElement]) -> HashMap<i32, i32> {
     valve_uids
 }
 
+#[allow(dead_code)]
 fn max_sketch_uid(elements: &[ViewElement], valve_uids: &HashMap<i32, i32>) -> i32 {
     let mut max_uid = valve_uids.values().copied().max().unwrap_or(0);
     for elem in elements {
@@ -1253,72 +1616,271 @@ fn sanitize_view_title_for_mdl(title: &str) -> String {
     out
 }
 
-/// Write a Flow element as type 11 (valve), type 10 (attached flow variable),
-/// and type 1 pipe connectors derived from flow endpoints.
+#[derive(Clone, Copy)]
+struct SketchTransform {
+    x_offset: f64,
+    y_offset: f64,
+}
+
+impl SketchTransform {
+    fn identity() -> Self {
+        Self {
+            x_offset: 0.0,
+            y_offset: 0.0,
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (i32, i32) {
+        (
+            (x - self.x_offset).round() as i32,
+            (y - self.y_offset).round() as i32,
+        )
+    }
+}
+
+fn compat_tail<'a>(
+    compat: Option<&'a view_element::ViewElementCompat>,
+    default: &'a str,
+) -> &'a str {
+    compat.and_then(|c| c.tail.as_deref()).unwrap_or(default)
+}
+
+fn compat_name_field<'a>(
+    compat: Option<&'a view_element::ViewElementCompat>,
+    default: &'a str,
+) -> &'a str {
+    compat
+        .and_then(|c| c.name_field.as_deref())
+        .unwrap_or(default)
+}
+
+fn default_flow_label_point(flow: &view_element::Flow, transform: SketchTransform) -> (i32, i32) {
+    let (x, y) = match flow.label_side {
+        view_element::LabelSide::Top => (flow.x, flow.y - 16.0),
+        view_element::LabelSide::Left => (flow.x - 16.0, flow.y),
+        view_element::LabelSide::Center => (flow.x, flow.y),
+        view_element::LabelSide::Bottom => (flow.x, flow.y + 16.0),
+        view_element::LabelSide::Right => (flow.x + 16.0, flow.y),
+    };
+    transform.point(x, y)
+}
+
+/// Write a Flow element as type 1 pipe connectors, type 11 (valve), and
+/// type 10 (attached flow variable).
 ///
-/// In MDL, flows are two elements: a valve (type 11) at the flow position
-/// and an attached variable (type 10) below it. The valve UID is looked up
-/// from the pre-allocated valve_uids map to avoid collisions.
+/// Vensim requires this exact ordering: pipe connectors first, then valve,
+/// then flow label. The valve UID is looked up from the pre-allocated
+/// valve_uids map to avoid collisions.
+#[cfg(test)]
 fn write_flow_element(
     buf: &mut String,
     flow: &view_element::Flow,
     valve_uids: &HashMap<i32, i32>,
+    cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
 ) {
-    // Sketch names: see `write_aux_element` for why `underbar_to_space` is
-    // used here instead of `format_mdl_ident`.
-    let name = underbar_to_space(&flow.name);
-    let valve_uid = valve_uids.get(&flow.uid).copied().unwrap_or(flow.uid - 1);
-
-    // Type 11 (valve): the valve name in Vensim is typically a numeric
-    // placeholder (like "48" or "444"). We use the valve uid as the name.
-    write!(
+    write_flow_element_with_context(
         buf,
-        "11,{},{},{},{},6,8,34,3,0,0,1,0,0,0",
-        valve_uid, valve_uid, flow.x as i32, flow.y as i32,
-    )
-    .unwrap();
-
-    // Type 10 (attached flow variable): shape=40 (bit 3 = equation, bit 5 = attached)
-    // The variable is positioned slightly below the valve.
-    let var_y = flow.y as i32 + 16;
-    write!(
-        buf,
-        "\n10,{},{},{},{},49,8,40,3,0,0,-1,0,0,0",
-        flow.uid, name, flow.x as i32, var_y,
-    )
-    .unwrap();
-
-    write_flow_pipe_connectors(buf, flow, valve_uid, next_connector_uid);
+        flow,
+        valve_uids,
+        cloud_uids,
+        next_connector_uid,
+        SketchTransform::identity(),
+        &HashMap::new(),
+        &HashSet::new(),
+        None,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_flow_element_with_context(
+    buf: &mut String,
+    flow: &view_element::Flow,
+    valve_uids: &HashMap<i32, i32>,
+    _cloud_uids: &HashSet<i32>,
+    next_connector_uid: &mut i32,
+    transform: SketchTransform,
+    elem_positions: &HashMap<i32, (i32, i32)>,
+    stock_uids: &HashSet<i32>,
+    uid_remap: Option<&SketchUidRemap>,
+) {
+    let name = format_sketch_name(&flow.name);
+    let valve_uid = uid_remap
+        .and_then(|ids| ids.valve_uid(flow.uid))
+        .or_else(|| valve_uids.get(&flow.uid).copied())
+        .unwrap_or(flow.uid - 1);
+    let valve_compat = flow.compat.as_ref();
+    let label_compat = flow.label_compat.as_ref();
+    let (valve_x, valve_y) = transform.point(flow.x, flow.y);
+
+    // Pipe connectors must come before the valve and flow label.
+    let had_pipes = write_flow_pipe_connectors_with_context(
+        buf,
+        flow,
+        valve_uid,
+        next_connector_uid,
+        FlowConnectorContext {
+            transform,
+            elem_positions,
+            stock_uids,
+            uid_remap,
+        },
+    );
+
+    let (valve_w, valve_h, valve_shape, valve_bits) = match valve_compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (6, 8, 34, 3),
+    };
+    let (label_w, label_h, label_shape, label_bits) = match label_compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (49, 8, 40, 3),
+    };
+    let valve_name = compat_name_field(valve_compat, "0");
+    let valve_tail = compat_tail(valve_compat, "0,0,1,0,0,0");
+
+    if had_pipes {
+        buf.push('\n');
+    }
+    write!(
+        buf,
+        "11,{},{},{},{},{},{},{},{},{}",
+        valve_uid,
+        valve_name,
+        valve_x,
+        valve_y,
+        valve_w,
+        valve_h,
+        valve_shape,
+        valve_bits,
+        valve_tail,
+    )
+    .unwrap();
+
+    let (label_x, label_y) = default_flow_label_point(flow, transform);
+    let label_tail = compat_tail(label_compat, "0,0,-1,0,0,0");
+    let label_uid = uid_remap.map_or(flow.uid, |ids| ids.element_uid(flow.uid));
+    write!(
+        buf,
+        "\n10,{},{},{},{},{},{},{},{},{}",
+        label_uid, name, label_x, label_y, label_w, label_h, label_shape, label_bits, label_tail,
+    )
+    .unwrap();
+}
+
+/// Returns true if any pipe connectors were written.
+#[cfg(test)]
+#[allow(dead_code)]
 fn write_flow_pipe_connectors(
     buf: &mut String,
     flow: &view_element::Flow,
     valve_uid: i32,
+    _cloud_uids: &HashSet<i32>,
     next_connector_uid: &mut i32,
-) {
-    let write_connector =
-        |buf: &mut String, connector_uid: i32, from_uid: i32, to_uid: i32, x: i32, y: i32| {
-            write!(
-                buf,
-                "\n1,{},{},{},0,0,0,0,0,0,0,-1--1--1,,1|({},{})|",
-                connector_uid, from_uid, to_uid, x, y,
-            )
-            .unwrap();
-        };
+) -> bool {
+    write_flow_pipe_connectors_with_context(
+        buf,
+        flow,
+        valve_uid,
+        next_connector_uid,
+        FlowConnectorContext {
+            transform: SketchTransform::identity(),
+            elem_positions: &HashMap::new(),
+            stock_uids: &HashSet::new(),
+            uid_remap: None,
+        },
+    )
+}
 
-    if let Some(first) = flow.points.first()
-        && let Some(endpoint_uid) = first.attached_to_uid
-    {
-        write_connector(
+struct FlowConnectorContext<'a> {
+    transform: SketchTransform,
+    elem_positions: &'a HashMap<i32, (i32, i32)>,
+    stock_uids: &'a HashSet<i32>,
+    uid_remap: Option<&'a SketchUidRemap>,
+}
+
+fn write_flow_pipe_connectors_with_context(
+    buf: &mut String,
+    flow: &view_element::Flow,
+    valve_uid: i32,
+    next_connector_uid: &mut i32,
+    ctx: FlowConnectorContext<'_>,
+) -> bool {
+    let mut wrote_any = false;
+
+    // Flow pipe connectors use field 4 for endpoint type and field 7 = 22 (pipe type).
+    // Flag 4 = connects to a stock, flag 100 = connects to a cloud.
+    let write_pipe = |buf: &mut String,
+                      first: bool,
+                      connector_uid: i32,
+                      from_uid: i32,
+                      to_uid: i32,
+                      direction: i32,
+                      x: i32,
+                      y: i32| {
+        if !first {
+            buf.push('\n');
+        }
+        write!(
             buf,
+            "1,{},{},{},{},0,0,22,0,0,0,-1--1--1,,1|({},{})|",
+            connector_uid, from_uid, to_uid, direction, x, y,
+        )
+        .unwrap();
+    };
+
+    let connector_point = |point: &view_element::FlowPoint| -> (i32, i32) {
+        let point_xy = ctx.transform.point(point.x, point.y);
+        let Some(endpoint_uid) = point.attached_to_uid else {
+            return point_xy;
+        };
+        if !ctx.stock_uids.contains(&endpoint_uid) {
+            return point_xy;
+        }
+
+        let Some(&(stock_x, stock_y)) = ctx.elem_positions.get(&endpoint_uid) else {
+            return point_xy;
+        };
+        let dx = f64::from(point_xy.0 - stock_x);
+        let dy = f64::from(point_xy.1 - stock_y);
+        let on_left_or_right = (dx.abs() - STOCK_WIDTH / 2.0).abs() <= STOCK_EDGE_TOLERANCE
+            && dy.abs() <= STOCK_HEIGHT / 2.0 + STOCK_EDGE_TOLERANCE;
+        if on_left_or_right {
+            return (stock_x, point_xy.1);
+        }
+
+        let on_top_or_bottom = (dy.abs() - STOCK_HEIGHT / 2.0).abs() <= STOCK_EDGE_TOLERANCE
+            && dx.abs() <= STOCK_WIDTH / 2.0 + STOCK_EDGE_TOLERANCE;
+        if on_top_or_bottom {
+            return (point_xy.0, stock_y);
+        }
+
+        point_xy
+    };
+
+    if flow.points.len() > 1
+        && let Some(last) = flow.points.last()
+        && let Some(endpoint_uid) = last.attached_to_uid
+    {
+        let (x, y) = connector_point(last);
+        let direction = if ctx.stock_uids.contains(&endpoint_uid) {
+            4
+        } else {
+            100
+        };
+        let endpoint_uid = ctx
+            .uid_remap
+            .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
+        write_pipe(
+            buf,
+            !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
-            first.x as i32,
-            first.y as i32,
+            direction,
+            x,
+            y,
         );
+        wrote_any = true;
         *next_connector_uid += 1;
     }
 
@@ -1328,60 +1890,127 @@ fn write_flow_pipe_connectors(
         .skip(1)
         .take(flow.points.len().saturating_sub(2))
     {
-        write_connector(
+        let (x, y) = connector_point(point);
+        write_pipe(
             buf,
+            !wrote_any,
             *next_connector_uid,
             valve_uid,
             valve_uid,
-            point.x as i32,
-            point.y as i32,
+            0,
+            x,
+            y,
         );
+        wrote_any = true;
         *next_connector_uid += 1;
     }
 
-    if flow.points.len() > 1
-        && let Some(last) = flow.points.last()
-        && let Some(endpoint_uid) = last.attached_to_uid
+    if let Some(first) = flow.points.first()
+        && let Some(endpoint_uid) = first.attached_to_uid
     {
-        write_connector(
+        let (x, y) = connector_point(first);
+        let direction = if ctx.stock_uids.contains(&endpoint_uid) {
+            4
+        } else {
+            100
+        };
+        let endpoint_uid = ctx
+            .uid_remap
+            .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
+        write_pipe(
             buf,
+            !wrote_any,
             *next_connector_uid,
             valve_uid,
             endpoint_uid,
-            last.x as i32,
-            last.y as i32,
+            direction,
+            x,
+            y,
         );
+        wrote_any = true;
         *next_connector_uid += 1;
     }
+
+    wrote_any
 }
 
 /// Write a type 12 line for a Cloud element.
+#[cfg(test)]
 fn write_cloud_element(buf: &mut String, cloud: &view_element::Cloud) {
-    // Clouds: text="0", shape=0, bits=3 (visible)
+    write_cloud_element_with_context(buf, cloud, SketchTransform::identity(), None);
+}
+
+fn write_cloud_element_with_context(
+    buf: &mut String,
+    cloud: &view_element::Cloud,
+    transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
+) {
+    let (w, h, shape, bits) = match &cloud.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (10, 8, 0, 3),
+    };
+    let (x, y) = transform.point(cloud.x, cloud.y);
+    let name_field = compat_name_field(cloud.compat.as_ref(), "48");
+    let tail = compat_tail(cloud.compat.as_ref(), "0,0,-1,0,0,0");
+    let uid = uid_remap.map_or(cloud.uid, |ids| ids.element_uid(cloud.uid));
     write!(
         buf,
-        "12,{},0,{},{},10,8,0,3,0,0,-1,0,0,0",
-        cloud.uid, cloud.x as i32, cloud.y as i32,
+        "12,{},{},{},{},{},{},{},{},{}",
+        uid, name_field, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
 
 /// Write a type 10 line for an Alias (ghost) element.
+#[cfg(test)]
 fn write_alias_element(
     buf: &mut String,
     alias: &view_element::Alias,
     name_map: &HashMap<i32, &str>,
 ) {
-    // Sketch names: see `write_aux_element` for why `underbar_to_space`.
+    write_alias_element_with_context(
+        buf,
+        alias,
+        name_map,
+        &HashSet::new(),
+        SketchTransform::identity(),
+        None,
+    );
+}
+
+fn write_alias_element_with_context(
+    buf: &mut String,
+    alias: &view_element::Alias,
+    name_map: &HashMap<i32, &str>,
+    stock_uids: &HashSet<i32>,
+    transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
+) {
     let name = name_map
         .get(&alias.alias_of_uid)
-        .map(|n| underbar_to_space(n))
+        .map(|n| format_sketch_name(n))
         .unwrap_or_default();
-    // shape=8, bits=2 (visible but bit 0 unset = ghost)
+    let (w, h, shape, bits) = match &alias.compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => (40, 20, 8, 2),
+    };
+    let (alias_x, alias_y) = if stock_uids.contains(&alias.alias_of_uid) {
+        (alias.x + 22.0, alias.y + 17.0)
+    } else {
+        (alias.x, alias.y)
+    };
+    let (x, y) = transform.point(alias_x, alias_y);
+    let tail = compat_tail(
+        alias.compat.as_ref(),
+        "0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
+    );
+    let uid = uid_remap.map_or(alias.uid, |ids| ids.element_uid(alias.uid));
+    // shape=8
     write!(
         buf,
-        "10,{},{},{},{},40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128",
-        alias.uid, name, alias.x as i32, alias.y as i32,
+        "10,{},{},{},{},{},{},{},{},{}",
+        uid, name, x, y, w, h, shape, bits, tail,
     )
     .unwrap();
 }
@@ -1390,11 +2019,32 @@ fn write_alias_element(
 ///
 /// For arc connectors, we reverse-compute a control point from the stored
 /// canvas angle using the endpoints of the connected elements.
+#[cfg(test)]
 fn write_link_element(
     buf: &mut String,
     link: &view_element::Link,
     elem_positions: &HashMap<i32, (i32, i32)>,
     use_lettered_polarity: bool,
+) {
+    write_link_element_with_context(
+        buf,
+        link,
+        elem_positions,
+        use_lettered_polarity,
+        None,
+        SketchTransform::identity(),
+        None,
+    );
+}
+
+fn write_link_element_with_context(
+    buf: &mut String,
+    link: &view_element::Link,
+    elem_positions: &HashMap<i32, (i32, i32)>,
+    use_lettered_polarity: bool,
+    link_compat: Option<&view_element::LinkSketchCompat>,
+    transform: SketchTransform,
+    uid_remap: Option<&SketchUidRemap>,
 ) {
     let polarity_val = match link.polarity {
         Some(LinkPolarity::Positive) if use_lettered_polarity => 83, // 'S'
@@ -1404,18 +2054,23 @@ fn write_link_element(
         None => 0,
     };
 
-    let from_pos = elem_positions
-        .get(&link.from_uid)
-        .copied()
-        .unwrap_or((0, 0));
-    let to_pos = elem_positions.get(&link.to_uid).copied().unwrap_or((0, 0));
+    let from_uid = link.from_uid;
+    let to_uid = link.to_uid;
+    let from_pos = elem_positions.get(&from_uid).copied().unwrap_or((0, 0));
+    let to_pos = elem_positions.get(&to_uid).copied().unwrap_or((0, 0));
+    let link_uid = uid_remap.map_or(link.uid, |ids| ids.element_uid(link.uid));
+    let from_uid = uid_remap.map_or(from_uid, |ids| ids.element_uid(from_uid));
+    let to_uid = uid_remap.map_or(to_uid, |ids| ids.element_uid(to_uid));
+    let field4 = link_compat.map(|compat| compat.field4).unwrap_or(0);
+    let field10 = link_compat.map(|compat| compat.field10).unwrap_or(0);
 
+    // Field 9 = 64 marks influence (causal) connectors in Vensim sketches.
     match &link.shape {
         LinkShape::Straight => {
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,1|(0,0)|",
-                link.uid, link.from_uid, link.to_uid, polarity_val,
+                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|(0,0)|",
+                link_uid, from_uid, to_uid, field4, polarity_val, field10,
             )
             .unwrap();
         }
@@ -1423,8 +2078,8 @@ fn write_link_element(
             let (ctrl_x, ctrl_y) = compute_control_point(from_pos, to_pos, *canvas_angle);
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,1|({},{})|",
-                link.uid, link.from_uid, link.to_uid, polarity_val, ctrl_x, ctrl_y,
+                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,1|({},{})|",
+                link_uid, from_uid, to_uid, field4, polarity_val, field10, ctrl_x, ctrl_y,
             )
             .unwrap();
         }
@@ -1432,12 +2087,13 @@ fn write_link_element(
             let npoints = points.len();
             write!(
                 buf,
-                "1,{},{},{},0,0,{},0,0,0,0,-1--1--1,,{}|",
-                link.uid, link.from_uid, link.to_uid, polarity_val, npoints,
+                "1,{},{},{},{},0,{},0,0,64,{},-1--1--1,,{}|",
+                link_uid, from_uid, to_uid, field4, polarity_val, field10, npoints,
             )
             .unwrap();
             for pt in points {
-                write!(buf, "({},{})|", pt.x as i32, pt.y as i32).unwrap();
+                let (x, y) = transform.point(pt.x, pt.y);
+                write!(buf, "({},{})|", x, y).unwrap();
             }
         }
     }
@@ -1512,6 +2168,68 @@ fn compute_control_point(from: (i32, i32), to: (i32, i32), canvas_angle: f64) ->
     (cx.round() as i32, cy.round() as i32)
 }
 
+/// Splits a StockFlow's elements into view segments at MDL view-marker
+/// Group boundaries.
+///
+/// When the MDL parser merges multiple named views into a single StockFlow,
+/// it inserts a Group element (with `is_mdl_view_marker == true`) at the
+/// start of each original view's elements.  This function reverses that
+/// merge by splitting on those markers.  Organizational groups from XMILE
+/// (where `is_mdl_view_marker == false`) are passed through as regular
+/// elements rather than triggering a view split.
+///
+/// Returns a Vec of (view_name, elements, font). If no marker Groups exist,
+/// returns a single segment using the StockFlow's own name (or "View 1").
+fn split_view_on_groups<'a>(
+    sf: &'a datamodel::StockFlow,
+) -> Vec<(String, Vec<&'a ViewElement>, Option<String>)> {
+    let has_mdl_markers = sf.elements.iter().any(|e| {
+        matches!(
+            e,
+            ViewElement::Group(g) if g.is_mdl_view_marker
+        )
+    });
+
+    if !has_mdl_markers {
+        let name = sf.name.clone().unwrap_or_else(|| "View 1".to_string());
+        let elements: Vec<&ViewElement> = sf
+            .elements
+            .iter()
+            .filter(|e| !matches!(e, ViewElement::Module(_)))
+            .collect();
+        return vec![(name, elements, sf.font.clone())];
+    }
+
+    let mut segments = Vec::new();
+    let mut current_name = sf.name.clone().unwrap_or_else(|| "View 1".to_string());
+    let mut current_elements: Vec<&'a ViewElement> = Vec::new();
+
+    let mut seen_marker = false;
+    for element in &sf.elements {
+        if let ViewElement::Group(group) = element
+            && group.is_mdl_view_marker
+        {
+            // Push the previous segment. Skip the initial pre-Group segment
+            // only if it has no elements (no content before the first Group).
+            if seen_marker || !current_elements.is_empty() {
+                segments.push((current_name, current_elements, sf.font.clone()));
+                current_elements = Vec::new();
+            }
+            seen_marker = true;
+            current_name = group.name.clone();
+            continue;
+        }
+        if !matches!(element, ViewElement::Module(_)) {
+            current_elements.push(element);
+        }
+    }
+    // Push the final segment (may be empty for trailing Groups).
+    if seen_marker || !current_elements.is_empty() {
+        segments.push((current_name, current_elements, sf.font.clone()));
+    }
+    segments
+}
+
 /// Stateful writer that accumulates the full MDL file text.
 pub struct MdlWriter {
     buf: String,
@@ -1529,13 +2247,16 @@ impl MdlWriter {
     }
 
     /// Orchestrate the full MDL file assembly and return the result.
+    ///
+    /// Vensim requires CRLF (`\r\n`) line endings, so the final output
+    /// is converted from LF to CRLF before returning.
     pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
         self.buf.push_str("{UTF-8}\n");
         let model = &project.models[0];
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
-        Ok(self.buf)
+        Ok(self.buf.replace('\n', "\r\n"))
     }
 
     /// Write sim spec control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER).
@@ -1598,21 +2319,29 @@ impl MdlWriter {
             write_dimension_def(&mut self.buf, dim);
         }
 
+        let display_names = build_display_name_map(&model.views);
+
         // Build a set of variable idents that belong to any group
+        // (skip .Control -- those vars are sim specs emitted separately)
         let mut grouped_idents: HashSet<&str> = HashSet::new();
         for group in &model.groups {
+            if group.name.eq_ignore_ascii_case("Control") {
+                continue;
+            }
             for member in &group.members {
                 grouped_idents.insert(member.as_str());
             }
         }
 
-        // 2. Variables in group order
+        // 2. Variables in group order (skip .Control -- emitted with sim specs)
         for group in &model.groups {
+            if group.name.eq_ignore_ascii_case("Control") {
+                continue;
+            }
             // Group marker
             write!(
                 self.buf,
                 "\n********************************************************\n\t.{}\n********************************************************~\n\t\t{}\n\t|\n",
-                // Group names appear in comment-like header blocks, not in equations.
                 underbar_to_space(&group.name),
                 group.doc.as_deref().unwrap_or(""),
             )
@@ -1624,21 +2353,29 @@ impl MdlWriter {
                     .iter()
                     .find(|v| v.get_ident() == member_ident)
                 {
-                    write_variable_entry(&mut self.buf, var);
+                    write_variable_entry(&mut self.buf, var, &display_names);
                     self.buf.push('\n');
                 }
             }
         }
 
-        // 3. Ungrouped variables
-        for var in &model.variables {
-            if !grouped_idents.contains(var.get_ident()) {
-                write_variable_entry(&mut self.buf, var);
-                self.buf.push('\n');
-            }
+        // 3. Ungrouped variables (alphabetical by ident for deterministic output)
+        let mut ungrouped: Vec<&datamodel::Variable> = model
+            .variables
+            .iter()
+            .filter(|v| !grouped_idents.contains(v.get_ident()))
+            .collect();
+        ungrouped.sort_by_key(|v| v.get_ident());
+
+        for var in ungrouped {
+            write_variable_entry(&mut self.buf, var, &display_names);
+            self.buf.push('\n');
         }
 
-        // 4. Sim spec variables
+        // 4. .Control group header + sim spec variables
+        self.buf.push_str(
+            "\n********************************************************\n\t.Control\n********************************************************~\n\t\tSimulation Control Parameters\n\t|\n",
+        );
         let sim_specs = model.sim_specs.as_ref().unwrap_or(&project.sim_specs);
         self.write_sim_specs(sim_specs);
 
@@ -1649,72 +2386,215 @@ impl MdlWriter {
 
     /// Write the sketch/view section of the MDL file.
     ///
-    /// This emits the sketch header, each view's elements, and the sketch
-    /// terminator. The section follows the equations terminator line.
+    /// Each view gets its own `\\\---///` separator and `V300` header line.
+    /// The first view's separator is already emitted by `write_equations_section`.
+    /// The final `///---\\\` terminator follows the last view.
+    ///
+    /// When a StockFlow contains Group elements (from merging multiple MDL
+    /// views at parse time), we split on those boundaries to reconstruct
+    /// the original multi-view structure.
     fn write_sketch_section(&mut self, views: &[View]) {
-        self.buf
-            .push_str("V300  Do not put anything below this section - it will be ignored\n");
+        if views.is_empty() {
+            // Emit a minimal valid sketch so the output is not malformed.
+            self.buf
+                .push_str("V300  Do not put anything below this section - it will be ignored\n");
+            self.buf.push_str("*View 1\n");
+            self.buf
+                .push_str("$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n");
+            self.buf.push_str("///---\\\\\\\n");
+            return;
+        }
 
+        let mut segment_idx = 0;
         for view in views {
             let View::StockFlow(sf) = view;
-            self.write_stock_flow_view(sf);
+
+            // Build shared maps from ALL elements so that cross-view
+            // references (links, aliases) resolve correctly.
+            let valve_uids = allocate_valve_uids(&sf.elements);
+            let name_map = build_name_map(&sf.elements);
+            let mut flow_compat_by_uid: HashMap<i32, &view_element::FlowSketchCompat> =
+                HashMap::new();
+            let mut link_compat_by_uid: HashMap<i32, &view_element::LinkSketchCompat> =
+                HashMap::new();
+            let mut stock_uids: HashSet<i32> = HashSet::new();
+            if let Some(sketch_compat) = sf.sketch_compat.as_ref() {
+                for flow in &sketch_compat.flows {
+                    flow_compat_by_uid.insert(flow.uid, flow);
+                }
+                for link in &sketch_compat.links {
+                    link_compat_by_uid.insert(link.uid, link);
+                }
+            }
+            for elem in &sf.elements {
+                if let ViewElement::Stock(stock) = elem {
+                    stock_uids.insert(stock.uid);
+                }
+            }
+
+            let segments = split_view_on_groups(sf);
+            let mut elem_positions = HashMap::new();
+            for (segment_ix, (_, elements, _)) in segments.iter().enumerate() {
+                let transform = sf
+                    .sketch_compat
+                    .as_ref()
+                    .and_then(|compat| compat.segments.get(segment_ix))
+                    .map(|compat| SketchTransform {
+                        x_offset: compat.x_offset,
+                        y_offset: compat.y_offset,
+                    })
+                    .unwrap_or_else(SketchTransform::identity);
+                elem_positions.extend(build_element_positions_with_transform(
+                    elements,
+                    &valve_uids,
+                    transform,
+                    &stock_uids,
+                    &flow_compat_by_uid,
+                ));
+            }
+
+            for (segment_ix, (view_name, elements, font)) in segments.iter().enumerate() {
+                if segment_idx > 0 {
+                    self.buf.push_str(
+                        "\\\\\\---/// Sketch information - do not modify anything except names\n",
+                    );
+                }
+                self.buf.push_str(
+                    "V300  Do not put anything below this section - it will be ignored\n",
+                );
+                self.write_view_segment(
+                    view_name,
+                    elements,
+                    font.as_deref(),
+                    sf.use_lettered_polarity,
+                    sf.sketch_compat
+                        .as_ref()
+                        .and_then(|compat| compat.segments.get(segment_ix))
+                        .map(|compat| SketchTransform {
+                            x_offset: compat.x_offset,
+                            y_offset: compat.y_offset,
+                        })
+                        .unwrap_or_else(SketchTransform::identity),
+                    &elem_positions,
+                    &name_map,
+                    &stock_uids,
+                    &flow_compat_by_uid,
+                    &link_compat_by_uid,
+                );
+                segment_idx += 1;
+            }
         }
 
         self.buf.push_str("///---\\\\\\\n");
     }
 
-    /// Write a single StockFlow view as sketch elements.
-    fn write_stock_flow_view(&mut self, sf: &datamodel::StockFlow) {
-        let view_title = sanitize_view_title_for_mdl(sf.name.as_deref().unwrap_or("View 1"));
+    /// Write a single view segment: title, font line, and all sketch elements.
+    #[allow(clippy::too_many_arguments)]
+    fn write_view_segment(
+        &mut self,
+        view_name: &str,
+        elements: &[&ViewElement],
+        font: Option<&str>,
+        use_lettered_polarity: bool,
+        transform: SketchTransform,
+        elem_positions: &HashMap<i32, (i32, i32)>,
+        name_map: &HashMap<i32, &str>,
+        stock_uids: &HashSet<i32>,
+        _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
+        link_compat_by_uid: &HashMap<i32, &view_element::LinkSketchCompat>,
+    ) {
+        let uid_remap = SketchUidRemap::dense_for_segment(elements);
+        let mut next_connector_uid = uid_remap.next_connector_uid();
+        let view_title = sanitize_view_title_for_mdl(view_name);
         writeln!(self.buf, "*{}", view_title).unwrap();
-        self.buf.push_str(
-            "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
-        );
 
-        // Allocate non-conflicting valve UIDs for flow elements
-        let valve_uids = allocate_valve_uids(&sf.elements);
-        let mut next_connector_uid = max_sketch_uid(&sf.elements, &valve_uids) + 1;
+        if let Some(f) = font {
+            writeln!(self.buf, "${}", f).unwrap();
+        } else {
+            self.buf.push_str(
+                "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
+            );
+        }
 
-        // Build position map for link control point computation
-        let elem_positions = build_element_positions(&sf.elements, &valve_uids);
+        // Collect cloud UIDs so flow pipe connectors can set the right direction flag.
+        // Also build a map from flow_uid -> clouds so we can emit each cloud
+        // just before its associated flow (Vensim requires this ordering).
+        let mut cloud_uids: HashSet<i32> = HashSet::new();
+        let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
+        for elem in elements {
+            if let ViewElement::Cloud(c) = *elem {
+                cloud_uids.insert(c.uid);
+                flow_clouds.entry(c.flow_uid).or_default().push(c);
+            }
+        }
 
-        // Build name map for alias resolution
-        let name_map = build_name_map(&sf.elements);
-
-        for elem in &sf.elements {
+        for elem in elements {
             match elem {
                 ViewElement::Aux(aux) => {
-                    write_aux_element(&mut self.buf, aux);
+                    write_aux_element_with_context(&mut self.buf, aux, transform, Some(&uid_remap));
                     self.buf.push('\n');
                 }
                 ViewElement::Stock(stock) => {
-                    write_stock_element(&mut self.buf, stock);
-                    self.buf.push('\n');
-                }
-                ViewElement::Flow(flow) => {
-                    write_flow_element(&mut self.buf, flow, &valve_uids, &mut next_connector_uid);
-                    self.buf.push('\n');
-                }
-                ViewElement::Link(link) => {
-                    write_link_element(
+                    write_stock_element_with_context(
                         &mut self.buf,
-                        link,
-                        &elem_positions,
-                        sf.use_lettered_polarity,
+                        stock,
+                        transform,
+                        Some(&uid_remap),
                     );
                     self.buf.push('\n');
                 }
-                ViewElement::Cloud(cloud) => {
-                    write_cloud_element(&mut self.buf, cloud);
+                ViewElement::Flow(flow) => {
+                    // Emit associated clouds before the flow pipes
+                    if let Some(clouds) = flow_clouds.get(&flow.uid) {
+                        for cloud in clouds {
+                            write_cloud_element_with_context(
+                                &mut self.buf,
+                                cloud,
+                                transform,
+                                Some(&uid_remap),
+                            );
+                            self.buf.push('\n');
+                        }
+                    }
+                    write_flow_element_with_context(
+                        &mut self.buf,
+                        flow,
+                        &uid_remap.valve_uids,
+                        &cloud_uids,
+                        &mut next_connector_uid,
+                        transform,
+                        elem_positions,
+                        stock_uids,
+                        Some(&uid_remap),
+                    );
                     self.buf.push('\n');
                 }
+                ViewElement::Link(link) => {
+                    write_link_element_with_context(
+                        &mut self.buf,
+                        link,
+                        elem_positions,
+                        use_lettered_polarity,
+                        link_compat_by_uid.get(&link.uid).copied(),
+                        transform,
+                        Some(&uid_remap),
+                    );
+                    self.buf.push('\n');
+                }
+                // Clouds are emitted with their associated flow above
+                ViewElement::Cloud(_) => {}
                 ViewElement::Alias(alias) => {
-                    write_alias_element(&mut self.buf, alias, &name_map);
+                    write_alias_element_with_context(
+                        &mut self.buf,
+                        alias,
+                        name_map,
+                        stock_uids,
+                        transform,
+                        Some(&uid_remap),
+                    );
                     self.buf.push('\n');
                 }
-                ViewElement::Module(_) | ViewElement::Group(_) => {
-                    // Modules and groups are not serialized in MDL sketch format
-                }
+                ViewElement::Module(_) | ViewElement::Group(_) => {}
             }
         }
     }
@@ -1731,8 +2611,9 @@ impl MdlWriter {
             .and_then(|m| m.sim_specs.as_ref())
             .unwrap_or(&project.sim_specs);
 
-        // The ///---\\\ separator is already emitted by write_sketch_section
-        self.buf.push_str(":L<%^E!@\n");
+        // The ///---\\\ separator is already emitted by write_sketch_section.
+        // The 0x7F (DEL) between :L and <%^E!@ is required by Vensim's parser.
+        self.buf.push_str(":L\x7F<%^E!@\n");
 
         // Type 22: Unit equivalences
         for unit in &project.units {
@@ -1780,14 +2661,14 @@ impl MdlWriter {
         self.buf.push_str("41:0\n");
         self.buf.push_str("42:0\n");
 
-        // Types 24/25/26: Time bounds (initial, final, time step)
+        // Types 24/25/26: Display time range for the graph/chart output.
+        // These control what Vensim shows in its default output graphs,
+        // NOT the simulation time range (which comes from the TIME STEP,
+        // INITIAL TIME, and FINAL TIME variable definitions).
+        // All reference MDL files set 24=start, 25=stop, 26=stop.
         writeln!(self.buf, "24:{}", format_f64(sim_specs.start)).unwrap();
         writeln!(self.buf, "25:{}", format_f64(sim_specs.stop)).unwrap();
-        let dt_val = match &sim_specs.dt {
-            datamodel::Dt::Dt(v) => format_f64(*v),
-            datamodel::Dt::Reciprocal(v) => format!("1/{}", format_f64(*v)),
-        };
-        writeln!(self.buf, "26:{}", dt_val).unwrap();
+        writeln!(self.buf, "26:{}", format_f64(sim_specs.stop)).unwrap();
     }
 }
 
@@ -1796,26 +2677,65 @@ impl MdlWriter {
 /// For flow elements, `write_flow_element` emits a synthetic valve using the
 /// pre-allocated `valve_uids` map. We register that valve UID here so that any
 /// connector whose endpoint is the valve can resolve a position.
+#[cfg(test)]
+#[allow(dead_code)]
 fn build_element_positions(
     elements: &[ViewElement],
     valve_uids: &HashMap<i32, i32>,
 ) -> HashMap<i32, (i32, i32)> {
+    build_element_positions_with_transform(
+        &elements.iter().collect::<Vec<_>>(),
+        valve_uids,
+        SketchTransform::identity(),
+        &HashSet::new(),
+        &HashMap::new(),
+    )
+}
+
+fn build_element_positions_with_transform(
+    elements: &[&ViewElement],
+    valve_uids: &HashMap<i32, i32>,
+    transform: SketchTransform,
+    stock_uids: &HashSet<i32>,
+    _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
+) -> HashMap<i32, (i32, i32)> {
     let mut positions = HashMap::new();
     for elem in elements {
         let (uid, x, y) = match elem {
-            ViewElement::Aux(a) => (a.uid, a.x as i32, a.y as i32),
-            ViewElement::Stock(s) => (s.uid, s.x as i32, s.y as i32),
+            ViewElement::Aux(a) => {
+                let (x, y) = transform.point(a.x, a.y);
+                (a.uid, x, y)
+            }
+            ViewElement::Stock(s) => {
+                let (x, y) = transform.point(s.x, s.y);
+                (s.uid, x, y)
+            }
             ViewElement::Flow(f) => {
+                let (valve_x, valve_y) = transform.point(f.x, f.y);
                 // Also register the allocated valve UID so connectors that
                 // reference the valve position can resolve.
                 if let Some(&valve_uid) = valve_uids.get(&f.uid) {
-                    positions.insert(valve_uid, (f.x as i32, f.y as i32));
+                    positions.insert(valve_uid, (valve_x, valve_y));
                 }
-                (f.uid, f.x as i32, f.y as i32)
+                let (label_x, label_y) = default_flow_label_point(f, transform);
+                (f.uid, label_x, label_y)
             }
-            ViewElement::Cloud(c) => (c.uid, c.x as i32, c.y as i32),
-            ViewElement::Alias(a) => (a.uid, a.x as i32, a.y as i32),
-            ViewElement::Module(m) => (m.uid, m.x as i32, m.y as i32),
+            ViewElement::Cloud(c) => {
+                let (x, y) = transform.point(c.x, c.y);
+                (c.uid, x, y)
+            }
+            ViewElement::Alias(a) => {
+                let (x, y) = if stock_uids.contains(&a.alias_of_uid) {
+                    transform.point(a.x + 22.0, a.y + 17.0)
+                } else {
+                    transform.point(a.x, a.y)
+                };
+                (a.uid, x, y)
+            }
+            ViewElement::Module(m) => {
+                let (x, y) = transform.point(m.x, m.y);
+                (m.uid, x, y)
+            }
             ViewElement::Link(_) | ViewElement::Group(_) => continue,
         };
         positions.insert(uid, (x, y));
@@ -1844,2617 +2764,5 @@ fn build_name_map(elements: &[ViewElement]) -> HashMap<i32, &str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::{Expr0, Loc};
-    use crate::common::RawIdent;
-    use crate::datamodel::{
-        Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
-        GraphicalFunctionScale, SimMethod, Stock, Unit, Variable,
-    };
-    use crate::lexer::LexerType;
-
-    /// Parse XMILE equation text to Expr0, then convert to MDL and assert.
-    fn assert_mdl(xmile_eqn: &str, expected_mdl: &str) {
-        let ast = Expr0::new(xmile_eqn, LexerType::Equation)
-            .expect("parse should succeed")
-            .expect("expression should not be empty");
-        let mdl = expr0_to_mdl(&ast);
-        assert_eq!(
-            expected_mdl, &mdl,
-            "MDL mismatch for XMILE input: {xmile_eqn:?}"
-        );
-    }
-
-    #[test]
-    fn constants() {
-        assert_mdl("5", "5");
-        assert_mdl("3.14", "3.14");
-        assert_mdl("1e3", "1e3");
-    }
-
-    #[test]
-    fn nan_constant() {
-        let ast = Expr0::new("NAN", LexerType::Equation).unwrap().unwrap();
-        let mdl = expr0_to_mdl(&ast);
-        assert_eq!("NaN", &mdl);
-    }
-
-    #[test]
-    fn variable_references() {
-        assert_mdl("population_growth_rate", "population growth rate");
-        assert_mdl("x", "x");
-        assert_mdl("a_b_c", "a b c");
-    }
-
-    #[test]
-    fn variable_references_quote_special_identifiers() {
-        let special = Expr0::Var(RawIdent::new_from_str("$_euro"), Loc::default());
-        assert_eq!(expr0_to_mdl(&special), "\"$ euro\"");
-
-        let expr = Expr0::Op2(
-            BinaryOp::Add,
-            Box::new(Expr0::Var(RawIdent::new_from_str("$_euro"), Loc::default())),
-            Box::new(Expr0::Var(
-                RawIdent::new_from_str("revenue"),
-                Loc::default(),
-            )),
-            Loc::default(),
-        );
-        assert_eq!(expr0_to_mdl(&expr), "\"$ euro\" + revenue");
-    }
-
-    #[test]
-    fn quoted_identifiers_escape_embedded_quotes_and_backslashes() {
-        assert_eq!(escape_mdl_quoted_ident(r#"it"s"#), r#"it\"s"#);
-        assert_eq!(escape_mdl_quoted_ident(r"back\slash"), r"back\\slash");
-        assert_eq!(escape_mdl_quoted_ident(r#"a"b\c"#), r#"a\"b\\c"#,);
-
-        assert_eq!(format_mdl_ident(r#"it"s_a_test"#), r#""it\"s a test""#,);
-    }
-
-    #[test]
-    fn needs_mdl_quoting_edge_cases() {
-        assert!(needs_mdl_quoting(""));
-        assert!(needs_mdl_quoting(" leading"));
-        assert!(needs_mdl_quoting("trailing "));
-        assert!(needs_mdl_quoting("1starts_with_digit"));
-        assert!(!needs_mdl_quoting("normal name"));
-        assert!(!needs_mdl_quoting("_private"));
-        assert!(needs_mdl_quoting("has/slash"));
-        assert!(needs_mdl_quoting("has|pipe"));
-    }
-
-    #[test]
-    fn arithmetic_operators() {
-        assert_mdl("a + b", "a + b");
-        assert_mdl("a - b", "a - b");
-        assert_mdl("a * b", "a * b");
-        assert_mdl("a / b", "a / b");
-        assert_mdl("a ^ b", "a ^ b");
-    }
-
-    #[test]
-    fn precedence_no_extra_parens() {
-        assert_mdl("a + b * c", "a + b * c");
-    }
-
-    #[test]
-    fn right_child_same_precedence_non_commutative() {
-        // a - (b - c) must preserve parens: subtraction is not associative
-        assert_mdl("a - (b - c)", "a - (b - c)");
-        // a / (b / c) must preserve parens: division is not associative
-        assert_mdl("a / (b / c)", "a / (b / c)");
-        // a - (b + c) must preserve parens: + has same precedence as -
-        assert_mdl("a - (b + c)", "a - (b + c)");
-    }
-
-    #[test]
-    fn left_child_same_precedence_no_extra_parens() {
-        // (a - b) - c should NOT get extra parens: left-to-right is natural
-        assert_mdl("a - b - c", "a - b - c");
-        // (a / b) / c should NOT get extra parens
-        assert_mdl("a / b / c", "a / b / c");
-        // (a + b) + c should NOT get extra parens: + is commutative anyway
-        assert_mdl("a + b + c", "a + b + c");
-    }
-
-    #[test]
-    fn precedence_parens_emitted() {
-        assert_mdl("(a + b) * c", "(a + b) * c");
-    }
-
-    #[test]
-    fn nested_precedence() {
-        assert_mdl("a * (b + c) / d", "a * (b + c) / d");
-    }
-
-    #[test]
-    fn unary_operators() {
-        assert_mdl("-a", "-a");
-        assert_mdl("+a", "+a");
-        // XMILE uses `not` keyword; MDL uses `:NOT:` with a trailing space before the operand
-        assert_mdl("not a", ":NOT: a");
-    }
-
-    #[test]
-    fn logical_operators_and() {
-        // XMILE uses `and` keyword; MDL uses `:AND:` infix operator
-        assert_mdl("a and b", "a :AND: b");
-    }
-
-    #[test]
-    fn logical_operators_or() {
-        // XMILE uses `or` keyword; MDL uses `:OR:` infix operator
-        assert_mdl("a or b", "a :OR: b");
-    }
-
-    #[test]
-    fn function_rename_smooth() {
-        assert_mdl("smth1(x, 5)", "SMOOTH(x, 5)");
-    }
-
-    #[test]
-    fn function_rename_smooth3() {
-        assert_mdl("smth3(x, 5)", "SMOOTH3(x, 5)");
-    }
-
-    #[test]
-    fn function_rename_safediv() {
-        assert_mdl("safediv(a, b)", "ZIDZ(a, b)");
-    }
-
-    #[test]
-    fn function_rename_safediv_three_args_emits_xidz() {
-        assert_mdl("safediv(a, b, x)", "XIDZ(a, b, x)");
-    }
-
-    #[test]
-    fn function_rename_init() {
-        assert_mdl("init(x, 10)", "ACTIVE INITIAL(x, 10)");
-    }
-
-    #[test]
-    fn function_rename_int() {
-        assert_mdl("int(x)", "INTEGER(x)");
-    }
-
-    #[test]
-    fn function_rename_uniform() {
-        assert_mdl("uniform(0, 10)", "RANDOM UNIFORM(0, 10)");
-    }
-
-    #[test]
-    fn function_rename_forcst() {
-        assert_mdl("forcst(x, 5, 0)", "FORECAST(x, 5, 0)");
-    }
-
-    #[test]
-    fn function_rename_delay() {
-        assert_mdl("delay(x, 5, 0)", "DELAY FIXED(x, 5, 0)");
-    }
-
-    #[test]
-    fn function_rename_delay1() {
-        assert_mdl("delay1(x, 5)", "DELAY1(x, 5)");
-    }
-
-    #[test]
-    fn function_rename_delay3() {
-        assert_mdl("delay3(x, 5)", "DELAY3(x, 5)");
-    }
-
-    #[test]
-    fn function_rename_integ() {
-        assert_mdl(
-            "integ(inflow - outflow, 100)",
-            "INTEG(inflow - outflow, 100)",
-        );
-    }
-
-    #[test]
-    fn function_rename_lookupinv() {
-        assert_mdl("lookupinv(tbl, 0.5)", "LOOKUP INVERT(tbl, 0.5)");
-    }
-
-    #[test]
-    fn function_rename_normalpink() {
-        assert_mdl("normalpink(x, 5)", "RANDOM PINK NOISE(x, 5)");
-    }
-
-    #[test]
-    fn function_rename_lookup() {
-        assert_mdl("lookup(tbl, x)", "LOOKUP(tbl, x)");
-    }
-
-    #[test]
-    fn function_unknown_uppercased() {
-        assert_mdl("abs(x)", "ABS(x)");
-        assert_mdl("ln(x)", "LN(x)");
-        assert_mdl("max(a, b)", "MAX(a, b)");
-    }
-
-    #[test]
-    fn arg_reorder_delay_n() {
-        // XMILE: delayn(input, delay_time, n, init) -> MDL: DELAY N(input, delay_time, init, n)
-        assert_mdl(
-            "delayn(input, delay_time, 3, init_val)",
-            "DELAY N(input, delay time, init val, 3)",
-        );
-    }
-
-    #[test]
-    fn arg_reorder_smooth_n() {
-        // XMILE: smthn(input, delay_time, n, init) -> MDL: SMOOTH N(input, delay_time, init, n)
-        assert_mdl(
-            "smthn(input, delay_time, 3, init_val)",
-            "SMOOTH N(input, delay time, init val, 3)",
-        );
-    }
-
-    #[test]
-    fn arg_reorder_random_normal() {
-        // XMILE: normal(mean, sd, seed, min, max) -> MDL: RANDOM NORMAL(min, max, mean, sd, seed)
-        assert_mdl(
-            "normal(mean, sd, seed, min_val, max_val)",
-            "RANDOM NORMAL(min val, max val, mean, sd, seed)",
-        );
-    }
-
-    // -- pattern recognizer tests (Task 2) --
-
-    #[test]
-    fn pattern_random_0_1() {
-        // XMILE: uniform(0, 1) -> MDL: RANDOM 0 1()
-        assert_mdl("uniform(0, 1)", "RANDOM 0 1()");
-    }
-
-    #[test]
-    fn pattern_random_0_1_not_matched_different_args() {
-        // uniform with non-(0,1) args should NOT match the RANDOM 0 1 pattern
-        assert_mdl("uniform(0, 10)", "RANDOM UNIFORM(0, 10)");
-    }
-
-    #[test]
-    fn pattern_log_2arg() {
-        // XMILE: ln(x) / ln(base) -> MDL: LOG(x, base)
-        assert_mdl("ln(x) / ln(base)", "LOG(x, base)");
-    }
-
-    #[test]
-    fn pattern_quantum() {
-        // XMILE: q * int(x / q)  ->  MDL: QUANTUM(x, q)
-        assert_mdl("q * int(x / q)", "QUANTUM(x, q)");
-    }
-
-    #[test]
-    fn pattern_quantum_not_matched_different_q() {
-        // q1 * int(x / q2) should NOT match QUANTUM when q1 != q2
-        assert_mdl("q1 * int(x / q2)", "q1 * INTEGER(x / q2)");
-    }
-
-    #[test]
-    fn pattern_pulse() {
-        // XMILE expansion of PULSE(start, width):
-        // IF TIME >= start AND TIME < (start + MAX(DT, width)) THEN 1 ELSE 0
-        assert_mdl(
-            "if time >= start and time < (start + max(dt, width)) then 1 else 0",
-            "PULSE(start, width)",
-        );
-    }
-
-    #[test]
-    fn pattern_pulse_not_matched_missing_lt() {
-        // Missing the Lt branch -- should fall through to mechanical conversion
-        assert_mdl(
-            "if time >= start then 1 else 0",
-            "IF THEN ELSE(Time >= start, 1, 0)",
-        );
-    }
-
-    #[test]
-    fn pattern_pulse_train() {
-        // XMILE expansion of PULSE TRAIN(start, width, interval, end_val):
-        // IF TIME >= start AND TIME <= end_val AND (TIME - start) MOD interval < width THEN 1 ELSE 0
-        assert_mdl(
-            "if time >= start and time <= end_val and (time - start) mod interval < width then 1 else 0",
-            "PULSE TRAIN(start, width, interval, end val)",
-        );
-    }
-
-    #[test]
-    fn mod_emits_modulo() {
-        assert_mdl("a mod b", "MODULO(a, b)");
-        assert_mdl("(time) mod (5)", "MODULO(Time, 5)");
-    }
-
-    #[test]
-    fn pattern_sample_if_true() {
-        // XMILE expansion of SAMPLE IF TRUE(cond, input, init):
-        // IF cond THEN input ELSE PREVIOUS(SELF, init)
-        assert_mdl(
-            "if cond then input else previous(self, init_val)",
-            "SAMPLE IF TRUE(cond, input, init val)",
-        );
-    }
-
-    #[test]
-    fn pattern_time_base() {
-        // XMILE expansion of TIME BASE(t, delta):
-        // t + delta * TIME
-        assert_mdl("t_val + delta * time", "TIME BASE(t val, delta)");
-    }
-
-    #[test]
-    fn pattern_random_poisson() {
-        // XMILE expansion of RANDOM POISSON(min, max, mean, sdev, factor, seed):
-        // poisson(mean / dt, seed, min, max) * factor + sdev
-        assert_mdl(
-            "poisson(mean / dt, seed, min_val, max_val) * factor + sdev",
-            "RANDOM POISSON(min val, max val, mean, sdev, factor, seed)",
-        );
-    }
-
-    #[test]
-    fn pattern_fallthrough_no_match() {
-        // An If expression that doesn't match any pattern should use mechanical conversion
-        assert_mdl("if a > b then c else d", "IF THEN ELSE(a > b, c, d)");
-    }
-
-    #[test]
-    fn pattern_allocate_by_priority() {
-        // XMILE expansion of ALLOCATE BY PRIORITY(demand[region], priority, ignore, width, supply):
-        // allocate(supply, region, demand[region.*], priority, width)
-        //
-        // The last subscript (region.*) is replaced with the dimension name, yielding demand[region].
-        // The arguments are reordered: demand first, then priority, then 0 (ignore), width, supply.
-        assert_mdl(
-            "allocate(supply, region, demand[region.*], priority, width)",
-            "ALLOCATE BY PRIORITY(demand[region], priority, 0, width, supply)",
-        );
-    }
-
-    #[test]
-    fn pattern_allocate_by_priority_no_subscript() {
-        // When the demand argument has no subscript (simple variable), it passes through as-is.
-        assert_mdl(
-            "allocate(supply, region, demand, priority, width)",
-            "ALLOCATE BY PRIORITY(demand, priority, 0, width, supply)",
-        );
-    }
-
-    // ---- Task 1: Variable entry formatting (scalar) ----
-
-    fn make_aux(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
-        Variable::Aux(Aux {
-            ident: ident.to_owned(),
-            equation: Equation::Scalar(eqn.to_owned()),
-            documentation: doc.to_owned(),
-            units: units.map(|u| u.to_owned()),
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        })
-    }
-
-    fn make_stock(ident: &str, eqn: &str, units: Option<&str>, doc: &str) -> Variable {
-        Variable::Stock(Stock {
-            ident: ident.to_owned(),
-            equation: Equation::Scalar(eqn.to_owned()),
-            documentation: doc.to_owned(),
-            units: units.map(|u| u.to_owned()),
-            inflows: vec![],
-            outflows: vec![],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        })
-    }
-
-    fn make_gf() -> GraphicalFunction {
-        GraphicalFunction {
-            kind: GraphicalFunctionKind::Continuous,
-            x_points: Some(vec![0.0, 1.0, 2.0]),
-            y_points: vec![0.0, 0.5, 1.0],
-            x_scale: GraphicalFunctionScale { min: 0.0, max: 2.0 },
-            y_scale: GraphicalFunctionScale { min: 0.0, max: 1.0 },
-        }
-    }
-
-    #[test]
-    fn scalar_aux_entry() {
-        let var = make_aux("characteristic_time", "10", Some("Minutes"), "How long");
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(
-            buf,
-            "characteristic time=\n\t10\n\t~\tMinutes\n\t~\tHow long\n\t|"
-        );
-    }
-
-    #[test]
-    fn scalar_aux_entry_quotes_special_identifier_name() {
-        let var = make_aux("$_euro", "10", Some("Dmnl"), "");
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(buf, "\"$ euro\"=\n\t10\n\t~\tDmnl\n\t~\t\n\t|");
-    }
-
-    #[test]
-    fn scalar_aux_no_units() {
-        let var = make_aux("rate", "a + b", None, "");
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(buf, "rate=\n\ta + b\n\t~\t\n\t~\t\n\t|");
-    }
-
-    #[test]
-    fn scalar_stock_integ() {
-        // Real stocks from the MDL reader store only the initial value in
-        // equation, with inflows/outflows in separate fields.  The writer
-        // must reconstruct the INTEG(...) expression.
-        let var = Variable::Stock(Stock {
-            ident: "teacup_temperature".to_owned(),
-            equation: Equation::Scalar("180".to_owned()),
-            documentation: "Temperature of tea".to_owned(),
-            units: Some("Degrees Fahrenheit".to_owned()),
-            inflows: vec![],
-            outflows: vec!["heat_loss_to_room".to_owned()],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(
-            buf,
-            "teacup temperature=\n\tINTEG(-heat loss to room, 180)\n\t~\tDegrees Fahrenheit\n\t~\tTemperature of tea\n\t|"
-        );
-    }
-
-    #[test]
-    fn stock_with_inflows_and_outflows() {
-        let var = Variable::Stock(Stock {
-            ident: "population".to_owned(),
-            equation: Equation::Scalar("1000".to_owned()),
-            documentation: String::new(),
-            units: None,
-            inflows: vec!["births".to_owned()],
-            outflows: vec!["deaths".to_owned()],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(
-            buf.contains("INTEG(births-deaths, 1000)"),
-            "Expected INTEG with both inflow and outflow: {}",
-            buf
-        );
-    }
-
-    #[test]
-    fn arrayed_stock_apply_to_all_preserves_initial_value() {
-        let var = Variable::Stock(Stock {
-            ident: "inventory".to_owned(),
-            equation: Equation::ApplyToAll(vec!["region".to_owned()], "100".to_owned()),
-            documentation: "Stock by region".to_owned(),
-            units: Some("widgets".to_owned()),
-            inflows: vec!["inflow".to_owned()],
-            outflows: vec!["outflow".to_owned()],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(
-            buf.contains("inventory[region]=\n\tINTEG(inflow-outflow, 100)"),
-            "ApplyToAll stock should emit arrayed INTEG with initial value: {}",
-            buf
-        );
-    }
-
-    #[test]
-    fn arrayed_stock_elements_preserve_each_initial_value() {
-        let var = Variable::Stock(Stock {
-            ident: "inventory".to_owned(),
-            equation: Equation::Arrayed(
-                vec!["region".to_owned()],
-                vec![
-                    ("north".to_owned(), "100".to_owned(), None, None),
-                    ("south".to_owned(), "200".to_owned(), None, None),
-                ],
-                None,
-                false,
-            ),
-            documentation: "Stock by region".to_owned(),
-            units: Some("widgets".to_owned()),
-            inflows: vec!["inflow".to_owned()],
-            outflows: vec!["outflow".to_owned()],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(
-            buf.contains("inventory[north]=\n\tINTEG(inflow-outflow, 100)"),
-            "First arrayed stock element should retain initial value: {}",
-            buf
-        );
-        assert!(
-            buf.contains("inventory[south]=\n\tINTEG(inflow-outflow, 200)"),
-            "Second arrayed stock element should retain initial value: {}",
-            buf
-        );
-    }
-
-    #[test]
-    fn active_initial_preserved_on_aux() {
-        let var = Variable::Aux(Aux {
-            ident: "x".to_owned(),
-            equation: Equation::Scalar("y * 2".to_owned()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat {
-                active_initial: Some("100".to_owned()),
-                ..Compat::default()
-            },
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(
-            buf.contains("ACTIVE INITIAL(y * 2, 100)"),
-            "Expected ACTIVE INITIAL wrapper: {}",
-            buf
-        );
-    }
-
-    #[test]
-    fn compat_data_source_reconstructs_get_direct_constants() {
-        let var = Variable::Aux(Aux {
-            ident: "imported_constants".to_owned(),
-            equation: Equation::Scalar("0".to_owned()),
-            documentation: String::new(),
-            units: None,
-            gf: Some(make_gf()),
-            ai_state: None,
-            uid: None,
-            compat: Compat {
-                data_source: Some(crate::datamodel::DataSource {
-                    kind: crate::datamodel::DataSourceKind::Constants,
-                    file: "workbook.xlsx".to_owned(),
-                    tab_or_delimiter: "Sheet1".to_owned(),
-                    row_or_col: "A".to_owned(),
-                    cell: String::new(),
-                }),
-                ..Compat::default()
-            },
-        });
-
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(
-            buf.contains("imported constants:="),
-            "GET DIRECT reconstruction should use := for data equations: {buf}"
-        );
-        assert!(
-            buf.contains("GET DIRECT CONSTANTS('workbook.xlsx', 'Sheet1', 'A')"),
-            "writer should reconstruct GET DIRECT CONSTANTS from compat metadata: {buf}"
-        );
-        assert!(
-            !buf.contains("([(0,0)-(2,1)]"),
-            "lookup table output must be suppressed when data_source metadata is present: {buf}"
-        );
-    }
-
-    #[test]
-    fn scalar_aux_with_lookup() {
-        let gf = make_gf();
-        let var = Variable::Aux(Aux {
-            ident: "effect_of_x".to_owned(),
-            equation: Equation::Scalar("TIME".to_owned()),
-            documentation: "Lookup effect".to_owned(),
-            units: None,
-            gf: Some(gf),
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(
-            buf,
-            "effect of x=\n\t([(0,0)-(2,1)],(0,0),(1,0.5),(2,1))\n\t~\t\n\t~\tLookup effect\n\t|"
-        );
-    }
-
-    #[test]
-    fn lookup_without_explicit_x_points() {
-        let gf = GraphicalFunction {
-            kind: GraphicalFunctionKind::Continuous,
-            x_points: None,
-            y_points: vec![0.0, 0.5, 1.0],
-            x_scale: GraphicalFunctionScale {
-                min: 0.0,
-                max: 10.0,
-            },
-            y_scale: GraphicalFunctionScale { min: 0.0, max: 1.0 },
-        };
-        let var = Variable::Aux(Aux {
-            ident: "tbl".to_owned(),
-            equation: Equation::Scalar(String::new()),
-            documentation: String::new(),
-            units: None,
-            gf: Some(gf),
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        // x_points auto-generated: 0, 5, 10
-        assert_eq!(
-            buf,
-            "tbl=\n\t([(0,0)-(10,1)],(0,0),(5,0.5),(10,1))\n\t~\t\n\t~\t\n\t|"
-        );
-    }
-
-    // ---- Task 2: Subscripted equation formatting ----
-
-    #[test]
-    fn apply_to_all_entry() {
-        let var = Variable::Aux(Aux {
-            ident: "rate_a".to_owned(),
-            equation: Equation::ApplyToAll(
-                vec!["one_dimensional_subscript".to_owned()],
-                "100".to_owned(),
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(
-            buf,
-            "rate a[one dimensional subscript]=\n\t100\n\t~\t\n\t~\t\n\t|"
-        );
-    }
-
-    #[test]
-    fn apply_to_all_multi_dim() {
-        let var = Variable::Aux(Aux {
-            ident: "matrix_a".to_owned(),
-            equation: Equation::ApplyToAll(
-                vec!["dim_a".to_owned(), "dim_b".to_owned()],
-                "0".to_owned(),
-            ),
-            documentation: String::new(),
-            units: Some("Dmnl".to_owned()),
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(buf, "matrix a[dim a,dim b]=\n\t0\n\t~\tDmnl\n\t~\t\n\t|");
-    }
-
-    #[test]
-    fn arrayed_per_element() {
-        let var = Variable::Aux(Aux {
-            ident: "rate_a".to_owned(),
-            equation: Equation::Arrayed(
-                vec!["one_dimensional_subscript".to_owned()],
-                vec![
-                    ("entry_1".to_owned(), "0.01".to_owned(), None, None),
-                    ("entry_2".to_owned(), "0.2".to_owned(), None, None),
-                    ("entry_3".to_owned(), "0.3".to_owned(), None, None),
-                ],
-                None,
-                false,
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert_eq!(
-            buf,
-            "rate a[entry 1]=\n\t0.01\n\t~~|\nrate a[entry 2]=\n\t0.2\n\t~~|\nrate a[entry 3]=\n\t0.3\n\t~\t\n\t~\t\n\t|"
-        );
-    }
-
-    #[test]
-    fn arrayed_subscript_names_with_underscores() {
-        let var = Variable::Aux(Aux {
-            ident: "demand".to_owned(),
-            equation: Equation::Arrayed(
-                vec!["region".to_owned()],
-                vec![
-                    ("north_america".to_owned(), "100".to_owned(), None, None),
-                    ("south_america".to_owned(), "200".to_owned(), None, None),
-                ],
-                None,
-                false,
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        // Underscored element names should appear with spaces
-        assert!(buf.contains("[north america]"));
-        assert!(buf.contains("[south america]"));
-    }
-
-    #[test]
-    fn arrayed_multidimensional_element_keys_preserve_tuple_shape() {
-        let var = Variable::Aux(Aux {
-            ident: "power5".to_owned(),
-            equation: Equation::Arrayed(
-                vec!["subs2".to_owned(), "subs1".to_owned(), "subs3".to_owned()],
-                vec![
-                    (
-                        "c,a,f".to_owned(),
-                        "power(var3[subs2, subs1], var4[subs2, subs3])".to_owned(),
-                        None,
-                        None,
-                    ),
-                    (
-                        "d,b,g".to_owned(),
-                        "power(var3[subs2, subs1], var4[subs2, subs3])".to_owned(),
-                        None,
-                        None,
-                    ),
-                ],
-                None,
-                false,
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-
-        assert!(
-            buf.contains("power5[c,a,f]="),
-            "missing first tuple key: {buf}"
-        );
-        assert!(
-            buf.contains("power5[d,b,g]="),
-            "missing second tuple key: {buf}"
-        );
-        assert!(
-            !buf.contains("power5[\"c,a,f\"]"),
-            "tuple key must not be quoted as a single symbol: {buf}"
-        );
-    }
-
-    #[test]
-    fn arrayed_with_per_element_lookup() {
-        let gf = make_gf();
-        let var = Variable::Aux(Aux {
-            ident: "tbl".to_owned(),
-            equation: Equation::Arrayed(
-                vec!["dim".to_owned()],
-                vec![
-                    ("a".to_owned(), String::new(), None, Some(gf.clone())),
-                    ("b".to_owned(), "5".to_owned(), None, None),
-                ],
-                None,
-                false,
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(buf.contains("tbl[a]=\n\t([(0,0)-(2,1)]"));
-        assert!(buf.contains("tbl[b]=\n\t5"));
-    }
-
-    // ---- Task 3: Dimension definitions ----
-
-    #[test]
-    fn dimension_def_named() {
-        let dim = datamodel::Dimension::named(
-            "dim_a".to_owned(),
-            vec!["a1".to_owned(), "a2".to_owned(), "a3".to_owned()],
-        );
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-        assert_eq!(buf, "dim a:\n\ta1, a2, a3\n\t~~|\n");
-    }
-
-    #[test]
-    fn dimension_def_indexed() {
-        let dim = datamodel::Dimension::indexed("dim_b".to_owned(), 5);
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-        assert_eq!(buf, "dim b:\n\t(1-5)\n\t~~|\n");
-    }
-
-    #[test]
-    fn dimension_def_with_mapping() {
-        let mut dim = datamodel::Dimension::named(
-            "dim_c".to_owned(),
-            vec!["dc1".to_owned(), "dc2".to_owned(), "dc3".to_owned()],
-        );
-        dim.set_maps_to("dim_b".to_owned());
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-        assert_eq!(buf, "dim c:\n\tdc1, dc2, dc3 -> dim b\n\t~~|\n");
-    }
-
-    // ---- Task 3: Data equations ----
-
-    #[test]
-    fn data_equation_uses_data_equals() {
-        let var = make_aux(
-            "direct_data_down",
-            "{GET_DIRECT_DATA('data_down.csv',',','A','B2')}",
-            None,
-            "",
-        );
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        // Data equations use := instead of =
-        assert!(buf.contains("direct data down:="), "expected := in: {buf}");
-    }
-
-    #[test]
-    fn non_data_equation_uses_equals() {
-        let var = make_aux("x", "42", None, "");
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(buf.starts_with("x="), "expected = in: {buf}");
-    }
-
-    #[test]
-    fn is_data_equation_detection() {
-        // Underscore-separated form (as might appear in some equation strings)
-        assert!(is_data_equation("{GET_DIRECT_DATA('f',',','A','B')}"));
-        assert!(is_data_equation("{GET_XLS_DATA('f','s','A','B')}"));
-        assert!(is_data_equation("{GET_VDF_DATA('f','v')}"));
-        assert!(is_data_equation("{GET_DATA_AT_TIME('v', 5)}"));
-        assert!(is_data_equation("{GET_123_DATA('f','s','A','B')}"));
-
-        // Space-separated form (as produced by the normalizer's SymbolClass::GetXls)
-        assert!(is_data_equation("{GET DIRECT DATA('f',',','A','B')}"));
-        assert!(is_data_equation("{GET XLS DATA('f','s','A','B')}"));
-        assert!(is_data_equation("{GET VDF DATA('f','v')}"));
-        assert!(is_data_equation("{GET DATA AT TIME('v', 5)}"));
-        assert!(is_data_equation("{GET 123 DATA('f','s','A','B')}"));
-
-        assert!(!is_data_equation("100"));
-        assert!(!is_data_equation("integ(a, b)"));
-        assert!(!is_data_equation(""));
-    }
-
-    #[test]
-    fn data_equation_preserves_raw_content() {
-        // Data equations should not go through expr0_to_mdl() because
-        // the GET XLS/DIRECT/etc. placeholders are not parseable as Expr0.
-        // Verify the raw content is preserved (not mangled by underbar_to_space).
-        let var = make_aux(
-            "my_data",
-            "{GET DIRECT DATA('data_file.csv',',','A','B2')}",
-            None,
-            "",
-        );
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        // The equation content must preserve underscores in quoted strings
-        assert!(
-            buf.contains("GET DIRECT DATA('data_file.csv',',','A','B2')"),
-            "Data equation content mangled: {}",
-            buf
-        );
-        // Must use := for data equations
-        assert!(buf.contains(":="), "Expected := for data equation: {}", buf);
-    }
-
-    #[test]
-    fn format_f64_whole_numbers() {
-        assert_eq!(format_f64(0.0), "0");
-        assert_eq!(format_f64(1.0), "1");
-        assert_eq!(format_f64(-5.0), "-5");
-        assert_eq!(format_f64(100.0), "100");
-    }
-
-    #[test]
-    fn format_f64_fractional() {
-        assert_eq!(format_f64(0.5), "0.5");
-        assert_eq!(format_f64(2.71), "2.71");
-    }
-
-    #[test]
-    fn format_f64_infinity_uses_vensim_numeric_sentinels() {
-        assert_eq!(format_f64(f64::INFINITY), "1e+38");
-        assert_eq!(format_f64(f64::NEG_INFINITY), "-1e+38");
-    }
-
-    #[test]
-    fn flow_with_lookup() {
-        let gf = make_gf();
-        let var = Variable::Flow(Flow {
-            ident: "flow_rate".to_owned(),
-            equation: Equation::Scalar("TIME".to_owned()),
-            documentation: "A flow".to_owned(),
-            units: Some("widgets/year".to_owned()),
-            gf: Some(gf),
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(buf.contains("flow rate=\n\t([(0,0)-(2,1)]"));
-        assert!(buf.contains("~\twidgets/year"));
-        assert!(buf.contains("~\tA flow"));
-    }
-
-    #[test]
-    fn module_variable_produces_no_output() {
-        let var = Variable::Module(datamodel::Module {
-            ident: "mod1".to_owned(),
-            model_name: "model1".to_owned(),
-            documentation: String::new(),
-            units: None,
-            references: vec![],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-        assert!(buf.is_empty());
-    }
-
-    // ---- Phase 4 Task 1: Validation ----
-
-    fn make_project(models: Vec<datamodel::Model>) -> datamodel::Project {
-        datamodel::Project {
-            name: "test".to_owned(),
-            sim_specs: datamodel::SimSpecs {
-                start: 0.0,
-                stop: 100.0,
-                dt: datamodel::Dt::Dt(1.0),
-                save_step: None,
-                sim_method: datamodel::SimMethod::Euler,
-                time_units: None,
-            },
-            dimensions: vec![],
-            units: vec![],
-            models,
-            source: None,
-            ai_information: None,
-        }
-    }
-
-    fn make_model(variables: Vec<Variable>) -> datamodel::Model {
-        datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables,
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }
-    }
-
-    #[test]
-    fn project_to_mdl_rejects_multiple_models() {
-        let project = make_project(vec![make_model(vec![]), make_model(vec![])]);
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("single model"),
-            "error should mention single model, got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn project_to_mdl_rejects_module_variable() {
-        let module_var = Variable::Module(datamodel::Module {
-            ident: "submodel".to_owned(),
-            model_name: "inner".to_owned(),
-            documentation: String::new(),
-            units: None,
-            references: vec![],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let project = make_project(vec![make_model(vec![module_var])]);
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Module"),
-            "error should mention Module, got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn project_to_mdl_succeeds_single_model() {
-        let var = make_aux("x", "5", Some("Units"), "A constant");
-        let project = make_project(vec![make_model(vec![var])]);
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let mdl = result.unwrap();
-        assert!(
-            mdl.starts_with("{UTF-8}\n"),
-            "MDL should start with UTF-8 marker, got: {:?}",
-            mdl.lines().next()
-        );
-        assert!(mdl.contains("x="));
-        assert!(mdl.contains("\\\\\\---///"));
-    }
-
-    // ---- Phase 4 Task 2: Sim spec emission ----
-
-    #[test]
-    fn sim_specs_emission() {
-        let sim_specs = datamodel::SimSpecs {
-            start: 0.0,
-            stop: 100.0,
-            dt: datamodel::Dt::Dt(0.5),
-            save_step: Some(datamodel::Dt::Dt(1.0)),
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: Some("Month".to_owned()),
-        };
-        let mut writer = MdlWriter::new();
-        writer.write_sim_specs(&sim_specs);
-        let output = writer.buf;
-
-        assert!(
-            output.contains("INITIAL TIME  = \n\t0"),
-            "should have INITIAL TIME, got: {output}"
-        );
-        assert!(
-            output.contains("~\tMonth\n\t~\tThe initial time for the simulation."),
-            "INITIAL TIME should have Month units"
-        );
-        assert!(
-            output.contains("FINAL TIME  = \n\t100"),
-            "should have FINAL TIME, got: {output}"
-        );
-        assert!(
-            output.contains("TIME STEP  = \n\t0.5"),
-            "should have TIME STEP = 0.5, got: {output}"
-        );
-        assert!(
-            output.contains("Month [0,?]"),
-            "TIME STEP should have units with range, got: {output}"
-        );
-        assert!(
-            output.contains("SAVEPER  = \n\t1"),
-            "should have SAVEPER = 1, got: {output}"
-        );
-    }
-
-    #[test]
-    fn sim_specs_saveper_defaults_to_time_step() {
-        let sim_specs = datamodel::SimSpecs {
-            start: 0.0,
-            stop: 50.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        };
-        let mut writer = MdlWriter::new();
-        writer.write_sim_specs(&sim_specs);
-        let output = writer.buf;
-
-        assert!(
-            output.contains("SAVEPER  = \n\tTIME STEP"),
-            "SAVEPER should reference TIME STEP when save_step is None, got: {output}"
-        );
-    }
-
-    #[test]
-    fn sim_specs_reciprocal_dt() {
-        let sim_specs = datamodel::SimSpecs {
-            start: 0.0,
-            stop: 100.0,
-            dt: datamodel::Dt::Reciprocal(4.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: Some("Year".to_owned()),
-        };
-        let mut writer = MdlWriter::new();
-        writer.write_sim_specs(&sim_specs);
-        let output = writer.buf;
-
-        assert!(
-            output.contains("TIME STEP  = \n\t1/4"),
-            "reciprocal dt should emit 1/v, got: {output}"
-        );
-    }
-
-    // ---- Phase 4 Task 3: Equations section assembly ----
-
-    #[test]
-    fn equations_section_full_assembly() {
-        let var1 = make_aux("growth_rate", "0.05", Some("1/Year"), "Growth rate");
-        let var2 = make_stock(
-            "population",
-            "integ(growth_rate * population, 100)",
-            Some("People"),
-            "Total population",
-        );
-        let model = datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables: vec![var1, var2],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        };
-        let project = datamodel::Project {
-            name: "test".to_owned(),
-            sim_specs: datamodel::SimSpecs {
-                start: 0.0,
-                stop: 100.0,
-                dt: datamodel::Dt::Dt(1.0),
-                save_step: None,
-                sim_method: datamodel::SimMethod::Euler,
-                time_units: Some("Year".to_owned()),
-            },
-            dimensions: vec![],
-            units: vec![],
-            models: vec![model],
-            source: None,
-            ai_information: None,
-        };
-
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let mdl = result.unwrap();
-
-        // Variable entries present
-        assert!(
-            mdl.contains("growth rate="),
-            "should contain growth rate variable"
-        );
-        assert!(
-            mdl.contains("population="),
-            "should contain population variable"
-        );
-
-        // Sim specs present
-        assert!(mdl.contains("INITIAL TIME"), "should contain INITIAL TIME");
-        assert!(mdl.contains("FINAL TIME"), "should contain FINAL TIME");
-        assert!(mdl.contains("TIME STEP"), "should contain TIME STEP");
-        assert!(mdl.contains("SAVEPER"), "should contain SAVEPER");
-
-        // Terminator present
-        assert!(
-            mdl.contains("\\\\\\---/// Sketch information - do not modify anything except names"),
-            "should contain section terminator"
-        );
-
-        // Ordering: variables before sim specs, sim specs before terminator
-        let var_pos = mdl.find("growth rate=").unwrap();
-        let initial_pos = mdl.find("INITIAL TIME").unwrap();
-        let terminator_pos = mdl.find("\\\\\\---///").unwrap();
-        assert!(
-            var_pos < initial_pos,
-            "variables should come before sim specs"
-        );
-        assert!(
-            initial_pos < terminator_pos,
-            "sim specs should come before terminator"
-        );
-    }
-
-    #[test]
-    fn equations_section_with_groups() {
-        let var1 = make_aux("rate_a", "10", None, "");
-        let var2 = make_aux("rate_b", "20", None, "");
-        let var3 = make_aux("ungrouped_var", "30", None, "");
-        let group = datamodel::ModelGroup {
-            name: "my_group".to_owned(),
-            doc: Some("Group docs".to_owned()),
-            parent: None,
-            members: vec!["rate_a".to_owned(), "rate_b".to_owned()],
-            run_enabled: false,
-        };
-        let model = datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables: vec![var1, var2, var3],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![group],
-        };
-        let project = make_project(vec![model]);
-
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let mdl = result.unwrap();
-
-        // Group marker present
-        assert!(
-            mdl.contains(".my group"),
-            "should contain group marker, got: {mdl}"
-        );
-        assert!(
-            mdl.contains("Group docs"),
-            "should contain group documentation"
-        );
-
-        // Grouped variables come before ungrouped
-        let rate_a_pos = mdl.find("rate a=").unwrap();
-        let ungrouped_pos = mdl.find("ungrouped var=").unwrap();
-        assert!(
-            rate_a_pos < ungrouped_pos,
-            "grouped variables should come before ungrouped"
-        );
-    }
-
-    #[test]
-    fn equations_section_with_dimensions() {
-        let dim = datamodel::Dimension::named(
-            "region".to_owned(),
-            vec!["north".to_owned(), "south".to_owned()],
-        );
-        let var = make_aux("x", "1", None, "");
-        let model = make_model(vec![var]);
-        let mut project = make_project(vec![model]);
-        project.dimensions.push(dim);
-
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let mdl = result.unwrap();
-
-        // Dimension def at the start, before variables
-        assert!(
-            mdl.contains("region:\n\tnorth, south\n\t~~|"),
-            "should contain dimension def"
-        );
-        let dim_pos = mdl.find("region:").unwrap();
-        let var_pos = mdl.find("x=").unwrap();
-        assert!(dim_pos < var_pos, "dimensions should come before variables");
-    }
-
-    // ---- Phase 5 Task 1: Sketch element serialization (types 10, 11, 12) ----
-
-    #[test]
-    fn sketch_aux_element() {
-        let aux = view_element::Aux {
-            name: "Growth_Rate".to_string(),
-            uid: 1,
-            x: 100.0,
-            y: 200.0,
-            label_side: view_element::LabelSide::Bottom,
-        };
-        let mut buf = String::new();
-        write_aux_element(&mut buf, &aux);
-        assert_eq!(buf, "10,1,Growth Rate,100,200,40,20,8,3,0,0,-1,0,0,0");
-    }
-
-    #[test]
-    fn sketch_stock_element() {
-        let stock = view_element::Stock {
-            name: "Population".to_string(),
-            uid: 2,
-            x: 300.0,
-            y: 150.0,
-            label_side: view_element::LabelSide::Top,
-        };
-        let mut buf = String::new();
-        write_stock_element(&mut buf, &stock);
-        assert_eq!(buf, "10,2,Population,300,150,40,20,3,3,0,0,0,0,0,0");
-    }
-
-    #[test]
-    fn sketch_flow_element_produces_valve_and_variable() {
-        let flow = view_element::Flow {
-            name: "Infection_Rate".to_string(),
-            uid: 6,
-            x: 295.0,
-            y: 191.0,
-            label_side: view_element::LabelSide::Bottom,
-            points: vec![],
-        };
-        let mut buf = String::new();
-        let valve_uids = HashMap::from([(6, 100)]);
-        let mut next_connector_uid = 200;
-        write_flow_element(&mut buf, &flow, &valve_uids, &mut next_connector_uid);
-        // valve line uses allocated UID, variable line uses flow's UID
-        assert!(buf.starts_with("11,100,100,295,191,6,8,34,3,0,0,1,0,0,0\n"));
-        assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
-    }
-
-    #[test]
-    fn sketch_flow_element_emits_pipe_connectors_from_flow_points() {
-        let flow = view_element::Flow {
-            name: "Infection_Rate".to_string(),
-            uid: 6,
-            x: 150.0,
-            y: 100.0,
-            label_side: view_element::LabelSide::Bottom,
-            points: vec![
-                view_element::FlowPoint {
-                    x: 100.0,
-                    y: 100.0,
-                    attached_to_uid: Some(1),
-                },
-                view_element::FlowPoint {
-                    x: 200.0,
-                    y: 100.0,
-                    attached_to_uid: Some(2),
-                },
-            ],
-        };
-        let mut buf = String::new();
-        let valve_uids = HashMap::from([(6, 100)]);
-        let mut next_connector_uid = 200;
-        write_flow_element(&mut buf, &flow, &valve_uids, &mut next_connector_uid);
-
-        let connector_lines: Vec<&str> =
-            buf.lines().filter(|line| line.starts_with("1,")).collect();
-        assert_eq!(
-            connector_lines.len(),
-            2,
-            "Expected two type-1 connector lines for flow endpoints: {}",
-            buf
-        );
-        assert!(
-            connector_lines.iter().any(|line| line.contains(",100,1,")),
-            "Expected connector from valve uid 100 to endpoint uid 1: {}",
-            buf
-        );
-        assert!(
-            connector_lines.iter().any(|line| line.contains(",100,2,")),
-            "Expected connector from valve uid 100 to endpoint uid 2: {}",
-            buf
-        );
-    }
-
-    #[test]
-    fn valve_uids_do_not_collide_with_existing_elements() {
-        // stock uid=1, flow uid=2 -> valve must NOT get uid=1
-        let elements = vec![
-            ViewElement::Stock(view_element::Stock {
-                name: "Population".to_string(),
-                uid: 1,
-                x: 100.0,
-                y: 100.0,
-                label_side: view_element::LabelSide::Bottom,
-            }),
-            ViewElement::Flow(view_element::Flow {
-                name: "Birth_Rate".to_string(),
-                uid: 2,
-                x: 200.0,
-                y: 100.0,
-                label_side: view_element::LabelSide::Bottom,
-                points: vec![],
-            }),
-        ];
-
-        let valve_uids = allocate_valve_uids(&elements);
-        // The valve for flow uid=2 must not equal 1 (stock's uid)
-        let valve_uid = valve_uids[&2];
-        assert_ne!(valve_uid, 1, "Valve UID collides with stock UID");
-        assert_ne!(valve_uid, 2, "Valve UID collides with flow UID");
-    }
-
-    #[test]
-    fn sketch_cloud_element() {
-        let cloud = view_element::Cloud {
-            uid: 7,
-            flow_uid: 6,
-            x: 479.0,
-            y: 235.0,
-        };
-        let mut buf = String::new();
-        write_cloud_element(&mut buf, &cloud);
-        assert_eq!(buf, "12,7,0,479,235,10,8,0,3,0,0,-1,0,0,0");
-    }
-
-    #[test]
-    fn sketch_alias_element() {
-        let alias = view_element::Alias {
-            uid: 10,
-            alias_of_uid: 1,
-            x: 200.0,
-            y: 300.0,
-            label_side: view_element::LabelSide::Bottom,
-        };
-        let mut name_map = HashMap::new();
-        name_map.insert(1, "Growth_Rate");
-        let mut buf = String::new();
-        write_alias_element(&mut buf, &alias, &name_map);
-        assert!(buf.starts_with("10,10,Growth Rate,200,300,40,20,8,2,0,3,-1,0,0,0,"));
-        assert!(buf.contains("128-128-128"));
-    }
-
-    // ---- Phase 5 Task 2: Connector serialization (type 1) ----
-
-    #[test]
-    fn sketch_link_straight() {
-        let link = view_element::Link {
-            uid: 3,
-            from_uid: 1,
-            to_uid: 2,
-            shape: LinkShape::Straight,
-            polarity: None,
-        };
-        let mut positions = HashMap::new();
-        positions.insert(1, (100, 100));
-        positions.insert(2, (200, 200));
-        let mut buf = String::new();
-        write_link_element(&mut buf, &link, &positions, false);
-        // Straight => control point (0,0)
-        assert_eq!(buf, "1,3,1,2,0,0,0,0,0,0,0,-1--1--1,,1|(0,0)|");
-    }
-
-    #[test]
-    fn sketch_link_with_polarity_symbol() {
-        let link = view_element::Link {
-            uid: 5,
-            from_uid: 1,
-            to_uid: 2,
-            shape: LinkShape::Straight,
-            polarity: Some(LinkPolarity::Positive),
-        };
-        let positions = HashMap::new();
-        let mut buf = String::new();
-        write_link_element(&mut buf, &link, &positions, false);
-        // polarity=43 ('+')
-        assert!(buf.contains(",0,0,43,0,0,0,0,"));
-    }
-
-    #[test]
-    fn sketch_link_with_polarity_letter() {
-        let link = view_element::Link {
-            uid: 5,
-            from_uid: 1,
-            to_uid: 2,
-            shape: LinkShape::Straight,
-            polarity: Some(LinkPolarity::Positive),
-        };
-        let positions = HashMap::new();
-        let mut buf = String::new();
-        write_link_element(&mut buf, &link, &positions, true);
-        // polarity=83 ('S' for lettered positive)
-        assert!(buf.contains(",0,0,83,0,0,0,0,"));
-    }
-
-    #[test]
-    fn sketch_link_arc_produces_nonzero_control_point() {
-        let link = view_element::Link {
-            uid: 3,
-            from_uid: 1,
-            to_uid: 2,
-            shape: LinkShape::Arc(45.0),
-            polarity: None,
-        };
-        let mut positions = HashMap::new();
-        positions.insert(1, (100, 100));
-        positions.insert(2, (200, 100));
-        let mut buf = String::new();
-        write_link_element(&mut buf, &link, &positions, false);
-        // Arc should produce a non-(0,0) control point
-        assert!(
-            !buf.contains("|(0,0)|"),
-            "arc should not produce (0,0) control point"
-        );
-    }
-
-    #[test]
-    fn sketch_link_multipoint_emits_all_points() {
-        let points = vec![
-            view_element::FlowPoint {
-                x: 150.0,
-                y: 120.0,
-                attached_to_uid: None,
-            },
-            view_element::FlowPoint {
-                x: 170.0,
-                y: 140.0,
-                attached_to_uid: None,
-            },
-            view_element::FlowPoint {
-                x: 190.0,
-                y: 160.0,
-                attached_to_uid: None,
-            },
-        ];
-        let link = view_element::Link {
-            uid: 4,
-            from_uid: 1,
-            to_uid: 2,
-            shape: LinkShape::MultiPoint(points),
-            polarity: None,
-        };
-        let mut positions = HashMap::new();
-        positions.insert(1, (100, 100));
-        positions.insert(2, (200, 200));
-        let mut buf = String::new();
-        write_link_element(&mut buf, &link, &positions, false);
-        assert!(
-            buf.contains("3|(150,120)|(170,140)|(190,160)|"),
-            "multipoint should emit all three points: {buf}"
-        );
-    }
-
-    // ---- Phase 5 Task 3: Complete sketch section assembly ----
-
-    #[test]
-    fn sketch_section_structure() {
-        let elements = vec![
-            ViewElement::Stock(view_element::Stock {
-                name: "Population".to_string(),
-                uid: 1,
-                x: 100.0,
-                y: 100.0,
-                label_side: view_element::LabelSide::Top,
-            }),
-            ViewElement::Aux(view_element::Aux {
-                name: "Growth_Rate".to_string(),
-                uid: 2,
-                x: 200.0,
-                y: 200.0,
-                label_side: view_element::LabelSide::Bottom,
-            }),
-            ViewElement::Link(view_element::Link {
-                uid: 3,
-                from_uid: 2,
-                to_uid: 1,
-                shape: LinkShape::Straight,
-                polarity: None,
-            }),
-        ];
-        let sf = datamodel::StockFlow {
-            name: None,
-            elements,
-            view_box: Default::default(),
-            zoom: 1.0,
-            use_lettered_polarity: false,
-        };
-        let views = vec![View::StockFlow(sf)];
-
-        let mut writer = MdlWriter::new();
-        writer.write_sketch_section(&views);
-        let output = writer.buf;
-
-        // Header
-        assert!(
-            output.starts_with("V300  Do not put anything below this section"),
-            "should start with V300 header"
-        );
-        // View title
-        assert!(output.contains("*View 1\n"), "should have view title");
-        // Font line
-        assert!(
-            output.contains("$192-192-192"),
-            "should have font settings line"
-        );
-        // Elements
-        assert!(
-            output.contains("10,1,Population,"),
-            "should have stock element"
-        );
-        assert!(
-            output.contains("10,2,Growth Rate,"),
-            "should have aux element"
-        );
-        assert!(output.contains("1,3,2,1,"), "should have link element");
-        // Terminator
-        assert!(
-            output.ends_with("///---\\\\\\\n"),
-            "should end with sketch terminator"
-        );
-    }
-
-    #[test]
-    fn sketch_section_in_full_project() {
-        let var = make_aux("x", "1", None, "");
-        let elements = vec![ViewElement::Aux(view_element::Aux {
-            name: "x".to_string(),
-            uid: 1,
-            x: 100.0,
-            y: 100.0,
-            label_side: view_element::LabelSide::Bottom,
-        })];
-        let model = datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables: vec![var],
-            views: vec![View::StockFlow(datamodel::StockFlow {
-                name: None,
-                elements,
-                view_box: Default::default(),
-                zoom: 1.0,
-                use_lettered_polarity: false,
-            })],
-            loop_metadata: vec![],
-            groups: vec![],
-        };
-        let project = make_project(vec![model]);
-
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(result.is_ok());
-        let mdl = result.unwrap();
-
-        // The sketch section should appear after the equations terminator
-        let terminator_pos = mdl
-            .find("\\\\\\---/// Sketch information")
-            .expect("should have equations terminator");
-        let v300_pos = mdl.find("V300").expect("should have V300 header");
-        assert!(
-            terminator_pos < v300_pos,
-            "V300 should come after equations terminator"
-        );
-
-        // The sketch terminator should be at the end
-        assert!(
-            mdl.contains("///---\\\\\\"),
-            "should have sketch terminator"
-        );
-    }
-
-    #[test]
-    fn sketch_roundtrip_teacup() {
-        // Read teacup.mdl, parse to Project, write sketch section, verify structure
-        let mdl_contents = include_str!("../../../../test/test-models/samples/teacup/teacup.mdl");
-        let project =
-            crate::mdl::parse_mdl(mdl_contents).expect("teacup.mdl should parse successfully");
-
-        let model = &project.models[0];
-        assert!(
-            !model.views.is_empty(),
-            "teacup model should have at least one view"
-        );
-
-        // Write the sketch section
-        let mut writer = MdlWriter::new();
-        writer.write_sketch_section(&model.views);
-        let output = writer.buf;
-
-        // Verify structural elements: the teacup model should have stocks, auxes,
-        // flows (valve + attached variable), links, and clouds.
-        assert!(output.contains("V300"), "output should contain V300 header");
-        assert!(
-            output.contains("*View 1"),
-            "output should contain view title"
-        );
-        assert!(
-            output.contains("///---\\\\\\"),
-            "output should end with sketch terminator"
-        );
-
-        // The teacup model elements (after roundtrip through datamodel):
-        // Stock: Teacup_Temperature -> type 10 with shape=3
-        // Aux: Heat_Loss_to_Room flow -> type 11 valve + type 10 attached
-        // Aux: Room_Temperature, Characteristic_Time -> type 10
-        // Links -> type 1
-        // Clouds -> type 12
-
-        // Count element types in output
-        let lines: Vec<&str> = output.lines().collect();
-        let type10_count = lines.iter().filter(|l| l.starts_with("10,")).count();
-        let type11_count = lines.iter().filter(|l| l.starts_with("11,")).count();
-        let type12_count = lines.iter().filter(|l| l.starts_with("12,")).count();
-        let type1_count = lines.iter().filter(|l| l.starts_with("1,")).count();
-
-        // Teacup has: 1 stock (Teacup_Temperature), 3 auxes (Heat_Loss_to_Room,
-        // Room_Temperature, Characteristic_Time), 1 flow (Heat_Loss_to_Room)
-        // which produces valve+variable, plus 1 cloud.
-        // The exact numbers depend on the MDL->datamodel conversion, but
-        // we should have a reasonable set of elements.
-        assert!(
-            type10_count >= 2,
-            "should have at least 2 type-10 elements (variables/stocks), got {type10_count}"
-        );
-        assert!(
-            type11_count >= 1,
-            "should have at least 1 type-11 element (valve), got {type11_count}"
-        );
-        assert!(
-            type12_count >= 1,
-            "should have at least 1 type-12 element (cloud/comment), got {type12_count}"
-        );
-        assert!(
-            type1_count >= 1,
-            "should have at least 1 type-1 element (connector), got {type1_count}"
-        );
-        // Verify no empty lines were introduced between elements
-        let element_lines: Vec<&&str> = lines
-            .iter()
-            .filter(|l| {
-                l.starts_with("10,")
-                    || l.starts_with("11,")
-                    || l.starts_with("12,")
-                    || l.starts_with("1,")
-            })
-            .collect();
-        assert!(
-            !element_lines.is_empty(),
-            "should have sketch elements in output"
-        );
-
-        // Verify the output can be re-parsed as a valid sketch section
-        let reparsed = crate::mdl::view::parse_views(&output);
-        assert!(
-            reparsed.is_ok(),
-            "re-serialized sketch should parse: {:?}",
-            reparsed.err()
-        );
-        let views = reparsed.unwrap();
-        assert!(
-            !views.is_empty(),
-            "re-parsed sketch should have at least one view"
-        );
-
-        // Verify all expected element types are present after re-parse
-        let view = &views[0];
-        let has_variable = view
-            .iter()
-            .any(|e| matches!(e, crate::mdl::view::VensimElement::Variable(_)));
-        let has_connector = view
-            .iter()
-            .any(|e| matches!(e, crate::mdl::view::VensimElement::Connector(_)));
-        assert!(has_variable, "re-parsed view should have variables");
-        assert!(has_connector, "re-parsed view should have connectors");
-    }
-
-    #[test]
-    fn sketch_roundtrip_preserves_view_title() {
-        let mdl_contents = r#"x = 5
-~ ~|
-\\\---/// Sketch information
-V300  Do not put anything below this section - it will be ignored
-*Overview
-$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
-10,1,x,100,100,40,20,8,3,0,0,-1,0,0,0
-///---\\\
-"#;
-
-        let project =
-            crate::mdl::parse_mdl(mdl_contents).expect("source MDL should parse successfully");
-        let mdl = crate::mdl::project_to_mdl(&project).expect("roundtrip MDL write should work");
-
-        assert!(
-            mdl.contains("*Overview\n"),
-            "Roundtrip should preserve original view title: {}",
-            mdl
-        );
-    }
-
-    #[test]
-    fn sketch_roundtrip_sanitizes_multiline_view_title() {
-        let var = make_aux("x", "5", Some("Units"), "A constant");
-        let model = datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables: vec![var],
-            views: vec![View::StockFlow(datamodel::StockFlow {
-                name: Some("Overview\r\nMain".to_owned()),
-                elements: vec![ViewElement::Aux(view_element::Aux {
-                    name: "x".to_owned(),
-                    uid: 1,
-                    x: 100.0,
-                    y: 100.0,
-                    label_side: view_element::LabelSide::Bottom,
-                })],
-                view_box: Default::default(),
-                zoom: 1.0,
-                use_lettered_polarity: false,
-            })],
-            loop_metadata: vec![],
-            groups: vec![],
-        };
-        let project = make_project(vec![model]);
-
-        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
-        assert!(
-            mdl.contains("*Overview Main\n"),
-            "view title should be serialized as a single line: {mdl}",
-        );
-
-        let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
-        let View::StockFlow(sf) = &reparsed.models[0].views[0];
-        assert_eq!(
-            sf.name.as_deref(),
-            Some("Overview Main"),
-            "sanitized title should roundtrip through MDL",
-        );
-    }
-
-    #[test]
-    fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
-        let stock_a = Variable::Stock(Stock {
-            ident: "stock_a".to_owned(),
-            equation: Equation::Scalar("100".to_owned()),
-            documentation: String::new(),
-            units: None,
-            inflows: vec![],
-            outflows: vec!["flow_ab".to_owned()],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let stock_b = Variable::Stock(Stock {
-            ident: "stock_b".to_owned(),
-            equation: Equation::Scalar("0".to_owned()),
-            documentation: String::new(),
-            units: None,
-            inflows: vec!["flow_ab".to_owned()],
-            outflows: vec![],
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-        let flow = Variable::Flow(Flow {
-            ident: "flow_ab".to_owned(),
-            equation: Equation::Scalar("10".to_owned()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: Compat::default(),
-        });
-
-        let model = datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables: vec![stock_a, stock_b, flow],
-            views: vec![View::StockFlow(datamodel::StockFlow {
-                name: Some("View 1".to_owned()),
-                elements: vec![
-                    ViewElement::Stock(view_element::Stock {
-                        name: "Stock_A".to_owned(),
-                        uid: 1,
-                        x: 100.0,
-                        y: 100.0,
-                        label_side: view_element::LabelSide::Bottom,
-                    }),
-                    ViewElement::Stock(view_element::Stock {
-                        name: "Stock_B".to_owned(),
-                        uid: 2,
-                        x: 300.0,
-                        y: 100.0,
-                        label_side: view_element::LabelSide::Bottom,
-                    }),
-                    ViewElement::Flow(view_element::Flow {
-                        name: "Flow_AB".to_owned(),
-                        uid: 6,
-                        x: 200.0,
-                        y: 100.0,
-                        label_side: view_element::LabelSide::Bottom,
-                        points: vec![
-                            view_element::FlowPoint {
-                                x: 122.5,
-                                y: 100.0,
-                                attached_to_uid: Some(1),
-                            },
-                            view_element::FlowPoint {
-                                x: 277.5,
-                                y: 100.0,
-                                attached_to_uid: Some(2),
-                            },
-                        ],
-                    }),
-                ],
-                view_box: Default::default(),
-                zoom: 1.0,
-                use_lettered_polarity: false,
-            })],
-            loop_metadata: vec![],
-            groups: vec![],
-        };
-        let project = make_project(vec![model]);
-
-        let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
-        let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
-        let View::StockFlow(sf) = &reparsed.models[0].views[0];
-
-        let stock_uid_by_name: HashMap<&str, i32> = sf
-            .elements
-            .iter()
-            .filter_map(|elem| {
-                if let ViewElement::Stock(stock) = elem {
-                    Some((stock.name.as_str(), stock.uid))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let flow = sf
-            .elements
-            .iter()
-            .find_map(|elem| {
-                if let ViewElement::Flow(flow) = elem {
-                    Some(flow)
-                } else {
-                    None
-                }
-            })
-            .expect("expected flow element after roundtrip");
-
-        assert_eq!(
-            flow.points.first().and_then(|pt| pt.attached_to_uid),
-            stock_uid_by_name.get("Stock_A").copied(),
-            "flow source attachment should roundtrip to Stock_A",
-        );
-        assert_eq!(
-            flow.points.last().and_then(|pt| pt.attached_to_uid),
-            stock_uid_by_name.get("Stock_B").copied(),
-            "flow sink attachment should roundtrip to Stock_B",
-        );
-    }
-
-    #[test]
-    fn compute_control_point_straight_midpoint() {
-        // For a nearly-straight arc angle, the control point should be near the midpoint
-        let from = (100, 100);
-        let to = (200, 100);
-        // Canvas angle of 0 degrees = straight line along x-axis
-        let (cx, cy) = compute_control_point(from, to, 0.0);
-        // For a straight line, the midpoint should be returned
-        assert_eq!(cx, 150);
-        assert_eq!(cy, 100);
-    }
-
-    #[test]
-    fn compute_control_point_arc_off_center() {
-        // A 45-degree arc should produce a control point off the midpoint
-        let from = (100, 100);
-        let to = (200, 100);
-        let (_cx, cy) = compute_control_point(from, to, 45.0);
-        // The control point should be above or below the line, not on it
-        assert_ne!(cy, 100, "arc control point should be off the straight line");
-    }
-
-    // ---- Phase 6 Task 1: Settings section ----
-
-    #[test]
-    fn settings_section_starts_with_marker() {
-        let project = make_project(vec![make_model(vec![])]);
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        assert!(
-            output.starts_with(":L<%^E!@\n"),
-            "settings section should start with marker (separator is in sketch section), got: {:?}",
-            &output[..output.len().min(40)]
-        );
-    }
-
-    #[test]
-    fn settings_section_contains_type_15_euler() {
-        let project = make_project(vec![make_model(vec![])]);
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        assert!(
-            output.contains("15:0,0,0,0,0,0\n"),
-            "Euler method should emit method code 0, got: {:?}",
-            output
-        );
-    }
-
-    #[test]
-    fn settings_section_contains_type_15_rk4() {
-        let mut project = make_project(vec![make_model(vec![])]);
-        project.sim_specs.sim_method = SimMethod::RungeKutta4;
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        assert!(
-            output.contains("15:0,0,0,1,0,0\n"),
-            "RK4 method should emit method code 1, got: {:?}",
-            output
-        );
-    }
-
-    #[test]
-    fn settings_section_contains_type_15_rk2() {
-        let mut project = make_project(vec![make_model(vec![])]);
-        project.sim_specs.sim_method = SimMethod::RungeKutta2;
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        assert!(
-            output.contains("15:0,0,0,3,0,0\n"),
-            "RK2 method should emit method code 3, got: {:?}",
-            output
-        );
-    }
-
-    #[test]
-    fn settings_section_contains_type_22_units() {
-        let mut project = make_project(vec![make_model(vec![])]);
-        project.units = vec![
-            Unit {
-                name: "Dollar".to_owned(),
-                equation: Some("$".to_owned()),
-                disabled: false,
-                aliases: vec!["Dollars".to_owned(), "$s".to_owned()],
-            },
-            Unit {
-                name: "Hour".to_owned(),
-                equation: None,
-                disabled: false,
-                aliases: vec!["Hours".to_owned()],
-            },
-        ];
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        assert!(
-            output.contains("22:$,Dollar,Dollars,$s\n"),
-            "should contain Dollar unit equivalence, got: {:?}",
-            output
-        );
-        assert!(
-            output.contains("22:Hour,Hours\n"),
-            "should contain Hour unit equivalence, got: {:?}",
-            output
-        );
-    }
-
-    #[test]
-    fn settings_section_skips_disabled_units() {
-        let mut project = make_project(vec![make_model(vec![])]);
-        project.units = vec![Unit {
-            name: "Disabled".to_owned(),
-            equation: None,
-            disabled: true,
-            aliases: vec![],
-        }];
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        assert!(
-            !output.contains("22:Disabled"),
-            "disabled units should not appear in output"
-        );
-    }
-
-    #[test]
-    fn settings_section_contains_common_defaults() {
-        let project = make_project(vec![make_model(vec![])]);
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        let output = writer.buf;
-        // Type 4 (Time), Type 19 (display), Type 24/25/26 (time bounds)
-        assert!(output.contains("\n4:Time\n"), "should have Type 4 (Time)");
-        assert!(
-            output.contains("\n19:"),
-            "should have Type 19 (display settings)"
-        );
-        assert!(
-            output.contains("\n24:"),
-            "should have Type 24 (initial time)"
-        );
-        assert!(output.contains("\n25:"), "should have Type 25 (final time)");
-        assert!(output.contains("\n26:"), "should have Type 26 (time step)");
-    }
-
-    #[test]
-    fn settings_roundtrip_integration_method() {
-        // Write settings, then parse them back and check integration method
-        for method in [
-            SimMethod::Euler,
-            SimMethod::RungeKutta4,
-            SimMethod::RungeKutta2,
-        ] {
-            let mut project = make_project(vec![make_model(vec![])]);
-            project.sim_specs.sim_method = method;
-            let mut writer = MdlWriter::new();
-            writer.write_settings_section(&project);
-            // Prepend the separator that write_sketch_section normally emits
-            let output = format!("///---\\\\\\\n{}", writer.buf);
-
-            let parser = crate::mdl::settings::PostEquationParser::new(&output);
-            let settings = parser.parse_settings();
-            assert_eq!(
-                settings.integration_method, method,
-                "integration method should roundtrip for {:?}",
-                method
-            );
-        }
-    }
-
-    #[test]
-    fn settings_roundtrip_unit_equivalences() {
-        let mut project = make_project(vec![make_model(vec![])]);
-        project.units = vec![
-            Unit {
-                name: "Dollar".to_owned(),
-                equation: Some("$".to_owned()),
-                disabled: false,
-                aliases: vec!["Dollars".to_owned()],
-            },
-            Unit {
-                name: "Hour".to_owned(),
-                equation: None,
-                disabled: false,
-                aliases: vec!["Hours".to_owned(), "Hr".to_owned()],
-            },
-        ];
-        let mut writer = MdlWriter::new();
-        writer.write_settings_section(&project);
-        // Prepend the separator that write_sketch_section normally emits
-        let output = format!("///---\\\\\\\n{}", writer.buf);
-
-        let parser = crate::mdl::settings::PostEquationParser::new(&output);
-        let settings = parser.parse_settings();
-        assert_eq!(settings.unit_equivs.len(), 2);
-        assert_eq!(settings.unit_equivs[0].name, "Dollar");
-        assert_eq!(settings.unit_equivs[0].equation, Some("$".to_string()));
-        assert_eq!(settings.unit_equivs[0].aliases, vec!["Dollars"]);
-        assert_eq!(settings.unit_equivs[1].name, "Hour");
-        assert_eq!(settings.unit_equivs[1].equation, None);
-        assert_eq!(settings.unit_equivs[1].aliases, vec!["Hours", "Hr"]);
-    }
-
-    // ---- Phase 6 Task 2: Full file assembly ----
-
-    #[test]
-    fn full_assembly_has_all_three_sections() {
-        let var = make_aux("x", "5", Some("Units"), "A constant");
-        let elements = vec![ViewElement::Aux(view_element::Aux {
-            name: "x".to_string(),
-            uid: 1,
-            x: 100.0,
-            y: 100.0,
-            label_side: view_element::LabelSide::Bottom,
-        })];
-        let model = datamodel::Model {
-            name: "default".to_owned(),
-            sim_specs: None,
-            variables: vec![var],
-            views: vec![View::StockFlow(datamodel::StockFlow {
-                name: None,
-                elements,
-                view_box: Default::default(),
-                zoom: 1.0,
-                use_lettered_polarity: false,
-            })],
-            loop_metadata: vec![],
-            groups: vec![],
-        };
-        let project = make_project(vec![model]);
-
-        let result = crate::mdl::project_to_mdl(&project);
-        assert!(
-            result.is_ok(),
-            "project_to_mdl should succeed: {:?}",
-            result
-        );
-        let mdl = result.unwrap();
-
-        // Section 1: Equations -- contains variable entry
-        assert!(mdl.contains("x="), "should contain equation for x");
-        // Equations terminator
-        assert!(
-            mdl.contains("\\\\\\---/// Sketch information"),
-            "should have equations terminator"
-        );
-
-        // Section 2: Sketch -- V300 header and elements
-        assert!(mdl.contains("V300"), "should have V300 sketch header");
-        assert!(mdl.contains("*View 1"), "should have view title");
-
-        // Section 3: Settings -- marker and type codes
-        assert!(mdl.contains(":L<%^E!@"), "should have settings marker");
-        assert!(mdl.contains("15:"), "should have Type 15 line");
-
-        // Sections should be in order: equations, sketch, settings
-        let eq_term = mdl.find("\\\\\\---/// Sketch").unwrap();
-        let v300 = mdl.find("V300").unwrap();
-        let sketch_term = mdl.find("///---\\\\\\").unwrap();
-        let settings_marker = mdl.find(":L<%^E!@").unwrap();
-        assert!(eq_term < v300, "equations should come before sketch");
-        assert!(
-            v300 < sketch_term,
-            "V300 should come before sketch terminator"
-        );
-        assert!(
-            sketch_term < settings_marker,
-            "sketch terminator should come before settings marker"
-        );
-    }
-
-    // ---- Phase 6 Task 3: compat wrapper ----
-
-    #[test]
-    fn compat_to_mdl_matches_project_to_mdl() {
-        let var = make_aux("x", "5", Some("Units"), "A constant");
-        let project = make_project(vec![make_model(vec![var])]);
-
-        let direct = crate::mdl::project_to_mdl(&project).unwrap();
-        let compat = crate::compat::to_mdl(&project).unwrap();
-        assert_eq!(
-            direct, compat,
-            "compat::to_mdl should produce same result as mdl::project_to_mdl"
-        );
-    }
-
-    #[test]
-    fn write_arrayed_with_default_equation_omits_dimension_level_default() {
-        // When default_equation is set (from EXCEPT syntax), the writer must
-        // NOT emit name[Dim...]=default because that would apply the default
-        // equation to excepted elements that should default to 0.
-        let var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: "cost".to_string(),
-            equation: datamodel::Equation::Arrayed(
-                vec!["region".to_string()],
-                vec![
-                    ("north".to_string(), "base+1".to_string(), None, None),
-                    ("south".to_string(), "base+2".to_string(), None, None),
-                ],
-                Some("base".to_string()),
-                true,
-            ),
-            documentation: String::new(),
-            units: Some("dollars".to_string()),
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        });
-
-        let mut buf = String::new();
-        write_variable_entry(&mut buf, &var);
-
-        // Must NOT contain dimension-level default (would apply to excepted elements)
-        assert!(
-            !buf.contains("cost[region]="),
-            "should NOT contain dimension-level default equation, got: {buf}"
-        );
-        // Individual element equations should be present
-        assert!(
-            buf.contains("cost[north]="),
-            "should contain north element equation, got: {buf}"
-        );
-        assert!(
-            buf.contains("cost[south]="),
-            "should contain south element equation, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_dimension_with_element_level_mapping() {
-        let dim = datamodel::Dimension {
-            name: "dim_a".to_string(),
-            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
-            mappings: vec![datamodel::DimensionMapping {
-                target: "dim_b".to_string(),
-                element_map: vec![
-                    ("a1".to_string(), "b2".to_string()),
-                    ("a2".to_string(), "b1".to_string()),
-                ],
-            }],
-            parent: None,
-        };
-
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-
-        assert!(
-            buf.contains("-> (dim b: b2, b1)"),
-            "element-level mapping must use parenthesized syntax, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_dimension_with_multi_target_positional_mapping() {
-        let dim = datamodel::Dimension {
-            name: "dim_a".to_string(),
-            elements: datamodel::DimensionElements::Named(vec!["a1".to_string(), "a2".to_string()]),
-            mappings: vec![
-                datamodel::DimensionMapping {
-                    target: "dim_b".to_string(),
-                    element_map: vec![],
-                },
-                datamodel::DimensionMapping {
-                    target: "dim_c".to_string(),
-                    element_map: vec![],
-                },
-            ],
-            parent: None,
-        };
-
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-
-        assert!(
-            buf.contains("dim b") && buf.contains("dim c"),
-            "both positional mapping targets should be emitted, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_dimension_element_mapping_sorted_by_source_position() {
-        // element_map entries out of source order should still emit
-        // targets in the dimension's element order for correct positional
-        // correspondence on re-import.
-        let dim = datamodel::Dimension {
-            name: "dim_a".to_string(),
-            elements: datamodel::DimensionElements::Named(vec![
-                "a1".to_string(),
-                "a2".to_string(),
-                "a3".to_string(),
-            ]),
-            mappings: vec![datamodel::DimensionMapping {
-                target: "dim_b".to_string(),
-                element_map: vec![
-                    ("a3".to_string(), "b3".to_string()),
-                    ("a1".to_string(), "b1".to_string()),
-                    ("a2".to_string(), "b2".to_string()),
-                ],
-            }],
-            parent: None,
-        };
-
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-
-        assert!(
-            buf.contains("-> (dim b: b1, b2, b3)"),
-            "targets should be in source element order (a1->b1, a2->b2, a3->b3), got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_dimension_element_mapping_case_insensitive_lookup() {
-        // element_map uses canonical (lowercase) keys, but dim.elements
-        // may preserve original casing -- the sort must still work.
-        let dim = datamodel::Dimension {
-            name: "Region".to_string(),
-            elements: datamodel::DimensionElements::Named(vec![
-                "North".to_string(),
-                "South".to_string(),
-                "East".to_string(),
-            ]),
-            mappings: vec![datamodel::DimensionMapping {
-                target: "zone".to_string(),
-                element_map: vec![
-                    ("east".to_string(), "z3".to_string()),
-                    ("north".to_string(), "z1".to_string()),
-                    ("south".to_string(), "z2".to_string()),
-                ],
-            }],
-            parent: None,
-        };
-
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-
-        assert!(
-            buf.contains("-> (zone: z1, z2, z3)"),
-            "targets should be sorted by source element order despite case mismatch, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_dimension_element_mapping_underscored_names() {
-        // Element names with underscores must be normalized via to_lower_space()
-        // to match the canonical form used in element_map keys.
-        let dim = datamodel::Dimension {
-            name: "Continent".to_string(),
-            elements: datamodel::DimensionElements::Named(vec![
-                "North_America".to_string(),
-                "South_America".to_string(),
-                "Europe".to_string(),
-            ]),
-            mappings: vec![datamodel::DimensionMapping {
-                target: "zone".to_string(),
-                element_map: vec![
-                    ("europe".to_string(), "z3".to_string()),
-                    ("north america".to_string(), "z1".to_string()),
-                    ("south america".to_string(), "z2".to_string()),
-                ],
-            }],
-            parent: None,
-        };
-
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-
-        assert!(
-            buf.contains("-> (zone: z1, z2, z3)"),
-            "underscore element names should match canonical element_map keys, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_dimension_one_to_many_falls_back_to_positional() {
-        // When a source element maps to multiple targets (from subdimension
-        // expansion), the element-level notation can't round-trip correctly.
-        // The writer should fall back to a positional dimension-name mapping.
-        let dim = datamodel::Dimension {
-            name: "dim_b".to_string(),
-            elements: datamodel::DimensionElements::Named(vec!["b1".to_string(), "b2".to_string()]),
-            mappings: vec![datamodel::DimensionMapping {
-                target: "dim_a".to_string(),
-                element_map: vec![
-                    ("b1".to_string(), "a1".to_string()),
-                    ("b1".to_string(), "a2".to_string()),
-                    ("b2".to_string(), "a3".to_string()),
-                ],
-            }],
-            parent: None,
-        };
-
-        let mut buf = String::new();
-        write_dimension_def(&mut buf, &dim);
-
-        assert!(
-            buf.contains("-> dim a") && !buf.contains("(dim a:"),
-            "one-to-many mapping should fall back to positional notation, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_arrayed_with_default_equation_writes_explicit_elements() {
-        let mut buf = String::new();
-        write_arrayed_entries(
-            &mut buf,
-            "g",
-            &["DimA".to_string()],
-            &[
-                ("A1".to_string(), "10".to_string(), None, None),
-                ("A2".to_string(), "7".to_string(), None, None),
-                ("A3".to_string(), "7".to_string(), None, None),
-            ],
-            &Some("7".to_string()),
-            &None,
-            "",
-        );
-        assert!(
-            !buf.contains("g[DimA]"),
-            "dimension-level default must not be emitted, got: {buf}"
-        );
-        assert!(
-            !buf.contains(":EXCEPT:"),
-            "EXCEPT syntax should not be emitted"
-        );
-        assert!(
-            buf.contains("g[A1]"),
-            "A1 entry should be written explicitly, got: {buf}"
-        );
-        assert!(
-            buf.contains("g[A2]") && buf.contains("g[A3]"),
-            "all explicit array elements should be written, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_arrayed_no_default_writes_all_elements() {
-        let mut buf = String::new();
-        write_arrayed_entries(
-            &mut buf,
-            "h",
-            &["DimA".to_string()],
-            &[
-                ("A1".to_string(), "8".to_string(), None, None),
-                ("A2".to_string(), "0".to_string(), None, None),
-            ],
-            &None,
-            &None,
-            "",
-        );
-        assert!(
-            !buf.contains(":EXCEPT:"),
-            "should not emit EXCEPT when no default_equation, got: {buf}"
-        );
-        assert!(buf.contains("h[A1]"), "should write A1 element, got: {buf}");
-        assert!(buf.contains("h[A2]"), "should write A2 element, got: {buf}");
-    }
-
-    #[test]
-    fn write_arrayed_except_no_exceptions_all_default() {
-        let mut buf = String::new();
-        write_arrayed_entries(
-            &mut buf,
-            "k",
-            &["DimA".to_string()],
-            &[
-                ("A1".to_string(), "5".to_string(), None, None),
-                ("A2".to_string(), "5".to_string(), None, None),
-            ],
-            &Some("5".to_string()),
-            &None,
-            "",
-        );
-        assert!(
-            !buf.contains("k[DimA]"),
-            "dimension-level default must not be emitted, got: {buf}"
-        );
-        assert!(buf.contains("k[A1]"), "should write A1 element, got: {buf}");
-        assert!(buf.contains("k[A2]"), "should write A2 element, got: {buf}");
-        assert!(
-            !buf.contains(":EXCEPT:"),
-            "EXCEPT syntax should not be emitted, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn write_arrayed_except_with_omitted_elements_avoids_dimension_default() {
-        let mut buf = String::new();
-        write_arrayed_entries(
-            &mut buf,
-            "h",
-            &["DimA".to_string()],
-            &[("A1".to_string(), "8".to_string(), None, None)],
-            &Some("8".to_string()),
-            &None,
-            "",
-        );
-
-        assert!(
-            !buf.contains("h[DimA]"),
-            "dimension-level default would apply to omitted EXCEPT elements, got: {buf}"
-        );
-        assert!(
-            buf.contains("h[A1]"),
-            "explicitly present elements must still be emitted, got: {buf}"
-        );
-    }
-
-    #[test]
-    fn compat_get_direct_equation_does_not_produce_backslash_escapes() {
-        let compat = Compat {
-            data_source: Some(crate::datamodel::DataSource {
-                kind: crate::datamodel::DataSourceKind::Constants,
-                file: "data/a.csv".to_string(),
-                tab_or_delimiter: ",".to_string(),
-                row_or_col: "B2".to_string(),
-                cell: String::new(),
-            }),
-            ..Compat::default()
-        };
-        let eq = compat_get_direct_equation(&compat).expect("should produce equation");
-        assert!(
-            !eq.contains("\\'"),
-            "writer must not emit backslash-escaped quotes (parser treats ' as toggle): {eq}"
-        );
-        assert!(
-            eq.contains("GET DIRECT CONSTANTS"),
-            "should produce GET DIRECT CONSTANTS: {eq}"
-        );
-    }
-}
+#[path = "writer_tests.rs"]
+mod tests;

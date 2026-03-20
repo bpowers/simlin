@@ -396,6 +396,8 @@ mod tests {
                     view_box: datamodel::Rect::default(),
                     zoom: 1.0,
                     use_lettered_polarity: false,
+                    font: None,
+                    sketch_compat: None,
                 })],
                 loop_metadata: vec![],
                 groups: vec![],
@@ -412,6 +414,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         })
     }
 
@@ -422,6 +425,7 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
         })
     }
 
@@ -431,6 +435,7 @@ mod tests {
             flow_uid,
             x,
             y,
+            compat: None,
         })
     }
 
@@ -455,6 +460,8 @@ mod tests {
                     attached_to_uid: attached,
                 })
                 .collect(),
+            compat: None,
+            label_compat: None,
         })
     }
 

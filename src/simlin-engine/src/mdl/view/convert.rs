@@ -112,8 +112,11 @@ pub fn build_views(
     // We do steps 3 then 1 (flow points already have attached_to_uid from compute_flow_points).
     for view in &mut result {
         let View::StockFlow(sf) = view;
-        fixup_flow_takeoffs(&mut sf.elements);
-        reassign_uids_sequential(&mut sf.elements);
+        fixup_flow_takeoffs(&mut sf.elements, sf.sketch_compat.as_mut());
+        let uid_map = reassign_uids_sequential(&mut sf.elements);
+        if let Some(sketch_compat) = sf.sketch_compat.as_mut() {
+            remap_sketch_compat_uids(sketch_compat, &uid_map);
+        }
     }
 
     result
@@ -128,7 +131,10 @@ const STOCK_HEIGHT: f64 = 35.0;
 /// Matches the XMILE path's `fixup_flow_takeoffs()` in xmile.rs.
 /// When a flow point is attached to a stock, the coordinate is snapped
 /// to the nearest edge of the stock rectangle rather than its center.
-fn fixup_flow_takeoffs(elements: &mut [ViewElement]) {
+fn fixup_flow_takeoffs(
+    elements: &mut [ViewElement],
+    sketch_compat: Option<&mut view_element::StockFlowSketchCompat>,
+) {
     // Collect stock positions by UID
     let stocks: HashMap<i32, (f64, f64)> = elements
         .iter()
@@ -143,11 +149,27 @@ fn fixup_flow_takeoffs(elements: &mut [ViewElement]) {
 
     for elem in elements.iter_mut() {
         if let ViewElement::Flow(flow) = elem {
-            if flow.points.len() != 2 {
+            if flow.points.len() < 2 {
                 continue;
             }
-            let source = flow.points[0].clone();
-            let sink = flow.points[1].clone();
+            let source = flow
+                .points
+                .first()
+                .cloned()
+                .unwrap_or(view_element::FlowPoint {
+                    x: 0.0,
+                    y: 0.0,
+                    attached_to_uid: None,
+                });
+            let sink = flow
+                .points
+                .last()
+                .cloned()
+                .unwrap_or(view_element::FlowPoint {
+                    x: 0.0,
+                    y: 0.0,
+                    attached_to_uid: None,
+                });
 
             // Adjust source point if attached to a stock
             if let Some(stock_uid) = source.attached_to_uid
@@ -160,9 +182,14 @@ fn fixup_flow_takeoffs(elements: &mut [ViewElement]) {
             if let Some(stock_uid) = sink.attached_to_uid
                 && let Some(&(sx, sy)) = stocks.get(&stock_uid)
             {
-                adjust_takeoff_point(&mut flow.points[1], sx, sy, &source);
+                let last_idx = flow.points.len() - 1;
+                adjust_takeoff_point(&mut flow.points[last_idx], sx, sy, &source);
             }
         }
+    }
+
+    if let Some(sketch_compat) = sketch_compat {
+        sync_flow_sketch_points(elements, sketch_compat);
     }
 }
 
@@ -195,7 +222,7 @@ fn adjust_takeoff_point(
 ///
 /// Matches the XMILE path's `assign_uids()` in xmile.rs, which assigns
 /// UIDs sequentially in element order starting from 1.
-fn reassign_uids_sequential(elements: &mut [ViewElement]) {
+fn reassign_uids_sequential(elements: &mut [ViewElement]) -> HashMap<i32, i32> {
     // Build old_uid -> new_uid mapping
     let mut uid_map: HashMap<i32, i32> = HashMap::new();
     let mut next_uid = 1;
@@ -235,6 +262,42 @@ fn reassign_uids_sequential(elements: &mut [ViewElement]) {
             ViewElement::Group(g) => g.uid = remap(g.uid),
         }
     }
+
+    uid_map
+}
+
+fn sync_flow_sketch_points(
+    elements: &[ViewElement],
+    sketch_compat: &mut view_element::StockFlowSketchCompat,
+) {
+    for flow_compat in &mut sketch_compat.flows {
+        let Some(ViewElement::Flow(flow)) = elements
+            .iter()
+            .find(|elem| elem.get_uid() == flow_compat.uid)
+        else {
+            continue;
+        };
+        if flow.points.len() != flow_compat.pipe_points.len() {
+            continue;
+        }
+        for (point, compat) in flow.points.iter().zip(&mut flow_compat.pipe_points) {
+            compat.point_x = point.x;
+            compat.point_y = point.y;
+        }
+    }
+}
+
+fn remap_sketch_compat_uids(
+    sketch_compat: &mut view_element::StockFlowSketchCompat,
+    uid_map: &HashMap<i32, i32>,
+) {
+    let remap = |uid: i32| -> i32 { uid_map.get(&uid).copied().unwrap_or(uid) };
+    for flow in &mut sketch_compat.flows {
+        flow.uid = remap(flow.uid);
+    }
+    for link in &mut sketch_compat.links {
+        link.uid = remap(link.uid);
+    }
 }
 
 /// Merge multiple views into a single StockFlow view.
@@ -252,10 +315,22 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
 
     let mut all_elements = Vec::new();
     let mut use_lettered_polarity = false;
+    // Use the font from the first view (all views in a Vensim file
+    // typically share the same font specification).
+    let mut font = None;
+    let mut sketch_compat = view_element::StockFlowSketchCompat::default();
 
     for view in views {
         let View::StockFlow(sf) = view;
         use_lettered_polarity = use_lettered_polarity || sf.use_lettered_polarity;
+        if font.is_none() {
+            font = sf.font;
+        }
+        if let Some(mut compat) = sf.sketch_compat {
+            sketch_compat.segments.append(&mut compat.segments);
+            sketch_compat.flows.append(&mut compat.flows);
+            sketch_compat.links.append(&mut compat.links);
+        }
         all_elements.extend(sf.elements);
     }
 
@@ -265,6 +340,8 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
+        font,
+        sketch_compat: Some(sketch_compat),
     });
 
     vec![merged]
@@ -286,6 +363,8 @@ fn convert_view(
     use_lettered_polarity: bool,
 ) -> Option<View> {
     let mut elements = Vec::new();
+    let mut flow_sketch_compat = Vec::new();
+    let mut link_sketch_compat = Vec::new();
     let uid_offset = view.uid_offset;
     let (valve_to_flow, flow_to_valve) = build_attached_valve_flow_maps(view);
 
@@ -299,7 +378,7 @@ fn convert_view(
 
     // If multi-view, add a group element for this view
     if is_multi_view {
-        let group = create_sector_group(view, uid_offset, start_x, start_y);
+        let group = create_sector_group(view, original_title, uid_offset, start_x, start_y);
         elements.push(group);
     }
 
@@ -316,7 +395,7 @@ fn convert_view(
 
         match elem {
             VensimElement::Variable(var) => {
-                if let Some(view_elem) = convert_variable(
+                if let Some((view_elem, flow_compat)) = convert_variable(
                     var,
                     uid,
                     symbols,
@@ -330,6 +409,9 @@ fn convert_view(
                 ) {
                     if matches!(&view_elem, ViewElement::Flow(_)) {
                         emitted_flow_uids.insert(uid);
+                    }
+                    if let Some(flow_compat) = flow_compat {
+                        flow_sketch_compat.push(flow_compat);
                     }
                     elements.push(view_elem);
                 }
@@ -345,9 +427,10 @@ fn convert_view(
                 // Non-cloud comments are ignored
             }
             VensimElement::Connector(conn) => {
-                if let Some(link) =
+                if let Some((link, link_compat)) =
                     convert_connector(conn, uid, view, uid_offset, symbols, &valve_to_flow)
                 {
+                    link_sketch_compat.push(link_compat);
                     elements.push(link);
                 }
             }
@@ -367,6 +450,15 @@ fn convert_view(
         view_box: Default::default(),
         zoom: 1.0,
         use_lettered_polarity,
+        font: view.header.font.clone(),
+        sketch_compat: Some(view_element::StockFlowSketchCompat {
+            segments: vec![view_element::SketchSegmentCompat {
+                x_offset: view.x_offset as f64,
+                y_offset: view.y_offset as f64,
+            }],
+            flows: flow_sketch_compat,
+            links: link_sketch_compat,
+        }),
     }))
 }
 
@@ -400,6 +492,29 @@ fn should_filter_from_view(
     false
 }
 
+/// Build a ViewElementCompat from raw MDL sketch dimensions.
+fn make_compat(
+    width: i32,
+    height: i32,
+    shape: i32,
+    bits: i32,
+    name_field: Option<String>,
+    tail: &str,
+) -> view_element::ViewElementCompat {
+    view_element::ViewElementCompat {
+        width: width as f64,
+        height: height as f64,
+        shape,
+        bits: bits as u32,
+        name_field,
+        tail: if tail.is_empty() {
+            None
+        } else {
+            Some(tail.to_string())
+        },
+    }
+}
+
 /// Convert a variable element to the appropriate ViewElement type.
 #[allow(clippy::too_many_arguments)]
 fn convert_variable(
@@ -413,7 +528,7 @@ fn convert_variable(
     uid_offset: i32,
     view_offsets: &[i32],
     flow_to_valve: &HashMap<i32, i32>,
-) -> Option<ViewElement> {
+) -> Option<(ViewElement, Option<view_element::FlowSketchCompat>)> {
     let canonical = to_lower_space(&var.name);
 
     // Skip Time and unwanted control variables
@@ -454,47 +569,98 @@ fn convert_variable(
                 (var.x as f64, var.y as f64)
             };
 
-            return Some(ViewElement::Alias(view_element::Alias {
-                uid,
-                alias_of_uid,
-                x: alias_x,
-                y: alias_y,
-                label_side: view_element::LabelSide::Bottom,
-            }));
+            return Some((
+                ViewElement::Alias(view_element::Alias {
+                    uid,
+                    alias_of_uid,
+                    x: alias_x,
+                    y: alias_y,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: Some(make_compat(
+                        var.width, var.height, var.shape, var.bits, None, &var.tail,
+                    )),
+                }),
+                None,
+            ));
         }
     }
 
     let var_type = symbol_info.var_type;
 
     match var_type {
-        VariableType::Stock => Some(ViewElement::Stock(view_element::Stock {
-            name: xmile_name,
-            uid,
-            x: var.x as f64,
-            y: var.y as f64,
-            label_side: view_element::LabelSide::Top, // Stocks default to top
-        })),
-        VariableType::Flow => {
-            // For flows, find the associated valve and compute flow points
-            let (flow_x, flow_y, points) =
-                compute_flow_data(var, view, uid_offset, symbols, flow_to_valve);
-
-            Some(ViewElement::Flow(view_element::Flow {
+        VariableType::Stock => Some((
+            ViewElement::Stock(view_element::Stock {
                 name: xmile_name,
                 uid,
-                x: flow_x as f64,
-                y: flow_y as f64,
-                label_side: view_element::LabelSide::Bottom,
-                points,
-            }))
+                x: var.x as f64,
+                y: var.y as f64,
+                label_side: view_element::LabelSide::Top, // Stocks default to top
+                compat: Some(make_compat(
+                    var.width, var.height, var.shape, var.bits, None, &var.tail,
+                )),
+            }),
+            None,
+        )),
+        VariableType::Flow => {
+            // For flows, find the associated valve and compute flow points
+            let (flow_x, flow_y, points, pipe_points) =
+                compute_flow_data(var, view, uid_offset, symbols, flow_to_valve);
+
+            // compat holds the valve's dimensions; label_compat holds the label variable's
+            let valve_uid = flow_to_valve.get(&var.uid).copied().unwrap_or(var.uid - 1);
+            let valve_compat = if var.attached {
+                if let Some(VensimElement::Valve(valve)) = view.get(valve_uid) {
+                    Some(make_compat(
+                        valve.width,
+                        valve.height,
+                        valve.shape,
+                        valve.bits,
+                        Some(valve.name.clone()),
+                        &valve.tail,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            Some((
+                ViewElement::Flow(view_element::Flow {
+                    name: xmile_name,
+                    uid,
+                    x: flow_x as f64,
+                    y: flow_y as f64,
+                    label_side: view_element::LabelSide::Bottom,
+                    points,
+                    compat: valve_compat,
+                    label_compat: Some(make_compat(
+                        var.width, var.height, var.shape, var.bits, None, &var.tail,
+                    )),
+                }),
+                Some(view_element::FlowSketchCompat {
+                    uid,
+                    valve_x: flow_x as f64,
+                    valve_y: flow_y as f64,
+                    label_x: var.x as f64,
+                    label_y: var.y as f64,
+                    pipe_points,
+                }),
+            ))
         }
-        VariableType::Aux => Some(ViewElement::Aux(view_element::Aux {
-            name: xmile_name,
-            uid,
-            x: var.x as f64,
-            y: var.y as f64,
-            label_side: view_element::LabelSide::Bottom,
-        })),
+        VariableType::Aux => Some((
+            ViewElement::Aux(view_element::Aux {
+                name: xmile_name,
+                uid,
+                x: var.x as f64,
+                y: var.y as f64,
+                label_side: view_element::LabelSide::Bottom,
+                compat: Some(make_compat(
+                    var.width, var.height, var.shape, var.bits, None, &var.tail,
+                )),
+            }),
+            None,
+        )),
     }
 }
 
@@ -513,7 +679,12 @@ fn compute_flow_data(
     uid_offset: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     flow_to_valve: &HashMap<i32, i32>,
-) -> (i32, i32, Vec<view_element::FlowPoint>) {
+) -> (
+    i32,
+    i32,
+    Vec<view_element::FlowPoint>,
+    Vec<view_element::FlowSketchPointCompat>,
+) {
     // Look for valve at uid - 1 (typical Vensim layout)
     // xmutil requires BOTH conditions:
     // 1. Flow variable has attached=true (vele->Attached())
@@ -538,20 +709,81 @@ fn compute_flow_data(
         valve_uid, var.x, var.y, view, &canonical, symbols, uid_offset,
     );
 
-    let points = vec![
-        view_element::FlowPoint {
-            x: endpoints.from_x as f64,
-            y: endpoints.from_y as f64,
-            attached_to_uid: endpoints.from_uid,
-        },
-        view_element::FlowPoint {
-            x: endpoints.to_x as f64,
-            y: endpoints.to_y as f64,
-            attached_to_uid: endpoints.to_uid,
-        },
-    ];
+    let mut points = vec![view_element::FlowPoint {
+        x: endpoints.from_x as f64,
+        y: endpoints.from_y as f64,
+        attached_to_uid: endpoints.from_uid,
+    }];
+    let mut pipe_points = Vec::new();
 
-    (flow_x, flow_y, points)
+    let mut endpoint_connectors: HashMap<i32, (i32, i32)> = HashMap::new();
+    let mut bend_points: Vec<(i32, (i32, i32))> = Vec::new();
+    for elem in view.iter() {
+        let VensimElement::Connector(conn) = elem else {
+            continue;
+        };
+        if conn.from_uid != valve_uid {
+            continue;
+        }
+        if conn.to_uid == valve_uid {
+            bend_points.push((conn.uid, conn.control_point));
+        } else {
+            endpoint_connectors
+                .entry(conn.to_uid)
+                .or_insert(conn.control_point);
+        }
+    }
+    bend_points.sort_by_key(|(uid, _)| *uid);
+
+    if let Some(from_uid) = endpoints.from_uid {
+        let local_uid = from_uid - uid_offset;
+        let (connector_x, connector_y) = endpoint_connectors
+            .get(&local_uid)
+            .copied()
+            .unwrap_or((endpoints.from_x, endpoints.from_y));
+        pipe_points.push(view_element::FlowSketchPointCompat {
+            connector_x: connector_x as f64,
+            connector_y: connector_y as f64,
+            point_x: endpoints.from_x as f64,
+            point_y: endpoints.from_y as f64,
+        });
+    }
+
+    for (_, (bend_x, bend_y)) in bend_points {
+        points.push(view_element::FlowPoint {
+            x: bend_x as f64,
+            y: bend_y as f64,
+            attached_to_uid: None,
+        });
+        pipe_points.push(view_element::FlowSketchPointCompat {
+            connector_x: bend_x as f64,
+            connector_y: bend_y as f64,
+            point_x: bend_x as f64,
+            point_y: bend_y as f64,
+        });
+    }
+
+    points.push(view_element::FlowPoint {
+        x: endpoints.to_x as f64,
+        y: endpoints.to_y as f64,
+        attached_to_uid: endpoints.to_uid,
+    });
+
+    if let Some(to_uid) = endpoints.to_uid {
+        let local_uid = to_uid - uid_offset;
+        let (connector_x, connector_y) = endpoint_connectors
+            .get(&local_uid)
+            .copied()
+            .unwrap_or((endpoints.to_x, endpoints.to_y));
+        pipe_points.push(view_element::FlowSketchPointCompat {
+            connector_x: connector_x as f64,
+            connector_y: connector_y as f64,
+            point_x: endpoints.to_x as f64,
+            point_y: endpoints.to_y as f64,
+        });
+    }
+
+    (flow_x, flow_y, points, pipe_points)
 }
 
 /// Convert a comment element that serves as a cloud (flow endpoint).
@@ -561,6 +793,14 @@ fn convert_comment_as_cloud(comment: &VensimComment, uid: i32, flow_uid: i32) ->
         flow_uid,
         x: comment.x as f64,
         y: comment.y as f64,
+        compat: Some(make_compat(
+            comment.width,
+            comment.height,
+            comment.shape,
+            comment.bits,
+            Some(comment.text.clone()),
+            &comment.tail,
+        )),
     })
 }
 
@@ -572,7 +812,7 @@ fn convert_connector(
     uid_offset: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     valve_to_flow: &HashMap<i32, i32>,
-) -> Option<ViewElement> {
+) -> Option<(ViewElement, view_element::LinkSketchCompat)> {
     let from_uid = uid_offset + conn.from_uid;
     let to_uid = uid_offset + conn.to_uid;
 
@@ -595,6 +835,7 @@ fn convert_connector(
     }
 
     // Handle valve indirection: if 'from' is a valve, use the next element (flow)
+    let from_attached_valve = matches!(from_elem, VensimElement::Valve(v) if v.attached);
     let (actual_from, actual_from_uid) = match from_elem {
         VensimElement::Valve(v) if v.attached => {
             let flow_uid = resolve_flow_uid_for_valve(conn.from_uid, view, valve_to_flow)?;
@@ -605,6 +846,7 @@ fn convert_connector(
     };
 
     // Similarly for 'to'
+    let to_attached_valve = matches!(to_elem, VensimElement::Valve(v) if v.attached);
     let (actual_to, actual_to_uid) = match to_elem {
         VensimElement::Valve(v) if v.attached => {
             let flow_uid = resolve_flow_uid_for_valve(conn.to_uid, view, valve_to_flow)?;
@@ -648,6 +890,7 @@ fn convert_connector(
         let canonical = to_lower_space(&v.name);
         if let Some(info) = symbols.get(&canonical)
             && info.var_type == VariableType::Stock
+            && (conn.field4 == 4 || conn.field4 == 100 || from_attached_valve || to_attached_valve)
         {
             return None;
         }
@@ -662,13 +905,39 @@ fn convert_connector(
         _ => None,
     };
 
-    Some(ViewElement::Link(view_element::Link {
-        uid,
-        from_uid: actual_from_uid,
-        to_uid: actual_to_uid,
-        shape,
-        polarity,
-    }))
+    let (raw_from_x, raw_from_y) = if from_attached_valve {
+        (from_elem.x() as f64, from_elem.y() as f64)
+    } else {
+        (actual_from.x() as f64, actual_from.y() as f64)
+    };
+    let (raw_to_x, raw_to_y) = if to_attached_valve {
+        (to_elem.x() as f64, to_elem.y() as f64)
+    } else {
+        (actual_to.x() as f64, actual_to.y() as f64)
+    };
+
+    Some((
+        ViewElement::Link(view_element::Link {
+            uid,
+            from_uid: actual_from_uid,
+            to_uid: actual_to_uid,
+            shape,
+            polarity,
+        }),
+        view_element::LinkSketchCompat {
+            uid,
+            field4: conn.field4,
+            field10: conn.field10,
+            from_attached_valve,
+            to_attached_valve,
+            control_x: conn.control_point.0 as f64,
+            control_y: conn.control_point.1 as f64,
+            from_x: raw_from_x,
+            from_y: raw_from_y,
+            to_x: raw_to_x,
+            to_y: raw_to_y,
+        },
+    ))
 }
 
 /// Epsilon for comparing angles - angles within this threshold are considered equal.
@@ -727,6 +996,7 @@ fn calculate_link_shape(
 /// datamodel::view_element::Group expects CENTER coordinates.
 fn create_sector_group(
     view: &VensimView,
+    original_title: &str,
     uid_offset: i32,
     start_x: i32,
     start_y: i32,
@@ -745,11 +1015,12 @@ fn create_sector_group(
     // Convert to center coordinates for datamodel
     ViewElement::Group(view_element::Group {
         uid: uid_offset,
-        name: view.title().to_string(),
+        name: original_title.to_string(),
         x: top_left_x + width / 2.0,
         y: top_left_y + height / 2.0,
         width,
         height,
+        is_mdl_view_marker: true,
     })
 }
 
@@ -829,6 +1100,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -843,6 +1115,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -874,7 +1149,7 @@ mod tests {
     fn test_create_sector_group() {
         let view = create_test_view();
         // Typical starting position: x=100, y=100
-        let group = create_sector_group(&view, 0, 100, 100);
+        let group = create_sector_group(&view, view.title(), 0, 100, 100);
 
         if let ViewElement::Group(g) = group {
             assert_eq!(g.name, "Test View");
@@ -897,6 +1172,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -912,6 +1188,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -927,6 +1206,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // Usually marked as ghost
+                bits: 2,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -940,6 +1222,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (0, 0),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -988,6 +1272,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1003,6 +1288,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false, // Primary definition
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1018,6 +1306,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: true, // Ghost/alias
+                bits: 2,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1058,6 +1349,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Population".to_string(), // Same as variable name after canonicalization
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1072,6 +1364,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1099,6 +1394,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Demand/Supply-Overview*2026".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1113,6 +1409,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1135,6 +1434,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1150,6 +1450,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1165,6 +1468,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1192,6 +1498,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1207,6 +1514,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1222,6 +1532,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1235,6 +1548,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (0, 0),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1266,6 +1581,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1279,6 +1595,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1292,6 +1611,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1302,6 +1624,8 @@ mod tests {
             polarity: None,
             letter_polarity: false,
             control_point: (175, 120),
+            field4: 0,
+            field10: 0,
         };
         view.insert(10, VensimElement::Connector(bend_connector.clone()));
 
@@ -1324,6 +1648,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1338,6 +1663,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1351,6 +1679,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1363,6 +1694,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1376,6 +1710,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
 
@@ -1389,6 +1726,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (110, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
         view.insert(
@@ -1400,6 +1739,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (160, 130),
+                field4: 0,
+                field10: 0,
             }),
         );
         view.insert(
@@ -1411,6 +1752,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (210, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1462,6 +1805,7 @@ mod tests {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
+            font: None,
         };
         let mut view = VensimView::new(header);
 
@@ -1476,6 +1820,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1489,6 +1836,9 @@ mod tests {
                 height: 20,
                 attached: false,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1501,6 +1851,9 @@ mod tests {
                 width: 6,
                 height: 8,
                 attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1514,6 +1867,9 @@ mod tests {
                 height: 20,
                 attached: true,
                 is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
             }),
         );
         view.insert(
@@ -1525,6 +1881,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (122, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
         view.insert(
@@ -1536,6 +1894,8 @@ mod tests {
                 polarity: None,
                 letter_polarity: false,
                 control_point: (278, 100),
+                field4: 0,
+                field10: 0,
             }),
         );
 
@@ -1604,5 +1964,823 @@ mod tests {
             stock_uids.get("Stock_B").copied(),
             "sink endpoint should remain attached to Stock_B",
         );
+    }
+
+    #[test]
+    fn test_stock_targeted_causal_link_is_preserved() {
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Inventory".to_string(),
+                x: 220,
+                y: 120,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Policy".to_string(),
+                x: 80,
+                y: 120,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            3,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 3,
+                from_uid: 2,
+                to_uid: 1,
+                polarity: Some('+'),
+                letter_polarity: false,
+                control_point: (150, 120),
+                field4: 0,
+                field10: 7,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "inventory".to_string(),
+            make_symbol_info(VariableType::Stock),
+        );
+        symbols.insert("policy".to_string(), make_symbol_info(VariableType::Aux));
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let stock_uid = sf
+            .elements
+            .iter()
+            .find_map(|elem| match elem {
+                ViewElement::Stock(stock) => Some(stock.uid),
+                _ => None,
+            })
+            .expect("expected stock element");
+        let aux_uid = sf
+            .elements
+            .iter()
+            .find_map(|elem| match elem {
+                ViewElement::Aux(aux) => Some(aux.uid),
+                _ => None,
+            })
+            .expect("expected aux element");
+        let link = sf
+            .elements
+            .iter()
+            .find_map(|elem| match elem {
+                ViewElement::Link(link) => Some(link),
+                _ => None,
+            })
+            .expect("expected causal link");
+
+        assert_eq!(link.from_uid, aux_uid, "link should start at the aux");
+        assert_eq!(link.to_uid, stock_uid, "link should still target the stock");
+        assert_eq!(
+            link.polarity,
+            Some(view_element::LinkPolarity::Positive),
+            "polarity should be preserved",
+        );
+
+        let sketch_compat = sf.sketch_compat.as_ref().expect("expected sketch compat");
+        let link_compat = sketch_compat
+            .links
+            .iter()
+            .find(|compat| compat.uid == link.uid)
+            .expect("expected link sketch compat");
+        assert_eq!(link_compat.field4, 0);
+        assert_eq!(link_compat.field10, 7);
+        assert!(!link_compat.from_attached_valve);
+        assert!(!link_compat.to_attached_valve);
+    }
+
+    #[test]
+    fn test_attached_valve_connector_preserves_sketch_endpoint_metadata() {
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Stock B".to_string(),
+                x: 300,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            100,
+            VensimElement::Valve(super::super::types::VensimValve {
+                uid: 100,
+                name: "100".to_string(),
+                x: 200,
+                y: 100,
+                width: 6,
+                height: 8,
+                attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            6,
+            VensimElement::Variable(VensimVariable {
+                uid: 6,
+                name: "Flow Rate".to_string(),
+                x: 200,
+                y: 116,
+                width: 40,
+                height: 20,
+                attached: true,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            7,
+            VensimElement::Variable(VensimVariable {
+                uid: 7,
+                name: "Policy".to_string(),
+                x: 80,
+                y: 60,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            101,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 101,
+                from_uid: 100,
+                to_uid: 1,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (122, 100),
+                field4: 100,
+                field10: 0,
+            }),
+        );
+        view.insert(
+            102,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 102,
+                from_uid: 100,
+                to_uid: 2,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (278, 100),
+                field4: 4,
+                field10: 0,
+            }),
+        );
+        view.insert(
+            103,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 103,
+                from_uid: 7,
+                to_uid: 100,
+                polarity: Some('+'),
+                letter_polarity: false,
+                control_point: (150, 70),
+                field4: 1,
+                field10: 9,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "stock a".to_string(),
+            SymbolInfo {
+                var_type: VariableType::Stock,
+                equations: vec![],
+                inflows: vec![],
+                outflows: vec!["flow rate".to_string()],
+                unwanted: false,
+                alternate_name: None,
+            },
+        );
+        symbols.insert(
+            "stock b".to_string(),
+            SymbolInfo {
+                var_type: VariableType::Stock,
+                equations: vec![],
+                inflows: vec!["flow rate".to_string()],
+                outflows: vec![],
+                unwanted: false,
+                alternate_name: None,
+            },
+        );
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+        symbols.insert("policy".to_string(), make_symbol_info(VariableType::Aux));
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let flow_uid = sf
+            .elements
+            .iter()
+            .find_map(|elem| match elem {
+                ViewElement::Flow(flow) => Some(flow.uid),
+                _ => None,
+            })
+            .expect("expected flow element");
+        let link = sf
+            .elements
+            .iter()
+            .find_map(|elem| match elem {
+                ViewElement::Link(link) => Some(link),
+                _ => None,
+            })
+            .expect("expected causal link");
+
+        assert_eq!(
+            link.to_uid, flow_uid,
+            "datamodel link should target the flow, not the synthetic valve",
+        );
+        assert_eq!(
+            link.polarity,
+            Some(view_element::LinkPolarity::Positive),
+            "polarity should be preserved",
+        );
+
+        let sketch_compat = sf.sketch_compat.as_ref().expect("expected sketch compat");
+        let link_compat = sketch_compat
+            .links
+            .iter()
+            .find(|compat| compat.uid == link.uid)
+            .expect("expected link sketch compat");
+        assert_eq!(link_compat.field4, 1);
+        assert_eq!(link_compat.field10, 9);
+        assert!(!link_compat.from_attached_valve);
+        assert!(link_compat.to_attached_valve);
+        assert_eq!(link_compat.control_x, 170.0);
+        assert_eq!(link_compat.control_y, 130.0);
+        assert_eq!(link_compat.to_x, 220.0);
+        assert_eq!(link_compat.to_y, 160.0);
+    }
+
+    // --- Compat field population tests (AC2.1, AC2.2) ---
+
+    #[test]
+    fn test_stock_compat_preserves_dimensions() {
+        // AC2.1: Stock elements preserve original width/height/bits
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Stock".to_string(),
+                x: 100,
+                y: 50,
+                width: 53,
+                height: 32,
+                attached: false,
+                is_ghost: false,
+                bits: 131,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "test stock".to_string(),
+            make_symbol_info(VariableType::Stock),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let stock = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Stock(s) = e {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .expect("expected stock element");
+
+        let compat = stock.compat.as_ref().expect("expected compat on stock");
+        assert_eq!(compat.width, 53.0);
+        assert_eq!(compat.height, 32.0);
+        assert_eq!(compat.bits, 131);
+    }
+
+    #[test]
+    fn test_aux_compat_preserves_dimensions() {
+        // AC2.2: Aux elements preserve original dimensions and bits
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Aux".to_string(),
+                x: 200,
+                y: 150,
+                width: 45,
+                height: 25,
+                attached: false,
+                is_ghost: false,
+                bits: 7,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("test aux".to_string(), make_symbol_info(VariableType::Aux));
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let aux = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Aux(a) = e {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .expect("expected aux element");
+
+        let compat = aux.compat.as_ref().expect("expected compat on aux");
+        assert_eq!(compat.width, 45.0);
+        assert_eq!(compat.height, 25.0);
+        assert_eq!(compat.bits, 7);
+    }
+
+    #[test]
+    fn test_flow_compat_preserves_valve_and_label_dimensions() {
+        // AC2.2: Flow elements preserve valve compat and label compat
+        use super::super::types::VensimValve;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        // Stock for flow endpoint
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 50,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Valve at uid 2
+        view.insert(
+            2,
+            VensimElement::Valve(VensimValve {
+                uid: 2,
+                name: "444".to_string(),
+                x: 150,
+                y: 100,
+                width: 9,
+                height: 11,
+                attached: true,
+                bits: 17,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Flow variable at uid 3 (attached to valve)
+        view.insert(
+            3,
+            VensimElement::Variable(VensimVariable {
+                uid: 3,
+                name: "Flow Rate".to_string(),
+                x: 150,
+                y: 120,
+                width: 55,
+                height: 35,
+                attached: true,
+                is_ghost: false,
+                bits: 99,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("stock a".to_string(), make_symbol_info(VariableType::Stock));
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let flow = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Flow(f) = e {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .expect("expected flow element");
+
+        // compat comes from the valve
+        let compat = flow
+            .compat
+            .as_ref()
+            .expect("expected compat on flow (from valve)");
+        assert_eq!(compat.width, 9.0);
+        assert_eq!(compat.height, 11.0);
+        assert_eq!(compat.bits, 17);
+
+        // label_compat comes from the flow variable itself
+        let label_compat = flow
+            .label_compat
+            .as_ref()
+            .expect("expected label_compat on flow");
+        assert_eq!(label_compat.width, 55.0);
+        assert_eq!(label_compat.height, 35.0);
+        assert_eq!(label_compat.bits, 99);
+    }
+
+    #[test]
+    fn test_cloud_compat_preserves_dimensions() {
+        // AC2.2: Cloud elements preserve original dimensions and bits
+        use super::super::types::VensimValve;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        // Cloud (comment) at uid 1
+        view.insert(
+            1,
+            VensimElement::Comment(VensimComment {
+                uid: 1,
+                text: "".to_string(),
+                x: 50,
+                y: 100,
+                width: 18,
+                height: 18,
+                scratch_name: false,
+                bits: 12,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Stock at uid 2
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Stock B".to_string(),
+                x: 250,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Valve at uid 3
+        view.insert(
+            3,
+            VensimElement::Valve(VensimValve {
+                uid: 3,
+                name: "444".to_string(),
+                x: 150,
+                y: 100,
+                width: 6,
+                height: 8,
+                attached: true,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Flow at uid 4 (attached to valve)
+        view.insert(
+            4,
+            VensimElement::Variable(VensimVariable {
+                uid: 4,
+                name: "Flow Rate".to_string(),
+                x: 150,
+                y: 120,
+                width: 40,
+                height: 20,
+                attached: true,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Connector from valve to cloud (cloud detection requires conn.to_uid == comment_uid)
+        view.insert(
+            5,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 5,
+                from_uid: 3,
+                to_uid: 1,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (100, 100),
+                field4: 0,
+                field10: 0,
+            }),
+        );
+
+        // Connector from valve to stock
+        view.insert(
+            6,
+            VensimElement::Connector(super::super::types::VensimConnector {
+                uid: 6,
+                from_uid: 3,
+                to_uid: 2,
+                polarity: None,
+                letter_polarity: false,
+                control_point: (200, 100),
+                field4: 0,
+                field10: 0,
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        let mut stock_info = make_symbol_info(VariableType::Stock);
+        stock_info.inflows = vec!["flow rate".to_string()];
+        symbols.insert("stock b".to_string(), stock_info);
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let cloud = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Cloud(c) = e {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .expect("expected cloud element");
+
+        let compat = cloud.compat.as_ref().expect("expected compat on cloud");
+        assert_eq!(compat.width, 18.0);
+        assert_eq!(compat.height, 18.0);
+        assert_eq!(compat.bits, 12);
+    }
+
+    #[test]
+    fn test_alias_compat_preserves_dimensions() {
+        // AC2.2: Alias elements preserve original dimensions and bits
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        // Primary variable at uid 1
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Contact Rate".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        // Ghost/alias at uid 2 with non-default dimensions
+        view.insert(
+            2,
+            VensimElement::Variable(VensimVariable {
+                uid: 2,
+                name: "Contact Rate".to_string(),
+                x: 300,
+                y: 400,
+                width: 48,
+                height: 24,
+                attached: false,
+                is_ghost: true,
+                bits: 130,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "contact rate".to_string(),
+            make_symbol_info(VariableType::Aux),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+
+        let alias = sf
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Alias(a) = e {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .expect("expected alias element");
+
+        let compat = alias.compat.as_ref().expect("expected compat on alias");
+        assert_eq!(compat.width, 48.0);
+        assert_eq!(compat.height, 24.0);
+        assert_eq!(compat.bits, 130);
+    }
+
+    #[test]
+    fn test_font_flows_to_stock_flow() {
+        // AC1.4: font string from the parsed view header should appear in StockFlow.font
+        let font_spec =
+            "192-192-192,0,Verdana|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0";
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: Some(font_spec.to_string()),
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Aux".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("test aux".to_string(), make_symbol_info(VariableType::Aux));
+        let all_names = names_from_symbols(&symbols);
+
+        let views = build_views(vec![view], &symbols, &all_names);
+        assert_eq!(views.len(), 1);
+
+        let View::StockFlow(sf) = &views[0];
+        assert_eq!(sf.font.as_deref(), Some(font_spec));
+    }
+
+    #[test]
+    fn test_no_font_gives_none_in_stock_flow() {
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Test Aux".to_string(),
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("test aux".to_string(), make_symbol_info(VariableType::Aux));
+        let all_names = names_from_symbols(&symbols);
+
+        let views = build_views(vec![view], &symbols, &all_names);
+        assert_eq!(views.len(), 1);
+
+        let View::StockFlow(sf) = &views[0];
+        assert!(sf.font.is_none());
     }
 }

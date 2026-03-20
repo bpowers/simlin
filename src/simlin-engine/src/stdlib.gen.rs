@@ -104,6 +104,7 @@ fn delay1() -> Model {
                     x: 232_f64,
                     y: 168_f64,
                     label_side: LabelSide::Top,
+                    compat: None,
                 }),
                 ViewElement::Flow(view_element::Flow {
                     name: "input".to_string(),
@@ -123,6 +124,8 @@ fn delay1() -> Model {
                             attached_to_uid: Some(1),
                         },
                     ],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Flow(view_element::Flow {
                     name: "output".to_string(),
@@ -142,6 +145,8 @@ fn delay1() -> Model {
                             attached_to_uid: Some(9),
                         },
                     ],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "delay time".to_string(),
@@ -149,6 +154,7 @@ fn delay1() -> Model {
                     x: 337.5_f64,
                     y: 233_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Link(view_element::Link {
                     uid: 5,
@@ -170,18 +176,21 @@ fn delay1() -> Model {
                     x: 221_f64,
                     y: 41_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Cloud(view_element::Cloud {
                     uid: 8,
                     flow_uid: 2,
                     x: 130_f64,
                     y: 170_f64,
+                    compat: None,
                 }),
                 ViewElement::Cloud(view_element::Cloud {
                     uid: 9,
                     flow_uid: 3,
                     x: 353_f64,
                     y: 168_f64,
+                    compat: None,
                 }),
             ],
             view_box: Rect {
@@ -192,6 +201,8 @@ fn delay1() -> Model {
             },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -305,6 +316,7 @@ fn delay3() -> Model {
                 x: 232_f64,
                 y: 168_f64,
                 label_side: LabelSide::Top,
+                compat: None,
             }),
                 ViewElement::Flow(view_element::Flow {
                     name: "input".to_string(),
@@ -313,6 +325,8 @@ fn delay3() -> Model {
                     y: 170_f64,
                     label_side: LabelSide::Bottom,
                     points: vec![FlowPoint { x: 130_f64, y: 170_f64, attached_to_uid: Some(16) }, FlowPoint { x: 209.5_f64, y: 170_f64, attached_to_uid: Some(1) }],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Flow(view_element::Flow {
                     name: "output".to_string(),
@@ -321,6 +335,8 @@ fn delay3() -> Model {
                     y: 171_f64,
                     label_side: LabelSide::Bottom,
                     points: vec![FlowPoint { x: 520.5_f64, y: 171_f64, attached_to_uid: Some(9) }, FlowPoint { x: 620_f64, y: 171_f64, attached_to_uid: Some(17) }],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                 name: "delay time".to_string(),
@@ -328,6 +344,7 @@ fn delay3() -> Model {
                 x: 426.5_f64,
                 y: 300_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Link(view_element::Link {
                 uid: 5,
@@ -342,6 +359,7 @@ fn delay3() -> Model {
                 x: 221_f64,
                 y: 41_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Flow(view_element::Flow {
                     name: "Flow 1".to_string(),
@@ -350,6 +368,8 @@ fn delay3() -> Model {
                     y: 169_f64,
                     label_side: LabelSide::Bottom,
                     points: vec![FlowPoint { x: 254.5_f64, y: 169_f64, attached_to_uid: Some(1) }, FlowPoint { x: 345.5_f64, y: 169_f64, attached_to_uid: Some(8) }],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Stock(view_element::Stock {
                 name: "Stock 2".to_string(),
@@ -357,6 +377,7 @@ fn delay3() -> Model {
                 x: 368_f64,
                 y: 170_f64,
                 label_side: LabelSide::Top,
+                compat: None,
             }),
                 ViewElement::Stock(view_element::Stock {
                 name: "Stock 3".to_string(),
@@ -364,6 +385,7 @@ fn delay3() -> Model {
                 x: 498_f64,
                 y: 171_f64,
                 label_side: LabelSide::Top,
+                compat: None,
             }),
                 ViewElement::Flow(view_element::Flow {
                     name: "Flow 2".to_string(),
@@ -372,6 +394,8 @@ fn delay3() -> Model {
                     y: 170_f64,
                     label_side: LabelSide::Bottom,
                     points: vec![FlowPoint { x: 390.5_f64, y: 170_f64, attached_to_uid: Some(8) }, FlowPoint { x: 475.5_f64, y: 170_f64, attached_to_uid: Some(9) }],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Link(view_element::Link {
                 uid: 11,
@@ -413,16 +437,20 @@ fn delay3() -> Model {
                 flow_uid: 2,
                 x: 130_f64,
                 y: 170_f64,
+                compat: None,
             }),
                 ViewElement::Cloud(view_element::Cloud {
                 uid: 17,
                 flow_uid: 3,
                 x: 620_f64,
                 y: 171_f64,
+                compat: None,
             })],
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -516,6 +544,8 @@ fn smth1() -> Model {
                             attached_to_uid: Some(3),
                         },
                     ],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Stock(view_element::Stock {
                     name: "Output".to_string(),
@@ -523,6 +553,7 @@ fn smth1() -> Model {
                     x: 242.083_f64,
                     y: 165.333_f64,
                     label_side: LabelSide::Top,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "delay time".to_string(),
@@ -530,6 +561,7 @@ fn smth1() -> Model {
                     x: 118_f64,
                     y: 274.833_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "input".to_string(),
@@ -537,6 +569,7 @@ fn smth1() -> Model {
                     x: 106_f64,
                     y: 117_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Link(view_element::Link {
                     uid: 6,
@@ -558,12 +591,14 @@ fn smth1() -> Model {
                     x: 242.083_f64,
                     y: 54_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Cloud(view_element::Cloud {
                     uid: 9,
                     flow_uid: 2,
                     x: 103.833_f64,
                     y: 165.333_f64,
+                    compat: None,
                 }),
             ],
             view_box: Rect {
@@ -574,6 +609,8 @@ fn smth1() -> Model {
             },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -741,6 +778,8 @@ fn smth3() -> Model {
                             attached_to_uid: Some(7),
                         },
                     ],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Stock(view_element::Stock {
                     name: "Stock 1".to_string(),
@@ -748,6 +787,7 @@ fn smth3() -> Model {
                     x: 242.083_f64,
                     y: 165.333_f64,
                     label_side: LabelSide::Top,
+                    compat: None,
                 }),
                 ViewElement::Stock(view_element::Stock {
                     name: "Stock 2".to_string(),
@@ -755,6 +795,7 @@ fn smth3() -> Model {
                     x: 306.833_f64,
                     y: 248.333_f64,
                     label_side: LabelSide::Top,
+                    compat: None,
                 }),
                 ViewElement::Flow(view_element::Flow {
                     name: "flow 2".to_string(),
@@ -774,6 +815,8 @@ fn smth3() -> Model {
                             attached_to_uid: Some(8),
                         },
                     ],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Stock(view_element::Stock {
                     name: "Output".to_string(),
@@ -781,6 +824,7 @@ fn smth3() -> Model {
                     x: 391.833_f64,
                     y: 317.333_f64,
                     label_side: LabelSide::Top,
+                    compat: None,
                 }),
                 ViewElement::Flow(view_element::Flow {
                     name: "flow 3".to_string(),
@@ -800,6 +844,8 @@ fn smth3() -> Model {
                             attached_to_uid: Some(10),
                         },
                     ],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "delay time".to_string(),
@@ -807,6 +853,7 @@ fn smth3() -> Model {
                     x: 118_f64,
                     y: 274.833_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                     name: "input".to_string(),
@@ -814,6 +861,7 @@ fn smth3() -> Model {
                     x: 106_f64,
                     y: 117_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Link(view_element::Link {
                     uid: 14,
@@ -849,24 +897,28 @@ fn smth3() -> Model {
                     x: 242.083_f64,
                     y: 54_f64,
                     label_side: LabelSide::Bottom,
+                    compat: None,
                 }),
                 ViewElement::Cloud(view_element::Cloud {
                     uid: 19,
                     flow_uid: 6,
                     x: 103.833_f64,
                     y: 165.333_f64,
+                    compat: None,
                 }),
                 ViewElement::Cloud(view_element::Cloud {
                     uid: 20,
                     flow_uid: 9,
                     x: 187.833_f64,
                     y: 248.333_f64,
+                    compat: None,
                 }),
                 ViewElement::Cloud(view_element::Cloud {
                     uid: 21,
                     flow_uid: 11,
                     x: 232.333_f64,
                     y: 320.333_f64,
+                    compat: None,
                 }),
             ],
             view_box: Rect {
@@ -877,6 +929,8 @@ fn smth3() -> Model {
             },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -972,6 +1026,7 @@ fn trend() -> Model {
                 x: 268.33299999999997_f64,
                 y: 244.333_f64,
                 label_side: LabelSide::Top,
+                compat: None,
             }),
                 ViewElement::Flow(view_element::Flow {
                     name: "flow".to_string(),
@@ -980,6 +1035,8 @@ fn trend() -> Model {
                     y: 244.333_f64,
                     label_side: LabelSide::Bottom,
                     points: vec![FlowPoint { x: 134.333_f64, y: 244.333_f64, attached_to_uid: Some(13) }, FlowPoint { x: 245.83299999999997_f64, y: 244.333_f64, attached_to_uid: Some(3) }],
+                    compat: None,
+                    label_compat: None,
                 }),
                 ViewElement::Aux(view_element::Aux {
                 name: "output".to_string(),
@@ -987,6 +1044,7 @@ fn trend() -> Model {
                 x: 347.333_f64,
                 y: 181.333_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Aux(view_element::Aux {
                 name: "delay time".to_string(),
@@ -994,6 +1052,7 @@ fn trend() -> Model {
                 x: 255_f64,
                 y: 176.333_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Link(view_element::Link {
                 uid: 7,
@@ -1015,6 +1074,7 @@ fn trend() -> Model {
                 x: 197_f64,
                 y: 118_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Link(view_element::Link {
                 uid: 10,
@@ -1036,16 +1096,20 @@ fn trend() -> Model {
                 x: 268.333_f64,
                 y: 92_f64,
                 label_side: LabelSide::Bottom,
+                compat: None,
             }),
                 ViewElement::Cloud(view_element::Cloud {
                 uid: 13,
                 flow_uid: 4,
                 x: 134.333_f64,
                 y: 244.333_f64,
+                compat: None,
             })],
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],
@@ -1142,6 +1206,8 @@ fn npv() -> Model {
             view_box: Rect { x: 0_f64, y: 0_f64, width: 0_f64, height: 0_f64 },
             zoom: 1_f64,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         })],
         loop_metadata: vec![],
         groups: vec![],

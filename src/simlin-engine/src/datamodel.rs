@@ -464,6 +464,82 @@ pub mod view_element {
         Right,
     }
 
+    /// Vensim-specific layout metadata preserved during MDL roundtripping.
+    /// Stores original element dimensions and type bits so the writer can
+    /// reproduce the sketch section byte-for-byte.
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
+    pub struct ViewElementCompat {
+        pub width: f64,
+        pub height: f64,
+        pub shape: i32,
+        pub bits: u32,
+        /// Optional raw sketch field stored between the UID and coordinates.
+        /// Vensim uses this slot for attached valves and cloud comments.
+        pub name_field: Option<String>,
+        /// Raw fields following `bits` in the sketch record, preserved so the
+        /// writer can roundtrip MDL-specific flags it does not interpret.
+        pub tail: Option<String>,
+    }
+
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
+    pub struct SketchSegmentCompat {
+        /// Translation applied by MDL view composition before the datamodel sees
+        /// the view. Serializing a split view subtracts this offset again.
+        pub x_offset: f64,
+        pub y_offset: f64,
+    }
+
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
+    pub struct FlowSketchPointCompat {
+        /// Pipe-connector control point after MDL view composition.
+        pub connector_x: f64,
+        pub connector_y: f64,
+        /// Flow point coordinates as imported into the datamodel after MDL
+        /// normalization. The writer applies the current point delta to the
+        /// stored connector control point so edited flows still serialize
+        /// sensibly instead of snapping back to the original sketch geometry.
+        pub point_x: f64,
+        pub point_y: f64,
+    }
+
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
+    pub struct FlowSketchCompat {
+        pub uid: i32,
+        pub valve_x: f64,
+        pub valve_y: f64,
+        pub label_x: f64,
+        pub label_y: f64,
+        pub pipe_points: Vec<FlowSketchPointCompat>,
+    }
+
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq)]
+    pub struct LinkSketchCompat {
+        pub uid: i32,
+        pub field4: i32,
+        pub field10: i32,
+        pub from_attached_valve: bool,
+        pub to_attached_valve: bool,
+        pub control_x: f64,
+        pub control_y: f64,
+        pub from_x: f64,
+        pub from_y: f64,
+        pub to_x: f64,
+        pub to_y: f64,
+    }
+
+    #[cfg_attr(feature = "debug-derive", derive(Debug))]
+    #[derive(Clone, PartialEq, Default)]
+    pub struct StockFlowSketchCompat {
+        pub segments: Vec<SketchSegmentCompat>,
+        pub flows: Vec<FlowSketchCompat>,
+        pub links: Vec<LinkSketchCompat>,
+    }
+
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Clone, PartialEq)]
     pub struct Aux {
@@ -472,6 +548,7 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: LabelSide,
+        pub compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -482,6 +559,7 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: LabelSide,
+        pub compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -503,6 +581,8 @@ pub mod view_element {
         // pub segment_with_aux: i32,
         // pub aux_percentage_into_segment: f64,
         pub points: Vec<FlowPoint>,
+        pub compat: Option<ViewElementCompat>,
+        pub label_compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -548,6 +628,7 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: LabelSide,
+        pub compat: Option<ViewElementCompat>,
     }
 
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -557,6 +638,7 @@ pub mod view_element {
         pub flow_uid: i32,
         pub x: f64,
         pub y: f64,
+        pub compat: Option<ViewElementCompat>,
     }
 
     /// Visual container for grouping related model elements.
@@ -573,6 +655,11 @@ pub mod view_element {
         pub y: f64,
         pub width: f64,
         pub height: f64,
+        /// When true, this Group was synthesized during MDL multi-view merge
+        /// to mark a view boundary.  The MDL writer splits on these markers
+        /// to reconstruct the original per-view structure.  XMILE-sourced
+        /// groups (organizational containers) leave this `false`.
+        pub is_mdl_view_marker: bool,
     }
 }
 
@@ -638,6 +725,12 @@ pub struct StockFlow {
     /// letters (S/O) rather than symbols (+/-). Corresponds to xmutil's
     /// bLetterPolarity flag and XMILE's isee:use_lettered_polarity attribute.
     pub use_lettered_polarity: bool,
+    /// Vensim default font string (e.g. "Arial|12||0-0-0|0-0-0|-1--1--1|-1--1--1|96,96")
+    /// preserved during MDL roundtripping.
+    pub font: Option<String>,
+    /// Raw MDL sketch metadata that must survive parse normalization so the
+    /// writer can invert the standard MDL import path when exporting again.
+    pub sketch_compat: Option<view_element::StockFlowSketchCompat>,
 }
 
 impl StockFlow {

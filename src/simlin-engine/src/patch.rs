@@ -1222,6 +1222,8 @@ mod tests {
             view_box: datamodel::Rect::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         });
         let patch = ProjectPatch {
             project_ops: vec![],

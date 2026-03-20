@@ -272,6 +272,7 @@ pub mod view_element {
                 label_side: datamodel::view_element::LabelSide::from(
                     v.label_side.unwrap_or(LabelSide::Bottom),
                 ),
+                compat: None,
             }
         }
     }
@@ -299,6 +300,7 @@ pub mod view_element {
             x: 72.0,
             y: 28.0,
             label_side: datamodel::view_element::LabelSide::Top,
+            compat: None,
         }];
         for expected in cases {
             let expected = expected.clone();
@@ -380,6 +382,7 @@ pub mod view_element {
                 label_side: datamodel::view_element::LabelSide::from(
                     v.label_side.unwrap_or(LabelSide::Top),
                 ),
+                compat: None,
             }
         }
     }
@@ -407,6 +410,7 @@ pub mod view_element {
             x: 73.0,
             y: 29.0,
             label_side: datamodel::view_element::LabelSide::Center,
+            compat: None,
         }];
         for expected in cases {
             let expected = expected.clone();
@@ -577,6 +581,8 @@ pub mod view_element {
                     v.label_side.unwrap_or(LabelSide::Bottom),
                 ),
                 points,
+                compat: None,
+                label_compat: None,
             }
         }
     }
@@ -619,6 +625,8 @@ pub mod view_element {
                     attached_to_uid: Some(666),
                 },
             ],
+            compat: None,
+            label_compat: None,
         }];
         for expected in cases {
             let expected = expected.clone();
@@ -644,6 +652,8 @@ pub mod view_element {
                     attached_to_uid: None,
                 },
             ],
+            compat: None,
+            label_compat: None,
         };
         let expected_v = datamodel::view_element::Flow {
             name: "from_vensim_v".to_string(),
@@ -663,6 +673,8 @@ pub mod view_element {
                     attached_to_uid: None,
                 },
             ],
+            compat: None,
+            label_compat: None,
         };
         let actual_v = datamodel::view_element::Flow::from(Flow::from(input_v));
         assert_eq!(expected_v, actual_v);
@@ -685,6 +697,8 @@ pub mod view_element {
                     attached_to_uid: None,
                 },
             ],
+            compat: None,
+            label_compat: None,
         };
         let expected_h = datamodel::view_element::Flow {
             name: "from_vensim_h".to_string(),
@@ -704,6 +718,8 @@ pub mod view_element {
                     attached_to_uid: None,
                 },
             ],
+            compat: None,
+            label_compat: None,
         };
         let actual_h = datamodel::view_element::Flow::from(Flow::from(input_h));
         assert_eq!(expected_h, actual_h);
@@ -1032,6 +1048,8 @@ pub mod view_element {
             view_box: Default::default(),
             zoom: 0.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
         for expected in cases {
             let expected = expected.clone();
@@ -1053,6 +1071,7 @@ pub mod view_element {
                     x: 0.0,
                     y: 0.0,
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "to_var".to_string(),
@@ -1060,11 +1079,14 @@ pub mod view_element {
                     x: 100.0,
                     y: 0.0, // directly to the right
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
             ],
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
 
         let link = datamodel::view_element::Link {
@@ -1106,6 +1128,7 @@ pub mod view_element {
                     x: 0.0,
                     y: 0.0,
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "to_var".to_string(),
@@ -1113,11 +1136,14 @@ pub mod view_element {
                     x: 100.0,
                     y: 100.0, // down and to the right (45 degrees in canvas coords, Y-down)
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
             ],
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
 
         let link = datamodel::view_element::Link {
@@ -1153,6 +1179,7 @@ pub mod view_element {
                     x: 0.0,
                     y: 0.0,
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "to_var".to_string(),
@@ -1160,11 +1187,14 @@ pub mod view_element {
                     x: 100.0,
                     y: 0.0, // directly to the right
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
             ],
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
 
         // Create an XMILE link with angle = 0 (straight horizontal right)
@@ -1202,6 +1232,7 @@ pub mod view_element {
                     x: 0.0,
                     y: 0.0,
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "to_var".to_string(),
@@ -1209,11 +1240,14 @@ pub mod view_element {
                     x: 100.0,
                     y: 0.0, // directly to the right
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
             ],
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
 
         // Create an XMILE link with angle = 45 (curved, not straight)
@@ -1261,6 +1295,7 @@ pub mod view_element {
                     x: 0.0,
                     y: 0.0,
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
                 datamodel::ViewElement::Aux(datamodel::view_element::Aux {
                     name: "to_var".to_string(),
@@ -1268,11 +1303,14 @@ pub mod view_element {
                     x: 100.0,
                     y: 0.0,
                     label_side: datamodel::view_element::LabelSide::Top,
+                    compat: None,
                 }),
             ],
             view_box: Default::default(),
             zoom: 1.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
 
         // Angle very close to straight (within epsilon) should become Straight
@@ -1438,6 +1476,7 @@ pub mod view_element {
                 label_side: datamodel::view_element::LabelSide::from(
                     v.label_side.unwrap_or(LabelSide::Bottom),
                 ),
+                compat: None,
             }
         }
     }
@@ -1466,6 +1505,7 @@ pub mod view_element {
             x: 74.0,
             y: 31.0,
             label_side: datamodel::view_element::LabelSide::Right,
+            compat: None,
         }];
         let view = StockFlow {
             name: None,
@@ -1473,6 +1513,8 @@ pub mod view_element {
             view_box: Default::default(),
             zoom: 0.0,
             use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
         };
         for expected in cases {
             let expected = expected.clone();
@@ -1497,6 +1539,7 @@ pub mod view_element {
                 flow_uid: v.flow_uid,
                 x: v.x,
                 y: v.y,
+                compat: None,
             }
         }
     }
@@ -1519,6 +1562,7 @@ pub mod view_element {
             flow_uid: 31,
             x: 73.0,
             y: 29.0,
+            compat: None,
         }];
         for expected in cases {
             let expected = expected.clone();
@@ -1574,6 +1618,7 @@ pub mod view_element {
                 y: v.y + v.height / 2.0,
                 width: v.width,
                 height: v.height,
+                is_mdl_view_marker: false,
             }
         }
     }
@@ -1601,6 +1646,7 @@ pub mod view_element {
             y: 175.0,
             width: 200.0,
             height: 150.0,
+            is_mdl_view_marker: false,
         }];
         for expected in cases {
             let expected = expected.clone();
@@ -2162,6 +2208,8 @@ impl From<View> for datamodel::View {
                     }
                 },
                 use_lettered_polarity: false,
+                font: None,
+                sketch_compat: None,
             })
         } else {
             unreachable!("only stock_flow supported for now -- should be filtered out before here")
@@ -2208,6 +2256,7 @@ fn test_view_roundtrip() {
                 x: 73.0,
                 y: 29.0,
                 label_side: datamodel::view_element::LabelSide::Center,
+                compat: None,
             },
         )],
         view_box: Rect {
@@ -2218,6 +2267,8 @@ fn test_view_roundtrip() {
         },
         zoom: 1.6,
         use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
     })];
     for expected in cases {
         let expected = expected.clone();

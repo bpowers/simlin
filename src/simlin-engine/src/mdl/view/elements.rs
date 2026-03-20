@@ -122,7 +122,7 @@ pub fn parse_variable(uid: i32, fields: &str) -> Result<VensimVariable, ViewErro
     let (width, rest) = parse_int_field(rest);
     let (height, rest) = parse_int_field(rest);
     let (shape, rest) = parse_int_field(rest);
-    let (bits, _) = parse_int_field(rest);
+    let (bits, tail) = parse_int_field(rest);
 
     let attached = (shape & (1 << 5)) != 0;
     let is_ghost = (bits & 1) == 0;
@@ -134,8 +134,11 @@ pub fn parse_variable(uid: i32, fields: &str) -> Result<VensimVariable, ViewErro
         y,
         width,
         height,
+        shape,
         attached,
         is_ghost,
+        bits,
+        tail: tail.to_string(),
     })
 }
 
@@ -150,7 +153,8 @@ pub fn parse_valve(uid: i32, fields: &str) -> Result<VensimValve, ViewError> {
     let (y, rest) = parse_int_field(rest);
     let (width, rest) = parse_int_field(rest);
     let (height, rest) = parse_int_field(rest);
-    let (shape, _) = parse_int_field(rest);
+    let (shape, rest) = parse_int_field(rest);
+    let (bits, tail) = parse_int_field(rest);
 
     let attached = (shape & (1 << 5)) != 0;
 
@@ -161,7 +165,10 @@ pub fn parse_valve(uid: i32, fields: &str) -> Result<VensimValve, ViewError> {
         y,
         width,
         height,
+        shape,
         attached,
+        bits,
+        tail: tail.to_string(),
     })
 }
 
@@ -180,7 +187,7 @@ pub fn parse_comment(uid: i32, fields: &str) -> Result<(VensimComment, bool), Vi
     let (width, rest) = parse_int_field(rest);
     let (height, rest) = parse_int_field(rest);
     let (_shape, rest) = parse_int_field(rest);
-    let (bits, _) = parse_int_field(rest);
+    let (bits, tail) = parse_int_field(rest);
 
     let scratch_name = (bits & (1 << 2)) != 0;
 
@@ -192,7 +199,10 @@ pub fn parse_comment(uid: i32, fields: &str) -> Result<(VensimComment, bool), Vi
             y,
             width,
             height,
+            shape: _shape,
             scratch_name,
+            bits,
+            tail: tail.to_string(),
         },
         scratch_name,
     ))
@@ -210,15 +220,15 @@ pub fn parse_comment(uid: i32, fields: &str) -> Result<(VensimComment, bool), Vi
 pub fn parse_connector(uid: i32, fields: &str) -> Result<VensimConnector, ViewError> {
     let (from_uid, rest) = parse_int_field(fields);
     let (to_uid, rest) = parse_int_field(rest);
-    let (_ignore1, rest) = parse_string_field(rest);
+    let (field4, rest) = parse_int_field(rest);
     let (_ignore2, rest) = parse_string_field(rest);
     let (polarity_ascii, rest) = parse_int_field(rest);
 
-    // Skip 6 ignored fields
+    // Skip field 7, 8, and 9, then preserve field 10.
     let (_, rest) = parse_string_field(rest);
     let (_, rest) = parse_string_field(rest);
     let (_, rest) = parse_string_field(rest);
-    let (_, rest) = parse_string_field(rest);
+    let (field10, rest) = parse_int_field(rest);
     let (_, rest) = parse_string_field(rest);
     let (_, rest) = parse_string_field(rest);
 
@@ -231,9 +241,11 @@ pub fn parse_connector(uid: i32, fields: &str) -> Result<VensimConnector, ViewEr
         uid,
         from_uid,
         to_uid,
+        field4,
         polarity,
         letter_polarity,
         control_point,
+        field10,
     })
 }
 
@@ -400,6 +412,7 @@ mod tests {
         assert_eq!(var.height, 20);
         assert!(!var.attached); // shape=3, bit 5 not set
         assert!(!var.is_ghost); // bits=3, bit 0 is set
+        assert_eq!(var.bits, 3);
     }
 
     #[test]
@@ -411,6 +424,7 @@ mod tests {
         assert_eq!(var.name, "Infection Rate");
         assert!(var.attached); // shape=40 has bit 5 set
         assert!(!var.is_ghost);
+        assert_eq!(var.bits, 3);
     }
 
     #[test]
@@ -422,6 +436,7 @@ mod tests {
 
         assert_eq!(var.name, "Contact Rate c");
         assert!(var.is_ghost); // bits=2, bit 0 not set
+        assert_eq!(var.bits, 2);
     }
 
     #[test]
@@ -435,6 +450,7 @@ mod tests {
         assert_eq!(valve.x, 295);
         assert_eq!(valve.y, 191);
         assert!(valve.attached); // shape=34 has bit 5 set
+        assert_eq!(valve.bits, 3);
     }
 
     #[test]
@@ -450,6 +466,7 @@ mod tests {
         assert_eq!(comment.y, 218);
         assert!(scratch_name);
         assert!(comment.scratch_name);
+        assert_eq!(comment.bits, 4);
     }
 
     #[test]
@@ -461,6 +478,7 @@ mod tests {
         assert_eq!(comment.text, "Some text");
         assert!(!scratch_name);
         assert!(!comment.scratch_name);
+        assert_eq!(comment.bits, 0);
     }
 
     #[test]
