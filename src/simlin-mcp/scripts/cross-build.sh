@@ -17,8 +17,10 @@ IMAGE_NAME="simlin-mcp-cross"
 CACHE_VOLUME="simlin-mcp-cross-cache"
 DIST_DIR="$MCP_DIR/dist"
 
-echo "==> Building cross-compilation toolchain image..."
-docker build -t "$IMAGE_NAME" -f "$MCP_DIR/Dockerfile.cross" "$MCP_DIR/"
+RUST_VERSION=$(grep '^channel' "$REPO_ROOT/rust-toolchain.toml" | sed 's/channel = "\(.*\)"/\1/')
+
+echo "==> Building cross-compilation toolchain image (rust $RUST_VERSION)..."
+docker build --build-arg "RUST_VERSION=$RUST_VERSION" -t "$IMAGE_NAME" -f "$MCP_DIR/Dockerfile.cross" "$MCP_DIR/"
 
 # Previous Docker runs leave root-owned files in dist/; remove via Docker
 # to avoid "Permission denied" when cleaning up as a non-root user.

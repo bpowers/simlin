@@ -66,15 +66,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read Rust toolchain version
-        id: rust-version
-        run: echo "version=$(grep '^channel' rust-toolchain.toml | sed 's/channel = \"\(.*\)\"/\1/')" >> "$GITHUB_OUTPUT"
-
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.rust-version.outputs.version }}
-          targets: ${{ matrix.target }}
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
 
       - name: Cache Cargo artifacts
         uses: actions/cache@v4
