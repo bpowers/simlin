@@ -2,10 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Integration test for build-npm-packages.sh (AC5.2).
+//! Integration test for build-npm-packages.sh (AC4).
 //!
 //! Runs the shell script in a temporary output directory and validates that each
-//! platform package.json contains the correct name, version, os, and cpu fields.
+//! platform package.json contains the correct name, version, os, cpu,
+//! publishConfig, and repository fields.
 
 use std::process::Command;
 
@@ -19,6 +20,11 @@ const PLATFORMS: &[Platform] = &[
     Platform {
         suffix: "darwin-arm64",
         os: "darwin",
+        cpu: "arm64",
+    },
+    Platform {
+        suffix: "linux-arm64",
+        os: "linux",
         cpu: "arm64",
     },
     Platform {
@@ -46,9 +52,9 @@ fn cargo_version() -> String {
     panic!("could not parse version from Cargo.toml");
 }
 
-// simlin-mcp.AC5.2: build-npm-packages.sh produces correct os/cpu/name/version fields
+// simlin-mcp.AC4: build-npm-packages.sh produces correct os/cpu/name/version/publishConfig/repository fields
 #[test]
-fn ac5_2_platform_packages_have_correct_fields() {
+fn ac4_platform_packages_have_correct_fields() {
     let tmp = tempfile::tempdir().expect("failed to create tempdir");
 
     // The script uses SCRIPT_DIR to locate Cargo.toml and to write into npm/.
@@ -138,5 +144,72 @@ fn ac5_2_platform_packages_have_correct_fields() {
             "wrong cpu for platform {}",
             plat.suffix
         );
+
+        // AC4.4: publishConfig and repository
+        let publish_config = &pkg["publishConfig"];
+        assert_eq!(
+            publish_config["access"], "public",
+            "missing publishConfig.access for {}",
+            plat.suffix
+        );
+
+        let repo = &pkg["repository"];
+        assert_eq!(
+            repo["type"], "git",
+            "missing repository.type for {}",
+            plat.suffix
+        );
+        assert!(
+            repo["url"].as_str().unwrap_or("").contains("simlin"),
+            "repository.url should reference simlin for {}",
+            plat.suffix
+        );
     }
+
+    // AC4.3: exactly 4 platform directories, no extras
+    let simlin_dir = tmp.path().join("npm").join("@simlin");
+    let dir_count = std::fs::read_dir(&simlin_dir)
+        .expect("failed to read @simlin directory")
+        .filter(|e| {
+            e.as_ref()
+                .map(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        dir_count, 4,
+        "expected exactly 4 platform directories under npm/@simlin/, got {dir_count}"
+    );
+}
+
+#[test]
+fn ac4_2_js_launcher_windows_triple() {
+    let js_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/simlin-mcp.js");
+    let contents = std::fs::read_to_string(&js_path).expect("read simlin-mcp.js");
+    assert!(
+        contents.contains("x86_64-pc-windows-gnu"),
+        "JS launcher should map Windows to x86_64-pc-windows-gnu for npm packages"
+    );
+    // The dev vendor fallback should also try the msvc triple, since
+    // `cargo build` on Windows produces msvc binaries by default.
+    assert!(
+        contents.contains("x86_64-pc-windows-msvc"),
+        "JS launcher dev fallback should also try the msvc triple for Windows"
+    );
+}
+
+#[test]
+fn ac4_4_wrapper_package_json_has_publish_config() {
+    let pkg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("package.json");
+    let contents = std::fs::read_to_string(&pkg_path).expect("read package.json");
+    let pkg: serde_json::Value = serde_json::from_str(&contents).expect("valid JSON");
+    assert_eq!(pkg["publishConfig"]["access"], "public");
+    assert_eq!(pkg["repository"]["type"], "git");
+    assert!(
+        pkg["repository"]["url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("simlin"),
+        "repository.url should reference simlin"
+    );
 }

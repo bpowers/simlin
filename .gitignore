@@ -98,3 +98,4 @@ __pycache__/
 # simlin-mcp npm packaging artifacts
 /src/simlin-mcp/vendor
 /src/simlin-mcp/npm
+/src/simlin-mcp/dist
