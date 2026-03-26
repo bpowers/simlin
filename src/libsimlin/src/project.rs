@@ -726,6 +726,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         }
     };
 
+    let datamodel_locked = proj.datamodel.lock().unwrap();
     let db_locked = proj.db.lock().unwrap();
     let sync_state = proj.sync_state.lock().unwrap();
     let sync = match sync_state.as_ref() {
@@ -740,7 +741,8 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         Err(err) => Some(err),
     };
 
-    let all_errors = gather_error_details_with_db(&db_locked, &sync, vm_error.as_ref());
+    let all_errors =
+        gather_error_details_with_db(&db_locked, &sync, vm_error.as_ref(), &datamodel_locked);
 
     if all_errors.is_empty() {
         return ptr::null_mut();

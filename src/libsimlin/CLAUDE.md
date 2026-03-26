@@ -63,7 +63,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
   - JSON patch types (`JsonProjectPatch`, `JsonModelPatch`, `JsonProjectOperation`, `JsonModelOperation`)
   - `simlin_project_apply_patch()` with dry-run support
   - `convert_json_project_patch()`, `convert_json_model_patch()` - JSON to engine patch conversion
-  - `gather_error_details_with_db()` collects errors exclusively from the salsa accumulator path (`collect_all_diagnostics`) plus an optional VM validation error
+  - `gather_error_details_with_db()` collects errors from the salsa accumulator path (`collect_all_diagnostics`) plus an optional VM validation error, using the datamodel for snippet/squiggle formatting
 
 ### Infrastructure
 

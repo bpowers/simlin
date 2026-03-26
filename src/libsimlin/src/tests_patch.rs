@@ -238,3 +238,110 @@ fn test_ltm_sim_then_patch_does_not_inherit_ltm_mode() {
         simlin_project_unref(proj);
     }
 }
+
+/// Verify that simlin_project_get_errors produces error details with
+/// snippet/squiggle formatting when a variable has an equation error.
+#[test]
+fn test_project_get_errors_includes_snippets() {
+    let datamodel = TestProject::new("snippet-via-ffi")
+        .aux("bad", "1 + bogus", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        let errors = simlin_project_get_errors(proj, &mut out_error);
+        assert!(out_error.is_null(), "unexpected operational error");
+        assert!(!errors.is_null(), "expected errors for bad equation");
+
+        let detail_count = simlin_error_get_detail_count(errors);
+        assert!(detail_count > 0, "expected at least one error detail");
+
+        let mut found_snippet = false;
+        for i in 0..detail_count {
+            let detail = simlin_error_get_detail(errors, i);
+            assert!(!detail.is_null());
+            let detail_ref = &*detail;
+            if !detail_ref.message.is_null() {
+                let msg = CStr::from_ptr(detail_ref.message).to_str().unwrap();
+                if msg.contains("1 + bogus") && msg.contains("~~~~~") {
+                    found_snippet = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            found_snippet,
+            "error detail messages should contain snippet with equation text and squiggle underline"
+        );
+
+        simlin_error_free(errors);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Verify that apply_patch error collection includes snippet formatting
+/// when the patch introduces a variable with a bad equation.
+#[test]
+fn test_apply_patch_errors_include_snippets() {
+    let datamodel = TestProject::new("patch-snippet")
+        .aux("ok_var", "42", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "broken", "equation": "1 + nonexistent" } }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true, // allow_errors so the patch is accepted
+            &mut collected_errors as *mut *mut SimlinError,
+            &mut out_error as *mut *mut SimlinError,
+        );
+        assert!(out_error.is_null(), "patch should succeed with allow_errors=true");
+        assert!(
+            !collected_errors.is_null(),
+            "should have collected errors for bad equation"
+        );
+
+        let detail_count = simlin_error_get_detail_count(collected_errors);
+        assert!(detail_count > 0, "expected at least one error detail");
+
+        let mut found_snippet = false;
+        for i in 0..detail_count {
+            let detail = simlin_error_get_detail(collected_errors, i);
+            assert!(!detail.is_null());
+            let detail_ref = &*detail;
+            if !detail_ref.message.is_null() {
+                let msg = CStr::from_ptr(detail_ref.message).to_str().unwrap();
+                if msg.contains("1 + nonexistent") && msg.contains("~~~~~~~~~~~") {
+                    found_snippet = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            found_snippet,
+            "patch error details should contain snippet with equation text and squiggle underline"
+        );
+
+        simlin_error_free(collected_errors);
+        simlin_project_unref(proj);
+    }
+}

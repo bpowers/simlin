@@ -323,15 +323,23 @@ impl ErrorDetailBuilder {
 /// If a VM validation error is provided, it is appended to the result.
 /// The caller is responsible for running `compile_project_incremental`
 /// separately and passing the result here.
+///
+/// The `datamodel` parameter enables snippet/squiggle formatting by
+/// providing variable equation text for equation and unit errors.
 pub(crate) fn gather_error_details_with_db(
     db: &engine::db::SimlinDb,
     sync: &engine::db::SyncResult<'_>,
     vm_error: Option<&engine::Error>,
+    datamodel: &engine::datamodel::Project,
 ) -> Vec<ErrorDetailData> {
     let diags = engine::db::collect_all_diagnostics(db, sync);
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
-        .map(|d| ErrorDetailBuilder::from_formatted(errors::format_diagnostic(d)))
+        .map(|d| {
+            ErrorDetailBuilder::from_formatted(errors::format_diagnostic_with_datamodel(
+                d, datamodel,
+            ))
+        })
         .collect();
 
     if let Some(error) = vm_error {
@@ -472,7 +480,8 @@ pub(crate) unsafe fn apply_project_patch_internal(
         Err(err) => Some(err),
     };
 
-    let all_errors = gather_error_details_with_db(&db, &staged_sync, sim_error.as_ref());
+    let all_errors =
+        gather_error_details_with_db(&db, &staged_sync, sim_error.as_ref(), &staged_datamodel);
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
