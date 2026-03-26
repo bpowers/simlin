@@ -9,9 +9,40 @@ Vensim can open a `.vdf` file and show its contents without a corresponding
 `.mdl` model file, and open "old" VDF files and show time-series for some
 variables even after substantive model changes. This means the VDF format is
 self-contained: it encodes enough information to map variable names to their
-time series data. Our goal is to replicate this capability -- converting a VDF
-file into a `Results` struct (a mapping of variable names to time series data)
-without any external model file.
+time series data. Our goal is to find a single, general, deterministic method
+to convert any VDF file into a `Results` struct (a mapping of variable names
+to time series data) without any external model file. An approach that works
+for small models but fails on large ones is not a solution -- it is a partial
+observation that has not yet uncovered the actual format mechanism.
+
+### Design perspective
+
+Vensim dates to the early 1990s, originally written in C for Windows. This
+context is essential for interpreting the file format:
+
+- **CPUs were slow; RAM and disk were precious.** Every structure in the file
+  was designed to be read with simple pointer arithmetic -- seek to an offset,
+  read a fixed-width struct, index into an array. O(n^2) algorithms,
+  probabilistic matching, and hash tables were not how formats were designed.
+  If our reverse-engineering approach involves combinatorial search or
+  heuristic scoring, that is a strong signal we have not decoded the actual
+  mechanism.
+
+- **The file is very likely a direct dump of Vensim's runtime memory
+  structures.** The offset table (OT) is probably the runtime variable array.
+  The section-1 records are probably the variable descriptor structs. The name
+  table is the string pool. The section-3 directory is the array shape table.
+  This explains why internal SMOOTH/DELAY macro variables appear in the file
+  despite not being something users typically plot: they exist in the
+  simulation state and are saved as part of it. The mapping from names to
+  time-series data that we are trying to reconstruct was, at runtime, a
+  simple index lookup through these same structures.
+
+- **Every mapping should be O(1) or O(n).** When Vensim opens a VDF, it reads
+  the structures back into memory and resolves names to data through direct
+  indexing. If a decoded field gives us a mapping that requires scanning a
+  range of offsets or scoring candidate solutions, we likely have the right
+  field but the wrong formula. The true formula is probably simpler.
 
 The format has been reverse-engineered from multiple VDF files of varying
 complexity:
@@ -575,10 +606,12 @@ Block 0 is always the time series itself (fully dense bitmap).
 ## Name-to-OT mapping
 
 The central challenge in VDF parsing is mapping names from the name table to
-offset table (OT) entries. For small and medium models, the mapping is now
-fully determined from VDF structure alone using the f[2]-offset record-to-name
-link (signal #10) validated by OT-position checking (signal #9). For large
-models (WRLD3, C-LEARN), participant filtering remains an open problem.
+offset table (OT) entries. We have not yet found a general deterministic
+method that works across all VDF files. Several structural signals are
+confirmed and exploited by the current partial approaches, but the underlying
+format mechanism -- the simple O(1) index path that Vensim's C code uses to
+resolve a record to its name -- is not fully decoded. What we have works on
+small/medium test fixtures; what we need is the actual formula.
 
 ### What is structurally determined
 
@@ -703,86 +736,72 @@ Validated behavior:
 4. SMOOTH/DELAY alias resolution via compiled module structure
 5. Empirical time-series correlation as a refinement layer
 
-### Solved problems
+### Validated partial approaches (not yet general)
 
-1. **Stock classification (solved by OT-position validation).** Previously
-   required external knowledge to distinguish stocks from non-stocks among
-   regular model variable names. Now solved: given a proposed name-to-block
-   assignment from the f[2]-offset mapping, the stocks-first-alphabetical
-   ordering produces expected OT positions for each name. Comparing expected
-   vs actual block start position uniquely determines stock classification
-   without external input. Validated across the full `model_editing/` corpus
-   and all small/medium test fixtures.
+These approaches produce correct results on small/medium test fixtures. They
+are useful for validating structural hypotheses, but they are NOT the general
+solution. The offset-range scanning and OT-position scoring they rely on are
+reconstruction techniques -- a 90s C program would not have used them. The
+true format mechanism is simpler and direct; these approaches approximate it.
 
-   Previously investigated and ruled out (for direct classification without
-   the f[2] mapping): block density, time-series variance patterns, record
-   field combinations, section-6 ref stream ordering, and final-value
-   anchoring.
+1. **f[2]-offset record-to-name mapping.** Record field[2] (the `name_key`)
+   encodes name-table position. Records sorted by f[2] correspond to
+   name-table entries at position `rank + offset`, where the nominal offset is
+   `slot_count - record_count`. This works on all small/medium test fixtures,
+   but incrementally edited models shift the offset by +/-1-2, requiring a
+   scan of nearby offsets validated by OT-position checking. The scan is a
+   workaround: a C programmer would have had one formula, not a range search.
+   The true offset derivation likely involves a field or header value we have
+   not decoded yet.
 
-2. **Record-to-name binding (solved by f[2]-offset mapping).** Previously
-   records did not directly indicate which name they describe. Now solved:
-   record field[2] (the `name_key`) provides a deterministic link. Records
-   sorted by f[2] correspond to name-table entries at position
-   `rank + offset`. The f[2]-offset mapper with OT-position validation
-   resolves the mapping in O(offset_range * records) time. See structural
-   signal #10 for details.
+2. **OT-position validation for stock classification.** Given a proposed
+   name-to-block assignment, the stocks-first-alphabetical ordering produces
+   expected OT positions. Comparing expected vs actual uniquely determines
+   stock classification. This is useful as a validation signal, but it
+   depends on already having a correct name-to-record assignment. It also
+   has not been tested on large models where the stocks-first property
+   breaks down (e.g., `Ref.vdf`'s non-contiguous stock ranges).
 
-3. **Array element mapping for single-dimension models (solved).** Array
-   elements occupy contiguous OT blocks in subscript order. The name table
-   stores base variable names (e.g., "a stock") alongside dimension names
-   ("sub1") and element names ("a", "b", "c"). Section 5 encodes dimension
-   cardinalities and gives enough information to recover named dimension sets
-   by combining its refs with local name-table order.
-   `to_results_with_array_info()` handles array expansion when provided with
-   stock classification and array dimension info; the dimension/element names
-   themselves can now be inferred and filtered automatically.
+3. **Single-dimension array element mapping.** Array elements occupy
+   contiguous OT blocks in subscript order. Section 5 encodes dimension
+   cardinalities and names; field[6] identifies which records are arrayed
+   and binds them to section-3 shape templates. This chain is fully decoded
+   for single-dimension models. Multi-dimension composition is not wired up.
 
-   **Record field[6] as shape binding**: field[6] != 5 identifies which base
-   names are arrayed. In single-shape files like `subscripts`, field[6]=32 is
-   the generic arrayed marker. In multi-shape files like `Ref.vdf`, field[6]
-   takes specific section-3 `index_word` values, directly binding each record
-   to a shape template. Combined with ot_index giving block starts and
-   section-5 giving dimension cardinalities, the array mapping is fully
-   determined for single-dimension models without the model file.
+### The core unsolved problem
 
-### Open problems (fully VDF-only mapping)
+We have not found a general, deterministic method to extract named results
+from arbitrary VDF files. The partial approaches above work on test fixtures
+but involve heuristic steps (offset scanning, candidate scoring, name-table
+filtering) that a C program would not have used. The actual format almost
+certainly contains a direct index path from records to names -- we have strong
+evidence that field[2] is part of it, but we do not have the complete formula.
 
-1. **Participant filtering for large models.** For small/medium models, the
-   f[2]-offset mapping deterministically resolves all names. For large models
-   like WRLD3, the name table contains more names than OT entries (~340
-   candidates for 296 OTs). The excess includes model variables that Vensim
-   chose not to save. The f[2]-offset approach has not been validated on
-   WRLD3-scale files where this filtering gap may surface.
+Specific manifestations of this gap:
 
-   Section-5-based filtering removes array bookkeeping names
-   (dimensions/elements) reliably, but that only helps array models; WRLD3 has
-   no section-5 content, so the large-model filtering problem remains open.
+1. **The f[2] offset formula is not fully decoded.** The nominal offset
+   `slot_count - record_count` works for fresh models but drifts on
+   incrementally edited ones. Rather than scanning a range, there is likely a
+   header or section field that gives the exact offset (or f[2] directly
+   encodes an absolute name-table index and we have the wrong interpretation).
 
-   *Possible approach*: the exact OT count is known from the header. If the
-   candidate count can be narrowed to match (e.g., by using constant-value
-   matching to anchor some entries and exclude others by elimination), the
-   mapping becomes determined.
+2. **Participant filtering for large models.** For WRLD3, the name table has
+   ~340 candidates for 296 OT slots. The excess includes unsaved variables.
+   Records are sparse (23 of 296 OTs in WRLD3). A C program would not filter
+   by name heuristics -- it would use an index or flag to identify which names
+   are OT participants. That flag or index is likely already in the file
+   (perhaps in the section-1 string table entries, which have 16 bytes of
+   undecoded per-name data).
 
-2. **Multi-dimension array models.** Section 3 clearly encodes reusable shape
-   templates (`flat_size + axis_sizes + axis slot refs`), and the
-   field[6] -> section-3 `index_word` -> section-5 trailing refs chain is
-   confirmed as the structural path from records through shape templates to
-   dimension sets. The f[2]-offset mapping now provides record-to-name
-   binding, but the full dimension-set composition path (assigning named
-   elements to each axis of a multi-dimensional variable) is not wired up yet.
+3. **Multi-dimension array composition.** The structural path from records
+   through section-3 shapes to section-5 dimension sets is confirmed, but
+   assigning named elements to each axis of a multi-dimensional variable is
+   not wired up.
 
-3. **Incrementally edited model offset drift.** The f[2]-offset mapping uses
-   a nominal offset of `slot_count - record_count`, but incrementally edited
-   models (e.g., the `model_editing/` chain) can shift this by +/-1-2. The
-   offset-range scan handles this, but the root cause (name-table
-   insertions/deletions during incremental saves) is not fully characterized.
-
-4. **Lookup-record payload structure.** Section-6 lookup records reliably
-   identify lookup definitions and their OT indices, but the internal payload
-   naming is not fully decoded. On small fixtures like `lookup_ex`, the parsed
-   lookup-record OT indices overlap already-owned variable slots, so generic
-   extraction conservatively auto-adds lookups only when their OT index is
-   otherwise unused.
+4. **Lookup-record payload structure.** Section-6 lookup records identify
+   lookup definitions and their OT indices, but the internal payload is not
+   fully decoded. On small fixtures, parsed lookup-record OT indices overlap
+   already-owned variable slots, so extraction is kept conservative.
 
 
 ## Appendix: reverse-engineering notes
