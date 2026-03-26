@@ -245,6 +245,13 @@ class Section5BridgeMatches:
 
 
 @dataclass
+class RecoveredDimensionSet:
+    name: str
+    elements: list[str]
+    sec5_index: int
+
+
+@dataclass
 class OtRange:
     start: int
     end: int
@@ -1401,6 +1408,73 @@ VENSIM_MODULE_NAMES = {"IN", "INI", "OUTPUT"}
 VENSIM_STDLIB_HELPERS = {"DEL", "LV1", "LV2", "LV3", "ST", "RT1", "RT2", "DL"}
 
 
+def _is_visible_model_name(name: str) -> bool:
+    if classify_name(name):
+        return False
+    if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+        return False
+    return True
+
+
+def _recover_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+    """
+    Recover dimension names and element labels when section 5 is unambiguous.
+
+    The straightforward case is the old single-dimension layout: one sec5
+    entry, one non-metadata payload ref naming the dimension, and the next `n`
+    simple visible names after that anchor providing the element labels.
+
+    Edited models can leave multiple sec5 entries with stale/stuttering refs.
+    Those are left unresolved instead of guessed through.
+    """
+    sec5_entries = vdf.parse_section5_sets() or []
+    if len(sec5_entries) != 1:
+        return []
+
+    slot_to_names = build_display_slot_to_names(vdf)
+    entry = sec5_entries[0]
+    payload_names: list[str] = []
+    seen_payload: set[str] = set()
+    for slot_ref in section5_payload_refs(entry):
+        for name in slot_to_names.get(slot_ref, []):
+            if not _is_visible_model_name(name):
+                continue
+            key = name.lower()
+            if key in seen_payload:
+                continue
+            seen_payload.add(key)
+            payload_names.append(name)
+
+    if len(payload_names) != 1:
+        return []
+
+    anchor = payload_names[0]
+    try:
+        anchor_idx = vdf.names.index(anchor)
+    except ValueError:
+        return []
+
+    elements: list[str] = []
+    seen_elements: set[str] = set()
+    for name in vdf.names[anchor_idx + 1:]:
+        if not _is_visible_model_name(name):
+            continue
+        if " " in name:
+            break
+        key = name.lower()
+        if key in seen_elements or key == anchor.lower():
+            continue
+        seen_elements.add(key)
+        elements.append(name)
+        if len(elements) == entry.n:
+            break
+
+    if len(elements) != entry.n:
+        return []
+
+    return [RecoveredDimensionSet(name=anchor, elements=elements, sec5_index=0)]
+
+
 def visible_variable_candidates(vdf: VdfFile) -> list[str]:
     """
     Filter the name table to candidate variable names (names that could own OT
@@ -1416,10 +1490,7 @@ def visible_variable_candidates(vdf: VdfFile) -> list[str]:
     for i, name in enumerate(vdf.names):
         if i >= slotted_count:
             break
-        cls = classify_name(name)
-        if cls:
-            continue
-        if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+        if not _is_visible_model_name(name):
             continue
         candidates.append(name)
     return candidates
@@ -1741,6 +1812,19 @@ def _lookup_record_names(vdf: VdfFile) -> list[str]:
     return out
 
 
+def _array_element_labels_for_block(
+    block: OwnerRecordBlock,
+    dimension_sets: list[RecoveredDimensionSet],
+) -> Optional[list[str]]:
+    if block.length() <= 1:
+        return None
+
+    matches = [dim.elements for dim in dimension_sets if len(dim.elements) == block.length()]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def _validate_name_block_assignment(
     name_to_block: dict[str, OwnerRecordBlock],
     vdf: VdfFile,
@@ -1779,77 +1863,15 @@ def _validate_name_block_assignment(
 
 def _recover_dimension_element_names(vdf: VdfFile) -> set[str]:
     """
-    Recover dimension element names from section 5 cardinalities and
-    name-table adjacency.
+    Return element labels from the structurally unambiguous sec5 cases.
 
-    Vensim writes dimension definitions as contiguous runs in the name
-    table: dim_name, [metadata...], elem1, elem2, ..., elemN. The elements
-    form a contiguous block with no intervening candidate names. This
-    strict contiguity requirement avoids false matches where variable names
-    happen to be adjacent.
-
-    Returns the set of identified element names. These structurally cannot
-    own arrayed OT blocks.
+    This intentionally stays conservative: edited models can keep stale sec5
+    entries around, so only the simple single-entry layout is treated as
+    decoded.
     """
-    sec5_entries = vdf.parse_section5_sets() or []
-    if not sec5_entries:
-        return set()
-
-    name_to_idx: dict[str, int] = {}
-    for i, name in enumerate(vdf.names):
-        if name not in name_to_idx:
-            name_to_idx[name] = i
-
-    candidate_set = set(visible_variable_candidates(vdf))
-    cardinalities = sorted([e.n for e in sec5_entries], reverse=True)
     elements: set[str] = set()
-    used_dims: set[str] = set()
-
-    for card in cardinalities:
-        best_dim: Optional[str] = None
-        best_elems: Optional[list[str]] = None
-
-        for cand in sorted(candidate_set, key=lambda n: name_to_idx.get(n, 0)):
-            if cand in used_dims or cand in elements:
-                continue
-            cand_idx = name_to_idx.get(cand, -1)
-            if cand_idx < 0:
-                continue
-
-            # Collect the FIRST n candidates after this dim name, requiring
-            # they form a contiguous block (only metadata names between them)
-            elems: list[str] = []
-            contiguous = True
-            for j in range(cand_idx + 1, len(vdf.names)):
-                if len(elems) >= card:
-                    break
-                next_name = vdf.names[j]
-                if next_name in used_dims or next_name in elements:
-                    contiguous = False
-                    break
-                cls = classify_name(next_name)
-                if cls:
-                    continue  # skip metadata
-                if next_name in VENSIM_MODULE_NAMES or next_name in VENSIM_STDLIB_HELPERS:
-                    continue
-                if next_name not in candidate_set:
-                    contiguous = False
-                    break
-                elems.append(next_name)
-
-            if contiguous and len(elems) == card:
-                # Additional check: elements should be simple names (no spaces)
-                # to avoid matching compound variable names as elements
-                all_simple = all(" " not in e for e in elems)
-                if all_simple:
-                    best_dim = cand
-                    best_elems = elems
-                    break
-
-        if best_dim is not None and best_elems is not None:
-            used_dims.add(best_dim)
-            elements.update(best_elems)
-
+    for dim in _recover_dimension_sets(vdf):
+        elements.update(dim.elements)
     return elements
 
 
@@ -2176,6 +2198,7 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
         return None
     data_start = vdf.first_data_block + 2 + vdf.bitmap_size
     time_values = [f32(vdf.data, data_start + i * 4) for i in range(time_count)]
+    dimension_sets = _recover_dimension_sets(vdf)
 
     results: list[NamedResult] = []
     emitted_names: set[str] = set()
@@ -2208,6 +2231,7 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
             emitted_ot_indices.add(ot_idx)
         else:
             # Arrayed variable: one result per OT element
+            element_labels = _array_element_labels_for_block(block, dimension_sets)
             for elem_offset in range(block.length()):
                 ot_idx = block.start + elem_offset
                 raw = vdf.offset_table_entry(ot_idx)
@@ -2218,7 +2242,10 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
                 else:
                     const_val = u32_as_f32(raw)
                     series = [const_val] * len(time_values)
-                elem_name = f"{name}[{elem_offset}]"
+                if element_labels is not None and elem_offset < len(element_labels):
+                    elem_name = f"{name}[{element_labels[elem_offset]}]"
+                else:
+                    elem_name = f"{name}[{elem_offset}]"
                 results.append(NamedResult(
                     name=elem_name, ot_index=ot_idx, values=series))
                 emitted_names.add(elem_name)

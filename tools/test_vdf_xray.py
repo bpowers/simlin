@@ -666,6 +666,43 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertNotIn("hud policy lookup", by_name)
         self.assertNotIn("loan standards impact on insolvency table", by_name)
 
+    def test_subscripts_extract_named_results_uses_dimension_element_names(self) -> None:
+        subscripts = parse_fixture("test/bobby/vdf/subscripts/subscripts.vdf")
+
+        results = vdf_xray.extract_named_results(subscripts)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        names = [result.name for result in results]
+        self.assertEqual(
+            names[:15],
+            [
+                "Time",
+                "a stock[a]",
+                "a stock[b]",
+                "a stock[c]",
+                "net flow[a]",
+                "net flow[b]",
+                "net flow[c]",
+                "other const[a]",
+                "other const[b]",
+                "other const[c]",
+                "some rate",
+                "FINAL TIME",
+                "INITIAL TIME",
+                "SAVEPER",
+                "TIME STEP",
+            ],
+        )
+        self.assertNotIn("a stock[0]", names)
+
+    def test_run8_dimension_set_recovery_skips_ambiguous_edited_slots(self) -> None:
+        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
+
+        dims = vdf_xray._recover_dimension_sets(run8)
+
+        self.assertEqual(dims, [])
+
 
 if __name__ == "__main__":
     unittest.main()

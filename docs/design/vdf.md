@@ -447,6 +447,13 @@ This is enough to infer dimension names and element names conservatively, and
 to exclude them from generic OT-participant filtering, but not enough to say
 which base variable uses which dimension.
 
+Current extraction only trusts the simplest form of this structure: a single
+section-5 entry with one non-metadata payload ref naming the dimension. That
+is sufficient to label arrays in fixtures like `subscripts.vdf` as
+`name[a]`, `name[b]`, `name[c]`. Edited files with multiple section-5 entries
+(`run_6`/`run_7`/`run_8`) still carry ambiguous ref layouts, so they remain on
+numeric element indices until the extra anchor is decoded.
+
 
 ## Section 6: OT metadata
 
