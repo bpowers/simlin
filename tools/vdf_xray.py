@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import struct
 import sys
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ VDF_SENTINEL = 0xF6800000
 
 OT_CODE_TIME = 0x0F
 OT_CODE_STOCK = 0x08
+OT_CODE_DYNAMIC = 0x11
+OT_CODE_CONST = 0x17
 
 SYSTEM_NAMES = {"Time", "INITIAL TIME", "FINAL TIME", "TIME STEP", "SAVEPER"}
 
@@ -179,9 +182,14 @@ class Section5SetEntry:
     refs: list[int]
     slotted_ref_count: int
 
-    def dimension_size(self) -> int:
-        # marker=0 entries have n+1 refs (1 trailing axis ref)
-        # marker=1 entries have n+2 refs (2 trailing axis refs)
+    def payload_ref_count(self) -> int:
+        """
+        Count of the non-trailing refs stored in the entry payload.
+
+        The model-edit fixtures show that this field should not be treated as
+        a decoded dimension cardinality. It is simply the length of the
+        leading ref payload before the trailing axis-anchor refs.
+        """
         trailing = 1 + self.marker
         return max(0, len(self.refs) - trailing)
 
@@ -203,6 +211,47 @@ class LookupRecord:
 
 
 @dataclass
+class SlotReferenceInfo:
+    slot_ref: int
+    heuristic_names: list[str]
+    signature: Optional[list[int]]
+    uses: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SlotTableLayout:
+    base: int
+    max_offset: int
+    distinct_strides: list[int]
+    irregular_stride_count: int
+    missing_16_slots: int
+    contiguous_16: bool
+
+
+@dataclass
+class SlotNameAlignment:
+    leading_extra_slots: int
+    score: int
+    hidden_slots: list[int]
+    mapped_visible_names: int
+    slot_to_names: dict[int, list[str]]
+
+
+@dataclass
+class Section5BridgeMatches:
+    exact: list[int] = field(default_factory=list)
+    partial: list[int] = field(default_factory=list)
+    null_trailing: list[int] = field(default_factory=list)
+
+
+@dataclass
+class RecoveredDimensionSet:
+    name: str
+    elements: list[str]
+    sec5_index: int
+
+
+@dataclass
 class OtRange:
     start: int
     end: int
@@ -210,6 +259,82 @@ class OtRange:
 
     def length(self) -> int:
         return self.end - self.start
+
+
+@dataclass
+class RecordShapeBlock:
+    start: int
+    end: int
+    ot_codes: list[int]
+    record_indices: list[int] = field(default_factory=list)
+    shape_record_indices: list[int] = field(default_factory=list)
+    shape_codes: list[int] = field(default_factory=list)
+    sort_keys: list[int] = field(default_factory=list)
+    slot_refs: list[int] = field(default_factory=list)
+
+    def length(self) -> int:
+        return self.end - self.start
+
+    def homogeneous_ot_codes(self) -> bool:
+        return len(set(self.ot_codes)) <= 1
+
+
+@dataclass
+class OwnerRecordBlock:
+    start: int
+    end: int
+    ot_codes: list[int]
+    sentinel_record_indices: list[int] = field(default_factory=list)
+    shape_codes: list[int] = field(default_factory=list)
+    slot_refs: list[int] = field(default_factory=list)
+    hidden_slot_refs: list[int] = field(default_factory=list)
+    direct_sort_keys: list[int] = field(default_factory=list)
+    attached_sort_keys: list[int] = field(default_factory=list)
+    sort_anchor_record_indices: list[int] = field(default_factory=list)
+    hidden: bool = False
+
+    def length(self) -> int:
+        return self.end - self.start
+
+    def homogeneous_ot_codes(self) -> bool:
+        return len(set(self.ot_codes)) <= 1
+
+
+@dataclass
+class MdlDimension:
+    name: str
+    elements: list[str]
+    line_no: int
+
+
+@dataclass
+class MdlDefinition:
+    name: str
+    kind: str
+    dimensions: list[str]
+    header: str
+    source_index: int
+    line_no: int
+    expression: str = ""
+
+    def is_stock(self) -> bool:
+        return self.kind == "stock"
+
+    def is_arrayed(self) -> bool:
+        return len(self.dimensions) > 0
+
+
+@dataclass
+class MdlModel:
+    dimensions: dict[str, MdlDimension]
+    definitions: list[MdlDefinition]
+    sketch_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MdlBlockMatch:
+    definition: MdlDefinition
+    candidate_block_indices: list[int]
 
 
 # ---- VDF File ----
@@ -550,8 +675,14 @@ class VdfFile:
 # ---- Slot-to-name helpers ----
 
 def build_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
+    return build_slot_to_names_with_offset(vdf, 0)
+
+
+def build_slot_to_names_with_offset(vdf: VdfFile, leading_extra_slots: int) -> dict[int, list[str]]:
     out: dict[int, list[str]] = {}
-    for i, slot in enumerate(vdf.slot_table):
+    if leading_extra_slots < 0:
+        leading_extra_slots = 0
+    for i, slot in enumerate(vdf.slot_table[leading_extra_slots:]):
         if i < len(vdf.names):
             out.setdefault(slot, []).append(vdf.names[i])
     return out
@@ -560,8 +691,1427 @@ def build_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
 def resolve_slot_ref(slot_ref: int, slot_to_names: dict[int, list[str]]) -> str:
     names = slot_to_names.get(slot_ref)
     if names:
-        return f"{slot_ref}:{'/'.join(names)}"
-    return f"{slot_ref}:<sec1>"
+        return f"{slot_ref}:?{'/'.join(names)}"
+    return f"{slot_ref}:?"
+
+
+def analyze_slot_table_offsets(values: list[int]) -> Optional[SlotTableLayout]:
+    if not values:
+        return None
+
+    sorted_vals = sorted(set(values))
+    base = sorted_vals[0]
+    max_offset = sorted_vals[-1]
+    strides = [sorted_vals[i + 1] - sorted_vals[i] for i in range(len(sorted_vals) - 1)]
+    distinct_strides = sorted(set(strides))
+
+    irregular_stride_count = 0
+    missing_16_slots = 0
+    for stride in strides:
+        if stride != 16:
+            irregular_stride_count += 1
+        if stride > 16 and stride % 16 == 0:
+            missing_16_slots += (stride // 16) - 1
+        elif stride > 16:
+            missing_16_slots += 1
+
+    contiguous_16 = len(sorted_vals) <= 1 or all(stride == 16 for stride in strides)
+    return SlotTableLayout(
+        base=base,
+        max_offset=max_offset,
+        distinct_strides=distinct_strides,
+        irregular_stride_count=irregular_stride_count,
+        missing_16_slots=missing_16_slots,
+        contiguous_16=contiguous_16,
+    )
+
+
+def format_slot_table_layout(layout: Optional[SlotTableLayout]) -> str:
+    if layout is None:
+        return "(empty)"
+    stride_str = ",".join(str(s) for s in layout.distinct_strides) if layout.distinct_strides else "-"
+    return (f"base={layout.base} max={layout.max_offset} strides=[{stride_str}] "
+            f"contiguous16={layout.contiguous_16} missing16={layout.missing_16_slots}")
+
+
+def _slot_name_alignment_class_score(name: Optional[str], cls: str,
+                                     *, section_kind: str) -> int:
+    if name is None:
+        return 0
+    if section_kind == "sec4":
+        if name == "Time":
+            return 10
+        if cls == "system":
+            return 4
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -2
+        return 1
+    if section_kind == "sec5_payload":
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -2
+        if cls == "system":
+            return 3
+        return 2
+    if section_kind == "sec5_trailing":
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -1
+        return 1
+    if section_kind == "sec6":
+        if cls in {"group", "unit", "meta", "builtin?", "signature", "quoted"}:
+            return -1
+        if cls == "system":
+            return 1
+        return 1
+    return 0
+
+
+def score_slot_name_alignment(vdf: VdfFile, leading_extra_slots: int) -> SlotNameAlignment:
+    """
+    Score a visible-name alignment against section-4/5/6 reference usage.
+
+    This is intentionally an analysis-layer heuristic. It does not change the
+    raw slot table or claim to decode the hidden slot/name relationship; it
+    only helps the xray output avoid obviously shifted name labels when helper
+    entries appear to occupy leading slot-table positions.
+    """
+    slot_to_names = build_slot_to_names_with_offset(vdf, leading_extra_slots)
+
+    def lookup(slot_ref: int) -> tuple[Optional[str], str]:
+        names = slot_to_names.get(slot_ref)
+        if not names:
+            return None, ""
+        name = names[0]
+        return name, classify_name(name)
+
+    score = 0
+
+    sec4_entries = vdf.parse_section4_entries() or []
+    for entry in sec4_entries:
+        for slot_ref in entry.refs:
+            name, cls = lookup(slot_ref)
+            score += _slot_name_alignment_class_score(name, cls, section_kind="sec4")
+
+    sec5_entries = vdf.parse_section5_sets() or []
+    for entry in sec5_entries:
+        for slot_ref in section5_payload_refs(entry):
+            if slot_ref <= 0:
+                continue
+            name, cls = lookup(slot_ref)
+            score += _slot_name_alignment_class_score(name, cls, section_kind="sec5_payload")
+        for slot_ref in section5_trailing_refs(entry):
+            if slot_ref <= 0:
+                continue
+            name, cls = lookup(slot_ref)
+            score += _slot_name_alignment_class_score(name, cls, section_kind="sec5_trailing")
+
+    sec6_result = vdf.parse_section6_ref_stream()
+    if sec6_result:
+        for entry in sec6_result[1]:
+            for slot_ref in entry.refs:
+                name, cls = lookup(slot_ref)
+                score += _slot_name_alignment_class_score(name, cls, section_kind="sec6")
+
+    mapped_visible_names = min(len(vdf.names), max(0, len(vdf.slot_table) - leading_extra_slots))
+    return SlotNameAlignment(
+        leading_extra_slots=leading_extra_slots,
+        score=score,
+        hidden_slots=vdf.slot_table[:leading_extra_slots],
+        mapped_visible_names=mapped_visible_names,
+        slot_to_names=slot_to_names,
+    )
+
+
+def best_slot_name_alignment(vdf: VdfFile, max_leading_extra_slots: int = 8) -> SlotNameAlignment:
+    if not vdf.slot_table:
+        return SlotNameAlignment(0, 0, [], 0, {})
+
+    limit = min(max_leading_extra_slots, len(vdf.slot_table) - 1)
+    best = score_slot_name_alignment(vdf, 0)
+    for leading in range(1, limit + 1):
+        candidate = score_slot_name_alignment(vdf, leading)
+        if candidate.score > best.score:
+            best = candidate
+    return best
+
+
+def preferred_slot_name_alignment(vdf: VdfFile) -> SlotNameAlignment:
+    """Use a shifted visible-name mapping only when it beats the default clearly."""
+    default = score_slot_name_alignment(vdf, 0)
+    best = best_slot_name_alignment(vdf)
+    if best.leading_extra_slots > 0 and best.score >= default.score + 4:
+        return best
+    return default
+
+
+def build_display_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
+    return preferred_slot_name_alignment(vdf).slot_to_names
+
+
+def visible_slot_name_pairs(vdf: VdfFile, *,
+                            alignment: Optional[SlotNameAlignment] = None) -> list[tuple[str, int]]:
+    alignment = alignment or preferred_slot_name_alignment(vdf)
+    pairs: list[tuple[str, int]] = []
+    for i in range(alignment.mapped_visible_names):
+        pairs.append((vdf.names[i], vdf.slot_table[alignment.leading_extra_slots + i]))
+    return pairs
+
+
+def section5_trailing_refs(entry: Section5SetEntry) -> list[int]:
+    trailing_count = 1 + entry.marker
+    if len(entry.refs) < trailing_count:
+        return []
+    return entry.refs[-trailing_count:]
+
+
+def section5_payload_refs(entry: Section5SetEntry) -> list[int]:
+    trailing_count = 1 + entry.marker
+    if len(entry.refs) < trailing_count:
+        return entry.refs.copy()
+    return entry.refs[:-trailing_count]
+
+
+def classify_section5_bridge_matches(sec3: Section3Entry,
+                                     sec5_entries: list[Section5SetEntry]) -> Section5BridgeMatches:
+    axis_refs = [r for r in sec3.axis_slot_refs() if r > 0]
+    axis_set = set(axis_refs)
+    matches = Section5BridgeMatches()
+
+    if not axis_refs:
+        return matches
+
+    for idx, sec5 in enumerate(sec5_entries):
+        trailing = section5_trailing_refs(sec5)
+        trailing_pos = [r for r in trailing if r > 0]
+        trailing_set = set(trailing_pos)
+
+        if trailing_pos and trailing_pos == axis_refs:
+            matches.exact.append(idx)
+        elif trailing_pos and len(trailing_pos) == len(axis_refs) and trailing_set == axis_set:
+            matches.exact.append(idx)
+        elif trailing_pos and trailing_set & axis_set:
+            matches.partial.append(idx)
+        elif trailing and not trailing_pos:
+            matches.null_trailing.append(idx)
+    return matches
+
+
+def classify_section5_shape_matches(sec5: Section5SetEntry,
+                                    sec3_entries: list[Section3Entry]) -> Section5BridgeMatches:
+    trailing = section5_trailing_refs(sec5)
+    trailing_pos = [r for r in trailing if r > 0]
+    trailing_set = set(trailing_pos)
+    matches = Section5BridgeMatches()
+
+    if not trailing:
+        return matches
+    if not trailing_pos:
+        matches.null_trailing.append(0)
+        return matches
+
+    for idx, sec3 in enumerate(sec3_entries):
+        axis_refs = [r for r in sec3.axis_slot_refs() if r > 0]
+        axis_set = set(axis_refs)
+
+        if axis_refs and trailing_pos == axis_refs:
+            matches.exact.append(idx)
+        elif axis_refs and len(trailing_pos) == len(axis_refs) and trailing_set == axis_set:
+            matches.exact.append(idx)
+        elif axis_refs and trailing_set & axis_set:
+            matches.partial.append(idx)
+    return matches
+
+
+def section5_exact_axis_sizes(sec5: Section5SetEntry,
+                              sec3_entries: list[Section3Entry]) -> list[list[int]]:
+    matches = classify_section5_shape_matches(sec5, sec3_entries)
+    return [sec3_entries[idx].axis_sizes() for idx in matches.exact]
+
+
+MDL_LHS_RE = re.compile(r"^(?P<name>[^\[]+?)(?:\[(?P<dims>[^\]]+)\])?$")
+MDL_NUMERIC_LITERAL_RE = re.compile(
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+)
+MDL_SKETCH_VAR_RE = re.compile(r"^10,\d+,([^,]+),")
+
+
+def parse_mdl_lhs(lhs: str) -> tuple[str, list[str]]:
+    match = MDL_LHS_RE.match(lhs.strip())
+    if match is None:
+        return lhs.strip(), []
+    name = match.group("name").strip()
+    dims_text = match.group("dims")
+    if not dims_text:
+        return name, []
+    dims = [part.strip() for part in dims_text.split(",") if part.strip()]
+    return name, dims
+
+
+def parse_mdl_expression(lines: list[str], start_idx: int, rhs: str) -> tuple[str, int]:
+    parts: list[str] = []
+    if rhs.strip():
+        parts.append(rhs.strip())
+
+    j = start_idx + 1
+    while j < len(lines):
+        probe = lines[j].strip()
+        if (probe.startswith("~")
+                or probe == "|"
+                or probe.startswith("********************************************************")):
+            break
+        if probe:
+            parts.append(probe)
+        j += 1
+    return " ".join(parts).strip(), j
+
+
+def parse_mdl_sketch_names(lines: list[str]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    in_sketch = False
+
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("*View"):
+            in_sketch = True
+            continue
+        if not in_sketch:
+            continue
+        if line.startswith("///---\\\\\\"):
+            break
+        match = MDL_SKETCH_VAR_RE.match(line)
+        if match is None:
+            continue
+        name = match.group(1).strip()
+        if name == "Time" or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def mdl_definition_runtime_class(definition: MdlDefinition) -> str:
+    if definition.is_stock():
+        return "stock"
+    if MDL_NUMERIC_LITERAL_RE.fullmatch(definition.expression):
+        return "const"
+    return "dynamic"
+
+
+def mdl_sketch_definitions(model: MdlModel, *,
+                           include_kinds: Optional[set[str]] = None) -> list[MdlDefinition]:
+    if include_kinds is None:
+        include_kinds = {"stock", "var"}
+    by_name = {
+        definition.name: definition
+        for definition in model.definitions
+        if definition.kind in include_kinds
+    }
+    return [by_name[name] for name in model.sketch_names if name in by_name]
+
+
+def parse_mdl_model(text: str) -> MdlModel:
+    """
+    Parse the definition and dimension headers from a Vensim .mdl source file.
+
+    This is intentionally shallow: it does not parse expressions, only the
+    model declarations needed to align visible names with VDF structure.
+    """
+    dimensions: dict[str, MdlDimension] = {}
+    definitions: list[MdlDefinition] = []
+    source_index = 0
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i].rstrip()
+        line = raw.strip()
+
+        if line.startswith("********************************************************"):
+            break
+        if not line or line == "{UTF-8}" or line.startswith("~") or line == "|":
+            i += 1
+            continue
+
+        if line.endswith(":") and "=" not in line:
+            name = line[:-1].strip()
+            elements: list[str] = []
+            j = i + 1
+            while j < len(lines):
+                probe = lines[j].strip()
+                if not probe:
+                    j += 1
+                    continue
+                if (probe.startswith("~")
+                        or probe.startswith("|")
+                        or probe.startswith("********************************************************")):
+                    break
+                elements.extend(part.strip() for part in probe.split(",") if part.strip())
+                j += 1
+            dimensions[name] = MdlDimension(name=name, elements=elements, line_no=i + 1)
+            i = j
+            continue
+
+        if "=" in raw:
+            lhs, rhs = raw.split("=", 1)
+            name, dims = parse_mdl_lhs(lhs)
+            expression, next_idx = parse_mdl_expression(lines, i, rhs)
+            source_index += 1
+            kind = "stock" if "INTEG" in expression.upper() else "var"
+            definitions.append(MdlDefinition(
+                name=name,
+                kind=kind,
+                dimensions=dims,
+                header=line,
+                source_index=source_index,
+                line_no=i + 1,
+                expression=expression,
+            ))
+            i = next_idx
+            continue
+
+        if line.endswith("("):
+            source_index += 1
+            definitions.append(MdlDefinition(
+                name=line[:-1].strip(),
+                kind="lookup",
+                dimensions=[],
+                header=line,
+                source_index=source_index,
+                line_no=i + 1,
+                expression=line,
+            ))
+        i += 1
+
+    return MdlModel(
+        dimensions=dimensions,
+        definitions=definitions,
+        sketch_names=parse_mdl_sketch_names(lines),
+    )
+
+
+def mdl_definition_flat_size(model: MdlModel, definition: MdlDefinition) -> Optional[int]:
+    if not definition.dimensions:
+        return 1
+    size = 1
+    for dim_name in definition.dimensions:
+        dim = model.dimensions.get(dim_name)
+        if dim is None or not dim.elements:
+            return None
+        size *= len(dim.elements)
+    return size
+
+
+def build_sec3_index_to_entry(vdf: VdfFile) -> dict[int, Section3Entry]:
+    directory = vdf.parse_section3_directory()
+    if directory is None:
+        return {}
+    return {entry.index_word(): entry for entry in directory.entries}
+
+
+def record_shape_length(vdf: VdfFile, rec: VdfRecord) -> Optional[int]:
+    """
+    Recover the OT span implied by record field[6], when the binding is decoded.
+
+    This is deterministic structure rather than a display heuristic:
+    - `5` always means scalar (len=1)
+    - an active sec3 `index_word` gives its flat size, including `index_word=0`
+      when that entry is active
+    - `32` is the generic array marker and resolves only when section 3 exposes
+      a single active flat size
+    """
+    code = rec.shape_code()
+    if code == 5:
+        return 1
+
+    idx_to_entry = build_sec3_index_to_entry(vdf)
+    entry = idx_to_entry.get(code)
+    if entry is not None and entry.flat_size() > 0:
+        return entry.flat_size()
+
+    if code == 32:
+        active_sizes = sorted({e.flat_size() for e in idx_to_entry.values() if e.flat_size() > 0})
+        if len(active_sizes) == 1:
+            return active_sizes[0]
+    return None
+
+
+def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
+    """
+    Group records by decoded shape span instead of raw ot_index.
+
+    A visible owner signal can split across records: one record may contribute
+    the shape-derived span while another positive-sort record lands inside that
+    span. This helper keeps the grouping structural and leaves name ownership
+    unresolved when the file does not force it.
+    """
+    codes = vdf.section6_ot_class_codes() or []
+    by_range: dict[tuple[int, int], RecordShapeBlock] = {}
+
+    def add_record(block: RecordShapeBlock, rec_idx: int, rec: VdfRecord, *,
+                   is_shape_record: bool) -> None:
+        if rec_idx not in block.record_indices:
+            block.record_indices.append(rec_idx)
+        if is_shape_record and rec_idx not in block.shape_record_indices:
+            block.shape_record_indices.append(rec_idx)
+        shape_code = rec.shape_code()
+        if is_shape_record and shape_code not in block.shape_codes:
+            block.shape_codes.append(shape_code)
+        sort_key = rec.fields[10]
+        if sort_key > 0 and sort_key not in block.sort_keys:
+            block.sort_keys.append(sort_key)
+        slot_ref = rec.slot_ref()
+        if slot_ref > 0 and slot_ref not in block.slot_refs:
+            block.slot_refs.append(slot_ref)
+
+    for rec_idx, rec in enumerate(vdf.records):
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count:
+            continue
+        length = record_shape_length(vdf, rec)
+        if length is None or length <= 0:
+            continue
+        end = min(vdf.offset_table_count, start + length)
+        key = (start, end)
+        block = by_range.setdefault(
+            key,
+            RecordShapeBlock(
+                start=start,
+                end=end,
+                ot_codes=codes[start:end],
+            ),
+        )
+        add_record(block, rec_idx, rec, is_shape_record=True)
+
+    for rec_idx, rec in enumerate(vdf.records):
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count or rec.fields[10] <= 0:
+            continue
+        if record_shape_length(vdf, rec) is not None:
+            continue
+        for block in by_range.values():
+            if block.start <= start < block.end:
+                add_record(block, rec_idx, rec, is_shape_record=False)
+
+    blocks = sorted(by_range.values(), key=lambda block: (block.start, block.end))
+    for block in blocks:
+        block.record_indices.sort()
+        block.shape_record_indices.sort()
+        block.shape_codes.sort()
+        block.sort_keys.sort()
+        block.slot_refs.sort()
+    return blocks
+
+
+def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
+    """
+    Return indices of records that are structurally model-variable owners.
+
+    The sentinel pair (f[8]=f[9]=0xf6800000) is a strong signal, but not
+    exclusive to model variables: system records (FINAL TIME, SAVEPER, etc.)
+    can also carry sentinels, especially in small/empty models. After reformat,
+    model records can carry f[0]=0 or f[1]=23, so those fields cannot be used
+    as filters. System-record discrimination is handled at the mapping layer.
+    """
+    out: list[int] = []
+    for rec_idx, rec in enumerate(vdf.records):
+        if not rec.has_sentinel():
+            continue
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count:
+            continue
+        if record_shape_length(vdf, rec) is None:
+            continue
+        out.append(rec_idx)
+    return out
+
+
+def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
+    """
+    Build the narrower owner-oriented block set from sentinel model records.
+
+    In the model-edit fixtures, the structurally "real" visible owners are
+    carried by the sentinel model records. Non-sentinel records still matter
+    as sort/order anchors, but they over-generate overlapping shape spans.
+    This helper keeps the owner candidate set narrow while still attaching
+    visible sort anchors back onto those owners.
+    """
+    codes = vdf.section6_ot_class_codes() or []
+    alignment = preferred_slot_name_alignment(vdf)
+    hidden_slots = set(alignment.hidden_slots)
+    by_range: dict[tuple[int, int], OwnerRecordBlock] = {}
+
+    def add_unique(values: list[int], value: int) -> None:
+        if value > 0 and value not in values:
+            values.append(value)
+
+    for rec_idx in sentinel_model_record_indices(vdf):
+        rec = vdf.records[rec_idx]
+        start = rec.ot_index()
+        length = record_shape_length(vdf, rec)
+        if length is None or length <= 0:
+            continue
+        end = min(vdf.offset_table_count, start + length)
+        key = (start, end)
+        block = by_range.setdefault(
+            key,
+            OwnerRecordBlock(
+                start=start,
+                end=end,
+                ot_codes=codes[start:end],
+            ),
+        )
+        block.sentinel_record_indices.append(rec_idx)
+        add_unique(block.shape_codes, rec.shape_code())
+        slot_ref = rec.slot_ref()
+        add_unique(block.slot_refs, slot_ref)
+        if slot_ref in hidden_slots:
+            add_unique(block.hidden_slot_refs, slot_ref)
+        if rec.fields[10] > 0:
+            add_unique(block.direct_sort_keys, rec.fields[10])
+            add_unique(block.attached_sort_keys, rec.fields[10])
+
+    blocks = sorted(by_range.values(), key=lambda block: (block.start, block.end))
+    slot_ref_counts: dict[int, int] = {}
+    for block in blocks:
+        for slot_ref in block.slot_refs:
+            slot_ref_counts[slot_ref] = slot_ref_counts.get(slot_ref, 0) + 1
+
+    for block in blocks:
+        block.sentinel_record_indices.sort()
+        block.shape_codes.sort()
+        block.slot_refs.sort()
+        block.hidden_slot_refs.sort()
+        block.direct_sort_keys.sort()
+        block.attached_sort_keys.sort()
+        block.hidden = (
+            bool(block.slot_refs)
+            and len(block.hidden_slot_refs) == len(block.slot_refs)
+            and all(slot_ref_counts.get(slot_ref, 0) == 1 for slot_ref in block.slot_refs)
+        )
+
+    visible_blocks = [block for block in blocks if not block.hidden]
+    hidden_blocks = [block for block in blocks if block.hidden]
+
+    def attach_sort(block: OwnerRecordBlock, rec_idx: int, sort_key: int) -> None:
+        add_unique(block.attached_sort_keys, sort_key)
+        add_unique(block.sort_anchor_record_indices, rec_idx)
+
+    def adjacent_visible_from_hidden(hidden_block: OwnerRecordBlock) -> list[OwnerRecordBlock]:
+        out: list[OwnerRecordBlock] = []
+        for block in visible_blocks:
+            if hidden_block.end == block.start:
+                if hidden_block.ot_codes and block.ot_codes and hidden_block.ot_codes[-1] == block.ot_codes[0]:
+                    out.append(block)
+            elif block.end == hidden_block.start:
+                if hidden_block.ot_codes and block.ot_codes and hidden_block.ot_codes[0] == block.ot_codes[-1]:
+                    out.append(block)
+        return out
+
+    for rec_idx, rec in enumerate(vdf.records):
+        sort_key = rec.fields[10]
+        ot_index = rec.ot_index()
+        if rec.has_sentinel() or sort_key <= 0 or ot_index <= 0 or ot_index >= vdf.offset_table_count:
+            continue
+
+        direct_hits = [block for block in visible_blocks if block.start <= ot_index < block.end]
+        if len(direct_hits) == 1:
+            attach_sort(direct_hits[0], rec_idx, sort_key)
+            continue
+
+        if direct_hits:
+            continue
+
+        hidden_hits = [block for block in hidden_blocks if block.start <= ot_index < block.end]
+        if len(hidden_hits) != 1:
+            continue
+
+        neighbors = adjacent_visible_from_hidden(hidden_hits[0])
+        if len(neighbors) == 1:
+            attach_sort(neighbors[0], rec_idx, sort_key)
+
+    for block in blocks:
+        block.attached_sort_keys.sort()
+        block.sort_anchor_record_indices.sort()
+
+    # Some compiled helpers are structurally real one-element stock owners that
+    # sit immediately before the visible stock array block. They can survive
+    # cleanup/reformat passes even when slot-based hidden detection collapses.
+    for block in blocks:
+        if block.hidden:
+            continue
+        if block.length() != 1 or not block.direct_sort_keys:
+            continue
+        if not block.ot_codes or any(code != OT_CODE_STOCK for code in block.ot_codes):
+            continue
+        neighbor = next(
+            (
+                candidate for candidate in blocks
+                if not candidate.hidden
+                and candidate.start == block.end
+                and candidate.length() > block.length()
+                and candidate.ot_codes
+                and all(code == OT_CODE_STOCK for code in candidate.ot_codes)
+                and not candidate.direct_sort_keys
+            ),
+            None,
+        )
+        if neighbor is not None:
+            block.hidden = True
+            for sort_key in block.attached_sort_keys:
+                if sort_key not in block.direct_sort_keys:
+                    add_unique(neighbor.attached_sort_keys, sort_key)
+            for rec_idx in block.sort_anchor_record_indices:
+                add_unique(neighbor.sort_anchor_record_indices, rec_idx)
+            neighbor.attached_sort_keys.sort()
+            neighbor.sort_anchor_record_indices.sort()
+
+    # Filter out unanchored system variable sentinel blocks. These have a
+    # slot_ref not shared by any other block (system variables live in their own
+    # slot group, separate from model views), no sort keys, and only constant or
+    # time OT codes. Model variables can have sort_key=0 but they share slot_refs
+    # with other model variables in the same view.
+    for block in blocks:
+        if block.hidden:
+            continue
+        if block.direct_sort_keys or block.attached_sort_keys:
+            continue
+        if not block.slot_refs:
+            continue
+        if not all(
+            code in (OT_CODE_CONST, OT_CODE_TIME) for code in block.ot_codes
+        ):
+            continue
+        if all(
+            slot_ref_counts.get(sr, 0) == 1 for sr in block.slot_refs
+        ):
+            block.hidden = True
+
+    return blocks
+
+
+def owner_blocks_in_sentinel_order(vdf: VdfFile, *,
+                                   include_hidden: bool = False) -> list[OwnerRecordBlock]:
+    """
+    Return owner blocks in their sentinel-record/file order.
+
+    This is a VDF-local ordering signal, not a guaranteed sketch-order signal.
+    Older fixtures often preserve sketch order here, but cleanup/reformat saves
+    can reshuffle the sentinel records without changing owner identity.
+    """
+    blocks = build_owner_record_blocks(vdf)
+    if not include_hidden:
+        blocks = [block for block in blocks if not block.hidden]
+    return sorted(
+        blocks,
+        key=lambda block: (
+            block.sentinel_record_indices[0] if block.sentinel_record_indices else len(vdf.records),
+            block.start,
+            block.end,
+        ),
+    )
+
+
+def owner_block_runtime_class(block: OwnerRecordBlock) -> str:
+    if block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes):
+        return "stock"
+    if block.ot_codes and all(code == OT_CODE_CONST for code in block.ot_codes):
+        return "const"
+    return "dynamic"
+
+
+# ---- VDF-native name mapping ----
+
+# Names that are module IO / stdlib helpers and never own OT entries.
+VENSIM_MODULE_NAMES = {"IN", "INI", "OUTPUT"}
+VENSIM_STDLIB_HELPERS = {"DEL", "LV1", "LV2", "LV3", "ST", "RT1", "RT2", "DL"}
+
+
+def _is_visible_model_name(name: str) -> bool:
+    if classify_name(name):
+        return False
+    if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+        return False
+    return True
+
+
+def _recover_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+    """
+    Recover dimension names and element labels when section 5 is unambiguous.
+
+    The straightforward case is the old single-dimension layout: one sec5
+    entry, one non-metadata payload ref naming the dimension, and the next `n`
+    simple visible names after that anchor providing the element labels.
+
+    Edited models can leave multiple sec5 entries with stale/stuttering refs.
+    Those are left unresolved instead of guessed through.
+    """
+    sec5_entries = vdf.parse_section5_sets() or []
+    if len(sec5_entries) != 1:
+        return []
+
+    slot_to_names = build_display_slot_to_names(vdf)
+    entry = sec5_entries[0]
+    payload_names: list[str] = []
+    seen_payload: set[str] = set()
+    for slot_ref in section5_payload_refs(entry):
+        for name in slot_to_names.get(slot_ref, []):
+            if not _is_visible_model_name(name):
+                continue
+            key = name.lower()
+            if key in seen_payload:
+                continue
+            seen_payload.add(key)
+            payload_names.append(name)
+
+    if len(payload_names) != 1:
+        return []
+
+    anchor = payload_names[0]
+    try:
+        anchor_idx = vdf.names.index(anchor)
+    except ValueError:
+        return []
+
+    elements: list[str] = []
+    seen_elements: set[str] = set()
+    for name in vdf.names[anchor_idx + 1:]:
+        if not _is_visible_model_name(name):
+            continue
+        if " " in name:
+            break
+        key = name.lower()
+        if key in seen_elements or key == anchor.lower():
+            continue
+        seen_elements.add(key)
+        elements.append(name)
+        if len(elements) == entry.n:
+            break
+
+    if len(elements) != entry.n:
+        return []
+
+    return [RecoveredDimensionSet(name=anchor, elements=elements, sec5_index=0)]
+
+
+def visible_variable_candidates(vdf: VdfFile) -> list[str]:
+    """
+    Filter the name table to candidate variable names (names that could own OT
+    entries). Removes system variables, metadata prefixed names, builtins,
+    module IO names, stdlib helpers, and unslotted names.
+
+    Dimension/element filtering is NOT done here because it requires OT
+    validation to distinguish ambiguous cases. That's handled in the mapping
+    stage.
+    """
+    slotted_count = len(vdf.slot_table)
+    candidates: list[str] = []
+    for i, name in enumerate(vdf.names):
+        if i >= slotted_count:
+            break
+        if not _is_visible_model_name(name):
+            continue
+        candidates.append(name)
+    return candidates
+
+
+@dataclass
+class NameMapping:
+    """Result of VDF-native name-to-OT mapping."""
+    variable_names: list[str]  # Alphabetically sorted variable names
+    owner_blocks: list[OwnerRecordBlock]  # Sort-key ordered visible blocks
+    name_to_block: dict[str, OwnerRecordBlock]
+    system_ot_indices: set[int]  # OT indices owned by system variables
+    unmapped_blocks: list[OwnerRecordBlock]  # Blocks that couldn't be mapped
+
+
+def _vensim_sort_key(name: str) -> str:
+    """Vensim sorts names case-insensitively."""
+    return name.lower()
+
+
+def _name_looks_lookupish(name: str) -> bool:
+    lower = name.lower()
+    return "lookup" in lower or "table" in lower or "graphical function" in lower
+
+
+def _name_allowed_for_block(name: str, block: OwnerRecordBlock) -> bool:
+    if classify_name(name):
+        return False
+    if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+        return False
+    # Lookup/table names that land on stock-coded owner blocks behave like
+    # internal aliases, not visible stock variables. Keep them out of the
+    # stock ordering pass; standalone lookup extraction is handled separately.
+    if (
+        block.ot_codes
+        and all(code == OT_CODE_STOCK for code in block.ot_codes)
+        and _name_looks_lookupish(name)
+    ):
+        return False
+    return True
+
+
+def _group_ot_positions(codes: list[int], *, want_stock: bool) -> list[int]:
+    return [
+        ot_idx for ot_idx, code in enumerate(codes)
+        if ot_idx > 0 and ((code == OT_CODE_STOCK) == want_stock)
+    ]
+
+
+def _assign_group_positions(
+    items: list[tuple[str, int, Optional[int]]],
+    positions: list[int],
+) -> Optional[dict[str, int]]:
+    """
+    Assign ordered named items into the available OT positions.
+
+    Anchored items carry a concrete OT start and must land there. Unanchored
+    items are placed greedily at the earliest position that still leaves room
+    for the remaining anchored items. This is a linear feasibility check over
+    the real OT layout, allowing anonymous helper gaps anywhere in the group.
+    """
+    total_len = sum(length for _, length, _ in items)
+    if total_len > len(positions):
+        return None
+
+    pos_index = {pos: i for i, pos in enumerate(positions)}
+    anchored_start_indices: list[Optional[int]] = [None] * len(items)
+    anchored_after_lengths = [0] * len(items)
+
+    next_anchor_idx: Optional[int] = None
+    lengths_before_next_anchor = 0
+    for item_idx in range(len(items) - 1, -1, -1):
+        _, length, start = items[item_idx]
+        anchored_after_lengths[item_idx] = lengths_before_next_anchor
+        if start is not None:
+            start_idx = pos_index.get(start)
+            if start_idx is None or start_idx + length > len(positions):
+                return None
+            if positions[start_idx:start_idx + length] != list(range(start, start + length)):
+                return None
+            anchored_start_indices[item_idx] = start_idx
+            next_anchor_idx = item_idx
+            lengths_before_next_anchor = 0
+        else:
+            lengths_before_next_anchor += length
+
+    assigned: dict[str, int] = {}
+    cursor = 0
+    for item_idx, (name, length, start) in enumerate(items):
+        start_idx = anchored_start_indices[item_idx]
+        if start_idx is not None and start is not None:
+            if cursor > start_idx:
+                return None
+            assigned[name] = start
+            cursor = start_idx + length
+            continue
+
+        if cursor + length > len(positions):
+            return None
+        remaining_before_anchor = anchored_after_lengths[item_idx]
+        next_anchor_pos = None
+        for future_idx in range(item_idx + 1, len(items)):
+            future_start_idx = anchored_start_indices[future_idx]
+            if future_start_idx is not None:
+                next_anchor_pos = future_start_idx
+                break
+        if next_anchor_pos is not None and cursor + length + remaining_before_anchor > next_anchor_pos:
+            return None
+        assigned[name] = positions[cursor]
+        cursor += length
+
+    return assigned
+
+
+def _nonstock_assignment_items(
+    name_to_block: dict[str, OwnerRecordBlock],
+) -> list[tuple[str, int, Optional[int]]]:
+    nonstock_names = sorted(
+        (
+            name for name, block in name_to_block.items()
+            if not (block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes))
+        ),
+        key=_vensim_sort_key,
+    )
+    system_names_sorted = sorted(
+        (name for name in SYSTEM_NAMES if name != "Time"),
+        key=_vensim_sort_key,
+    )
+
+    items: list[tuple[str, int, Optional[int]]] = []
+    i = 0
+    j = 0
+    while i < len(nonstock_names) or j < len(system_names_sorted):
+        if j >= len(system_names_sorted):
+            name = nonstock_names[i]
+            block = name_to_block[name]
+            items.append((name, block.length(), block.start))
+            i += 1
+            continue
+        if i >= len(nonstock_names):
+            items.append((system_names_sorted[j], 1, None))
+            j += 1
+            continue
+        if _vensim_sort_key(nonstock_names[i]) <= _vensim_sort_key(system_names_sorted[j]):
+            name = nonstock_names[i]
+            block = name_to_block[name]
+            items.append((name, block.length(), block.start))
+            i += 1
+        else:
+            items.append((system_names_sorted[j], 1, None))
+            j += 1
+    return items
+
+
+def _lookup_record_names(vdf: VdfFile) -> list[str]:
+    """
+    Return lookup/table names in slotted name-table order.
+
+    Section-6 lookup records are written 1:1 with these lookupish name-table
+    entries, so an old-school linear pass can pair them by position without
+    searching.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in vdf.names[:len(vdf.slot_table)]:
+        if classify_name(name):
+            continue
+        if not _name_looks_lookupish(name):
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _array_element_labels_for_block(
+    block: OwnerRecordBlock,
+    dimension_sets: list[RecoveredDimensionSet],
+) -> Optional[list[str]]:
+    if block.length() <= 1:
+        return None
+
+    matches = [dim.elements for dim in dimension_sets if len(dim.elements) == block.length()]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _validate_name_block_assignment(
+    name_to_block: dict[str, OwnerRecordBlock],
+    vdf: VdfFile,
+) -> bool:
+    """
+    Check that a name-to-block assignment produces an OT layout consistent
+    with the stocks-first-alphabetical ordering rule.
+
+    For each model variable, its expected OT position (derived from alphabetical
+    sorting within the stock/non-stock group) must match its assigned block's
+    actual OT start position.
+    """
+    codes = vdf.section6_ot_class_codes() or []
+    if not codes:
+        return False
+
+    stock_names = sorted(
+        (
+            name for name, block in name_to_block.items()
+            if block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes)
+        ),
+        key=_vensim_sort_key,
+    )
+    stock_items = [
+        (name, name_to_block[name].length(), name_to_block[name].start)
+        for name in stock_names
+    ]
+    stock_positions = _group_ot_positions(codes, want_stock=True)
+    if _assign_group_positions(stock_items, stock_positions) is None:
+        return False
+
+    nonstock_items = _nonstock_assignment_items(name_to_block)
+    nonstock_positions = _group_ot_positions(codes, want_stock=False)
+    return _assign_group_positions(nonstock_items, nonstock_positions) is not None
+
+
+def _recover_dimension_element_names(vdf: VdfFile) -> set[str]:
+    """
+    Return element labels from the structurally unambiguous sec5 cases.
+
+    This intentionally stays conservative: edited models can keep stale sec5
+    entries around, so only the simple single-entry layout is treated as
+    decoded.
+    """
+    elements: set[str] = set()
+    for dim in _recover_dimension_sets(vdf):
+        elements.update(dim.elements)
+    return elements
+
+
+def _offset_sort_key_breaks(
+    sorted_recs: list[tuple[int, VdfRecord]],
+    offset: int,
+    vdf: VdfFile,
+) -> int:
+    pairs: list[tuple[int, str]] = []
+    for rank, (_, rec) in enumerate(sorted_recs):
+        name_idx = rank + offset
+        if not (0 <= name_idx < len(vdf.names)):
+            continue
+        name = vdf.names[name_idx]
+        if classify_name(name):
+            continue
+        if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+            continue
+        sort_key = rec.fields[10]
+        if sort_key > 0:
+            pairs.append((sort_key, name))
+
+    pairs.sort()
+    breaks = 0
+    prev_key: Optional[str] = None
+    for _, name in pairs:
+        name_key = _vensim_sort_key(name)
+        if prev_key is not None and prev_key > name_key:
+            breaks += 1
+        prev_key = name_key
+    return breaks
+
+
+def _mapping_from_record_names(
+    sorted_recs: list[tuple[int, VdfRecord]],
+    offset: int,
+    vdf: VdfFile,
+    visible_blocks: list[OwnerRecordBlock],
+) -> dict[str, OwnerRecordBlock]:
+    rec_to_name: dict[int, str] = {}
+    rec_sort_names: dict[int, list[tuple[int, VdfRecord, str]]] = {}
+    for rank, (ri, rec) in enumerate(sorted_recs):
+        name_idx = rank + offset
+        if not (0 <= name_idx < len(vdf.names)):
+            continue
+        name = vdf.names[name_idx]
+        rec_to_name[ri] = name
+        rec_sort_names.setdefault(rec.fields[10], []).append((ri, rec, name))
+
+    ordered_blocks = sorted(
+        visible_blocks,
+        key=lambda block: (
+            block.attached_sort_keys[0] if block.attached_sort_keys else math.inf,
+            block.start,
+            block.end,
+        ),
+    )
+
+    used_names: set[str] = set()
+    name_to_block: dict[str, OwnerRecordBlock] = {}
+
+    for block in ordered_blocks:
+        chosen: Optional[str] = None
+        for sort_key in block.attached_sort_keys:
+            candidates = [
+                name
+                for _, _, name in rec_sort_names.get(sort_key, [])
+                if name not in used_names and _name_allowed_for_block(name, block)
+            ]
+            if candidates:
+                chosen = candidates[0]
+                break
+
+        if chosen is None:
+            for rec_idx in block.sentinel_record_indices:
+                name = rec_to_name.get(rec_idx)
+                if name is None or name in used_names:
+                    continue
+                if _name_allowed_for_block(name, block):
+                    chosen = name
+                    break
+
+        if chosen is None:
+            continue
+        used_names.add(chosen)
+        name_to_block[chosen] = block
+
+    return name_to_block
+
+
+def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
+    """
+    Deterministic record-to-name mapping via the f[2]-offset formula.
+
+    Records sorted by f[2] correspond to names at position
+    (rank + offset) in the name table. The offset is typically
+    slot_count - record_count, but can differ by a small amount in
+    incrementally edited models. We try a small range of offsets and
+    validate each against OT positions.
+
+    This is O(offset_range * records) -- fast and deterministic, matching
+    what a 90s C program would use to reconstruct the mapping.
+    """
+    n_recs = len(vdf.records)
+    n_slots = len(vdf.slot_table)
+    if n_recs == 0 or n_slots == 0 or n_recs > n_slots:
+        return None
+
+    sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+
+    nominal_offset = n_slots - n_recs
+    candidates: list[tuple[int, int, int, dict[str, OwnerRecordBlock]]] = []
+    for offset in range(max(0, nominal_offset - 3), nominal_offset + 4):
+        trial = _mapping_from_record_names(sorted_recs, offset, vdf, visible_blocks)
+        if not _validate_name_block_assignment(trial, vdf):
+            continue
+        mapped_count = len(trial)
+        sort_breaks = _offset_sort_key_breaks(sorted_recs, offset, vdf)
+        distance = abs(offset - nominal_offset)
+        candidates.append((mapped_count, -sort_breaks, -distance, trial))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return candidates[0][3]
+
+
+def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
+    """
+    Map visible variable names to owner blocks using the stocks-first-
+    alphabetical ordering rule, validated against actual OT positions.
+
+    Uses the f[2]-offset formula plus sort-key anchored block ownership.
+    This stays linear in the number of records/blocks and avoids the
+    combinatorial fallback entirely.
+    """
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+
+    if not visible_blocks:
+        hidden_ots: set[int] = set()
+        hidden_unmapped: list[OwnerRecordBlock] = []
+        for block in all_blocks:
+            if block.hidden:
+                hidden_ots.update(range(block.start, block.end))
+                hidden_unmapped.append(block)
+        return NameMapping(
+            variable_names=[],
+            owner_blocks=[],
+            name_to_block={},
+            system_ot_indices=hidden_ots,
+            unmapped_blocks=hidden_unmapped,
+        )
+
+    f2_result = _try_f2_offset_mapping(vdf)
+    if f2_result is None:
+        return None
+
+    mapped_names = sorted(f2_result.keys(), key=_vensim_sort_key)
+    mapped_blocks = [f2_result[name] for name in mapped_names]
+    mapped_ranges = {(block.start, block.end) for block in mapped_blocks}
+    # Unmapped visible blocks plus hidden system blocks both contribute to
+    # system_ot_indices -- those OT slots are system-owned regardless of
+    # whether the block was hidden at the owner-building stage.
+    sys_blocks = [block for block in visible_blocks if (block.start, block.end) not in mapped_ranges]
+    sys_ots: set[int] = set()
+    for block in sys_blocks:
+        sys_ots.update(range(block.start, block.end))
+    for block in all_blocks:
+        if block.hidden:
+            sys_ots.update(range(block.start, block.end))
+    return NameMapping(
+        variable_names=mapped_names,
+        owner_blocks=mapped_blocks,
+        name_to_block=f2_result,
+        system_ot_indices=sys_ots,
+        unmapped_blocks=sys_blocks,
+    )
+
+
+@dataclass
+class NamedResult:
+    """A single named time series from a VDF file."""
+    name: str
+    ot_index: int
+    values: list[float]
+
+
+def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
+    """
+    Extract named time series from a VDF file using VDF-native structure only.
+
+    Returns a list of NamedResult for each mapped variable (scalar variables
+    get one entry, arrayed variables get one entry per element). System
+    variables (FINAL TIME, INITIAL TIME, SAVEPER, TIME STEP) are also included.
+    """
+    mapping = map_names_to_owner_blocks(vdf)
+    if mapping is None:
+        return None
+
+    # Extract time values
+    if vdf.first_data_block + 2 + vdf.bitmap_size > len(vdf.data):
+        return None
+    time_count = u16(vdf.data, vdf.first_data_block)
+    if time_count != vdf.time_point_count:
+        return None
+    data_start = vdf.first_data_block + 2 + vdf.bitmap_size
+    time_values = [f32(vdf.data, data_start + i * 4) for i in range(time_count)]
+    dimension_sets = _recover_dimension_sets(vdf)
+
+    results: list[NamedResult] = []
+    emitted_names: set[str] = set()
+    emitted_ot_indices: set[int] = set()
+
+    # Time itself
+    results.append(NamedResult(name="Time", ot_index=0, values=time_values))
+    emitted_names.add("Time")
+    emitted_ot_indices.add(0)
+
+    # Mapped variable results
+    for name in mapping.variable_names:
+        block = mapping.name_to_block.get(name)
+        if block is None:
+            continue
+
+        if block.length() == 1:
+            # Scalar variable
+            ot_idx = block.start
+            raw = vdf.offset_table_entry(ot_idx)
+            if raw is None:
+                continue
+            if vdf.is_data_block_offset(raw):
+                series = vdf.extract_block_series(raw, time_values)
+            else:
+                const_val = u32_as_f32(raw)
+                series = [const_val] * len(time_values)
+            results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+            emitted_names.add(name)
+            emitted_ot_indices.add(ot_idx)
+        else:
+            # Arrayed variable: one result per OT element
+            element_labels = _array_element_labels_for_block(block, dimension_sets)
+            for elem_offset in range(block.length()):
+                ot_idx = block.start + elem_offset
+                raw = vdf.offset_table_entry(ot_idx)
+                if raw is None:
+                    continue
+                if vdf.is_data_block_offset(raw):
+                    series = vdf.extract_block_series(raw, time_values)
+                else:
+                    const_val = u32_as_f32(raw)
+                    series = [const_val] * len(time_values)
+                if element_labels is not None and elem_offset < len(element_labels):
+                    elem_name = f"{name}[{element_labels[elem_offset]}]"
+                else:
+                    elem_name = f"{name}[{elem_offset}]"
+                results.append(NamedResult(
+                    name=elem_name, ot_index=ot_idx, values=series))
+                emitted_names.add(elem_name)
+                emitted_ot_indices.add(ot_idx)
+
+    # Standalone lookup/table outputs have direct OT bindings in section 6.
+    lookup_names = _lookup_record_names(vdf)
+    lookup_records = vdf.section6_lookup_records() or []
+    if len(lookup_names) == len(lookup_records):
+        for name, record in zip(lookup_names, lookup_records):
+            ot_idx = record.ot_index()
+            if name in emitted_names or ot_idx in emitted_ot_indices:
+                continue
+            raw = vdf.offset_table_entry(ot_idx)
+            if raw is None:
+                continue
+            if vdf.is_data_block_offset(raw):
+                series = vdf.extract_block_series(raw, time_values)
+            else:
+                const_val = u32_as_f32(raw)
+                series = [const_val] * len(time_values)
+            results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+            emitted_names.add(name)
+            emitted_ot_indices.add(ot_idx)
+
+    # System variables share the same gap-aware non-stock placement logic as
+    # named variables. This keeps helper/lookup gaps from shifting the system
+    # names onto the wrong OT slots.
+    codes = vdf.section6_ot_class_codes() or []
+    nonstock_positions = _group_ot_positions(codes, want_stock=False)
+    system_positions = _assign_group_positions(
+        _nonstock_assignment_items(mapping.name_to_block),
+        nonstock_positions,
+    )
+    if system_positions is None:
+        return None
+
+    for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key):
+        ot_idx = system_positions.get(name)
+        if ot_idx is None:
+            continue
+        raw = vdf.offset_table_entry(ot_idx)
+        if raw is None:
+            continue
+        if vdf.is_data_block_offset(raw):
+            series = vdf.extract_block_series(raw, time_values)
+        else:
+            const_val = u32_as_f32(raw)
+            series = [const_val] * len(time_values)
+        results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
+        emitted_names.add(name)
+        emitted_ot_indices.add(ot_idx)
+
+    return results
+
+
+def mdl_definition_matches_block(model: MdlModel, definition: MdlDefinition,
+                                 block: RecordShapeBlock) -> bool:
+    expected_size = mdl_definition_flat_size(model, definition)
+    if expected_size is not None and block.length() != expected_size:
+        return False
+    if definition.is_stock():
+        return bool(block.ot_codes) and all(code == OT_CODE_STOCK for code in block.ot_codes)
+    return all(code != OT_CODE_STOCK for code in block.ot_codes)
+
+
+def mdl_definition_matches_owner_block(model: MdlModel, definition: MdlDefinition,
+                                       block: OwnerRecordBlock) -> bool:
+    expected_size = mdl_definition_flat_size(model, definition)
+    if expected_size is not None and block.length() != expected_size:
+        return False
+    if definition.is_stock():
+        return bool(block.ot_codes) and all(code == OT_CODE_STOCK for code in block.ot_codes)
+    return all(code != OT_CODE_STOCK for code in block.ot_codes)
+
+
+def match_mdl_definitions_to_blocks(vdf: VdfFile, model: MdlModel) -> list[MdlBlockMatch]:
+    blocks = build_record_shape_blocks(vdf)
+    matches: list[MdlBlockMatch] = []
+    for definition in model.definitions:
+        if definition.kind not in {"stock", "var", "lookup"}:
+            continue
+        candidate_block_indices = [
+            idx for idx, block in enumerate(blocks)
+            if mdl_definition_matches_block(model, definition, block)
+        ]
+        matches.append(MdlBlockMatch(
+            definition=definition,
+            candidate_block_indices=candidate_block_indices,
+        ))
+    return matches
+
+
+def match_mdl_definitions_to_owner_blocks(vdf: VdfFile, model: MdlModel) -> list[MdlBlockMatch]:
+    blocks = build_owner_record_blocks(vdf)
+    matches: list[MdlBlockMatch] = []
+    for definition in model.definitions:
+        if definition.kind not in {"stock", "var", "lookup"}:
+            continue
+        candidate_block_indices = [
+            idx for idx, block in enumerate(blocks)
+            if not block.hidden and mdl_definition_matches_owner_block(model, definition, block)
+        ]
+        matches.append(MdlBlockMatch(
+            definition=definition,
+            candidate_block_indices=candidate_block_indices,
+        ))
+    return matches
 
 
 # ---- Parsing ----
@@ -651,6 +2201,9 @@ def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
         return 0, []
     end = name_sec.file_offset
 
+    best_key: Optional[tuple[int, int, int, int, int, int]] = None
+    best: tuple[int, list[int]] = (0, [])
+
     for gap in range(20):
         for name_count in range(max_name_count, 0, -1):
             table_size = name_count * 4
@@ -662,12 +2215,33 @@ def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
             sorted_vals = sorted(set(values))
             if len(sorted_vals) != name_count:
                 continue
-            if not all(v % 4 == 0 and v > 0 and v < sec1_data_size for v in sorted_vals):
+            if not all(v % 4 == 0 and v > 0 and v + 16 <= sec1_data_size for v in sorted_vals):
                 continue
             strides = [sorted_vals[i + 1] - sorted_vals[i] for i in range(len(sorted_vals) - 1)]
-            if strides and min(strides) >= 4:
-                return table_start, values
-    return 0, []
+            if strides and min(strides) < 4:
+                continue
+
+            layout = analyze_slot_table_offsets(values)
+            if layout is None:
+                continue
+
+            # Prefer the largest structurally valid table first. Within that
+            # count, prefer the candidates that preserve the observed 16-byte
+            # slot lattice rather than whichever suffix happens to appear with
+            # the smallest gap before section 2.
+            key = (
+                name_count,
+                1 if layout.contiguous_16 else 0,
+                -layout.irregular_stride_count,
+                -layout.missing_16_slots,
+                -table_start,
+                -gap,
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (table_start, values)
+
+    return best
 
 
 def find_records(data: bytes, search_start: int, search_end: int) -> list[VdfRecord]:
@@ -920,10 +2494,19 @@ def print_slots(vdf: VdfFile) -> None:
         print("=== Slot Table ===\n  (empty)\n")
         return
     sec1_data_start = vdf.sections[1].data_offset() if len(vdf.sections) > 1 else 0
+    alignment = preferred_slot_name_alignment(vdf)
+    default_alignment = score_slot_name_alignment(vdf, 0)
     print(f"=== Slot Table ({len(vdf.slot_table)} entries @ 0x{vdf.slot_table_offset:08x}) ===")
+    print(f"  layout: {format_slot_table_layout(analyze_slot_table_offsets(vdf.slot_table))}")
+    if alignment.leading_extra_slots > 0:
+        hidden = ", ".join(str(slot) for slot in alignment.hidden_slots)
+        print(f"  visible-name alignment: skip {alignment.leading_extra_slots} leading slot entries "
+              f"(score {alignment.score} vs default {default_alignment.score})")
+        print(f"  hidden slot refs: [{hidden}]")
     print(f"  {'Idx':>3}  {'Sec1Off':>7}  {'Name':<36}  {'w[0]':>8} {'w[1]':>8} {'w[2]':>8} {'w[3]':>8}")
     for i, offset in enumerate(vdf.slot_table):
-        name = vdf.names[i] if i < len(vdf.names) else "???"
+        name_idx = i - alignment.leading_extra_slots
+        name = vdf.names[name_idx] if 0 <= name_idx < len(vdf.names) else "<hidden>"
         abs_off = sec1_data_start + offset
         if abs_off + 16 <= len(vdf.data):
             w = [u32(vdf.data, abs_off + j * 4) for j in range(4)]
@@ -941,9 +2524,9 @@ def print_records(vdf: VdfFile) -> None:
         return
 
     slot_to_name: dict[int, str] = {}
-    for i, slot in enumerate(vdf.slot_table):
-        if i < len(vdf.names):
-            slot_to_name[slot] = vdf.names[i]
+    for slot, names in build_display_slot_to_names(vdf).items():
+        if names:
+            slot_to_name[slot] = names[0]
 
     print(f"  SENT = sentinel 0x{VDF_SENTINEL:08x}")
     print(f"  Known: f[0]=type f[1]=class f[6]=shape f[10]=sort f[11]=ot_idx f[12]=slot_ref")
@@ -998,7 +2581,7 @@ def print_section3(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     sec4_entries = vdf.parse_section4_entries()
     sec4_idx_words = set()
     if sec4_entries:
@@ -1007,10 +2590,13 @@ def print_section3(vdf: VdfFile) -> None:
     for i, entry in enumerate(directory.entries):
         slot_refs = [resolve_slot_ref(sr, slot_to_names) for sr in entry.axis_slot_refs()]
         sec4_hit = entry.index_word() in sec4_idx_words
+        state = "placeholder" if entry.flat_size() == 0 else "active"
         print(f"  {i:>3} @0x{entry.file_offset:08x} idx={entry.index_word()} sec4_hit={sec4_hit} "
-              f"flat={entry.flat_size()} axes={entry.axis_sizes()} "
+              f"state={state} flat={entry.flat_size()} axes={entry.axis_sizes()} "
               f"w10={entry.words[10]} w11={entry.words[11]} "
-              f"slot_refs={slot_refs} tail={entry.terminal_tag()}")
+              f"shape_words={entry.words[:4]} "
+              f"slot_refs={slot_refs} raw_slot_refs={entry.axis_slot_refs()} "
+              f"tail={entry.terminal_tag()}")
     print()
 
 
@@ -1025,7 +2611,7 @@ def print_section4(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     for i, e in enumerate(entries[:30]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs]
         print(f"  {i:>3} @0x{e.file_offset:08x} packed=0x{e.packed_word:08x} "
@@ -1047,12 +2633,25 @@ def print_section5(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
+    directory = vdf.parse_section3_directory()
+    sec3_entries = directory.entries if directory else []
     for i, e in enumerate(entries[:16]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs[:8]]
+        payload = section5_payload_refs(e)
+        payload_refs = [resolve_slot_ref(r, slot_to_names) for r in payload[:8]]
+        trailing_count = 1 + e.marker
+        trailing_refs = e.refs[-trailing_count:] if len(e.refs) >= trailing_count else []
+        trailing_ref_names = [resolve_slot_ref(r, slot_to_names) for r in trailing_refs]
+        exact_axes = section5_exact_axis_sizes(e, sec3_entries) if sec3_entries else []
+        sec3_matches = classify_section5_shape_matches(e, sec3_entries) if sec3_entries else None
         print(f"  {i:>3} @0x{e.file_offset:08x} n={e.n} marker={e.marker} "
-              f"size={len(e.refs)} dim={e.dimension_size()} "
-              f"slotted={e.slotted_ref_count} refs(head)={refs}")
+              f"size={len(e.refs)} payload_refs={e.payload_ref_count()} "
+              f"slotted={e.slotted_ref_count} refs(head)={refs} "
+              f"payload={payload_refs} raw_refs={e.refs} "
+              f"trailing={trailing_ref_names} raw_trailing={trailing_refs} "
+              f"sec3_exact={sec3_matches.exact if sec3_matches else []} "
+              f"exact_axes={exact_axes}")
     if len(entries) > 16:
         print(f"  ... ({len(entries) - 16} more sets)")
     print()
@@ -1066,7 +2665,7 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
         return
 
     skip, entries, stop = result
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
     slot_to_name_flat: dict[int, str] = {}
     for s, names in slot_to_names.items():
         slot_to_name_flat[s] = names[0] if names else ""
@@ -1078,7 +2677,7 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
     for i, e in enumerate(entries[:12]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs]
         print(f"  {i:>3} @0x{e.file_offset:08x} n={len(e.refs)} "
-              f"slot_hits={e.slotted_ref_count} refs={refs}")
+              f"slot_hits={e.slotted_ref_count} raw_refs={e.refs} refs={refs}")
     if len(entries) > 12:
         print(f"  ... ({len(entries) - 12} more entries)")
     print()
@@ -1263,11 +2862,18 @@ def print_shape_record_bridge(vdf: VdfFile) -> None:
 
     for code in sorted(shape_groups.keys()):
         recs = shape_groups[code]
+        entry = idx_to_entry.get(code)
         if code == 5:
             label = "scalar"
-        elif code in idx_to_entry:
-            entry = idx_to_entry[code]
-            label = f"sec3 idx={code}, flat={entry.flat_size()}, axes={entry.axis_sizes()}"
+        elif entry is not None:
+            state = "active" if entry.flat_size() > 0 else "placeholder"
+            label = f"sec3 idx={code}, flat={entry.flat_size()}, axes={entry.axis_sizes()} ({state})"
+        elif code == 32 and directory.entries:
+            active = [e for e in directory.entries if e.flat_size() > 0]
+            label = ("generic arrayed"
+                     if not active else
+                     "generic arrayed; active sec3="
+                     + ", ".join(f"{e.index_word()}/{e.axis_sizes()}" for e in active))
         elif code >= 7000:
             label = f"high-range ({code})"
         else:
@@ -1294,6 +2900,262 @@ def print_shape_record_bridge(vdf: VdfFile) -> None:
     print()
 
 
+def print_record_shape_blocks(vdf: VdfFile) -> None:
+    print("=== Record Shape Blocks ===")
+    blocks = build_record_shape_blocks(vdf)
+    if not blocks:
+        print("  (none)\n")
+        return
+
+    for i, block in enumerate(blocks):
+        code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+        slot_labels = [describe_slot_ref(vdf, slot_ref) for slot_ref in block.slot_refs]
+        print(f"  {i:>3}  OT[{block.start}..{block.end}) len={block.length()} "
+              f"shape_codes={block.shape_codes} recs={block.record_indices} "
+              f"shape_recs={block.shape_record_indices} sorts={block.sort_keys} "
+              f"codes={code_str} homogeneous={block.homogeneous_ot_codes()} "
+              f"slots={slot_labels}")
+    print()
+
+
+def print_owner_record_blocks(vdf: VdfFile) -> None:
+    print("=== Owner Record Blocks ===")
+    blocks = build_owner_record_blocks(vdf)
+    if not blocks:
+        print("  (none)\n")
+        return
+
+    for i, block in enumerate(blocks):
+        code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+        slot_labels = [describe_slot_ref(vdf, slot_ref) for slot_ref in block.slot_refs]
+        hidden_label = "hidden" if block.hidden else "visible"
+        print(f"  {i:>3}  OT[{block.start}..{block.end}) len={block.length()} "
+              f"{hidden_label} sentinel_recs={block.sentinel_record_indices} "
+              f"shape_codes={block.shape_codes} direct_sorts={block.direct_sort_keys} "
+              f"attached_sorts={block.attached_sort_keys} "
+              f"sort_anchors={block.sort_anchor_record_indices} "
+              f"codes={code_str} homogeneous={block.homogeneous_ot_codes()} "
+              f"slots={slot_labels}")
+    print()
+
+
+def format_record_shape_block(vdf: VdfFile, block: Optional[RecordShapeBlock], *,
+                              block_idx: Optional[int] = None) -> str:
+    if block is None:
+        return "missing"
+    prefix = f"block[{block_idx}] " if block_idx is not None else ""
+    code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+    return (f"{prefix}OT[{block.start}..{block.end}) len={block.length()} "
+            f"shape_codes={block.shape_codes} sorts={block.sort_keys} "
+            f"codes={code_str} slots={block.slot_refs}")
+
+
+def format_owner_record_block(vdf: VdfFile, block: Optional[OwnerRecordBlock], *,
+                              block_idx: Optional[int] = None) -> str:
+    if block is None:
+        return "missing"
+    prefix = f"owner[{block_idx}] " if block_idx is not None else ""
+    code_str = "[" + ", ".join(f"0x{code:02x}" for code in block.ot_codes) + "]"
+    hidden_label = "hidden" if block.hidden else "visible"
+    return (f"{prefix}OT[{block.start}..{block.end}) len={block.length()} {hidden_label} "
+            f"class={owner_block_runtime_class(block)} "
+            f"sentinel_recs={block.sentinel_record_indices} "
+            f"direct_sorts={block.direct_sort_keys} attached_sorts={block.attached_sort_keys} "
+            f"anchors={block.sort_anchor_record_indices} codes={code_str} slots={block.slot_refs}")
+
+
+def print_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
+    print("=== MDL Alignment ===")
+    print(f"  mdl: {mdl_path}")
+    print(f"  dimensions={len(model.dimensions)} definitions={len(model.definitions)}")
+    if model.dimensions:
+        for dim in model.dimensions.values():
+            print(f"    dim {dim.name}({len(dim.elements)}): {dim.elements}")
+
+    blocks = build_record_shape_blocks(vdf)
+    matches = match_mdl_definitions_to_blocks(vdf, model)
+    matched_block_indices: set[int] = set()
+
+    for match in matches:
+        definition = match.definition
+        flat_size = mdl_definition_flat_size(model, definition)
+        if len(match.candidate_block_indices) == 1:
+            status = "unique"
+        elif len(match.candidate_block_indices) == 0:
+            status = "missing"
+        else:
+            status = "ambiguous"
+        print(f"  src[{definition.source_index:>2}] {definition.kind:<6} {definition.name}"
+              f"{'[' + ','.join(definition.dimensions) + ']' if definition.dimensions else ''} "
+              f"flat={flat_size if flat_size is not None else '?'} "
+              f"candidates={len(match.candidate_block_indices)} {status}")
+        for block_idx in match.candidate_block_indices:
+            matched_block_indices.add(block_idx)
+            print(f"        {format_record_shape_block(vdf, blocks[block_idx], block_idx=block_idx)}")
+
+    unmatched = [idx for idx in range(len(blocks)) if idx not in matched_block_indices]
+    if unmatched:
+        print("  unmatched blocks:")
+        for idx in unmatched:
+            print(f"        {format_record_shape_block(vdf, blocks[idx], block_idx=idx)}")
+    print()
+
+
+def print_owner_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
+    print("=== Owner MDL Alignment ===")
+    print(f"  mdl: {mdl_path}")
+
+    blocks = build_owner_record_blocks(vdf)
+    matches = match_mdl_definitions_to_owner_blocks(vdf, model)
+    matched_block_indices: set[int] = set()
+
+    for match in matches:
+        definition = match.definition
+        flat_size = mdl_definition_flat_size(model, definition)
+        if len(match.candidate_block_indices) == 1:
+            status = "unique"
+        elif len(match.candidate_block_indices) == 0:
+            status = "missing"
+        else:
+            status = "ambiguous"
+        print(f"  src[{definition.source_index:>2}] {definition.kind:<6} {definition.name}"
+              f"{'[' + ','.join(definition.dimensions) + ']' if definition.dimensions else ''} "
+              f"flat={flat_size if flat_size is not None else '?'} "
+              f"candidates={len(match.candidate_block_indices)} {status}")
+        for block_idx in match.candidate_block_indices:
+            matched_block_indices.add(block_idx)
+            print(f"        {format_owner_record_block(vdf, blocks[block_idx], block_idx=block_idx)}")
+
+    unmatched = [idx for idx, block in enumerate(blocks) if idx not in matched_block_indices and not block.hidden]
+    if unmatched:
+        print("  unmatched visible owners:")
+        for idx in unmatched:
+            print(f"        {format_owner_record_block(vdf, blocks[idx], block_idx=idx)}")
+
+    hidden = [idx for idx, block in enumerate(blocks) if block.hidden]
+    if hidden:
+        print("  hidden owner blocks:")
+        for idx in hidden:
+            print(f"        {format_owner_record_block(vdf, blocks[idx], block_idx=idx)}")
+    print()
+
+
+def print_name_mapping(vdf: VdfFile) -> None:
+    """Show the VDF-native name-to-OT mapping."""
+    print("=== VDF-Native Name Mapping ===")
+
+    candidates = visible_variable_candidates(vdf)
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+    print(f"  candidates={len(candidates)} visible_owner_blocks={len(visible_blocks)}")
+    print(f"  candidate names: {candidates}")
+
+    mapping = map_names_to_owner_blocks(vdf)
+    if mapping is None:
+        print("  mapping FAILED (more candidates than blocks)")
+        print()
+        return
+
+    print(f"  mapped={len(mapping.name_to_block)} unmapped_blocks={len(mapping.unmapped_blocks)}")
+
+    for name in mapping.variable_names:
+        block = mapping.name_to_block.get(name)
+        if block is None:
+            print(f"  {name}: unmapped")
+            continue
+        cls = owner_block_runtime_class(block)
+        sort_str = str(block.attached_sort_keys) if block.attached_sort_keys else "[]"
+        print(f"  {name}: OT[{block.start}..{block.end}) len={block.length()} "
+              f"class={cls} sorts={sort_str}")
+
+    if mapping.unmapped_blocks:
+        print("  unmapped (system) blocks:")
+        for block in mapping.unmapped_blocks:
+            print(f"    OT[{block.start}..{block.end}) class={owner_block_runtime_class(block)}")
+
+    if mapping.system_ot_indices:
+        print(f"  system OT indices: {sorted(mapping.system_ot_indices)}")
+
+    # Verify against final values
+    finals = vdf.section6_final_values()
+    if finals:
+        print("  verification (final values):")
+        for name in mapping.variable_names:
+            block = mapping.name_to_block.get(name)
+            if block is None:
+                continue
+            for offset in range(block.length()):
+                ot_idx = block.start + offset
+                if ot_idx < len(finals):
+                    elem_label = f"{name}[{offset}]" if block.length() > 1 else name
+                    print(f"    {elem_label}: OT[{ot_idx}] final={finals[ot_idx]}")
+    print()
+
+
+def print_extracted_results(vdf: VdfFile) -> None:
+    """Extract and show named results using VDF-native mapping."""
+    print("=== Extracted Named Results ===")
+    results = extract_named_results(vdf)
+    if results is None:
+        print("  extraction FAILED")
+        print()
+        return
+
+    print(f"  total results: {len(results)}")
+    for r in results:
+        first = r.values[0] if r.values else float("nan")
+        last = r.values[-1] if r.values else float("nan")
+        print(f"  {r.name}: OT[{r.ot_index}] first={first} last={last}")
+    print()
+
+
+def print_owner_sketch_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
+    print("=== Owner Sketch Alignment ===")
+    print(f"  mdl: {mdl_path}")
+
+    sketch_defs = mdl_sketch_definitions(model)
+    blocks = owner_blocks_in_sentinel_order(vdf)
+
+    print(f"  sketch_names={len(model.sketch_names)} visible_defs={len(sketch_defs)} "
+          f"visible_owner_blocks={len(blocks)}")
+    if model.sketch_names:
+        print(f"  sketch_order={model.sketch_names}")
+    sketch_classes = [mdl_definition_runtime_class(definition) for definition in sketch_defs]
+    owner_classes = [owner_block_runtime_class(block) for block in blocks]
+    if sketch_classes != owner_classes:
+        print("  note: sentinel/file owner order does not match mdl sketch order in this fixture")
+
+    max_len = max(len(sketch_defs), len(blocks))
+    for idx in range(max_len):
+        definition = sketch_defs[idx] if idx < len(sketch_defs) else None
+        block = blocks[idx] if idx < len(blocks) else None
+
+        lhs = (
+            f"sketch[{idx:>2}] {definition.name} "
+            f"class={mdl_definition_runtime_class(definition)}"
+            if definition is not None else
+            f"sketch[{idx:>2}] missing"
+        )
+        rhs = (
+            f"owner[{idx:>2}] OT[{block.start}..{block.end}) "
+            f"class={owner_block_runtime_class(block)} "
+            f"sentinel_recs={block.sentinel_record_indices} "
+            f"attached_sorts={block.attached_sort_keys}"
+            if block is not None else
+            f"owner[{idx:>2}] missing"
+        )
+        print(f"  {lhs} -> {rhs}")
+
+    hidden = owner_blocks_in_sentinel_order(vdf, include_hidden=True)
+    hidden = [block for block in hidden if block.hidden]
+    if hidden:
+        print("  hidden owner blocks:")
+        for block in hidden:
+            print(f"        OT[{block.start}..{block.end}) class={owner_block_runtime_class(block)} "
+                  f"sentinel_recs={block.sentinel_record_indices} attached_sorts={block.attached_sort_keys}")
+    print()
+
+
 def print_section35_bridge(vdf: VdfFile) -> None:
     """Show the section-3 -> section-5 relationship via shared axis_slot_refs."""
     print("=== Section 3 -> Section 5 Bridge ===")
@@ -1307,7 +3169,7 @@ def print_section35_bridge(vdf: VdfFile) -> None:
         print("  (no section-5 entries)\n")
         return
 
-    slot_to_names = build_slot_to_names(vdf)
+    slot_to_names = build_display_slot_to_names(vdf)
 
     for i, sec3 in enumerate(directory.entries):
         axis_refs = set(sec3.axis_slot_refs())
@@ -1316,27 +3178,50 @@ def print_section35_bridge(vdf: VdfFile) -> None:
                   f"axes={sec3.axis_sizes()} -- no axis_slot_refs")
             continue
 
-        # Find sec5 entries whose trailing ref(s) overlap with this sec3's axis_slot_refs
-        matched_sec5 = []
-        for j, sec5 in enumerate(sec5_entries):
-            trailing_count = 1 + sec5.marker
-            trailing_refs = set(sec5.refs[-trailing_count:]) if len(sec5.refs) >= trailing_count else set()
-            if trailing_refs & axis_refs:
-                matched_sec5.append((j, sec5))
+        matches = classify_section5_bridge_matches(sec3, sec5_entries)
 
         axis_ref_strs = [resolve_slot_ref(r, slot_to_names) for r in sec3.axis_slot_refs()]
-        print(f"  sec3[{i}] idx={sec3.index_word()} flat={sec3.flat_size()} "
+        state = "placeholder" if sec3.flat_size() == 0 else "active"
+        print(f"  sec3[{i}] state={state} idx={sec3.index_word()} flat={sec3.flat_size()} "
               f"axes={sec3.axis_sizes()} axis_refs={axis_ref_strs}")
 
-        if matched_sec5:
-            for j, sec5 in matched_sec5:
-                trailing_count = 1 + sec5.marker
-                trailing = sec5.refs[-trailing_count:]
+        if matches.exact:
+            for j in matches.exact:
+                sec5 = sec5_entries[j]
+                trailing = section5_trailing_refs(sec5)
                 trailing_strs = [resolve_slot_ref(r, slot_to_names) for r in trailing]
-                print(f"    -> sec5[{j}] n={sec5.n} marker={sec5.marker} "
-                      f"dim_size={sec5.dimension_size()} trailing={trailing_strs}")
+                exact_axes = section5_exact_axis_sizes(sec5, directory.entries)
+                print(f"    -> exact sec5[{j}] n={sec5.n} marker={sec5.marker} "
+                      f"payload_refs={sec5.payload_ref_count()} trailing={trailing_strs} "
+                      f"axes={exact_axes}")
+        elif matches.partial:
+            for j in matches.partial:
+                sec5 = sec5_entries[j]
+                trailing = section5_trailing_refs(sec5)
+                trailing_strs = [resolve_slot_ref(r, slot_to_names) for r in trailing]
+                print(f"    -> partial sec5[{j}] n={sec5.n} marker={sec5.marker} "
+                      f"payload_refs={sec5.payload_ref_count()} trailing={trailing_strs}")
+        elif matches.null_trailing:
+            null_idxs = ", ".join(f"sec5[{j}]" for j in matches.null_trailing)
+            verb = "ends" if len(matches.null_trailing) == 1 else "end"
+            print(f"    (no non-zero sec5 trailing refs; {null_idxs} {verb} in a 0 sentinel)")
         else:
             print(f"    (no matching sec5 entries)")
+    print()
+
+
+def print_slot_reference_inventory(vdf: VdfFile) -> None:
+    print("=== Referenced Slot Refs ===")
+    inventory = collect_slot_reference_inventory(vdf)
+    if not inventory:
+        print("  (none)\n")
+        return
+
+    for slot_ref in sorted(inventory):
+        info = inventory[slot_ref]
+        names = "/".join(info.heuristic_names) if info.heuristic_names else "<none>"
+        print(f"  {slot_ref:>4}  names?={names:<32} sig={format_u32_words(info.signature)}")
+        print(f"        uses={', '.join(info.uses)}")
     print()
 
 
@@ -1346,7 +3231,31 @@ def print_validation(vdf: VdfFile) -> None:
     errors: list[str] = []
     warnings: list[str] = []
 
-    # 1. Section-3 index_words form arithmetic progression (step=27)
+    # 1. Section framing should be stable and ordered.
+    if len(vdf.sections) == 8:
+        print("  [PASS] section scan found the expected 8 sections")
+    else:
+        errors.append(f"expected 8 sections, found {len(vdf.sections)}")
+
+    if any(vdf.sections[i].file_offset >= vdf.sections[i + 1].file_offset
+           for i in range(len(vdf.sections) - 1)):
+        errors.append("section offsets are not strictly increasing")
+    elif vdf.sections:
+        print("  [PASS] section offsets are strictly increasing")
+
+    # 2. Slot tables in small/medium fixtures form a contiguous 16-byte lattice.
+    slot_layout = analyze_slot_table_offsets(vdf.slot_table)
+    if slot_layout is None:
+        warnings.append("slot table is empty")
+    elif slot_layout.contiguous_16:
+        print(f"  [PASS] slot table forms a contiguous 16-byte lattice "
+              f"(base={slot_layout.base}, count={len(vdf.slot_table)})")
+    else:
+        warnings.append(
+            "slot table is structurally valid but not a contiguous 16-byte lattice: "
+            f"{format_slot_table_layout(slot_layout)}")
+
+    # 3. Section-3 index_words form arithmetic progression (step=27)
     directory = vdf.parse_section3_directory()
     if directory and directory.entries:
         idx_words = [e.index_word() for e in directory.entries]
@@ -1370,7 +3279,7 @@ def print_validation(vdf: VdfFile) -> None:
         elif len(idx_words) == 1:
             print(f"  [PASS] sec3 single entry, index_word={idx_words[0]}")
 
-        # 2. All sec3 axis_slot_refs are in the slot table
+        # 4. All sec3 axis_slot_refs are in the slot table
         slot_set = set(vdf.slot_table)
         all_axis_refs: list[int] = []
         for entry in directory.entries:
@@ -1386,7 +3295,7 @@ def print_validation(vdf: VdfFile) -> None:
     else:
         print(f"  [SKIP] no section-3 directory entries")
 
-    # 3. Section-5 trailing refs overlap with sec3 axis_slot_refs
+    # 5. Section-5 trailing refs overlap with sec3 axis_slot_refs
     sec5_entries = vdf.parse_section5_sets()
     if directory and directory.entries and sec5_entries:
         sec3_axis_set: set[int] = set()
@@ -1418,14 +3327,14 @@ def print_validation(vdf: VdfFile) -> None:
                 print(f"  [SKIP] empty axis ref sets (sec3={len(sec3_axis_set)}, "
                       f"sec5={len(sec5_trailing)})")
 
-        if sec3_only:
+        if sec3_only and sec5_trailing:
             warnings.append(f"sec3 axis refs not in sec5 trailing: {sec3_only}")
-        if sec5_only:
+        if sec5_only and sec3_axis_set:
             warnings.append(f"sec5 trailing refs not in sec3 axis: {sec5_only}")
     elif not sec5_entries:
         print(f"  [SKIP] no section-5 entries for axis ref overlap check")
 
-    # 4. Record field[6] values are either 0, 5, 32, a sec3 index_word, or in the high range (7000+)
+    # 6. Record field[6] values are either 0, 5, 32, a sec3 index_word, or in the high range (7000+)
     # 0 appears on padding/system/non-model records
     if directory and directory.entries:
         sec3_idx_words = {e.index_word() for e in directory.entries}
@@ -1494,6 +3403,7 @@ def print_summary(vdf: VdfFile) -> None:
     print(f"  OT entries:     {vdf.offset_table_count} ({n_block} blocks, {n_const} constants)")
     print(f"  Stocks:         {stock_count}")
     print(f"  Data blocks:    {n_block}")
+    print(f"  Slot lattice:   {format_slot_table_layout(analyze_slot_table_offsets(vdf.slot_table))}")
 
 
 def print_raw_section(vdf: VdfFile, section_idx: int) -> None:
@@ -1542,6 +3452,17 @@ def print_json_summary(vdf: VdfFile) -> None:
         ],
     }
 
+    slot_layout = analyze_slot_table_offsets(vdf.slot_table)
+    if slot_layout is not None:
+        summary["slot_table_layout"] = {
+            "base": slot_layout.base,
+            "max_offset": slot_layout.max_offset,
+            "distinct_strides": slot_layout.distinct_strides,
+            "irregular_stride_count": slot_layout.irregular_stride_count,
+            "missing_16_slots": slot_layout.missing_16_slots,
+            "contiguous_16": slot_layout.contiguous_16,
+        }
+
     directory = vdf.parse_section3_directory()
     if directory and directory.entries:
         summary["section3_entries"] = [
@@ -1567,7 +3488,7 @@ def print_json_summary(vdf: VdfFile) -> None:
 
 def slot_words(vdf: VdfFile, slot_offset: int) -> Optional[list[int]]:
     """Read the 16-byte section-1 payload for a slot-table entry."""
-    if len(vdf.sections) <= 1:
+    if len(vdf.sections) <= 1 or slot_offset <= 0:
         return None
     abs_off = vdf.sections[1].data_offset() + slot_offset
     if abs_off + 16 > len(vdf.data):
@@ -1581,7 +3502,74 @@ def format_u32_words(words: Optional[list[int]]) -> str:
     return "[" + " ".join(f"{word:08x}" for word in words) + "]"
 
 
-def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str) -> None:
+def ref_signature_fingerprint(vdf: VdfFile, refs: list[int]) -> list[Optional[list[int]]]:
+    return [slot_words(vdf, slot_ref) for slot_ref in refs]
+
+
+def format_ref_signature_fingerprint(vdf: VdfFile, refs: list[int]) -> str:
+    if not refs:
+        return "[]"
+    return "[" + ", ".join(format_u32_words(words)
+                           for words in ref_signature_fingerprint(vdf, refs)) + "]"
+
+
+def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = False) -> str:
+    names = build_display_slot_to_names(vdf).get(slot_ref, [])
+    label = resolve_slot_ref(slot_ref, {slot_ref: names} if names else {})
+    if not include_signature:
+        return label
+    return f"{label} sig={format_u32_words(slot_words(vdf, slot_ref))}"
+
+
+def collect_slot_reference_inventory(vdf: VdfFile) -> dict[int, SlotReferenceInfo]:
+    slot_to_names = build_display_slot_to_names(vdf)
+    inventory: dict[int, SlotReferenceInfo] = {}
+
+    def add(slot_ref: int, use: str) -> None:
+        if slot_ref <= 0:
+            return
+        info = inventory.setdefault(
+            slot_ref,
+            SlotReferenceInfo(
+                slot_ref=slot_ref,
+                heuristic_names=slot_to_names.get(slot_ref, []).copy(),
+                signature=slot_words(vdf, slot_ref),
+            ),
+        )
+        info.uses.append(use)
+
+    directory = vdf.parse_section3_directory()
+    if directory:
+        for entry_idx, entry in enumerate(directory.entries):
+            for axis_idx, slot_ref in enumerate(entry.axis_slot_refs()):
+                add(slot_ref, f"sec3[{entry_idx}].axis[{axis_idx}]")
+
+    sec4_entries = vdf.parse_section4_entries()
+    if sec4_entries:
+        for entry_idx, entry in enumerate(sec4_entries):
+            for ref_idx, slot_ref in enumerate(entry.refs):
+                add(slot_ref, f"sec4[{entry_idx}].ref[{ref_idx}]")
+
+    sec5_entries = vdf.parse_section5_sets()
+    if sec5_entries:
+        for entry_idx, entry in enumerate(sec5_entries):
+            for ref_idx, slot_ref in enumerate(entry.refs):
+                add(slot_ref, f"sec5[{entry_idx}].ref[{ref_idx}]")
+
+    sec6_result = vdf.parse_section6_ref_stream()
+    if sec6_result:
+        for entry_idx, entry in enumerate(sec6_result[1]):
+            for ref_idx, slot_ref in enumerate(entry.refs):
+                add(slot_ref, f"sec6[{entry_idx}].ref[{ref_idx}]")
+
+    for info in inventory.values():
+        info.uses.sort()
+    return inventory
+
+
+def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str, *,
+                  left_mdl: Optional[tuple[MdlModel, str]] = None,
+                  right_mdl: Optional[tuple[MdlModel, str]] = None) -> None:
     """Compare two parsed simulation-result VDFs at the decoded-structure level."""
     print("=== Compare ===")
     print(f"Left:  {left_path}")
@@ -1600,18 +3588,28 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
     for label, lhs, rhs in header_fields:
         if lhs != rhs:
             print(f"  {label}: left={lhs} right={rhs}")
+    left_alignment = preferred_slot_name_alignment(left)
+    right_alignment = preferred_slot_name_alignment(right)
+    if (left_alignment.leading_extra_slots != right_alignment.leading_extra_slots
+            or left_alignment.score != right_alignment.score):
+        print(f"  visible_slot_alignment: left=skip{left_alignment.leading_extra_slots}/score{left_alignment.score} "
+              f"right=skip{right_alignment.leading_extra_slots}/score{right_alignment.score}")
     print()
 
     print("=== Shared Name / Slot Diffs ===")
-    by_name_left = {name: i for i, name in enumerate(left.names[:len(left.slot_table)])}
-    by_name_right = {name: i for i, name in enumerate(right.names[:len(right.slot_table)])}
+    left_pairs = visible_slot_name_pairs(left, alignment=left_alignment)
+    right_pairs = visible_slot_name_pairs(right, alignment=right_alignment)
+    by_name_left: dict[str, tuple[int, int]] = {}
+    by_name_right: dict[str, tuple[int, int]] = {}
+    for idx, (name, slot) in enumerate(left_pairs):
+        by_name_left.setdefault(name, (idx, slot))
+    for idx, (name, slot) in enumerate(right_pairs):
+        by_name_right.setdefault(name, (idx, slot))
     shared_names = sorted(set(by_name_left) & set(by_name_right))
     any_slot_diff = False
     for name in shared_names:
-        li = by_name_left[name]
-        ri = by_name_right[name]
-        lslot = left.slot_table[li]
-        rslot = right.slot_table[ri]
+        _, lslot = by_name_left[name]
+        _, rslot = by_name_right[name]
         lwords = slot_words(left, lslot)
         rwords = slot_words(right, rslot)
         if lslot != rslot or lwords != rwords:
@@ -1621,6 +3619,102 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
             print(f"    right: slot={rslot} words={format_u32_words(rwords)}")
     if not any_slot_diff:
         print("  (no shared-name slot payload differences)")
+    print()
+
+    print("=== Referenced Slot Inventory Diffs ===")
+    left_inventory = collect_slot_reference_inventory(left)
+    right_inventory = collect_slot_reference_inventory(right)
+    any_inventory_diff = False
+    for slot_ref in sorted(set(left_inventory) | set(right_inventory)):
+        linfo = left_inventory.get(slot_ref)
+        rinfo = right_inventory.get(slot_ref)
+        if linfo is None or rinfo is None:
+            any_inventory_diff = True
+            print(f"  slot {slot_ref}")
+            if linfo is None:
+                print("    left:  missing")
+            else:
+                print(
+                    f"    left:  names?={linfo.heuristic_names} sig={format_u32_words(linfo.signature)} "
+                    f"uses={linfo.uses}"
+                )
+            if rinfo is None:
+                print("    right: missing")
+            else:
+                print(
+                    f"    right: names?={rinfo.heuristic_names} sig={format_u32_words(rinfo.signature)} "
+                    f"uses={rinfo.uses}"
+                )
+            continue
+        if (
+            linfo.signature != rinfo.signature
+            or linfo.heuristic_names != rinfo.heuristic_names
+            or linfo.uses != rinfo.uses
+        ):
+            any_inventory_diff = True
+            print(f"  slot {slot_ref}")
+            print(
+                f"    left:  names?={linfo.heuristic_names} sig={format_u32_words(linfo.signature)} "
+                f"uses={linfo.uses}"
+            )
+            print(
+                f"    right: names?={rinfo.heuristic_names} sig={format_u32_words(rinfo.signature)} "
+                f"uses={rinfo.uses}"
+            )
+    if not any_inventory_diff:
+        print("  (no referenced-slot differences)")
+    print()
+
+    print("=== Section 3 Diffs ===")
+    left_sec3 = left.parse_section3_directory()
+    right_sec3 = right.parse_section3_directory()
+    left_entries = left_sec3.entries if left_sec3 else []
+    right_entries = right_sec3.entries if right_sec3 else []
+    any_sec3_diff = False
+    max_sec3 = max(len(left_entries), len(right_entries))
+    for i in range(max_sec3):
+        lentry = left_entries[i] if i < len(left_entries) else None
+        rentry = right_entries[i] if i < len(right_entries) else None
+        lwords = lentry.words if lentry else None
+        rwords = rentry.words if rentry else None
+        if lwords != rwords:
+            any_sec3_diff = True
+            print(f"  sec3[{i}]")
+            print(f"    left:  {lwords}")
+            print(f"    right: {rwords}")
+    if not any_sec3_diff:
+        print("  (no section-3 differences)")
+    print()
+
+    print("=== Section 5 Diffs ===")
+    left_sec5 = left.parse_section5_sets() or []
+    right_sec5 = right.parse_section5_sets() or []
+    any_sec5_diff = False
+    max_sec5 = max(len(left_sec5), len(right_sec5))
+    for i in range(max_sec5):
+        lentry = left_sec5[i] if i < len(left_sec5) else None
+        rentry = right_sec5[i] if i < len(right_sec5) else None
+        ltuple = (lentry.n, lentry.marker, lentry.refs) if lentry else None
+        rtuple = (rentry.n, rentry.marker, rentry.refs) if rentry else None
+        if ltuple != rtuple:
+            any_sec5_diff = True
+            print(f"  sec5[{i}]")
+            if lentry is None:
+                print("    left:  missing")
+            else:
+                print(f"    left:  {ltuple}")
+                print(f"           payload={section5_payload_refs(lentry)} "
+                      f"trailing={section5_trailing_refs(lentry)} "
+                      f"sigseq={format_ref_signature_fingerprint(left, lentry.refs)}")
+            if rentry is None:
+                print("    right: missing")
+            else:
+                print(f"    right: {rtuple}")
+                print(f"           payload={section5_payload_refs(rentry)} "
+                      f"trailing={section5_trailing_refs(rentry)} "
+                      f"sigseq={format_ref_signature_fingerprint(right, rentry.refs)}")
+    if not any_sec5_diff:
+        print("  (no section-5 differences)")
     print()
 
     print("=== Record Diffs By Index ===")
@@ -1644,6 +3738,72 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         print("  (no record differences)")
     print()
 
+    print("=== Record Shape Block Diffs ===")
+    left_blocks = build_record_shape_blocks(left)
+    right_blocks = build_record_shape_blocks(right)
+    any_block_diff = False
+    keys = sorted({(b.start, b.end) for b in left_blocks} | {(b.start, b.end) for b in right_blocks})
+    left_by_key = {(b.start, b.end): b for b in left_blocks}
+    right_by_key = {(b.start, b.end): b for b in right_blocks}
+    for key in keys:
+        lblock = left_by_key.get(key)
+        rblock = right_by_key.get(key)
+        if lblock is None or rblock is None:
+            any_block_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_record_shape_block(left, lblock) if lblock else 'missing'}")
+            print(f"    right: {format_record_shape_block(right, rblock) if rblock else 'missing'}")
+            continue
+        ltuple = (lblock.shape_codes, lblock.sort_keys, lblock.slot_refs, lblock.ot_codes)
+        rtuple = (rblock.shape_codes, rblock.sort_keys, rblock.slot_refs, rblock.ot_codes)
+        if ltuple != rtuple:
+            any_block_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_record_shape_block(left, lblock)}")
+            print(f"    right: {format_record_shape_block(right, rblock)}")
+    if not any_block_diff:
+        print("  (no record-shape-block differences)")
+    print()
+
+    print("=== Owner Block Diffs ===")
+    left_owner_blocks = build_owner_record_blocks(left)
+    right_owner_blocks = build_owner_record_blocks(right)
+    any_owner_diff = False
+    keys = sorted({(b.start, b.end) for b in left_owner_blocks} | {(b.start, b.end) for b in right_owner_blocks})
+    left_by_key = {(b.start, b.end): b for b in left_owner_blocks}
+    right_by_key = {(b.start, b.end): b for b in right_owner_blocks}
+    for key in keys:
+        lblock = left_by_key.get(key)
+        rblock = right_by_key.get(key)
+        if lblock is None or rblock is None:
+            any_owner_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_owner_record_block(left, lblock) if lblock else 'missing'}")
+            print(f"    right: {format_owner_record_block(right, rblock) if rblock else 'missing'}")
+            continue
+        ltuple = (
+            lblock.hidden,
+            lblock.sentinel_record_indices,
+            lblock.direct_sort_keys,
+            lblock.attached_sort_keys,
+            lblock.slot_refs,
+        )
+        rtuple = (
+            rblock.hidden,
+            rblock.sentinel_record_indices,
+            rblock.direct_sort_keys,
+            rblock.attached_sort_keys,
+            rblock.slot_refs,
+        )
+        if ltuple != rtuple:
+            any_owner_diff = True
+            print(f"  OT[{key[0]}..{key[1]})")
+            print(f"    left:  {format_owner_record_block(left, lblock)}")
+            print(f"    right: {format_owner_record_block(right, rblock)}")
+    if not any_owner_diff:
+        print("  (no owner-block differences)")
+    print()
+
     print("=== Section 6 Ref Stream Diffs ===")
     left_ref_stream = left.parse_section6_ref_stream()
     right_ref_stream = right.parse_section6_ref_stream()
@@ -1654,17 +3814,19 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         _, right_entries, right_stop = right_ref_stream
         print(f"  stop_offset: left=0x{left_stop:08x} right=0x{right_stop:08x}")
         max_entries = max(len(left_entries), len(right_entries))
-        left_slots = build_slot_to_names(left)
-        right_slots = build_slot_to_names(right)
+        left_slots = build_display_slot_to_names(left)
+        right_slots = build_display_slot_to_names(right)
         for i in range(max_entries):
             lentry = left_entries[i] if i < len(left_entries) else None
             rentry = right_entries[i] if i < len(right_entries) else None
-            lrefs = [resolve_slot_ref(r, left_slots) for r in lentry.refs] if lentry else []
-            rrefs = [resolve_slot_ref(r, right_slots) for r in rentry.refs] if rentry else []
-            if lrefs != rrefs:
+            lrefs_raw = lentry.refs if lentry else []
+            rrefs_raw = rentry.refs if rentry else []
+            if lrefs_raw != rrefs_raw:
                 print(f"  entry[{i}]")
-                print(f"    left:  {lrefs}")
-                print(f"    right: {rrefs}")
+                print(f"    left:  raw={lrefs_raw} refs={[resolve_slot_ref(r, left_slots) for r in lrefs_raw]}")
+                print(f"           sigseq={format_ref_signature_fingerprint(left, lrefs_raw)}")
+                print(f"    right: raw={rrefs_raw} refs={[resolve_slot_ref(r, right_slots) for r in rrefs_raw]}")
+                print(f"           sigseq={format_ref_signature_fingerprint(right, rrefs_raw)}")
     print()
 
     print("=== OT Class Code Diffs ===")
@@ -1707,6 +3869,15 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
                 print(f"    right: raw=0x{rraw:08x} const={u32_as_f32(rraw)} final={rfin}")
     print()
 
+    if left_mdl is not None:
+        print_mdl_alignment(left, left_mdl[0], left_mdl[1])
+        print_owner_mdl_alignment(left, left_mdl[0], left_mdl[1])
+        print_owner_sketch_alignment(left, left_mdl[0], left_mdl[1])
+    if right_mdl is not None:
+        print_mdl_alignment(right, right_mdl[0], right_mdl[1])
+        print_owner_mdl_alignment(right, right_mdl[0], right_mdl[1])
+        print_owner_sketch_alignment(right, right_mdl[0], right_mdl[1])
+
 
 # ---- Main ----
 
@@ -1718,6 +3889,10 @@ def main() -> None:
     parser.add_argument("path", help="Path to VDF file")
     parser.add_argument("--compare", metavar="OTHER_VDF",
                         help="Compare this VDF against another simulation-result VDF")
+    parser.add_argument("--mdl", metavar="MODEL.mdl",
+                        help="Optional Vensim model source for mdl-aware alignment output")
+    parser.add_argument("--compare-mdl", metavar="OTHER_MODEL.mdl",
+                        help="Optional model source for the VDF passed to --compare")
     parser.add_argument("--all", action="store_true", help="Show everything")
     parser.add_argument("--names", action="store_true", help="Show name table")
     parser.add_argument("--slots", action="store_true", help="Show slot table")
@@ -1726,13 +3901,23 @@ def main() -> None:
     parser.add_argument("--sec4", action="store_true", help="Show section 4 entries")
     parser.add_argument("--sec5", action="store_true", help="Show section 5 sets")
     parser.add_argument("--sec6", action="store_true", help="Show section 6 ref stream and tail")
+    parser.add_argument("--slot-xref", action="store_true",
+                        help="Show section 3/4/5/6 referenced slot refs with signatures")
     parser.add_argument("--ot", action="store_true", help="Show offset table")
     parser.add_argument("--blocks", action="store_true", help="Show data blocks")
     parser.add_argument("--data", action="store_true", help="Extract and show all time series")
     parser.add_argument("--bridge", action="store_true", help="Show record shape -> sec3 bridge")
+    parser.add_argument("--record-blocks", action="store_true",
+                        help="Show record groups merged by decoded shape span")
+    parser.add_argument("--owner-blocks", action="store_true",
+                        help="Show owner-oriented blocks built from sentinel model records")
     parser.add_argument("--sec35-bridge", action="store_true", help="Show section-3 -> section-5 bridge")
     parser.add_argument("--ranges", action="store_true", help="Show record-derived OT ranges")
     parser.add_argument("--validate", action="store_true", help="Check structural invariants")
+    parser.add_argument("--map-names", action="store_true",
+                        help="Show VDF-native name-to-OT mapping")
+    parser.add_argument("--extract", action="store_true",
+                        help="Extract named results using VDF-native mapping")
     parser.add_argument("--raw-section", type=int, metavar="N", help="Full hexdump of section N")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON summary")
 
@@ -1746,6 +3931,10 @@ def main() -> None:
         sys.exit(1)
 
     vdf = parse_vdf(data)
+    mdl_model: Optional[tuple[MdlModel, str]] = None
+    if args.mdl:
+        mdl_path = Path(args.mdl)
+        mdl_model = (parse_mdl_model(mdl_path.read_text(errors="replace")), str(mdl_path))
 
     if args.compare:
         other_path = Path(args.compare)
@@ -1754,7 +3943,21 @@ def main() -> None:
             print(f"Dataset VDF detected ({other_path}). Compare mode only supports simulation-result VDFs.")
             sys.exit(1)
         other_vdf = parse_vdf(other_data)
-        print_compare(vdf, str(path), other_vdf, str(other_path))
+        other_mdl_model: Optional[tuple[MdlModel, str]] = None
+        if args.compare_mdl:
+            other_mdl_path = Path(args.compare_mdl)
+            other_mdl_model = (
+                parse_mdl_model(other_mdl_path.read_text(errors="replace")),
+                str(other_mdl_path),
+            )
+        print_compare(
+            vdf,
+            str(path),
+            other_vdf,
+            str(other_path),
+            left_mdl=mdl_model,
+            right_mdl=other_mdl_model,
+        )
         return
 
     if args.json:
@@ -1765,8 +3968,9 @@ def main() -> None:
     show_all = args.all
     show_specific = any([
         args.names, args.slots, args.records, args.sec3, args.sec4,
-        args.sec5, args.sec6, args.ot, args.blocks, args.data,
-        args.bridge, args.sec35_bridge, args.ranges, args.validate,
+        args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
+        args.bridge, args.record_blocks, args.sec35_bridge, args.ranges, args.validate,
+        args.owner_blocks, args.map_names, args.extract,
         args.raw_section is not None,
     ])
 
@@ -1793,10 +3997,20 @@ def main() -> None:
     if show_all or args.sec6:
         print_ot_codes(vdf)
         print_section6_tail(vdf)
+    if show_all or args.slot_xref:
+        print_slot_reference_inventory(vdf)
     if show_all or args.ranges:
         print_ot_ranges(vdf)
     if show_all or args.bridge:
         print_shape_record_bridge(vdf)
+    if show_all or args.record_blocks:
+        print_record_shape_blocks(vdf)
+    if show_all or args.owner_blocks:
+        print_owner_record_blocks(vdf)
+    if mdl_model is not None:
+        print_mdl_alignment(vdf, mdl_model[0], mdl_model[1])
+        print_owner_mdl_alignment(vdf, mdl_model[0], mdl_model[1])
+        print_owner_sketch_alignment(vdf, mdl_model[0], mdl_model[1])
     if show_all or args.sec35_bridge:
         print_section35_bridge(vdf)
     if show_all or args.ot:
@@ -1811,6 +4025,10 @@ def main() -> None:
 
     if args.validate:
         print_validation(vdf)
+    if show_all or args.map_names:
+        print_name_mapping(vdf)
+    if args.extract:
+        print_extracted_results(vdf)
 
     if not show_specific or show_all:
         print_summary(vdf)
