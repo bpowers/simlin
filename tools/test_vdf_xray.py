@@ -358,7 +358,22 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         water = parse_fixture("test/bobby/vdf/water/Current.vdf")
         blocks = vdf_xray.build_owner_record_blocks(water)
 
-        self.assertEqual([(block.start, block.end) for block in blocks], [
+        # The INITIAL TIME block at OT 4..5 should be marked hidden: it has a
+        # unique slot_ref (not shared by any model variable view), no sort keys,
+        # and only constant OT codes.
+        self.assertEqual(
+            [(block.start, block.end, block.hidden) for block in blocks],
+            [
+                (1, 2, False),
+                (2, 3, False),
+                (3, 4, False),
+                (4, 5, True),
+                (5, 6, False),
+                (6, 7, False),
+            ],
+        )
+        visible = [b for b in blocks if not b.hidden]
+        self.assertEqual([(b.start, b.end) for b in visible], [
             (1, 2),
             (2, 3),
             (3, 4),
