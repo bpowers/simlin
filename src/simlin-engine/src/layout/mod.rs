@@ -3818,12 +3818,17 @@ pub fn incremental_layout(
             })
             .collect();
 
-        // Build the set of all stock UIDs so we can detect cloud-vs-stock mismatches.
-        let all_stock_uids: HashSet<i32> = state
+        // Build the set of cloud UIDs so we can validate cloud-endpoint assignments.
+        // When a cloud is expected (expected_from/to == None), the flow endpoint must
+        // be either unattached or attached to a cloud.  Checking against cloud_uids
+        // (rather than just "not in stock_uids") catches the case where a stock was
+        // kind-changed to an aux: the old UID is reused by the new non-stock element,
+        // so the flow must be rebuilt with a proper cloud endpoint.
+        let cloud_uids: HashSet<i32> = state
             .elements
             .iter()
             .filter_map(|elem| match elem {
-                ViewElement::Stock(s) => Some(s.uid),
+                ViewElement::Cloud(c) => Some(c.uid),
                 _ => None,
             })
             .collect();
@@ -3850,21 +3855,23 @@ pub fn incremental_layout(
                     .and_then(|s| state.uid_manager.get_uid(s));
 
                 // Check the source endpoint (points[0]):
-                //   - None expected (cloud): the source must NOT be attached to any stock
+                //   - None expected (cloud): endpoint must be unattached or attached to a cloud
                 //   - Some(uid) expected: the source must be attached to exactly that stock
                 let source_uid = flow.points[0].attached_to_uid;
                 let from_matches = match expected_from_uid {
-                    None => !source_uid.is_some_and(|u| all_stock_uids.contains(&u)),
+                    None => {
+                        source_uid.is_none() || source_uid.is_some_and(|u| cloud_uids.contains(&u))
+                    }
                     Some(uid) => source_uid == Some(uid),
                 };
 
                 // Check the sink endpoint (points[last]):
-                //   - None expected (cloud): the sink must NOT be attached to any stock
+                //   - None expected (cloud): endpoint must be unattached or attached to a cloud
                 //   - Some(uid) expected: the sink must be attached to exactly that stock
                 let last = flow.points.len() - 1;
                 let sink_uid = flow.points[last].attached_to_uid;
                 let to_matches = match expected_to_uid {
-                    None => !sink_uid.is_some_and(|u| all_stock_uids.contains(&u)),
+                    None => sink_uid.is_none() || sink_uid.is_some_and(|u| cloud_uids.contains(&u)),
                     Some(uid) => sink_uid == Some(uid),
                 };
 

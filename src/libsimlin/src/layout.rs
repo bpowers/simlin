@@ -73,7 +73,8 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
     };
 
     // Deserialize the optional patch JSON up front, before acquiring locks.
-    let model_patch = if !patch_json.is_null() {
+    let patch_was_provided = !patch_json.is_null();
+    let model_patch = if patch_was_provided {
         let json_str = match CStr::from_ptr(patch_json).to_str() {
             Ok(s) => s,
             Err(_) => {
@@ -174,7 +175,9 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
 
     let db_state = Some((&mut *db_locked, source_project));
 
-    // Use incremental layout when a patch and existing non-empty view are available
+    // Use incremental layout when a patch and existing non-empty view are available.
+    // When a patch was provided but has no ops for this model, preserve the existing
+    // view unchanged rather than regenerating from scratch.
     let new_view = if let (Some(old_sf), Some(ref mp)) = (old_view, &model_patch) {
         if !old_sf.elements.is_empty() {
             // Clone required: old_sf borrows from datamodel_locked, but
@@ -190,6 +193,10 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         } else {
             engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
         }
+    } else if patch_was_provided && old_view.is_some_and(|sf| !sf.elements.is_empty()) {
+        // Patch was provided but no ops target this model, and the model already has
+        // a non-empty view. Preserve the existing layout unchanged.
+        return;
     } else {
         engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
     };

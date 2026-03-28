@@ -1354,3 +1354,133 @@ fn test_incremental_new_flow_cloud_positions_recorded() {
         sink_point.y,
     );
 }
+
+/// When a stock with flows is kind-changed to an aux (via UpsertAux, no
+/// DeleteVariable), flows that were attached to the stock must be rebuilt
+/// with cloud endpoints. The old stock UID is reused by the new aux element,
+/// so the flow endpoint check must detect this as a topology change.
+#[test]
+fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "tank".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["fill".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "fill".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify the flow's sink endpoint is attached to the stock
+    let fill_flow = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "fill" => Some(f),
+            _ => None,
+        })
+        .expect("fill flow must exist in initial view");
+    let tank_uid = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "tank" => Some(s.uid),
+            _ => None,
+        })
+        .expect("tank stock must exist in initial view");
+    assert!(
+        fill_flow.points.last().unwrap().attached_to_uid == Some(tank_uid),
+        "fill's sink must be attached to tank in initial view"
+    );
+
+    // Patch: change stock "tank" to aux "tank" (no DeleteVariable, no explicit flow reset)
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "tank");
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "tank".to_string(),
+            equation: datamodel::Equation::Scalar("100".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        }));
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::UpsertAux(datamodel::Aux {
+            ident: "tank".to_string(),
+            equation: datamodel::Equation::Scalar("100".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after kind change should succeed");
+
+    // The flow "fill" must NOT be attached to the aux element (old tank UID).
+    // It should have cloud endpoints since the aux has no inflows/outflows.
+    let fill_in_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "fill" => Some(f),
+            _ => None,
+        })
+        .expect("fill flow should exist in new view");
+
+    let still_attached_to_tank_uid = fill_in_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(tank_uid));
+    assert!(
+        !still_attached_to_tank_uid,
+        "fill flow must NOT be attached to the old tank UID after kind change to aux. \
+         The flow should have been rebuilt with cloud endpoints. points: {:?}",
+        fill_in_new.points
+    );
+
+    // There should be cloud elements for the flow's endpoints
+    let fill_clouds: Vec<_> = new_view
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Cloud(c) if c.flow_uid == fill_in_new.uid))
+        .collect();
+    assert!(
+        !fill_clouds.is_empty(),
+        "fill flow should have cloud endpoints after stock-to-aux kind change"
+    );
+}

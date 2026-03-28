@@ -499,3 +499,88 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
         simlin_project_unref(proj);
     }
 }
+
+/// When patch_json is provided but contains no ops for the target model, the
+/// existing layout must be preserved unchanged. Previously this fell through
+/// to generate_best_layout, wiping hand-placed coordinates.
+#[test]
+fn test_diagram_sync_preserves_layout_when_patch_has_no_ops_for_model() {
+    let test_project = TestProject::new("preserve_test")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "10", None);
+
+    let datamodel = test_project.build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        // Generate initial layout
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        assert!(err.is_null(), "initial diagram_sync should succeed");
+
+        // Move an element to a distinctive position
+        const MARKER_X: f64 = 7777.0;
+        const MARKER_Y: f64 = 6666.0;
+        {
+            let mut dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model_mut("main").unwrap();
+            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+                for elem in &mut sf.elements {
+                    if let engine::datamodel::ViewElement::Stock(s) = elem {
+                        if s.name == "level" {
+                            s.x = MARKER_X;
+                            s.y = MARKER_Y;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Call diagram_sync with a patch that targets a DIFFERENT model
+        let patch_json = r#"{
+            "models": [{
+                "name": "other_model",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "x", "equation": "1" } }
+                }]
+            }]
+        }"#;
+        let patch_cstr = CString::new(patch_json).unwrap();
+        err = ptr::null_mut();
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), patch_cstr.as_ptr(), &mut err);
+        assert!(
+            err.is_null(),
+            "diagram_sync with non-targeting patch should succeed"
+        );
+
+        // Verify marker position is preserved (layout was NOT regenerated)
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            match &model.views[0] {
+                engine::datamodel::View::StockFlow(sf) => {
+                    let level = sf
+                        .elements
+                        .iter()
+                        .find(|e| e.get_name().is_some_and(|n| n == "level"))
+                        .expect("'level' must still be in the view");
+                    let (x, y) = match level {
+                        engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                        _ => panic!("'level' should be a Stock"),
+                    };
+                    assert!(
+                        (x - MARKER_X).abs() < 0.01 && (y - MARKER_Y).abs() < 0.01,
+                        "marker position should be preserved when patch has no ops for model: \
+                         expected ({MARKER_X},{MARKER_Y}), got ({x},{y})"
+                    );
+                }
+            }
+        }
+
+        simlin_project_unref(proj);
+    }
+}
