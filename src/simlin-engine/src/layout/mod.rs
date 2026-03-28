@@ -253,12 +253,21 @@ impl LayoutState {
 
         self.positions.remove(&deleted_uid);
 
-        // Collect UIDs of clouds being removed so we can clean up their positions
+        // Collect UIDs of clouds and aliases being removed so we can clean up their positions
         let removed_cloud_uids: Vec<i32> = self
             .elements
             .iter()
             .filter_map(|elem| match elem {
                 ViewElement::Cloud(c) if c.flow_uid == deleted_uid => Some(c.uid),
+                _ => None,
+            })
+            .collect();
+
+        let removed_alias_uids: Vec<i32> = self
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Alias(a) if a.alias_of_uid == deleted_uid => Some(a.uid),
                 _ => None,
             })
             .collect();
@@ -276,6 +285,10 @@ impl LayoutState {
 
         for cloud_uid in &removed_cloud_uids {
             self.positions.remove(cloud_uid);
+        }
+
+        for alias_uid in &removed_alias_uids {
+            self.positions.remove(alias_uid);
         }
 
         // Clean up cloud bookkeeping for the deleted flow
@@ -1119,6 +1132,54 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
                 compat: None,
             }));
             state.positions.insert(cloud_uid, Position::new(cx, cy));
+        }
+    }
+
+    // Repair pass: for XMILE-imported views a cloud element may exist but the
+    // corresponding flow point's attached_to_uid may be None.  Wire up any
+    // unattached flow endpoints to their matching cloud.
+    //
+    // Build a map from flow_uid to the clouds that now exist for it.
+    let mut clouds_by_flow: HashMap<i32, Vec<(i32, f64, f64)>> = HashMap::new();
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem {
+            clouds_by_flow
+                .entry(c.flow_uid)
+                .or_default()
+                .push((c.uid, c.x, c.y));
+        }
+    }
+
+    for elem in &mut state.elements {
+        let flow = match elem {
+            ViewElement::Flow(f) => f,
+            _ => continue,
+        };
+        let Some(clouds) = clouds_by_flow.get(&flow.uid) else {
+            continue;
+        };
+        if flow.points.len() < 2 {
+            continue;
+        }
+
+        // For each flow endpoint (source=0, sink=last) that is unattached,
+        // assign the nearest cloud.  We use a simple squared-distance heuristic
+        // which is correct for both single-cloud and two-cloud cases.
+        let last = flow.points.len() - 1;
+        for pt_idx in [0, last] {
+            if flow.points[pt_idx].attached_to_uid.is_some() {
+                continue;
+            }
+            let px = flow.points[pt_idx].x;
+            let py = flow.points[pt_idx].y;
+            let nearest = clouds.iter().min_by(|(_, ax, ay), (_, bx, by)| {
+                let da = (ax - px).powi(2) + (ay - py).powi(2);
+                let db = (bx - px).powi(2) + (by - py).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if let Some(&(cloud_uid, _, _)) = nearest {
+                flow.points[pt_idx].attached_to_uid = Some(cloud_uid);
+            }
         }
     }
 }
@@ -3692,12 +3753,15 @@ pub fn incremental_layout(
             })
             .collect();
         for ident in kind_changed {
+            // Save the display name before apply_deletion removes it from display_names,
+            // so the rebuilt element can recover the original casing (e.g. "Growth Rate"
+            // instead of "growth_rate").
+            let saved_display = state.display_names.get(&ident).cloned();
             state.apply_deletion(&ident);
-            // Re-insert the display name so the rebuilt element uses the original name.
-            state
-                .display_names
-                .entry(ident.clone())
-                .or_insert_with(|| ident.clone());
+            // Restore: use the saved original display name when available, otherwise
+            // fall back to the canonical ident so the entry is always present.
+            let display = saved_display.unwrap_or_else(|| ident.clone());
+            state.display_names.insert(ident, display);
         }
     }
 
@@ -3783,14 +3847,13 @@ pub fn incremental_layout(
             // the UID in uid_manager. identify_new_elements will see a UID with
             // no corresponding element and classify the flow as new, causing
             // create_flow_view_element to rebuild it with correct endpoints.
-            state.apply_deletion(&flow_ident);
-            // Re-insert the display name removed by apply_deletion so the
-            // rebuilt flow element uses the original name.
             let canonical = canonicalize(&flow_ident).into_owned();
-            state
-                .display_names
-                .entry(canonical)
-                .or_insert_with(|| flow_ident.clone());
+            // Save the display name before apply_deletion removes it so the
+            // rebuilt element recovers the original casing.
+            let saved_display = state.display_names.get(&canonical).cloned();
+            state.apply_deletion(&flow_ident);
+            let display = saved_display.unwrap_or_else(|| flow_ident.clone());
+            state.display_names.insert(canonical, display);
         }
     }
 

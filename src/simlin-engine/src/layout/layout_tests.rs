@@ -5592,6 +5592,293 @@ fn test_incremental_kind_change_stock_to_aux_no_delete() {
     );
 }
 
+// ---- Issue 1 (PR review iter 3): diff_clouds must wire cloud UIDs into flow attached_to_uid ----
+
+#[test]
+fn test_diff_clouds_wires_attached_to_uid_for_unattached_flow_point() {
+    // Simulate an XMILE import where a cloud element exists but the flow's source
+    // point has attached_to_uid == None.  After diff_clouds the flow point's
+    // attached_to_uid must reference the cloud's UID.
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    // flow "f" uid=2, from cloud (no from_stock)
+    state.uid_manager.add(2, "f");
+    state.display_names.insert("f".into(), "f".into());
+
+    // Flow element whose source point has attached_to_uid == None (XMILE import style)
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "f".into(),
+        uid: 2,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 50.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+            FlowPoint {
+                x: 200.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(100.0, 100.0));
+
+    // Cloud already exists for this flow, but the flow point is unattached
+    let cloud_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid,
+        flow_uid: 2,
+        x: 50.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(cloud_uid, Position::new(50.0, 100.0));
+
+    // Metadata says "f" has no from_stock (needs source cloud)
+    let metadata = ComputedMetadata {
+        chains: Vec::new(),
+        feedback_loops: Vec::new(),
+        dominant_periods: Vec::new(),
+        dep_graph: BTreeMap::new(),
+        reverse_dep_graph: BTreeMap::new(),
+        constants: BTreeSet::new(),
+        stock_to_inflows: HashMap::new(),
+        stock_to_outflows: HashMap::new(),
+        flow_to_stocks: HashMap::from([("f".into(), (None, None))]),
+    };
+
+    diff_clouds(&mut state, &metadata);
+
+    // After diff_clouds, the flow's source point must be attached to the cloud
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == 2 => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow should still exist after diff_clouds");
+
+    let surviving_cloud_uid = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Cloud(c) if c.flow_uid == 2 => Some(c.uid),
+            _ => None,
+        })
+        .expect("cloud for flow should still exist");
+
+    let source_attached = flow.points[0].attached_to_uid;
+    assert_eq!(
+        source_attached,
+        Some(surviving_cloud_uid),
+        "source flow point attached_to_uid should reference the cloud after diff_clouds, \
+         got {:?}",
+        source_attached
+    );
+}
+
+// ---- Issue 2 (PR review iter 3): display names preserved through type-change deletion ----
+
+#[test]
+fn test_incremental_kind_change_preserves_display_name() {
+    // Build a model with aux "Growth Rate" (ident: "Growth Rate", canonical: "growth_rate").
+    // Generate layout.  Change it to a stock via type-change (UpsertStock, no DeleteVariable).
+    // The resulting Stock element's name must be "Growth Rate", not "growth_rate".
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "Growth Rate".to_string(),
+                equation: datamodel::Equation::Scalar("0.1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "other".to_string(),
+                equation: datamodel::Equation::Scalar("1.0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify initial state: the display name was preserved
+    let aux_name = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "growth_rate" => {
+                Some(a.name.clone())
+            }
+            _ => None,
+        })
+        .expect("Growth Rate aux should exist in old view");
+    // The aux element name should contain "Growth" (line-wrapped or not)
+    assert!(
+        aux_name.contains("Growth"),
+        "aux display name should contain 'Growth', got '{}'",
+        aux_name
+    );
+
+    // Patch: kind-change aux "Growth Rate" -> stock, no DeleteVariable
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "Growth Rate");
+    model
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "Growth Rate".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        }));
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::UpsertStock(
+            datamodel::Stock {
+                ident: "Growth Rate".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after kind change should succeed");
+
+    // The rebuilt Stock element must use "Growth Rate", not "growth_rate"
+    let stock_name = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "growth_rate" => {
+                Some(s.name.clone())
+            }
+            _ => None,
+        })
+        .expect("Growth Rate stock should exist in new view");
+
+    assert!(
+        stock_name.contains("Growth"),
+        "rebuilt stock display name should contain 'Growth' (the original case), \
+         got '{}' -- display name was lost during type-change deletion",
+        stock_name
+    );
+}
+
+// ---- Issue 3 (PR review iter 3): alias positions removed during deletion ----
+
+#[test]
+fn test_apply_deletion_removes_alias_position_from_state() {
+    // Build a LayoutState with an aux and an alias pointing to it (both with positions).
+    // Delete the aux.  The alias's position must also be removed from state.positions.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "rate".to_string(),
+            equation: datamodel::Equation::Scalar("0.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let mut state = LayoutState::new(&model);
+
+    let aux_uid = state.get_or_alloc_uid("rate");
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "rate".to_string(),
+        uid: aux_uid,
+        x: 100.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(aux_uid, Position::new(100.0, 100.0));
+
+    // Add an alias element with its own position entry
+    let alias_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias_uid,
+        alias_of_uid: aux_uid,
+        x: 200.0,
+        y: 200.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(alias_uid, Position::new(200.0, 200.0));
+
+    assert!(
+        state.positions.contains_key(&alias_uid),
+        "precondition: alias position should exist before deletion"
+    );
+
+    state.apply_deletion("rate");
+
+    assert!(
+        !state.positions.contains_key(&alias_uid),
+        "alias position should be removed from state.positions after aux deletion"
+    );
+    assert!(
+        !state.positions.contains_key(&aux_uid),
+        "aux position should also be removed"
+    );
+    assert!(state.elements.is_empty(), "all elements should be removed");
+}
+
 // ---- Issue 3: group names in UidManager must not collide with variable names ----
 
 #[test]
