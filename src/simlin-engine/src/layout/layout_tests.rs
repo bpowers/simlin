@@ -3443,90 +3443,11 @@ fn make_connector_diff_state() -> (LayoutState, ComputedMetadata) {
     (state, metadata)
 }
 
-fn make_connector_diff_model() -> datamodel::Model {
-    datamodel::Model {
-        name: TEST_MODEL.to_string(),
-        sim_specs: None,
-        variables: vec![
-            datamodel::Variable::Stock(datamodel::Stock {
-                ident: "population".to_string(),
-                equation: datamodel::Equation::Scalar("100".to_string()),
-                documentation: String::new(),
-                units: None,
-                inflows: vec!["births".to_string()],
-                outflows: vec!["deaths".to_string()],
-                compat: datamodel::Compat {
-                    visibility: datamodel::Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-                ai_state: None,
-                uid: Some(1),
-            }),
-            datamodel::Variable::Flow(datamodel::Flow {
-                ident: "births".to_string(),
-                equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                compat: datamodel::Compat {
-                    visibility: datamodel::Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-                ai_state: None,
-                uid: Some(2),
-            }),
-            datamodel::Variable::Aux(datamodel::Aux {
-                ident: "birth_rate".to_string(),
-                equation: datamodel::Equation::Scalar("0.03".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                compat: datamodel::Compat {
-                    visibility: datamodel::Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-                ai_state: None,
-                uid: Some(3),
-            }),
-            datamodel::Variable::Flow(datamodel::Flow {
-                ident: "deaths".to_string(),
-                equation: datamodel::Equation::Scalar("population * death_rate".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                compat: datamodel::Compat {
-                    visibility: datamodel::Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-                ai_state: None,
-                uid: Some(4),
-            }),
-            datamodel::Variable::Aux(datamodel::Aux {
-                ident: "death_rate".to_string(),
-                equation: datamodel::Equation::Scalar("0.01".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                compat: datamodel::Compat {
-                    visibility: datamodel::Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-                ai_state: None,
-                uid: Some(5),
-            }),
-        ],
-        views: Vec::new(),
-        loop_metadata: Vec::new(),
-        groups: Vec::new(),
-    }
-}
-
 #[test]
 fn test_diff_connectors_preserves_existing_links() {
     let (mut state, metadata) = make_connector_diff_state();
-    let model = make_connector_diff_model();
 
-    diff_connectors(&mut state, &model, &metadata);
+    diff_connectors(&mut state, &metadata);
 
     // birth_rate(3)->births(2) should still exist with Arc(45.0) and Positive polarity
     let link_br = state
@@ -3572,7 +3493,6 @@ fn test_diff_connectors_preserves_existing_links() {
 #[test]
 fn test_diff_connectors_removes_stale_links() {
     let (mut state, mut metadata) = make_connector_diff_state();
-    let model = make_connector_diff_model();
 
     // Remove death_rate from the dep_graph for deaths, so the
     // death_rate->deaths link should be removed
@@ -3580,7 +3500,7 @@ fn test_diff_connectors_removes_stale_links() {
         deps.remove("death_rate");
     }
 
-    diff_connectors(&mut state, &model, &metadata);
+    diff_connectors(&mut state, &metadata);
 
     // death_rate->deaths link should no longer exist
     let link_dr = state
@@ -3600,7 +3520,6 @@ fn test_diff_connectors_removes_stale_links() {
 #[test]
 fn test_diff_connectors_adds_new_links() {
     let (mut state, mut metadata) = make_connector_diff_state();
-    let model = make_connector_diff_model();
 
     // Add a new dependency: births also depends on death_rate (contrived)
     if let Some(deps) = metadata.dep_graph.get_mut("births") {
@@ -3614,7 +3533,7 @@ fn test_diff_connectors_adds_new_links() {
         .count();
     assert_eq!(link_count_before, 4, "precondition: four links");
 
-    diff_connectors(&mut state, &model, &metadata);
+    diff_connectors(&mut state, &metadata);
 
     // New link: death_rate(5)->births(2)
     let new_link = state
@@ -3645,7 +3564,6 @@ fn test_diff_connectors_adds_new_links() {
 #[test]
 fn test_diff_connectors_noop_same_dep_graph() {
     let (mut state, metadata) = make_connector_diff_state();
-    let model = make_connector_diff_model();
 
     // Snapshot element UIDs and link details before diff
     let links_before: Vec<(i32, i32, LinkShape)> = state
@@ -3658,7 +3576,7 @@ fn test_diff_connectors_noop_same_dep_graph() {
         .collect();
     let total_before = state.elements.len();
 
-    diff_connectors(&mut state, &model, &metadata);
+    diff_connectors(&mut state, &metadata);
 
     let links_after: Vec<(i32, i32, LinkShape)> = state
         .elements
@@ -3688,9 +3606,8 @@ fn test_diff_connectors_noop_same_dep_graph() {
 #[test]
 fn test_diff_connectors_structural_flow_stock_skipped() {
     let (mut state, metadata) = make_connector_diff_state();
-    let model = make_connector_diff_model();
 
-    diff_connectors(&mut state, &model, &metadata);
+    diff_connectors(&mut state, &metadata);
 
     // births(2)->population(1) is structural flow->stock. The dep_graph
     // has this as population depending on births, which would be

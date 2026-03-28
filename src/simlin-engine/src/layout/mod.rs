@@ -897,11 +897,7 @@ pub fn settle_new_elements(
 /// against edges derived from the current dep_graph, then preserve
 /// unchanged links, remove stale ones, and create new links with
 /// default shapes.
-pub fn diff_connectors(
-    state: &mut LayoutState,
-    _model: &datamodel::Model,
-    metadata: &ComputedMetadata,
-) {
+pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
     // Build HashMap<(from_uid, to_uid), ViewElement> for existing links
     let mut old_links: HashMap<(i32, i32), ViewElement> = HashMap::new();
     for elem in &state.elements {
@@ -3670,7 +3666,7 @@ pub fn incremental_layout(
 
     if new_elements.is_empty() {
         // No new elements: just diff connectors/clouds and rebuild
-        diff_connectors(&mut state, model, &metadata);
+        diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
         optimize_labels(&mut state, model, &metadata);
         apply_loop_curvature(&mut state, &config, model, &metadata);
@@ -3793,7 +3789,7 @@ pub fn incremental_layout(
     }
 
     // Step 7: Diff connectors and clouds
-    diff_connectors(&mut state, model, &metadata);
+    diff_connectors(&mut state, &metadata);
     diff_clouds(&mut state, &metadata);
 
     // Step 8: Polish
