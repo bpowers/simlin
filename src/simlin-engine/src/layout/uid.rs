@@ -65,6 +65,17 @@ impl UidManager {
         }
     }
 
+    /// Update the ident associated with an existing UID, keeping the
+    /// UID itself stable.  A no-op when `old_ident` is not tracked.
+    pub fn rename(&mut self, old_ident: &str, new_ident: &str) {
+        let uid = match self.reverse.remove(old_ident) {
+            Some(uid) => uid,
+            None => return,
+        };
+        self.seen.insert(uid, new_ident.to_string());
+        self.reverse.insert(new_ident.to_string(), uid);
+    }
+
     /// Look up the UID for a named element.
     pub fn get_uid(&self, ident: &str) -> Option<i32> {
         self.reverse.get(ident).copied()
@@ -164,5 +175,27 @@ mod tests {
         mgr.add(5, "var_a");
         mgr.add(10, "var_a");
         assert_eq!(mgr.get_uid("var_a"), Some(10));
+    }
+
+    #[test]
+    fn test_uid_manager_rename_updates_mapping() {
+        let mut mgr = UidManager::new();
+        mgr.add(5, "old_name");
+
+        mgr.rename("old_name", "new_name");
+
+        assert_eq!(mgr.get_uid("new_name"), Some(5));
+        assert_eq!(mgr.get_uid("old_name"), None);
+    }
+
+    #[test]
+    fn test_uid_manager_rename_noop_for_unknown() {
+        let mut mgr = UidManager::new();
+        mgr.add(5, "existing");
+
+        mgr.rename("nonexistent", "something");
+
+        assert_eq!(mgr.get_uid("existing"), Some(5));
+        assert_eq!(mgr.get_uid("something"), None);
     }
 }
