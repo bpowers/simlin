@@ -315,6 +315,60 @@ impl LayoutState {
         self.display_names
             .insert(new_canonical, new_display_name.to_string());
     }
+
+    /// Walk model variables and identify which ones are not yet represented
+    /// in this layout state (either no UID mapping or no view element with
+    /// that UID), classifying each by variable type.
+    pub fn identify_new_elements(&self, model: &datamodel::Model) -> NewElements {
+        let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
+
+        let mut new_stocks = Vec::new();
+        let mut new_flows = Vec::new();
+        let mut new_auxes = Vec::new();
+        let mut new_modules = Vec::new();
+
+        for var in &model.variables {
+            let canonical = canonicalize(var.get_ident()).into_owned();
+            let is_new = match self.uid_manager.get_uid(&canonical) {
+                None => true,
+                Some(uid) => !existing_uids.contains(&uid),
+            };
+
+            if is_new {
+                match var {
+                    datamodel::Variable::Stock(_) => new_stocks.push(canonical),
+                    datamodel::Variable::Flow(_) => new_flows.push(canonical),
+                    datamodel::Variable::Aux(_) => new_auxes.push(canonical),
+                    datamodel::Variable::Module(_) => new_modules.push(canonical),
+                }
+            }
+        }
+
+        NewElements {
+            new_stocks,
+            new_flows,
+            new_auxes,
+            new_modules,
+        }
+    }
+}
+
+/// Variables in the model that have no corresponding view element in
+/// the current layout state, classified by type.
+pub struct NewElements {
+    pub new_stocks: Vec<String>,
+    pub new_flows: Vec<String>,
+    pub new_auxes: Vec<String>,
+    pub new_modules: Vec<String>,
+}
+
+impl NewElements {
+    pub fn is_empty(&self) -> bool {
+        self.new_stocks.is_empty()
+            && self.new_flows.is_empty()
+            && self.new_auxes.is_empty()
+            && self.new_modules.is_empty()
+    }
 }
 
 /// Perform three-way connector diff: compare old links in LayoutState
