@@ -107,10 +107,24 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 return;
             }
         };
-        engine_patch
+        // Collect all patches for this model and merge their ops, because a
+        // ProjectPatch may legally contain multiple ModelPatch entries for the
+        // same model (e.g. two separate UpsertFlow ops on the same model).
+        // Using find() would silently drop all but the first matching entry.
+        let matching_ops: Vec<_> = engine_patch
             .models
-            .into_iter()
-            .find(|m| m.name == model_name_str)
+            .iter()
+            .filter(|m| m.name == model_name_str)
+            .flat_map(|m| m.ops.iter().cloned())
+            .collect();
+        if matching_ops.is_empty() {
+            None
+        } else {
+            Some(simlin_engine::ModelPatch {
+                name: model_name_str.to_string(),
+                ops: matching_ops,
+            })
+        }
     } else {
         None
     };

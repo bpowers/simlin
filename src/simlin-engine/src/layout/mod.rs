@@ -907,6 +907,29 @@ pub fn settle_new_elements(
         }
     }
 
+    // Also update positions for clouds of new flows.  SFDP moves cloud nodes in a rigid
+    // group together with their parent flow, but the loop above skips cloud idents since
+    // they are not model variables and therefore not in new_ident_set.  Without recording
+    // the settled cloud positions here, the coordinate update loop in incremental_layout
+    // cannot apply the flow's displacement to the cloud element, leaving the cloud stranded
+    // at its creation position while the flow endpoint shifts.
+    for var_ident in var_to_node.keys() {
+        if !new_ident_set.contains(var_ident.as_str()) {
+            continue;
+        }
+        let canonical = canonicalize(var_ident);
+        if let Some(cloud_idents) = state.flow_ident_to_clouds.get(canonical.as_ref()) {
+            for cloud_ident in cloud_idents {
+                if let Some(&cloud_uid) = state.cloud_ident_to_uid.get(cloud_ident)
+                    && let Some(cloud_node) = var_to_node.get(cloud_ident)
+                    && let Some(&pos) = settled_layout.get(cloud_node)
+                {
+                    state.positions.insert(cloud_uid, pos);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3895,6 +3918,19 @@ pub fn incremental_layout(
         if let Some(&pos) = initial_positions.get(flow_ident) {
             let uid = state.get_or_alloc_uid(flow_ident);
             create_flow_view_element(&mut state, &config, &metadata, flow_ident, uid, pos)?;
+        }
+    }
+
+    // create_flow_view_element calls build_clouds_for_flow which pushes Cloud elements into
+    // state.elements but does not add their positions to state.positions.  Record those
+    // positions now so that settle_new_elements can seed proper initial positions for cloud
+    // nodes in SFDP and later update them after settling.
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem {
+            state
+                .positions
+                .entry(c.uid)
+                .or_insert_with(|| Position::new(c.x, c.y));
         }
     }
 
