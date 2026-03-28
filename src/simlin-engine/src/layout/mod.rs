@@ -577,6 +577,742 @@ fn layout_chain(
     create_view_elements(state, config, metadata, &positioned, stocks, flows)
 }
 
+/// Rebuild flow templates from current view elements.
+fn refresh_flow_templates(state: &mut LayoutState, model: &datamodel::Model) {
+    state.flow_templates.clear();
+
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            datamodel::Variable::Flow(f) => {
+                let ident = canonicalize(&f.ident).into_owned();
+                state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for elem in &state.elements {
+        if let ViewElement::Flow(flow_elem) = elem
+            && let Some(ident) = uid_to_ident.get(&flow_elem.uid)
+            && flow_elem.points.len() >= 2
+        {
+            let offsets: Vec<Position> = flow_elem
+                .points
+                .iter()
+                .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
+                .collect();
+            state
+                .flow_templates
+                .insert(ident.clone(), FlowTemplate { offsets });
+        }
+    }
+}
+
+/// Build an undirected graph with all model variables and cloud nodes for SFDP.
+fn build_full_graph(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) -> Result<(Graph<String>, HashMap<String, String>), String> {
+    state.cloud_ident_to_uid.clear();
+    state.cloud_ident_to_flow_ident.clear();
+    state.flow_ident_to_clouds.clear();
+
+    let flow_uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            datamodel::Variable::Flow(f) => {
+                let ident = canonicalize(&f.ident).into_owned();
+                state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut var_to_node: HashMap<String, String> = HashMap::new();
+    let mut node_to_var: HashMap<String, String> = HashMap::new();
+    let mut builder = GraphBuilder::<String>::new_undirected();
+    let mut node_index = 0;
+
+    let all_vars: BTreeSet<String> = metadata
+        .dep_graph
+        .keys()
+        .chain(metadata.dep_graph.values().flat_map(|deps| deps.iter()))
+        .cloned()
+        .collect();
+
+    for var_ident in &all_vars {
+        let node_id = format!("node_{}", node_index);
+        var_to_node.insert(var_ident.clone(), node_id.clone());
+        node_to_var.insert(node_id.clone(), var_ident.clone());
+        builder.add_node(node_id);
+        node_index += 1;
+    }
+
+    for (from_ident, deps) in &metadata.dep_graph {
+        if let Some(from_node) = var_to_node.get(from_ident) {
+            for to_ident in deps {
+                if let Some(to_node) = var_to_node.get(to_ident) {
+                    builder.add_edge(from_node.clone(), to_node.clone(), 1.0);
+                }
+            }
+        }
+    }
+
+    for elem in &state.elements {
+        if let ViewElement::Cloud(cloud) = elem {
+            let flow_ident = match flow_uid_to_ident.get(&cloud.flow_uid) {
+                Some(ident) => ident.clone(),
+                None => {
+                    return Err(format!(
+                        "build_full_graph: cloud {} references unknown flow UID {}",
+                        cloud.uid, cloud.flow_uid
+                    ));
+                }
+            };
+
+            let cloud_ident = make_cloud_node_ident(cloud.uid);
+            if !var_to_node.contains_key(&cloud_ident) {
+                let node_id = format!("node_{}", node_index);
+                builder.add_node(node_id.clone());
+                var_to_node.insert(cloud_ident.clone(), node_id.clone());
+                node_to_var.insert(node_id, cloud_ident.clone());
+                node_index += 1;
+            }
+
+            let flow_node = var_to_node.get(&flow_ident).ok_or_else(|| {
+                format!("build_full_graph: missing node for flow '{}'", flow_ident)
+            })?;
+            let cloud_node = var_to_node[&cloud_ident].clone();
+            builder.add_edge(flow_node.clone(), cloud_node, 1.0);
+
+            state
+                .cloud_ident_to_uid
+                .insert(cloud_ident.clone(), cloud.uid);
+            state
+                .cloud_ident_to_flow_ident
+                .insert(cloud_ident.clone(), flow_ident.clone());
+            state
+                .flow_ident_to_clouds
+                .entry(flow_ident)
+                .or_default()
+                .push(cloud_ident);
+        }
+    }
+
+    Ok((builder.build(), var_to_node))
+}
+
+/// Run SFDP with chain elements locked into rigid groups.
+fn run_sfdp_with_rigid_chains(
+    state: &LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    full_graph: Graph<String>,
+    chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
+    var_to_node: &HashMap<String, String>,
+) -> Result<Layout<String>, String> {
+    let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
+
+    for (_stocks, _flows, all_vars) in chains_data {
+        let mut group_members: Vec<String> = Vec::new();
+        let mut added: HashSet<String> = HashSet::new();
+
+        for var_ident in all_vars {
+            if let Some(node_id) = var_to_node.get(var_ident) {
+                let uid = state.uid_manager.get_uid(var_ident);
+                let is_positioned = uid.is_some_and(|u| state.positions.contains_key(&u));
+                if is_positioned && added.insert(node_id.clone()) {
+                    group_members.push(node_id.clone());
+
+                    let canonical = canonicalize(var_ident);
+                    if let Some(cloud_idents) = state.flow_ident_to_clouds.get(canonical.as_ref()) {
+                        for cloud_ident in cloud_idents {
+                            if let Some(cloud_node) = var_to_node.get(cloud_ident)
+                                && added.insert(cloud_node.clone())
+                            {
+                                group_members.push(cloud_node.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if group_members.len() > 1 {
+            constrained_builder.add_rigid_group(group_members);
+        }
+    }
+
+    let constrained_graph = constrained_builder.build();
+
+    let mut initial_layout: Layout<String> = BTreeMap::new();
+    let cloud_uid_to_pos: HashMap<i32, Position> = state
+        .elements
+        .iter()
+        .filter_map(|elem| {
+            if let ViewElement::Cloud(cloud) = elem {
+                Some((cloud.uid, Position::new(cloud.x, cloud.y)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut center_x = config.start_x;
+    let mut center_y = config.start_y;
+    let mut count = 0;
+
+    for (var_ident, node_id) in var_to_node {
+        if let Some(uid) = state.uid_manager.get_uid(var_ident)
+            && let Some(&pos) = state.positions.get(&uid)
+        {
+            initial_layout.insert(node_id.clone(), pos);
+            center_x += pos.x;
+            center_y += pos.y;
+            count += 1;
+            continue;
+        }
+
+        if let Some(&cloud_uid) = state.cloud_ident_to_uid.get(var_ident) {
+            if let Some(&pos) = cloud_uid_to_pos.get(&cloud_uid) {
+                initial_layout.insert(node_id.clone(), pos);
+                continue;
+            }
+            if let Some(flow_ident) = state.cloud_ident_to_flow_ident.get(var_ident)
+                && let Some(flow_uid) = state.uid_manager.get_uid(flow_ident)
+                && let Some(&pos) = state.positions.get(&flow_uid)
+            {
+                initial_layout.insert(node_id.clone(), pos);
+                continue;
+            }
+        }
+    }
+
+    // Average the accumulated positions with the start position (which was
+    // used as the initial accumulator value) to bias the center toward the
+    // configured origin when few nodes are positioned.
+    if count > 0 {
+        center_x /= (count + 1) as f64;
+        center_y /= (count + 1) as f64;
+    }
+
+    let mut aux_index = 0;
+    for node_id in var_to_node.values() {
+        if initial_layout.contains_key(node_id) {
+            continue;
+        }
+        let angle = aux_index as f64 * 2.0 * PI / 8.0;
+        let radius = 100.0;
+        initial_layout.insert(
+            node_id.clone(),
+            Position::new(
+                center_x + radius * angle.cos(),
+                center_y + radius * angle.sin(),
+            ),
+        );
+        aux_index += 1;
+    }
+
+    // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
+    // are overridden for auxiliary layout. Other SFDP parameters stay at
+    // their defaults (notably p=-1.0 and step size=0.1) to avoid runaway
+    // repulsion that can fling disconnected chains far apart.
+    let sfdp_config = SfdpConfig {
+        k: 75.0,
+        max_iterations: 5000,
+        convergence_threshold: 0.001,
+        initial_step_size: 0.1,
+        cooling_factor: 0.9995,
+        c: 3.0,
+        ..SfdpConfig::default()
+    };
+
+    let node_to_ident: HashMap<String, String> = var_to_node
+        .iter()
+        .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
+        .collect();
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let aux_node_ids: HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            if let datamodel::Variable::Aux(aux) = var {
+                let canonical = canonicalize(&aux.ident);
+                var_to_node.get(canonical.as_ref()).cloned()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
+        let mut segments = Vec::new();
+
+        for edge in constrained_graph.edges() {
+            let (Some(&from_pos), Some(&to_pos)) = (
+                candidate_layout.get(&edge.from),
+                candidate_layout.get(&edge.to),
+            ) else {
+                continue;
+            };
+
+            if let (Some(from_ident), Some(to_ident)) =
+                (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
+                && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
+            {
+                continue;
+            }
+
+            segments.push(LineSegment {
+                start: from_pos,
+                end: to_pos,
+                from_node: edge.from.clone(),
+                to_node: edge.to.clone(),
+            });
+        }
+
+        for (flow_ident, tmpl) in &state.flow_templates {
+            if tmpl.offsets.len() < 2 {
+                continue;
+            }
+            let Some(node_id) = var_to_node.get(flow_ident) else {
+                continue;
+            };
+            let Some(&center) = candidate_layout.get(node_id) else {
+                continue;
+            };
+
+            let points: Vec<Position> = tmpl
+                .offsets
+                .iter()
+                .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
+                .collect();
+
+            for i in 0..points.len() - 1 {
+                segments.push(LineSegment {
+                    start: points[i],
+                    end: points[i + 1],
+                    from_node: format!("{}#{}", flow_ident, i),
+                    to_node: format!("{}#{}", flow_ident, i + 1),
+                });
+            }
+        }
+
+        segments
+    };
+
+    let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
+    for edge in constrained_graph.edges() {
+        adjacency
+            .entry(edge.from.clone())
+            .or_default()
+            .push((edge.to.clone(), edge.weight));
+        adjacency
+            .entry(edge.to.clone())
+            .or_default()
+            .push((edge.from.clone(), edge.weight));
+    }
+
+    let max_delta_aux = config.annealing_max_delta_aux;
+    let max_delta_chain = config.annealing_max_delta_chain;
+    let annealing_config = config.clone();
+    let annealing_seed = config.annealing_random_seed;
+
+    let mut annealing_round: usize = 0;
+    let mut last_annealing_iter: usize = 0;
+    let mut best_crossings: usize = usize::MAX;
+    let mut best_layout: Option<Layout<String>> = None;
+
+    let final_layout = compute_layout_from_initial_with_callback(
+        &constrained_graph,
+        &sfdp_config,
+        &initial_layout,
+        annealing_seed,
+        &mut |iter, layout| {
+            if !should_trigger_annealing(
+                iter,
+                annealing_config.annealing_interval,
+                last_annealing_iter,
+                annealing_round,
+                annealing_config.annealing_max_rounds,
+            ) {
+                return None;
+            }
+
+            let result = run_annealing_with_filter(
+                layout,
+                build_segments,
+                &annealing_config,
+                annealing_seed.wrapping_add(annealing_round as u64),
+                |node_id: &String| aux_node_ids.contains(node_id),
+                |node_id: &String| {
+                    if aux_node_ids.contains(node_id) {
+                        max_delta_aux
+                    } else {
+                        max_delta_chain
+                    }
+                },
+                &adjacency,
+            );
+
+            last_annealing_iter = iter;
+            annealing_round += 1;
+
+            if result.crossings < best_crossings {
+                best_crossings = result.crossings;
+                best_layout = Some(result.layout.clone());
+                Some(result.layout)
+            } else {
+                None
+            }
+        },
+    );
+
+    // If SFDP drifted after a good annealing round, the final layout
+    // may be worse than the best we found. Compare and keep the better one.
+    if let Some(saved) = best_layout {
+        let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
+        if final_crossings > best_crossings {
+            return Ok(saved);
+        }
+    }
+
+    Ok(final_layout)
+}
+
+/// Update all element coordinates from SFDP results.
+fn apply_layout_positions(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    layout: &Layout<String>,
+    var_to_node: &HashMap<String, String>,
+) -> Result<(), String> {
+    let layout_by_ident: HashMap<String, Position> = var_to_node
+        .iter()
+        .filter_map(|(ident, node_id)| layout.get(node_id).map(|&pos| (ident.clone(), pos)))
+        .collect();
+
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            let ident = canonicalize(var.get_ident()).into_owned();
+            state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+        })
+        .collect();
+
+    let mut flow_deltas: HashMap<i32, Position> = HashMap::new();
+
+    for elem in &mut state.elements {
+        match elem {
+            ViewElement::Stock(stock) => {
+                if let Some(ident) = uid_to_ident.get(&stock.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    stock.x = pos.x;
+                    stock.y = pos.y;
+                    state.positions.insert(stock.uid, pos);
+                }
+            }
+            ViewElement::Flow(flow) => {
+                if let Some(ident) = uid_to_ident.get(&flow.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    let dx = pos.x - flow.x;
+                    let dy = pos.y - flow.y;
+                    if dx != 0.0 || dy != 0.0 {
+                        for pt in &mut flow.points {
+                            pt.x += dx;
+                            pt.y += dy;
+                        }
+                    }
+                    flow.x = pos.x;
+                    flow.y = pos.y;
+                    state.positions.insert(flow.uid, pos);
+                    flow_deltas.insert(flow.uid, Position::new(dx, dy));
+                }
+            }
+            ViewElement::Aux(aux) => {
+                if let Some(ident) = uid_to_ident.get(&aux.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    aux.x = pos.x;
+                    aux.y = pos.y;
+                    state.positions.insert(aux.uid, pos);
+                }
+            }
+            ViewElement::Module(module) => {
+                if let Some(ident) = uid_to_ident.get(&module.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    module.x = pos.x;
+                    module.y = pos.y;
+                    state.positions.insert(module.uid, pos);
+                }
+            }
+            ViewElement::Cloud(cloud) => {
+                let cloud_ident = make_cloud_node_ident(cloud.uid);
+                if let Some(&pos) = layout_by_ident.get(&cloud_ident) {
+                    cloud.x = pos.x;
+                    cloud.y = pos.y;
+                } else if let Some(&delta) = flow_deltas.get(&cloud.flow_uid) {
+                    cloud.x += delta.x;
+                    cloud.y += delta.y;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Create auxiliary view elements for variables not yet in the elements list.
+fn create_missing_auxiliary_elements(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    layout: &Layout<String>,
+    var_to_node: &HashMap<String, String>,
+) -> Result<(), String> {
+    let existing_uids: HashSet<i32> = state.elements.iter().map(|e| e.get_uid()).collect();
+
+    for var in &model.variables {
+        if let datamodel::Variable::Aux(aux) = var {
+            let canonical = canonicalize(&aux.ident);
+            let uid = state.uid_manager.alloc(&canonical);
+            if existing_uids.contains(&uid) {
+                continue;
+            }
+
+            let pos = var_to_node
+                .get(canonical.as_ref())
+                .and_then(|node_id| layout.get(node_id))
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "create_missing_auxiliary_elements: no layout position for aux '{}'",
+                        canonical.as_ref()
+                    )
+                })?;
+
+            let name = state.display_name(&canonical);
+            let formatted = format_label_with_line_breaks(&name);
+            let elem = ViewElement::Aux(view_element::Aux {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            });
+            state.elements.push(elem);
+            state.positions.insert(uid, pos);
+        }
+    }
+    Ok(())
+}
+
+/// Create module view elements for variables not yet in the elements list.
+fn create_missing_module_elements(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    layout: &Layout<String>,
+    var_to_node: &HashMap<String, String>,
+) -> Result<(), String> {
+    let existing_uids: HashSet<i32> = state.elements.iter().map(|e| e.get_uid()).collect();
+
+    for var in &model.variables {
+        if let datamodel::Variable::Module(m) = var {
+            let canonical = canonicalize(&m.ident);
+            let uid = state.uid_manager.alloc(&canonical);
+            if existing_uids.contains(&uid) {
+                continue;
+            }
+
+            let pos = var_to_node
+                .get(canonical.as_ref())
+                .and_then(|node_id| layout.get(node_id))
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "create_missing_module_elements: no layout position for module '{}'",
+                        canonical.as_ref()
+                    )
+                })?;
+
+            let name = state.display_name(&canonical);
+            let formatted = format_label_with_line_breaks(&name);
+            let elem = ViewElement::Module(view_element::Module {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+            });
+            state.elements.push(elem);
+            state.positions.insert(uid, pos);
+        }
+    }
+    Ok(())
+}
+
+/// Position auxiliaries using SFDP with rigid chain groups (steps 1-6 of
+/// the auxiliary placement pipeline).
+fn place_auxiliaries(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
+) -> Result<(), String> {
+    refresh_flow_templates(state, model);
+
+    let (full_graph, var_to_node) = build_full_graph(state, model, metadata)?;
+
+    if full_graph.node_count() == 0 {
+        return Ok(());
+    }
+
+    let layout = run_sfdp_with_rigid_chains(
+        state,
+        config,
+        model,
+        metadata,
+        full_graph,
+        chains_data,
+        &var_to_node,
+    )?;
+
+    apply_layout_positions(state, model, &layout, &var_to_node)?;
+
+    create_missing_auxiliary_elements(state, model, &layout, &var_to_node)?;
+
+    create_missing_module_elements(state, model, &layout, &var_to_node)?;
+
+    Ok(())
+}
+
+/// Create link view elements for all non-structural dependency edges.
+fn build_connectors(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) -> Result<(), String> {
+    let mut link_set: HashSet<String> = HashSet::new();
+
+    let model_var_idents: HashSet<String> = model
+        .variables
+        .iter()
+        .map(|v| canonicalize(v.get_ident()).into_owned())
+        .collect();
+
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    let dep_entries: Vec<(String, Vec<String>)> = metadata
+        .dep_graph
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    for (dependent_ident, dependencies) in &dep_entries {
+        for dependency_ident in dependencies {
+            // Metadata stores var -> dependencies, but view connectors are
+            // dependency -> dependent.
+            let from_ident = dependency_ident.as_str();
+            let to_ident = dependent_ident.as_str();
+
+            if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                continue;
+            }
+
+            let link_key = format!("{}->{}", from_ident, to_ident);
+            if !link_set.insert(link_key) {
+                continue;
+            }
+
+            let from_uid = match state.uid_manager.get_uid(from_ident) {
+                Some(uid) => uid,
+                None => {
+                    if model_var_idents.contains(from_ident) {
+                        return Err(format!(
+                            "create_connectors: missing UID for model variable '{}'",
+                            from_ident
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let to_uid = match state.uid_manager.get_uid(to_ident) {
+                Some(uid) => uid,
+                None => {
+                    if model_var_idents.contains(to_ident) {
+                        return Err(format!(
+                            "create_connectors: missing UID for model variable '{}'",
+                            to_ident
+                        ));
+                    }
+                    continue;
+                }
+            };
+
+            if from_uid == 0 || to_uid == 0 {
+                return Err(format!(
+                    "create_connectors: invalid UID 0 in edge {} -> {}",
+                    from_ident, to_ident
+                ));
+            }
+
+            let link_uid = state.uid_manager.alloc("");
+            let mut shape = LinkShape::Straight;
+
+            if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
+                    (state.positions.get(&from_uid), state.positions.get(&to_uid))
+                {
+                    calc_stock_flow_arc_angle(s_pos, f_pos)
+                } else {
+                    -45.0
+                };
+                shape = LinkShape::Arc(arc_angle);
+            }
+
+            let link = ViewElement::Link(view_element::Link {
+                uid: link_uid,
+                from_uid,
+                to_uid,
+                shape,
+                polarity: None,
+            });
+            state.elements.push(link);
+        }
+    }
+
+    Ok(())
+}
+
 /// The main layout engine holding all intermediate state.
 struct LayoutEngine<'a> {
     config: LayoutConfig,
@@ -622,7 +1358,6 @@ impl<'a> LayoutEngine<'a> {
         let chain_positions = compute_chain_positions(chains, &self.metadata, &self.config);
 
         // Phase 2: Layout each chain at its position
-        // Need to clone chain data since self is borrowed mutably below
         let chains_data: Vec<_> = chains
             .iter()
             .map(|c| (c.stocks.clone(), c.flows.clone(), c.all_vars.clone()))
@@ -632,11 +1367,25 @@ impl<'a> LayoutEngine<'a> {
                 .get(&i)
                 .copied()
                 .unwrap_or(Position::new(self.config.start_x, self.config.start_y));
-            self.layout_chain_at_position(stocks, flows, position)?;
+            layout_chain(
+                &mut self.state,
+                &self.config,
+                &self.metadata,
+                stocks,
+                flows,
+                position,
+            )?;
         }
 
         // Phase 3: Position auxiliaries and create connectors
-        self.layout_auxiliaries_and_connectors(&chains_data)?;
+        place_auxiliaries(
+            &mut self.state,
+            &self.config,
+            self.model,
+            &self.metadata,
+            &chains_data,
+        )?;
+        build_connectors(&mut self.state, self.model, &self.metadata)?;
 
         // Phase 4: Apply optimal label placement
         self.apply_optimal_label_placement();
@@ -676,800 +1425,6 @@ impl<'a> LayoutEngine<'a> {
             font: None,
             sketch_compat: None,
         })
-    }
-
-    /// Layout a single chain at the given base position using BFS.
-    fn layout_chain_at_position(
-        &mut self,
-        stocks: &[String],
-        flows: &[String],
-        base_position: Position,
-    ) -> Result<(), String> {
-        layout_chain(
-            &mut self.state,
-            &self.config,
-            &self.metadata,
-            stocks,
-            flows,
-            base_position,
-        )
-    }
-
-    /// Rebuild flow templates from current view elements.
-    fn refresh_flow_templates(&mut self) {
-        self.state.flow_templates.clear();
-
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| match var {
-                datamodel::Variable::Flow(f) => {
-                    let ident = canonicalize(&f.ident).into_owned();
-                    self.state
-                        .uid_manager
-                        .get_uid(&ident)
-                        .map(|uid| (uid, ident))
-                }
-                _ => None,
-            })
-            .collect();
-
-        for elem in &self.state.elements {
-            if let ViewElement::Flow(flow_elem) = elem
-                && let Some(ident) = uid_to_ident.get(&flow_elem.uid)
-                && flow_elem.points.len() >= 2
-            {
-                let offsets: Vec<Position> = flow_elem
-                    .points
-                    .iter()
-                    .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
-                    .collect();
-                self.state
-                    .flow_templates
-                    .insert(ident.clone(), FlowTemplate { offsets });
-            }
-        }
-    }
-
-    /// Phase 3: Position auxiliaries using SFDP with rigid chain groups, then create connectors.
-    fn layout_auxiliaries_and_connectors(
-        &mut self,
-        chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
-    ) -> Result<(), String> {
-        self.refresh_flow_templates();
-
-        let (full_graph, var_to_node) = self.build_full_graph()?;
-
-        if full_graph.node_count() == 0 {
-            return Ok(());
-        }
-
-        // Run SFDP with rigid chains (takes ownership of full_graph)
-        let layout = self.run_sfdp_with_rigid_chains(full_graph, chains_data, &var_to_node)?;
-
-        // Apply SFDP positions to all elements
-        self.apply_layout_positions(&layout, &var_to_node)?;
-
-        // Create auxiliary view elements for any not yet created
-        self.create_missing_auxiliary_elements(&layout, &var_to_node)?;
-
-        // Create module view elements for any not yet created
-        self.create_missing_module_elements(&layout, &var_to_node)?;
-
-        // Create connector (link) view elements
-        self.create_connectors()?;
-
-        self.recalculate_bounds();
-        Ok(())
-    }
-
-    /// Build an undirected graph with all model variables and cloud nodes for SFDP.
-    fn build_full_graph(&mut self) -> Result<(Graph<String>, HashMap<String, String>), String> {
-        // Reset cloud mappings
-        self.state.cloud_ident_to_uid.clear();
-        self.state.cloud_ident_to_flow_ident.clear();
-        self.state.flow_ident_to_clouds.clear();
-
-        let flow_uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| match var {
-                datamodel::Variable::Flow(f) => {
-                    let ident = canonicalize(&f.ident).into_owned();
-                    self.state
-                        .uid_manager
-                        .get_uid(&ident)
-                        .map(|uid| (uid, ident))
-                }
-                _ => None,
-            })
-            .collect();
-
-        let mut var_to_node: HashMap<String, String> = HashMap::new();
-        let mut node_to_var: HashMap<String, String> = HashMap::new();
-        let mut builder = GraphBuilder::<String>::new_undirected();
-        let mut node_index = 0;
-
-        // Add all variables from the dependency graph as nodes
-        let all_vars: BTreeSet<String> = self
-            .metadata
-            .dep_graph
-            .keys()
-            .chain(
-                self.metadata
-                    .dep_graph
-                    .values()
-                    .flat_map(|deps| deps.iter()),
-            )
-            .cloned()
-            .collect();
-
-        for var_ident in &all_vars {
-            let node_id = format!("node_{}", node_index);
-            var_to_node.insert(var_ident.clone(), node_id.clone());
-            node_to_var.insert(node_id.clone(), var_ident.clone());
-            builder.add_node(node_id);
-            node_index += 1;
-        }
-
-        // Add edges from dependency graph
-        for (from_ident, deps) in &self.metadata.dep_graph {
-            if let Some(from_node) = var_to_node.get(from_ident) {
-                for to_ident in deps {
-                    if let Some(to_node) = var_to_node.get(to_ident) {
-                        builder.add_edge(from_node.clone(), to_node.clone(), 1.0);
-                    }
-                }
-            }
-        }
-
-        // Add cloud nodes
-        for elem in &self.state.elements {
-            if let ViewElement::Cloud(cloud) = elem {
-                let flow_ident = match flow_uid_to_ident.get(&cloud.flow_uid) {
-                    Some(ident) => ident.clone(),
-                    None => {
-                        return Err(format!(
-                            "build_full_graph: cloud {} references unknown flow UID {}",
-                            cloud.uid, cloud.flow_uid
-                        ));
-                    }
-                };
-
-                let cloud_ident = make_cloud_node_ident(cloud.uid);
-                if !var_to_node.contains_key(&cloud_ident) {
-                    let node_id = format!("node_{}", node_index);
-                    builder.add_node(node_id.clone());
-                    var_to_node.insert(cloud_ident.clone(), node_id.clone());
-                    node_to_var.insert(node_id, cloud_ident.clone());
-                    node_index += 1;
-                }
-
-                let flow_node = var_to_node.get(&flow_ident).ok_or_else(|| {
-                    format!("build_full_graph: missing node for flow '{}'", flow_ident)
-                })?;
-                let cloud_node = var_to_node[&cloud_ident].clone();
-                builder.add_edge(flow_node.clone(), cloud_node, 1.0);
-
-                self.state
-                    .cloud_ident_to_uid
-                    .insert(cloud_ident.clone(), cloud.uid);
-                self.state
-                    .cloud_ident_to_flow_ident
-                    .insert(cloud_ident.clone(), flow_ident.clone());
-                self.state
-                    .flow_ident_to_clouds
-                    .entry(flow_ident)
-                    .or_default()
-                    .push(cloud_ident);
-            }
-        }
-
-        Ok((builder.build(), var_to_node))
-    }
-
-    /// Run SFDP with chain elements locked into rigid groups.
-    fn run_sfdp_with_rigid_chains(
-        &self,
-        full_graph: Graph<String>,
-        chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<Layout<String>, String> {
-        let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
-
-        // Create one rigid group per chain
-        for (_stocks, _flows, all_vars) in chains_data {
-            let mut group_members: Vec<String> = Vec::new();
-            let mut added: HashSet<String> = HashSet::new();
-
-            for var_ident in all_vars {
-                if let Some(node_id) = var_to_node.get(var_ident) {
-                    // Only include positioned elements in the rigid group
-                    let uid = self.state.uid_manager.get_uid(var_ident);
-                    let is_positioned = uid.is_some_and(|u| self.state.positions.contains_key(&u));
-                    if is_positioned && added.insert(node_id.clone()) {
-                        group_members.push(node_id.clone());
-
-                        // Also add clouds attached to flows in this chain
-                        let canonical = canonicalize(var_ident);
-                        if let Some(cloud_idents) =
-                            self.state.flow_ident_to_clouds.get(canonical.as_ref())
-                        {
-                            for cloud_ident in cloud_idents {
-                                if let Some(cloud_node) = var_to_node.get(cloud_ident)
-                                    && added.insert(cloud_node.clone())
-                                {
-                                    group_members.push(cloud_node.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if group_members.len() > 1 {
-                constrained_builder.add_rigid_group(group_members);
-            }
-        }
-
-        let constrained_graph = constrained_builder.build();
-
-        // Build initial layout from existing positions
-        let mut initial_layout: Layout<String> = BTreeMap::new();
-        let cloud_uid_to_pos: HashMap<i32, Position> = self
-            .state
-            .elements
-            .iter()
-            .filter_map(|elem| {
-                if let ViewElement::Cloud(cloud) = elem {
-                    Some((cloud.uid, Position::new(cloud.x, cloud.y)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Pre-compute center from known positions for auxiliary placement
-        let mut center_x = self.config.start_x;
-        let mut center_y = self.config.start_y;
-        let mut count = 0;
-
-        for (var_ident, node_id) in var_to_node {
-            // Try existing positioned elements first
-            if let Some(uid) = self.state.uid_manager.get_uid(var_ident)
-                && let Some(&pos) = self.state.positions.get(&uid)
-            {
-                initial_layout.insert(node_id.clone(), pos);
-                center_x += pos.x;
-                center_y += pos.y;
-                count += 1;
-                continue;
-            }
-
-            // Try cloud positions
-            if let Some(&cloud_uid) = self.state.cloud_ident_to_uid.get(var_ident) {
-                if let Some(&pos) = cloud_uid_to_pos.get(&cloud_uid) {
-                    initial_layout.insert(node_id.clone(), pos);
-                    continue;
-                }
-                // Fall back to flow position for clouds
-                if let Some(flow_ident) = self.state.cloud_ident_to_flow_ident.get(var_ident)
-                    && let Some(flow_uid) = self.state.uid_manager.get_uid(flow_ident)
-                    && let Some(&pos) = self.state.positions.get(&flow_uid)
-                {
-                    initial_layout.insert(node_id.clone(), pos);
-                    continue;
-                }
-            }
-        }
-
-        // Average the accumulated positions with the start position (which was
-        // used as the initial accumulator value) to bias the center toward the
-        // configured origin when few nodes are positioned.
-        if count > 0 {
-            center_x /= (count + 1) as f64;
-            center_y /= (count + 1) as f64;
-        }
-
-        let mut aux_index = 0;
-        for node_id in var_to_node.values() {
-            if initial_layout.contains_key(node_id) {
-                continue;
-            }
-            // Unpositioned node; place in circle around center
-            let angle = aux_index as f64 * 2.0 * PI / 8.0;
-            let radius = 100.0;
-            initial_layout.insert(
-                node_id.clone(),
-                Position::new(
-                    center_x + radius * angle.cos(),
-                    center_y + radius * angle.sin(),
-                ),
-            );
-            aux_index += 1;
-        }
-
-        // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
-        // are overridden for auxiliary layout. Other SFDP parameters stay at
-        // their defaults (notably p=-1.0 and step size=0.1) to avoid runaway
-        // repulsion that can fling disconnected chains far apart.
-        let sfdp_config = SfdpConfig {
-            k: 75.0,
-            max_iterations: 5000,
-            convergence_threshold: 0.001,
-            initial_step_size: 0.1,
-            cooling_factor: 0.9995,
-            c: 3.0,
-            ..SfdpConfig::default()
-        };
-
-        let node_to_ident: HashMap<String, String> = var_to_node
-            .iter()
-            .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
-            .collect();
-        let stock_inflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_inflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let stock_outflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_outflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let aux_node_ids: HashSet<String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                if let datamodel::Variable::Aux(aux) = var {
-                    let canonical = canonicalize(&aux.ident);
-                    var_to_node.get(canonical.as_ref()).cloned()
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
-            let mut segments = Vec::new();
-
-            for edge in constrained_graph.edges() {
-                let (Some(&from_pos), Some(&to_pos)) = (
-                    candidate_layout.get(&edge.from),
-                    candidate_layout.get(&edge.to),
-                ) else {
-                    continue;
-                };
-
-                // Graph edges follow dep_graph direction (stock → flow for
-                // structural deps). Skip these since they're rendered as
-                // pipes, not connectors.
-                if let (Some(from_ident), Some(to_ident)) =
-                    (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
-                    && is_structural_stock_flow(
-                        from_ident,
-                        to_ident,
-                        &stock_inflows,
-                        &stock_outflows,
-                    )
-                {
-                    continue;
-                }
-
-                segments.push(LineSegment {
-                    start: from_pos,
-                    end: to_pos,
-                    from_node: edge.from.clone(),
-                    to_node: edge.to.clone(),
-                });
-            }
-
-            for (flow_ident, tmpl) in &self.state.flow_templates {
-                if tmpl.offsets.len() < 2 {
-                    continue;
-                }
-                let Some(node_id) = var_to_node.get(flow_ident) else {
-                    continue;
-                };
-                let Some(&center) = candidate_layout.get(node_id) else {
-                    continue;
-                };
-
-                let points: Vec<Position> = tmpl
-                    .offsets
-                    .iter()
-                    .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
-                    .collect();
-
-                for i in 0..points.len() - 1 {
-                    segments.push(LineSegment {
-                        start: points[i],
-                        end: points[i + 1],
-                        from_node: format!("{}#{}", flow_ident, i),
-                        to_node: format!("{}#{}", flow_ident, i + 1),
-                    });
-                }
-            }
-
-            segments
-        };
-
-        // Build adjacency map for coupled motion
-        let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
-        for edge in constrained_graph.edges() {
-            adjacency
-                .entry(edge.from.clone())
-                .or_default()
-                .push((edge.to.clone(), edge.weight));
-            adjacency
-                .entry(edge.to.clone())
-                .or_default()
-                .push((edge.from.clone(), edge.weight));
-        }
-
-        let max_delta_aux = self.config.annealing_max_delta_aux;
-        let max_delta_chain = self.config.annealing_max_delta_chain;
-        let annealing_config = self.config.clone();
-        let annealing_seed = self.config.annealing_random_seed;
-
-        // Interleaved annealing state
-        let mut annealing_round: usize = 0;
-        let mut last_annealing_iter: usize = 0;
-        let mut best_crossings: usize = usize::MAX;
-        let mut best_layout: Option<Layout<String>> = None;
-
-        let final_layout = compute_layout_from_initial_with_callback(
-            &constrained_graph,
-            &sfdp_config,
-            &initial_layout,
-            annealing_seed,
-            &mut |iter, layout| {
-                if !should_trigger_annealing(
-                    iter,
-                    annealing_config.annealing_interval,
-                    last_annealing_iter,
-                    annealing_round,
-                    annealing_config.annealing_max_rounds,
-                ) {
-                    return None;
-                }
-
-                let result = run_annealing_with_filter(
-                    layout,
-                    build_segments,
-                    &annealing_config,
-                    annealing_seed.wrapping_add(annealing_round as u64),
-                    |node_id: &String| aux_node_ids.contains(node_id),
-                    |node_id: &String| {
-                        if aux_node_ids.contains(node_id) {
-                            max_delta_aux
-                        } else {
-                            max_delta_chain
-                        }
-                    },
-                    &adjacency,
-                );
-
-                last_annealing_iter = iter;
-                annealing_round += 1;
-
-                if result.crossings < best_crossings {
-                    best_crossings = result.crossings;
-                    best_layout = Some(result.layout.clone());
-                    Some(result.layout)
-                } else {
-                    None
-                }
-            },
-        );
-
-        // If SFDP drifted after a good annealing round, the final layout
-        // may be worse than the best we found. Compare and keep the better one.
-        if let Some(saved) = best_layout {
-            let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
-            if final_crossings > best_crossings {
-                return Ok(saved);
-            }
-        }
-
-        Ok(final_layout)
-    }
-
-    /// Update all element coordinates from SFDP results.
-    fn apply_layout_positions(
-        &mut self,
-        layout: &Layout<String>,
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        // Build ident -> position map
-        let layout_by_ident: HashMap<String, Position> = var_to_node
-            .iter()
-            .filter_map(|(ident, node_id)| layout.get(node_id).map(|&pos| (ident.clone(), pos)))
-            .collect();
-
-        // Build uid -> ident map
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                let ident = canonicalize(var.get_ident()).into_owned();
-                self.state
-                    .uid_manager
-                    .get_uid(&ident)
-                    .map(|uid| (uid, ident))
-            })
-            .collect();
-
-        let mut flow_deltas: HashMap<i32, Position> = HashMap::new();
-
-        for elem in &mut self.state.elements {
-            match elem {
-                ViewElement::Stock(stock) => {
-                    if let Some(ident) = uid_to_ident.get(&stock.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        stock.x = pos.x;
-                        stock.y = pos.y;
-                        self.state.positions.insert(stock.uid, pos);
-                    }
-                }
-                ViewElement::Flow(flow) => {
-                    if let Some(ident) = uid_to_ident.get(&flow.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        let dx = pos.x - flow.x;
-                        let dy = pos.y - flow.y;
-                        if dx != 0.0 || dy != 0.0 {
-                            for pt in &mut flow.points {
-                                pt.x += dx;
-                                pt.y += dy;
-                            }
-                        }
-                        flow.x = pos.x;
-                        flow.y = pos.y;
-                        self.state.positions.insert(flow.uid, pos);
-                        flow_deltas.insert(flow.uid, Position::new(dx, dy));
-                    }
-                }
-                ViewElement::Aux(aux) => {
-                    if let Some(ident) = uid_to_ident.get(&aux.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        aux.x = pos.x;
-                        aux.y = pos.y;
-                        self.state.positions.insert(aux.uid, pos);
-                    }
-                }
-                ViewElement::Module(module) => {
-                    if let Some(ident) = uid_to_ident.get(&module.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        module.x = pos.x;
-                        module.y = pos.y;
-                        self.state.positions.insert(module.uid, pos);
-                    }
-                }
-                ViewElement::Cloud(cloud) => {
-                    let cloud_ident = make_cloud_node_ident(cloud.uid);
-                    if let Some(&pos) = layout_by_ident.get(&cloud_ident) {
-                        cloud.x = pos.x;
-                        cloud.y = pos.y;
-                    } else if let Some(&delta) = flow_deltas.get(&cloud.flow_uid) {
-                        cloud.x += delta.x;
-                        cloud.y += delta.y;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        self.recalculate_bounds();
-        Ok(())
-    }
-
-    /// Create auxiliary view elements for variables not yet in the elements list.
-    fn create_missing_auxiliary_elements(
-        &mut self,
-        layout: &Layout<String>,
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        let existing_uids: HashSet<i32> = self.state.elements.iter().map(|e| e.get_uid()).collect();
-
-        for var in &self.model.variables {
-            if let datamodel::Variable::Aux(aux) = var {
-                let canonical = canonicalize(&aux.ident);
-                let uid = self.state.uid_manager.alloc(&canonical);
-                if existing_uids.contains(&uid) {
-                    continue;
-                }
-
-                let pos = var_to_node
-                    .get(canonical.as_ref())
-                    .and_then(|node_id| layout.get(node_id))
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "create_missing_auxiliary_elements: no layout position for aux '{}'",
-                            canonical.as_ref()
-                        )
-                    })?;
-
-                let name = self.state.display_name(&canonical);
-                let formatted = format_label_with_line_breaks(&name);
-                let elem = ViewElement::Aux(view_element::Aux {
-                    name: formatted,
-                    uid,
-                    x: pos.x,
-                    y: pos.y,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                });
-                self.state.elements.push(elem);
-                self.state.positions.insert(uid, pos);
-            }
-        }
-        Ok(())
-    }
-
-    /// Create module view elements for variables not yet in the elements list.
-    /// Follows the same pattern as `create_missing_auxiliary_elements`.
-    fn create_missing_module_elements(
-        &mut self,
-        layout: &Layout<String>,
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        let existing_uids: HashSet<i32> = self.state.elements.iter().map(|e| e.get_uid()).collect();
-
-        for var in &self.model.variables {
-            if let datamodel::Variable::Module(m) = var {
-                let canonical = canonicalize(&m.ident);
-                let uid = self.state.uid_manager.alloc(&canonical);
-                if existing_uids.contains(&uid) {
-                    continue;
-                }
-
-                let pos = var_to_node
-                    .get(canonical.as_ref())
-                    .and_then(|node_id| layout.get(node_id))
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "create_missing_module_elements: no layout position for module '{}'",
-                            canonical.as_ref()
-                        )
-                    })?;
-
-                let name = self.state.display_name(&canonical);
-                let formatted = format_label_with_line_breaks(&name);
-                let elem = ViewElement::Module(view_element::Module {
-                    name: formatted,
-                    uid,
-                    x: pos.x,
-                    y: pos.y,
-                    label_side: LabelSide::Bottom,
-                });
-                self.state.elements.push(elem);
-                self.state.positions.insert(uid, pos);
-            }
-        }
-        Ok(())
-    }
-
-    /// Create link view elements for all non-structural dependency edges.
-    fn create_connectors(&mut self) -> Result<(), String> {
-        let mut link_set: HashSet<String> = HashSet::new();
-
-        let model_var_idents: HashSet<String> = self
-            .model
-            .variables
-            .iter()
-            .map(|v| canonicalize(v.get_ident()).into_owned())
-            .collect();
-
-        // Build lookup sets for structural connections
-        let stock_inflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_inflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let stock_outflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_outflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-
-        let dep_entries: Vec<(String, Vec<String>)> = self
-            .metadata
-            .dep_graph
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-
-        for (dependent_ident, dependencies) in &dep_entries {
-            for dependency_ident in dependencies {
-                // Metadata stores var -> dependencies, but view connectors are
-                // dependency -> dependent.
-                let from_ident = dependency_ident.as_str();
-                let to_ident = dependent_ident.as_str();
-
-                // Skip structural flow-to-stock connections
-                if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
-                    continue;
-                }
-
-                let link_key = format!("{}->{}", from_ident, to_ident);
-                if !link_set.insert(link_key) {
-                    continue;
-                }
-
-                let from_uid = match self.state.uid_manager.get_uid(from_ident) {
-                    Some(uid) => uid,
-                    None => {
-                        if model_var_idents.contains(from_ident) {
-                            return Err(format!(
-                                "create_connectors: missing UID for model variable '{}'",
-                                from_ident
-                            ));
-                        }
-                        continue;
-                    }
-                };
-                let to_uid = match self.state.uid_manager.get_uid(to_ident) {
-                    Some(uid) => uid,
-                    None => {
-                        if model_var_idents.contains(to_ident) {
-                            return Err(format!(
-                                "create_connectors: missing UID for model variable '{}'",
-                                to_ident
-                            ));
-                        }
-                        continue;
-                    }
-                };
-
-                if from_uid == 0 || to_uid == 0 {
-                    return Err(format!(
-                        "create_connectors: invalid UID 0 in edge {} -> {}",
-                        from_ident, to_ident
-                    ));
-                }
-
-                let link_uid = self.state.uid_manager.alloc("");
-                let mut shape = LinkShape::Straight;
-
-                // Check for structural stock->flow connections that need an arc
-                if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
-                    let arc_angle = if let (Some(&s_pos), Some(&f_pos)) = (
-                        self.state.positions.get(&from_uid),
-                        self.state.positions.get(&to_uid),
-                    ) {
-                        calc_stock_flow_arc_angle(s_pos, f_pos)
-                    } else {
-                        -45.0
-                    };
-                    shape = LinkShape::Arc(arc_angle);
-                }
-
-                let link = ViewElement::Link(view_element::Link {
-                    uid: link_uid,
-                    from_uid,
-                    to_uid,
-                    shape,
-                    polarity: None,
-                });
-                self.state.elements.push(link);
-            }
-        }
-
-        Ok(())
     }
 
     /// Apply optimal label placement based on connector angles.
