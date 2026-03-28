@@ -1019,3 +1019,145 @@ fn test_systems_format_layout_with_modules() {
     // Use the shared verify_layout helper which now includes Module coverage
     verify_layout(&view, model, "systems_hiring");
 }
+
+/// Helper: extract element position by canonical ident from a StockFlow view.
+fn find_element_position(
+    view: &simlin_engine::datamodel::StockFlow,
+    canonical_ident: &str,
+) -> Option<(f64, f64)> {
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Stock(s) if normalize(&s.name) == canonical_ident => {
+                return Some((s.x, s.y));
+            }
+            ViewElement::Flow(f) if normalize(&f.name) == canonical_ident => {
+                return Some((f.x, f.y));
+            }
+            ViewElement::Aux(a) if normalize(&a.name) == canonical_ident => {
+                return Some((a.x, a.y));
+            }
+            ViewElement::Module(m) if normalize(&m.name) == canonical_ident => {
+                return Some((m.x, m.y));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Collect all variable element positions from a view as a map of
+/// canonical ident -> (x, y).
+fn collect_element_positions(
+    view: &simlin_engine::datamodel::StockFlow,
+) -> std::collections::HashMap<String, (f64, f64)> {
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    let mut positions = std::collections::HashMap::new();
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Stock(s) => {
+                positions.insert(normalize(&s.name), (s.x, s.y));
+            }
+            ViewElement::Flow(f) => {
+                positions.insert(normalize(&f.name), (f.x, f.y));
+            }
+            ViewElement::Aux(a) => {
+                positions.insert(normalize(&a.name), (a.x, a.y));
+            }
+            ViewElement::Module(m) => {
+                positions.insert(normalize(&m.name), (m.x, m.y));
+            }
+            _ => {}
+        }
+    }
+    positions
+}
+
+#[test]
+fn test_incremental_add_aux() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    // Load SIR model and generate initial layout
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let old_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("initial layout should succeed");
+    let original_positions = collect_element_positions(&old_view);
+
+    // Build patched project: add vaccination_rate aux that depends on susceptible
+    let mut patched_project = project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "vaccination_rate".to_string(),
+            equation: datamodel::Equation::Scalar("susceptible * 0.01".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        }));
+
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
+            ident: "vaccination_rate".to_string(),
+            equation: datamodel::Equation::Scalar("susceptible * 0.01".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        })],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    // AC1.2: All original element positions should be preserved
+    let new_positions = collect_element_positions(&new_view);
+    for (ident, &(orig_x, orig_y)) in &original_positions {
+        let (new_x, new_y) = new_positions
+            .get(ident)
+            .unwrap_or_else(|| panic!("original element '{}' should still exist", ident));
+        assert!(
+            (orig_x - new_x).abs() < 0.01 && (orig_y - new_y).abs() < 0.01,
+            "element '{}' moved from ({}, {}) to ({}, {})",
+            ident,
+            orig_x,
+            orig_y,
+            new_x,
+            new_y,
+        );
+    }
+
+    // AC4.1: vaccination_rate should have a view element
+    let vr_pos = find_element_position(&new_view, "vaccination_rate")
+        .expect("vaccination_rate should have a view element");
+    assert!(
+        vr_pos.0.is_finite() && vr_pos.1.is_finite(),
+        "vaccination_rate should have finite coordinates"
+    );
+
+    // AC4.1: vaccination_rate should be near susceptible (its dependency)
+    let susc_pos = new_positions
+        .get("susceptible")
+        .expect("susceptible should exist");
+    let distance = ((vr_pos.0 - susc_pos.0).powi(2) + (vr_pos.1 - susc_pos.1).powi(2)).sqrt();
+    assert!(
+        distance < 500.0,
+        "vaccination_rate should be within 500px of susceptible, got {}",
+        distance,
+    );
+
+    // Basic integrity: all UIDs should be unique
+    let mut uids = HashSet::new();
+    for elem in &new_view.elements {
+        let uid = elem.get_uid();
+        assert!(uids.insert(uid), "duplicate UID {} found", uid);
+    }
+}
