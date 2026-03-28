@@ -5119,6 +5119,120 @@ mod tests {
     }
 
     #[test]
+    fn test_optimize_labels() {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "aux_a".to_string(),
+                    equation: datamodel::Equation::Scalar("aux_b".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "aux_b".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let mut metadata = ComputedMetadata::new_empty();
+        // aux_a depends on aux_b
+        metadata.dep_graph.insert(
+            "aux_a".to_string(),
+            vec!["aux_b".to_string()].into_iter().collect(),
+        );
+        // reverse: aux_b is used by aux_a
+        metadata.reverse_dep_graph.insert(
+            "aux_b".to_string(),
+            vec!["aux_a".to_string()].into_iter().collect(),
+        );
+
+        let mut state = LayoutState::new(&model);
+        let a_uid = state.get_or_alloc_uid("aux_a");
+        let b_uid = state.get_or_alloc_uid("aux_b");
+
+        // aux_a below aux_b: the connection runs downward from aux_b and
+        // upward into aux_a.  From each variable's perspective the connector
+        // leaves toward the bottom, making Bottom a poor label position and
+        // causing the optimizer to prefer Top.
+        state.elements.push(ViewElement::Aux(view_element::Aux {
+            name: "aux_a".to_string(),
+            uid: a_uid,
+            x: 100.0,
+            y: 200.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        }));
+        state.positions.insert(a_uid, Position::new(100.0, 200.0));
+
+        state.elements.push(ViewElement::Aux(view_element::Aux {
+            name: "aux_b".to_string(),
+            uid: b_uid,
+            x: 100.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        }));
+        state.positions.insert(b_uid, Position::new(100.0, 100.0));
+
+        let orig_a = (100.0_f64, 200.0_f64);
+        let orig_b = (100.0_f64, 100.0_f64);
+
+        optimize_labels(&mut state, &model, &metadata);
+
+        // At least one element's label_side should have moved away from
+        // Bottom, because each aux has a connection in the downward or
+        // upward direction that makes Bottom suboptimal.
+        let sides: Vec<view_element::LabelSide> = state
+            .elements
+            .iter()
+            .filter_map(|e| {
+                if let ViewElement::Aux(a) = e {
+                    Some(a.label_side)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(sides.len(), 2, "should still have 2 aux elements");
+        let any_changed = sides.iter().any(|&s| s != view_element::LabelSide::Bottom);
+        assert!(
+            any_changed,
+            "optimize_labels should adjust at least one label_side from the default; got {:?}",
+            sides
+        );
+
+        // Element positions must not change -- optimize_labels moves
+        // labels, not the elements themselves.
+        for elem in &state.elements {
+            if let ViewElement::Aux(a) = elem {
+                if a.name == "aux_a" {
+                    assert_eq!(a.x, orig_a.0, "aux_a x should be unchanged");
+                    assert_eq!(a.y, orig_a.1, "aux_a y should be unchanged");
+                } else if a.name == "aux_b" {
+                    assert_eq!(a.x, orig_b.0, "aux_b x should be unchanged");
+                    assert_eq!(a.y, orig_b.1, "aux_b y should be unchanged");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_compute_metadata_with_main_alias() {
         let mut model = simple_model();
         model.name = String::new();
