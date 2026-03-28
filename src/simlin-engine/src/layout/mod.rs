@@ -241,9 +241,6 @@ impl LayoutState {
             .unwrap_or_else(|| canonical_ident.to_string())
     }
 
-    /// Remove all view elements associated with a deleted variable:
-    /// the primary element, any links referencing it, any clouds for
-    /// the flow, and internal cloud bookkeeping maps.
     /// Remove a variable and its associated view elements (clouds, aliases, links)
     /// from the layout state.
     ///
