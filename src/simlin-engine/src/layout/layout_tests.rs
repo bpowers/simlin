@@ -4190,3 +4190,276 @@ fn test_identify_new_elements_uid_exists_but_no_element() {
         "should be new when UID exists but no element"
     );
 }
+
+// -- compute_new_element_positions tests --
+
+/// Helper: build a LayoutState with positioned existing elements and a
+/// ComputedMetadata with the given dep_graph.  Returns (state, metadata).
+fn make_positioning_state(
+    existing: &[(&str, f64, f64, &str)], // (ident, x, y, type: "stock"|"aux"|"flow")
+    dep_graph: &[(&str, &[&str])],       // (var, deps_it_depends_on)
+) -> (LayoutState, ComputedMetadata) {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    let mut next_uid = 1;
+    for &(ident, x, y, kind) in existing {
+        let uid = next_uid;
+        next_uid += 1;
+        state.uid_manager.add(uid, ident);
+        state.positions.insert(uid, Position::new(x, y));
+
+        let elem = match kind {
+            "stock" => ViewElement::Stock(view_element::Stock {
+                name: ident.into(),
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            "flow" => ViewElement::Flow(view_element::Flow {
+                name: ident.into(),
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                points: vec![
+                    FlowPoint {
+                        x: x - 50.0,
+                        y,
+                        attached_to_uid: None,
+                    },
+                    FlowPoint {
+                        x: x + 50.0,
+                        y,
+                        attached_to_uid: None,
+                    },
+                ],
+                compat: None,
+                label_compat: None,
+            }),
+            _ => ViewElement::Aux(view_element::Aux {
+                name: ident.into(),
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+        };
+        state.elements.push(elem);
+    }
+
+    let mut dg = BTreeMap::new();
+    let mut rdg = BTreeMap::new();
+    for &(var, deps) in dep_graph {
+        let dep_set: BTreeSet<String> = deps.iter().map(|s| s.to_string()).collect();
+        dg.insert(var.to_string(), dep_set);
+        for dep in deps {
+            rdg.entry(dep.to_string())
+                .or_insert_with(BTreeSet::new)
+                .insert(var.to_string());
+        }
+    }
+
+    let metadata = ComputedMetadata {
+        chains: Vec::new(),
+        feedback_loops: Vec::new(),
+        dominant_periods: Vec::new(),
+        dep_graph: dg,
+        reverse_dep_graph: rdg,
+        constants: BTreeSet::new(),
+        stock_to_inflows: HashMap::new(),
+        stock_to_outflows: HashMap::new(),
+        flow_to_stocks: HashMap::new(),
+    };
+
+    (state, metadata)
+}
+
+/// AC4.1: A new aux connected to two existing elements at (100,100)
+/// and (200,200) is placed near (150,150).
+#[test]
+fn test_new_element_positioning_aux_near_connected() {
+    let (state, metadata) = make_positioning_state(
+        &[("a", 100.0, 100.0, "aux"), ("b", 200.0, 200.0, "aux")],
+        // new_aux depends on a and b
+        &[("new_aux", &["a", "b"])],
+    );
+
+    let new_elements = NewElements {
+        new_stocks: Vec::new(),
+        new_flows: Vec::new(),
+        new_auxes: vec!["new_aux".to_string()],
+        new_modules: Vec::new(),
+    };
+
+    let positions = compute_new_element_positions(&state, &metadata, &new_elements);
+    let pos = positions
+        .get("new_aux")
+        .expect("new_aux should have a position");
+
+    // Should be within a reasonable radius of centroid (150, 150)
+    let dx = pos.x - 150.0;
+    let dy = pos.y - 150.0;
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        dist < 100.0,
+        "new_aux should be near centroid of a and b, got ({}, {}), distance {}",
+        pos.x,
+        pos.y,
+        dist
+    );
+}
+
+/// AC4.2: A new stock-flow chain connected to existing structure is
+/// positioned near the connected elements' centroid.
+#[test]
+fn test_new_element_positioning_chain_near_connected() {
+    let (state, metadata) = make_positioning_state(
+        &[("existing_stock", 300.0, 200.0, "stock")],
+        // new_flow depends on existing_stock
+        &[("new_flow", &["existing_stock"])],
+    );
+
+    let new_elements = NewElements {
+        new_stocks: vec!["new_stock".to_string()],
+        new_flows: vec!["new_flow".to_string()],
+        new_auxes: Vec::new(),
+        new_modules: Vec::new(),
+    };
+
+    let positions = compute_new_element_positions(&state, &metadata, &new_elements);
+
+    // At least the new_flow should have a position near existing_stock
+    let flow_pos = positions
+        .get("new_flow")
+        .expect("new_flow should have a position");
+    let dx = flow_pos.x - 300.0;
+    let dy = flow_pos.y - 200.0;
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        dist < 300.0,
+        "new_flow should be near existing_stock, got ({}, {}), distance {}",
+        flow_pos.x,
+        flow_pos.y,
+        dist
+    );
+}
+
+/// AC4.3: A new chain with no connections to existing structure is
+/// placed at the diagram periphery (beyond the bounding box of
+/// existing elements).
+#[test]
+fn test_new_element_positioning_chain_at_periphery() {
+    let (state, metadata) = make_positioning_state(
+        &[("s1", 100.0, 100.0, "stock"), ("s2", 300.0, 100.0, "stock")],
+        // new_stock has no dependency edges to existing elements
+        &[],
+    );
+
+    let new_elements = NewElements {
+        new_stocks: vec!["new_stock".to_string()],
+        new_flows: Vec::new(),
+        new_auxes: Vec::new(),
+        new_modules: Vec::new(),
+    };
+
+    let positions = compute_new_element_positions(&state, &metadata, &new_elements);
+
+    let pos = positions
+        .get("new_stock")
+        .expect("new_stock should have a position");
+
+    // Should be placed outside the bounding box of existing elements
+    // Existing elements span x=[100,300], y=[100,100]
+    // The new element should be beyond max_x (300)
+    assert!(
+        pos.x > 300.0 || pos.y > 100.0 || pos.x < 100.0 || pos.y < 100.0,
+        "new_stock at ({}, {}) should be outside existing bounding box [100..300, 100..100]",
+        pos.x,
+        pos.y
+    );
+}
+
+/// AC4.4: Two new auxes connected to the same existing element are
+/// spread apart (not stacked at the same position).
+#[test]
+fn test_new_element_positioning_auxes_spread_apart() {
+    let (state, metadata) = make_positioning_state(
+        &[("target", 200.0, 200.0, "aux")],
+        // Both new auxes depend on the same existing element
+        &[("aux_a", &["target"]), ("aux_b", &["target"])],
+    );
+
+    let new_elements = NewElements {
+        new_stocks: Vec::new(),
+        new_flows: Vec::new(),
+        new_auxes: vec!["aux_a".to_string(), "aux_b".to_string()],
+        new_modules: Vec::new(),
+    };
+
+    let positions = compute_new_element_positions(&state, &metadata, &new_elements);
+
+    let pos_a = positions
+        .get("aux_a")
+        .expect("aux_a should have a position");
+    let pos_b = positions
+        .get("aux_b")
+        .expect("aux_b should have a position");
+
+    let dx = pos_a.x - pos_b.x;
+    let dy = pos_a.y - pos_b.y;
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        dist > 10.0,
+        "aux_a ({}, {}) and aux_b ({}, {}) should be spread apart, but distance is {}",
+        pos_a.x,
+        pos_a.y,
+        pos_b.x,
+        pos_b.y,
+        dist
+    );
+}
+
+/// New modules connected to existing elements are placed near them.
+#[test]
+fn test_new_element_positioning_module_near_connected() {
+    let (state, metadata) = make_positioning_state(
+        &[("existing_aux", 150.0, 150.0, "aux")],
+        // new_module depends on existing_aux
+        &[("new_module", &["existing_aux"])],
+    );
+
+    let new_elements = NewElements {
+        new_stocks: Vec::new(),
+        new_flows: Vec::new(),
+        new_auxes: Vec::new(),
+        new_modules: vec!["new_module".to_string()],
+    };
+
+    let positions = compute_new_element_positions(&state, &metadata, &new_elements);
+
+    let pos = positions
+        .get("new_module")
+        .expect("new_module should have a position");
+    let dx = pos.x - 150.0;
+    let dy = pos.y - 150.0;
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        dist < 200.0,
+        "new_module should be near existing_aux, got ({}, {}), distance {}",
+        pos.x,
+        pos.y,
+        dist
+    );
+}

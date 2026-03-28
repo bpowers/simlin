@@ -371,6 +371,263 @@ impl NewElements {
     }
 }
 
+/// Compute initial positions for newly-added elements based on their
+/// dependency connections to existing elements.
+///
+/// Three placement strategies:
+/// - Connected aux/module: centroid of connected existing elements with
+///   ring spreading when multiple new elements share the same connections
+/// - Connected chain element: near connected existing elements with offset
+/// - Disconnected element: at the diagram periphery beyond existing bounds
+pub fn compute_new_element_positions(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+) -> HashMap<String, Position> {
+    let mut result: HashMap<String, Position> = HashMap::new();
+
+    let new_set: HashSet<&str> = new_elements
+        .new_stocks
+        .iter()
+        .chain(&new_elements.new_flows)
+        .chain(&new_elements.new_auxes)
+        .chain(&new_elements.new_modules)
+        .map(|s| s.as_str())
+        .collect();
+
+    // Compute bounding box of all existing positioned elements for periphery placement
+    let (bbox_min, bbox_max) = existing_bounding_box(state);
+
+    // Place new auxes and modules near connected existing elements
+    place_new_point_elements(
+        state,
+        metadata,
+        &new_elements.new_auxes,
+        &new_set,
+        &bbox_min,
+        &bbox_max,
+        &mut result,
+    );
+    place_new_point_elements(
+        state,
+        metadata,
+        &new_elements.new_modules,
+        &new_set,
+        &bbox_min,
+        &bbox_max,
+        &mut result,
+    );
+
+    // Place new stocks and flows (chain elements)
+    place_new_chain_elements(
+        state,
+        metadata,
+        new_elements,
+        &new_set,
+        &bbox_min,
+        &bbox_max,
+        &mut result,
+    );
+
+    result
+}
+
+/// Bounding box of all existing positioned elements.
+/// Returns ((min_x, min_y), (max_x, max_y)).
+/// When no positions exist, returns a default origin area.
+fn existing_bounding_box(state: &LayoutState) -> (Position, Position) {
+    if state.positions.is_empty() {
+        return (
+            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
+            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
+        );
+    }
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for pos in state.positions.values() {
+        min_x = min_x.min(pos.x);
+        min_y = min_y.min(pos.y);
+        max_x = max_x.max(pos.x);
+        max_y = max_y.max(pos.y);
+    }
+    (Position::new(min_x, min_y), Position::new(max_x, max_y))
+}
+
+/// Collect positions of existing elements connected to a given ident
+/// via dep_graph (things `ident` depends on) and reverse_dep_graph
+/// (things that depend on `ident`), excluding other new elements.
+fn connected_existing_positions(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    ident: &str,
+    new_set: &HashSet<&str>,
+) -> Vec<Position> {
+    let mut positions = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Forward: things this element depends on
+    if let Some(deps) = metadata.dep_graph.get(ident) {
+        for dep in deps {
+            if new_set.contains(dep.as_str()) || !seen.insert(dep.as_str()) {
+                continue;
+            }
+            if let Some(uid) = state.uid_manager.get_uid(dep)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                positions.push(pos);
+            }
+        }
+    }
+
+    // Reverse: things that depend on this element
+    if let Some(dependents) = metadata.reverse_dep_graph.get(ident) {
+        for dep in dependents {
+            if new_set.contains(dep.as_str()) || !seen.insert(dep.as_str()) {
+                continue;
+            }
+            if let Some(uid) = state.uid_manager.get_uid(dep)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                positions.push(pos);
+            }
+        }
+    }
+
+    positions
+}
+
+/// Centroid of a non-empty set of positions.
+fn centroid(positions: &[Position]) -> Position {
+    let n = positions.len() as f64;
+    let sum_x: f64 = positions.iter().map(|p| p.x).sum();
+    let sum_y: f64 = positions.iter().map(|p| p.y).sum();
+    Position::new(sum_x / n, sum_y / n)
+}
+
+/// Place new aux or module elements near their connected existing elements,
+/// spreading multiple elements that share the same connections into a ring.
+fn place_new_point_elements(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    new_idents: &[String],
+    new_set: &HashSet<&str>,
+    bbox_min: &Position,
+    bbox_max: &Position,
+    result: &mut HashMap<String, Position>,
+) {
+    if new_idents.is_empty() {
+        return;
+    }
+
+    // Group new elements by their set of connected existing element UIDs
+    // so we can spread apart those that share the same connection set.
+    let mut connection_groups: HashMap<Vec<i32>, Vec<String>> = HashMap::new();
+    let mut ident_centroids: HashMap<String, Position> = HashMap::new();
+
+    for ident in new_idents {
+        let connected = connected_existing_positions(state, metadata, ident, new_set);
+        if connected.is_empty() {
+            // No connections to existing elements: place at periphery
+            let periphery_x = bbox_max.x + 150.0;
+            let center_y = (bbox_min.y + bbox_max.y) / 2.0;
+            result.insert(ident.clone(), Position::new(periphery_x, center_y));
+            continue;
+        }
+
+        let center = centroid(&connected);
+        ident_centroids.insert(ident.clone(), center);
+
+        // Build a sorted key from connected existing UIDs for grouping
+        let mut uid_key: Vec<i32> = connected
+            .iter()
+            .filter_map(|pos| {
+                state
+                    .positions
+                    .iter()
+                    .find(|(_, p)| (p.x - pos.x).abs() < 0.001 && (p.y - pos.y).abs() < 0.001)
+                    .map(|(&uid, _)| uid)
+            })
+            .collect();
+        uid_key.sort();
+        uid_key.dedup();
+
+        connection_groups
+            .entry(uid_key)
+            .or_default()
+            .push(ident.clone());
+    }
+
+    // Place each group, spreading elements in a ring when multiple share
+    // the same connection set (AC4.4).
+    for group in connection_groups.values() {
+        let group_count = group.len();
+        for (i, ident) in group.iter().enumerate() {
+            let base = ident_centroids
+                .get(ident)
+                .copied()
+                .unwrap_or(Position::new(bbox_max.x + 150.0, bbox_min.y));
+
+            if group_count == 1 {
+                result.insert(ident.clone(), base);
+            } else {
+                let angle = i as f64 * 2.0 * PI / group_count.max(8) as f64;
+                let radius = 50.0;
+                result.insert(
+                    ident.clone(),
+                    Position::new(base.x + radius * angle.cos(), base.y + radius * angle.sin()),
+                );
+            }
+        }
+    }
+}
+
+/// Place new stock and flow elements.  When connected to existing
+/// structure, place near the connected elements; when disconnected,
+/// place at the diagram periphery.
+fn place_new_chain_elements(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+    new_set: &HashSet<&str>,
+    _bbox_min: &Position,
+    bbox_max: &Position,
+    result: &mut HashMap<String, Position>,
+) {
+    let offset_x = 100.0;
+    let offset_y = 50.0;
+
+    for stock_ident in &new_elements.new_stocks {
+        let connected = connected_existing_positions(state, metadata, stock_ident, new_set);
+        if connected.is_empty() {
+            // Periphery placement
+            let pos = Position::new(bbox_max.x + 150.0, bbox_max.y + offset_y);
+            result.insert(stock_ident.clone(), pos);
+        } else {
+            let center = centroid(&connected);
+            result.insert(
+                stock_ident.clone(),
+                Position::new(center.x + offset_x, center.y + offset_y),
+            );
+        }
+    }
+
+    for flow_ident in &new_elements.new_flows {
+        let connected = connected_existing_positions(state, metadata, flow_ident, new_set);
+        if connected.is_empty() {
+            let pos = Position::new(bbox_max.x + 200.0, bbox_max.y + offset_y);
+            result.insert(flow_ident.clone(), pos);
+        } else {
+            let center = centroid(&connected);
+            result.insert(
+                flow_ident.clone(),
+                Position::new(center.x + offset_x, center.y),
+            );
+        }
+    }
+}
+
 /// Perform three-way connector diff: compare old links in LayoutState
 /// against edges derived from the current dep_graph, then preserve
 /// unchanged links, remove stale ones, and create new links with
