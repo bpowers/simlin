@@ -3882,3 +3882,311 @@ fn test_diff_clouds_noop_when_unchanged() {
         "cloud count should not change when metadata is unchanged"
     );
 }
+
+// -- identify_new_elements tests --
+
+/// Build a LayoutState with elements for stocks S1/S2 and aux A1,
+/// then check that a model adding A2 and F1 identifies them correctly.
+#[test]
+fn test_identify_new_elements_partial_overlap() {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    // Register existing elements: stocks s1, s2 and aux a1
+    state.uid_manager.add(1, "s1");
+    state.uid_manager.add(2, "s2");
+    state.uid_manager.add(3, "a1");
+
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "s1".into(),
+        uid: 1,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "s2".into(),
+        uid: 2,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "a1".into(),
+        uid: 3,
+        x: 150.0,
+        y: 50.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+
+    // Model has s1, s2, a1 (existing) + a2 and f1 (new)
+    let model = datamodel::Model {
+        name: "test".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "s1".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["f1".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "s2".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "a1".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(3),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "a2".to_string(),
+                equation: datamodel::Equation::Scalar("2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f1".to_string(),
+                equation: datamodel::Equation::Scalar("a2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let result = state.identify_new_elements(&model);
+
+    assert!(
+        result.new_stocks.is_empty(),
+        "s1 and s2 already exist, no new stocks"
+    );
+    assert_eq!(result.new_auxes, vec!["a2"]);
+    assert_eq!(result.new_flows, vec!["f1"]);
+    assert!(result.new_modules.is_empty());
+}
+
+/// When all model variables already have elements in state,
+/// identify_new_elements should return empty lists.
+#[test]
+fn test_identify_new_elements_all_present() {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    state.uid_manager.add(1, "population");
+    state.uid_manager.add(2, "growth");
+
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "population".into(),
+        uid: 1,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "growth".into(),
+        uid: 2,
+        x: 50.0,
+        y: 50.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+
+    let model = datamodel::Model {
+        name: "test".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "population".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "growth".to_string(),
+                equation: datamodel::Equation::Scalar("0.05".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let result = state.identify_new_elements(&model);
+    assert!(result.is_empty(), "all variables already present");
+}
+
+/// When the LayoutState is empty, every model variable should be new.
+#[test]
+fn test_identify_new_elements_empty_state() {
+    let state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    let model = datamodel::Model {
+        name: "test".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "susceptible".to_string(),
+                equation: datamodel::Equation::Scalar("1000".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["infection".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "infection".to_string(),
+                equation: datamodel::Equation::Scalar("susceptible * contact_rate".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "contact_rate".to_string(),
+                equation: datamodel::Equation::Scalar("0.05".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "vaccination".to_string(),
+                model_name: "vaccination_model".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let result = state.identify_new_elements(&model);
+
+    assert_eq!(result.new_stocks, vec!["susceptible"]);
+    assert_eq!(result.new_flows, vec!["infection"]);
+    assert_eq!(result.new_auxes, vec!["contact_rate"]);
+    assert_eq!(result.new_modules, vec!["vaccination"]);
+}
+
+/// When a UID exists in uid_manager but no element in elements has that UID,
+/// the variable should be treated as new.
+#[test]
+fn test_identify_new_elements_uid_exists_but_no_element() {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    // UID is registered but there is no corresponding ViewElement
+    state.uid_manager.add(10, "orphan_aux");
+
+    let model = datamodel::Model {
+        name: "test".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "orphan_aux".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(10),
+        })],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let result = state.identify_new_elements(&model);
+    assert_eq!(
+        result.new_auxes,
+        vec!["orphan_aux"],
+        "should be new when UID exists but no element"
+    );
+}
