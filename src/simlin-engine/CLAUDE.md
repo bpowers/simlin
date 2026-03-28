@@ -34,7 +34,7 @@ Equation text flows through these stages in order:
 - **`src/model.rs`** - Model compilation stages (`ModelStage0` -> `ModelStage1` -> `ModuleStage2`), dependency resolution, topological sort. `collect_module_idents` pre-scans datamodel variables to identify which names will expand to modules (preventing incorrect `LoadPrev` compilation). `init_referenced_vars` extends the Initials runlist to include variables referenced by `INIT()` calls, ensuring their values are captured in the `initial_values` snapshot. `check_units` is gated behind `cfg(any(test, feature = "testing"))` (production unit checking uses salsa tracked functions).
 - **`src/project.rs`** - `Project` struct aggregating models. `from_salsa(datamodel, db, source_project, cb)` builds a Project from a pre-synced salsa database (all variable parsing comes from salsa-cached results). `from_datamodel(datamodel)` is a convenience wrapper that creates a local DB and syncs. `From<datamodel::Project>`, `with_ltm()`, and `with_ltm_all_links()` are all gated behind `cfg(any(test, feature = "testing"))` (retained only for tests and the AST interpreter cross-validation path); production code uses `db::compile_project_incremental` with `ltm_enabled`/`ltm_discovery_mode` on `SourceProject`.
 - **`src/results.rs`** - `Results` (variable offsets + timeseries data), `Specs` (time/integration config)
-- **`src/patch.rs`** - `ModelPatch`/`ProjectPatch` for representing and applying model changes
+- **`src/patch.rs`** - `ModelPatch`/`ProjectPatch` (both `Clone`) for representing and applying model changes. `ModelPatch` is consumed by `incremental_layout()` to determine what variables were added/removed/renamed
 
 ## Incremental compilation (salsa)
 
@@ -79,7 +79,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/ltm.rs`** - Loops That Matter: feedback loop detection and dominance analysis
 - **`src/ltm_augment.rs`** - Synthetic variable generation for loop instrumentation
 - **`src/diagram/`** - Diagram/sketch rendering: `elements.rs`, `connector.rs`, `flow.rs`, `render.rs`, `common.rs`, `constants.rs`, `label.rs`, `arrowhead.rs`
-- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable): `mod.rs` (pipeline orchestration, public API), `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters including `module_width`/`module_height`), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management). Generates view elements for modules (not just stocks/flows/auxes).
+- **`src/layout/`** - Automatic diagram layout generation (available on all targets including WASM; uses serial fallback when rayon is unavailable). Two entry points: `fresh_layout()` generates a complete diagram from scratch; `incremental_layout()` preserves existing element positions and adds/removes only what changed. Submodules: `sfdp.rs` (force-directed placement), `annealing.rs` (crossing reduction), `chain.rs` (stock-flow chain positioning), `config.rs` (layout parameters including `module_width`/`module_height`), `connector.rs` (link routing), `graph.rs` (graph data structures), `metadata.rs` (feedback loops, dominant periods), `placement.rs` (label optimization, normalization), `text.rs` (label sizing), `uid.rs` (UID management), `layout_tests.rs` (unit tests for composable layout blocks and incremental operations). `LayoutState` is the public mutable state struct used by both paths: `LayoutState::new()` for fresh layout, `LayoutState::from_existing_view()` for incremental. Incremental helpers: `identify_new_elements()`, `compute_new_element_positions()`, `settle_new_elements()`, `diff_connectors()`, `diff_clouds()`, `apply_deletion()`, `apply_rename()`. The convenience wrappers `generate_best_layout()` and `generate_layout_with_config()` remain as the primary public API for callers. Generates view elements for modules (not just stocks/flows/auxes).
 
 ## Cargo features
 
@@ -107,7 +107,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`tests/simulate_systems.rs`** - Systems format simulation integration tests (fixtures in `test/systems-format/`)
 - **`tests/simulate_ltm.rs`** - LTM feature tests
 - **`tests/systems_roundtrip.rs`** - Systems format parse-translate-write round-trip tests
-- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, modules, LTM metadata, dominant periods)
+- **`tests/layout.rs`** - Layout generation integration tests (chains, connectors, modules, LTM metadata, dominant periods, incremental layout operations)
 - **`tests/json_roundtrip.rs`** - JSON serialization roundtrip
 - **`tests/roundtrip.rs`** - XMILE/MDL roundtrip tests
 - **`tests/vm_alloc.rs`** - VM memory allocation tests
