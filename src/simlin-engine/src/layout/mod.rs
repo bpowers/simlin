@@ -106,6 +106,127 @@ impl LayoutState {
         }
     }
 
+    /// Seed all layout state from an existing diagram view, enabling
+    /// incremental layout to preserve existing element positions.
+    pub fn from_existing_view(old_view: &datamodel::StockFlow, model: &datamodel::Model) -> Self {
+        let mut uid_manager = UidManager::new();
+        let mut display_names = HashMap::new();
+        let mut positions = HashMap::new();
+        let mut flow_templates = HashMap::new();
+        let mut cloud_ident_to_uid = HashMap::new();
+        let mut cloud_ident_to_flow_ident = HashMap::new();
+        let mut flow_ident_to_clouds: HashMap<String, Vec<String>> = HashMap::new();
+
+        // Seed display names and UID manager from model variables
+        for var in &model.variables {
+            let ident = var.get_ident();
+            let canonical = canonicalize(ident).into_owned();
+            display_names.insert(canonical, ident.to_string());
+
+            if let Some(uid) = match var {
+                datamodel::Variable::Stock(s) => s.uid,
+                datamodel::Variable::Flow(f) => f.uid,
+                datamodel::Variable::Aux(a) => a.uid,
+                datamodel::Variable::Module(m) => m.uid,
+            } {
+                uid_manager.add(uid, ident);
+            }
+        }
+
+        // Seed UID manager from view elements and extract positions
+        for elem in &old_view.elements {
+            match elem {
+                ViewElement::Aux(a) => {
+                    uid_manager.add(a.uid, &canonicalize(&a.name));
+                    positions.insert(a.uid, Position::new(a.x, a.y));
+                }
+                ViewElement::Stock(s) => {
+                    uid_manager.add(s.uid, &canonicalize(&s.name));
+                    positions.insert(s.uid, Position::new(s.x, s.y));
+                }
+                ViewElement::Flow(f) => {
+                    uid_manager.add(f.uid, &canonicalize(&f.name));
+                    positions.insert(f.uid, Position::new(f.x, f.y));
+                }
+                ViewElement::Module(m) => {
+                    uid_manager.add(m.uid, &canonicalize(&m.name));
+                    positions.insert(m.uid, Position::new(m.x, m.y));
+                }
+                ViewElement::Group(g) => {
+                    uid_manager.add(g.uid, &canonicalize(&g.name));
+                    positions.insert(g.uid, Position::new(g.x, g.y));
+                }
+                ViewElement::Cloud(c) => {
+                    uid_manager.add(c.uid, "");
+                    positions.insert(c.uid, Position::new(c.x, c.y));
+                }
+                ViewElement::Link(l) => {
+                    uid_manager.add(l.uid, "");
+                }
+                ViewElement::Alias(a) => {
+                    uid_manager.add(a.uid, "");
+                    positions.insert(a.uid, Position::new(a.x, a.y));
+                }
+            }
+        }
+
+        // Build uid-to-ident map for flows (used by flow_templates and cloud maps)
+        let uid_to_ident: HashMap<i32, String> = model
+            .variables
+            .iter()
+            .filter_map(|var| {
+                let uid = match var {
+                    datamodel::Variable::Stock(s) => s.uid,
+                    datamodel::Variable::Flow(f) => f.uid,
+                    datamodel::Variable::Aux(a) => a.uid,
+                    datamodel::Variable::Module(m) => m.uid,
+                }?;
+                Some((uid, canonicalize(var.get_ident()).into_owned()))
+            })
+            .collect();
+
+        // Populate flow_templates from existing flow elements
+        for elem in &old_view.elements {
+            if let ViewElement::Flow(f) = elem
+                && let Some(ident) = uid_to_ident.get(&f.uid)
+                && f.points.len() >= 2
+            {
+                let offsets: Vec<Position> = f
+                    .points
+                    .iter()
+                    .map(|pt| Position::new(pt.x - f.x, pt.y - f.y))
+                    .collect();
+                flow_templates.insert(ident.clone(), FlowTemplate { offsets });
+            }
+        }
+
+        // Populate cloud maps from existing cloud elements
+        for elem in &old_view.elements {
+            if let ViewElement::Cloud(c) = elem {
+                let cloud_ident = make_cloud_node_ident(c.uid);
+                if let Some(flow_ident) = uid_to_ident.get(&c.flow_uid) {
+                    cloud_ident_to_uid.insert(cloud_ident.clone(), c.uid);
+                    cloud_ident_to_flow_ident.insert(cloud_ident.clone(), flow_ident.clone());
+                    flow_ident_to_clouds
+                        .entry(flow_ident.clone())
+                        .or_default()
+                        .push(cloud_ident);
+                }
+            }
+        }
+
+        Self {
+            uid_manager,
+            display_names,
+            elements: old_view.elements.clone(),
+            positions,
+            flow_templates,
+            cloud_ident_to_uid,
+            cloud_ident_to_flow_ident,
+            flow_ident_to_clouds,
+        }
+    }
+
     /// Get or allocate a UID for a variable by its canonical ident.
     pub fn get_or_alloc_uid(&mut self, ident: &str) -> i32 {
         self.uid_manager.alloc(ident)

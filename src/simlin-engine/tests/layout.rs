@@ -9,6 +9,7 @@ use std::io::BufReader;
 use simlin_engine::common::canonicalize;
 use simlin_engine::datamodel::ViewElement;
 use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
+use simlin_engine::layout::LayoutState;
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::{generate_best_layout, generate_layout, generate_layout_with_config};
 use simlin_engine::open_xmile;
@@ -764,6 +765,112 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
         !source_project.ltm_enabled(&db),
         "ltm_enabled should be false after compute_metadata completes"
     );
+}
+
+#[test]
+fn test_from_existing_view_sir_round_trip() {
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+    let generated_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+
+    let state = LayoutState::from_existing_view(&generated_view, model);
+
+    // Element count must match
+    assert_eq!(
+        state.elements.len(),
+        generated_view.elements.len(),
+        "from_existing_view should preserve all elements"
+    );
+
+    // Every element UID and position must match
+    for (orig, seeded) in generated_view.elements.iter().zip(state.elements.iter()) {
+        assert_eq!(orig.get_uid(), seeded.get_uid(), "UIDs must match");
+
+        // Check positions for elements with coordinates
+        let orig_pos = get_element_position(orig);
+        let seeded_pos = get_element_position(seeded);
+        assert_eq!(
+            orig_pos,
+            seeded_pos,
+            "positions must match for uid={}",
+            orig.get_uid()
+        );
+    }
+
+    // Positions map must contain entries for all elements with coordinates
+    for elem in &generated_view.elements {
+        if let Some((x, y)) = get_element_position(elem) {
+            let pos = state.positions.get(&elem.get_uid());
+            assert!(
+                pos.is_some(),
+                "positions map should contain uid={}",
+                elem.get_uid()
+            );
+            let pos = pos.unwrap();
+            assert!(
+                (pos.x - x).abs() < f64::EPSILON && (pos.y - y).abs() < f64::EPSILON,
+                "position mismatch for uid={}: ({}, {}) vs ({}, {})",
+                elem.get_uid(),
+                pos.x,
+                pos.y,
+                x,
+                y
+            );
+        }
+    }
+}
+
+#[test]
+fn test_from_existing_view_teacup_round_trip() {
+    let project = load_project("test/test-models/samples/teacup/teacup.stmx");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+    let generated_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+
+    let state = LayoutState::from_existing_view(&generated_view, model);
+
+    assert_eq!(
+        state.elements.len(),
+        generated_view.elements.len(),
+        "from_existing_view should preserve all elements"
+    );
+
+    for (orig, seeded) in generated_view.elements.iter().zip(state.elements.iter()) {
+        assert_eq!(orig.get_uid(), seeded.get_uid(), "UIDs must match");
+    }
+
+    // Positions map must contain entries for all elements with coordinates
+    for elem in &generated_view.elements {
+        if let Some((x, y)) = get_element_position(elem) {
+            let pos = state.positions.get(&elem.get_uid());
+            assert!(
+                pos.is_some(),
+                "positions map should contain uid={}",
+                elem.get_uid()
+            );
+            let pos = pos.unwrap();
+            assert!(
+                (pos.x - x).abs() < f64::EPSILON && (pos.y - y).abs() < f64::EPSILON,
+                "position mismatch for uid={}",
+                elem.get_uid()
+            );
+        }
+    }
+}
+
+/// Extract (x, y) position from a view element, if it has coordinates.
+fn get_element_position(elem: &ViewElement) -> Option<(f64, f64)> {
+    match elem {
+        ViewElement::Aux(a) => Some((a.x, a.y)),
+        ViewElement::Stock(s) => Some((s.x, s.y)),
+        ViewElement::Flow(f) => Some((f.x, f.y)),
+        ViewElement::Module(m) => Some((m.x, m.y)),
+        ViewElement::Cloud(c) => Some((c.x, c.y)),
+        ViewElement::Alias(a) => Some((a.x, a.y)),
+        ViewElement::Group(g) => Some((g.x, g.y)),
+        ViewElement::Link(_) => None,
+    }
 }
 
 /// Verify that a systems-format model with modules produces a complete,
