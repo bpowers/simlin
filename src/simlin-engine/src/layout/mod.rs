@@ -153,7 +153,10 @@ impl LayoutState {
                     positions.insert(m.uid, Position::new(m.x, m.y));
                 }
                 ViewElement::Group(g) => {
-                    uid_manager.add(g.uid, &canonicalize(&g.name));
+                    // Groups are not looked up by name for variable operations,
+                    // so register with an empty ident to prevent collisions with
+                    // model variables that happen to share the same name.
+                    uid_manager.add(g.uid, "");
                     positions.insert(g.uid, Position::new(g.x, g.y));
                 }
                 ViewElement::Cloud(c) => {
@@ -3662,11 +3665,51 @@ pub fn incremental_layout(
         }
     }
 
+    // Between steps 3 and 4a: detect variables whose type changed (e.g., Aux -> Stock).
+    // When a caller issues UpsertStock for a variable that was previously an Aux, there
+    // is no DeleteVariable in the patch and the old Aux element is still in state.
+    // identify_new_elements only checks for UID presence, not element type, so the
+    // stale element would survive.  We detect type mismatches here and remove the
+    // old element so it is rebuilt with the correct type.
+    {
+        let kind_changed: Vec<String> = model
+            .variables
+            .iter()
+            .filter_map(|var| {
+                let canonical = canonicalize(var.get_ident()).into_owned();
+                let uid = state.uid_manager.get_uid(&canonical)?;
+                // Find the view element for this UID
+                let elem = state.elements.iter().find(|e| e.get_uid() == uid)?;
+                // Check for a type mismatch
+                let mismatch = !matches!(
+                    (var, elem),
+                    (datamodel::Variable::Stock(_), ViewElement::Stock(_))
+                        | (datamodel::Variable::Flow(_), ViewElement::Flow(_))
+                        | (datamodel::Variable::Aux(_), ViewElement::Aux(_))
+                        | (datamodel::Variable::Module(_), ViewElement::Module(_))
+                );
+                if mismatch { Some(canonical) } else { None }
+            })
+            .collect();
+        for ident in kind_changed {
+            state.apply_deletion(&ident);
+            // Re-insert the display name so the rebuilt element uses the original name.
+            state
+                .display_names
+                .entry(ident.clone())
+                .or_insert_with(|| ident.clone());
+        }
+    }
+
     // Between steps 3 and 4: detect flows whose stock connections changed.
     // A flow element keeps its old attached_to_uid values when preserved in state,
     // so a flow that moved from one stock to another would keep stale endpoints.
     // Remove such flows (and their clouds) so identify_new_elements picks them
     // up as new and they get rebuilt with correct endpoints.
+    //
+    // This also handles transitions between stock and cloud endpoints: if the
+    // model now expects a cloud source (from_stock == None) but the preserved
+    // flow's source point is still attached to a stock UID, the flow is stale.
     {
         let uid_to_ident: HashMap<i32, String> = model
             .variables
@@ -3674,6 +3717,16 @@ pub fn incremental_layout(
             .filter_map(|var| {
                 let ident = canonicalize(var.get_ident()).into_owned();
                 state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            })
+            .collect();
+
+        // Build the set of all stock UIDs so we can detect cloud-vs-stock mismatches.
+        let all_stock_uids: HashSet<i32> = state
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Stock(s) => Some(s.uid),
+                _ => None,
             })
             .collect();
 
@@ -3685,15 +3738,11 @@ pub fn incremental_layout(
                     ViewElement::Flow(f) => f,
                     _ => return None,
                 };
+                if flow.points.len() < 2 {
+                    return None;
+                }
                 let flow_ident = uid_to_ident.get(&flow.uid)?;
                 let (expected_from, expected_to) = metadata.flow_to_stocks.get(flow_ident)?;
-
-                // Collect the stock UIDs currently referenced by this flow's endpoints
-                let attached_uids: Vec<i32> = flow
-                    .points
-                    .iter()
-                    .filter_map(|pt| pt.attached_to_uid)
-                    .collect();
 
                 let expected_from_uid = expected_from
                     .as_deref()
@@ -3702,15 +3751,23 @@ pub fn incremental_layout(
                     .as_deref()
                     .and_then(|s| state.uid_manager.get_uid(s));
 
-                // The flow needs rebuilding if either expected stock UID is missing
-                // from the attached endpoints (the stock connection changed).
+                // Check the source endpoint (points[0]):
+                //   - None expected (cloud): the source must NOT be attached to any stock
+                //   - Some(uid) expected: the source must be attached to exactly that stock
+                let source_uid = flow.points[0].attached_to_uid;
                 let from_matches = match expected_from_uid {
-                    None => true, // no from-stock expected (cloud source)
-                    Some(uid) => attached_uids.contains(&uid),
+                    None => !source_uid.is_some_and(|u| all_stock_uids.contains(&u)),
+                    Some(uid) => source_uid == Some(uid),
                 };
+
+                // Check the sink endpoint (points[last]):
+                //   - None expected (cloud): the sink must NOT be attached to any stock
+                //   - Some(uid) expected: the sink must be attached to exactly that stock
+                let last = flow.points.len() - 1;
+                let sink_uid = flow.points[last].attached_to_uid;
                 let to_matches = match expected_to_uid {
-                    None => true, // no to-stock expected (cloud sink)
-                    Some(uid) => attached_uids.contains(&uid),
+                    None => !sink_uid.is_some_and(|u| all_stock_uids.contains(&u)),
+                    Some(uid) => sink_uid == Some(uid),
                 };
 
                 if from_matches && to_matches {
