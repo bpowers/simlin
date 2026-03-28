@@ -5233,6 +5233,227 @@ mod tests {
     }
 
     #[test]
+    fn test_place_auxiliaries() {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "birth_rate".to_string(),
+                    equation: datamodel::Equation::Scalar("0.03".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let config = LayoutConfig::default();
+
+        let mut metadata = ComputedMetadata::new_empty();
+        // births depends on birth_rate and population
+        metadata.dep_graph.insert(
+            "births".to_string(),
+            vec!["birth_rate".to_string(), "population".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        // population depends on births (structural inflow)
+        metadata.dep_graph.insert(
+            "population".to_string(),
+            vec!["births".to_string()].into_iter().collect(),
+        );
+        metadata
+            .stock_to_inflows
+            .insert("population".to_string(), vec!["births".to_string()]);
+        metadata
+            .flow_to_stocks
+            .insert("births".to_string(), (None, Some("population".to_string())));
+
+        let mut state = LayoutState::new(&model);
+
+        // Pre-populate stock and flow view elements (simulating
+        // post-layout_chain state).
+        let pop_uid = state.get_or_alloc_uid("population");
+        let births_uid = state.get_or_alloc_uid("births");
+
+        let stock_x = 200.0_f64;
+        let stock_y = 100.0_f64;
+        let flow_x = 150.0_f64;
+        let flow_y = 100.0_f64;
+
+        state.elements.push(ViewElement::Stock(view_element::Stock {
+            name: "population".to_string(),
+            uid: pop_uid,
+            x: stock_x,
+            y: stock_y,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        }));
+        state
+            .positions
+            .insert(pop_uid, Position::new(stock_x, stock_y));
+
+        // A cloud at the source end of the flow (births has no from_stock)
+        let cloud_uid = state.uid_manager.alloc("");
+        state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            uid: cloud_uid,
+            flow_uid: births_uid,
+            x: 100.0,
+            y: 100.0,
+            compat: None,
+        }));
+        state
+            .positions
+            .insert(cloud_uid, Position::new(100.0, 100.0));
+
+        state.elements.push(ViewElement::Flow(view_element::Flow {
+            name: "births".to_string(),
+            uid: births_uid,
+            x: flow_x,
+            y: flow_y,
+            label_side: view_element::LabelSide::Top,
+            points: vec![
+                FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: Some(cloud_uid),
+                },
+                FlowPoint {
+                    x: 200.0,
+                    y: 100.0,
+                    attached_to_uid: Some(pop_uid),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        }));
+        state
+            .positions
+            .insert(births_uid, Position::new(flow_x, flow_y));
+
+        let chains_data = vec![(
+            vec!["population".to_string()],
+            vec!["births".to_string()],
+            vec!["population".to_string(), "births".to_string()],
+        )];
+
+        place_auxiliaries(&mut state, &config, &model, &metadata, &chains_data).unwrap();
+
+        // An aux view element should be created for birth_rate
+        let aux_elems: Vec<&view_element::Aux> = state
+            .elements
+            .iter()
+            .filter_map(|e| {
+                if let ViewElement::Aux(a) = e {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            aux_elems.len(),
+            1,
+            "expected exactly one aux element for birth_rate"
+        );
+        let aux = aux_elems[0];
+        assert!(
+            canonicalize(&aux.name).contains("birth_rate"),
+            "aux element should be named birth_rate, got '{}'",
+            aux.name
+        );
+
+        // The rigid group constraint means chain elements move together
+        // as a unit.  Verify their relative spacing is preserved even if
+        // SFDP shifts the group slightly.
+        let post_stock = state
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Stock(s) = e {
+                    (s.uid == pop_uid).then_some((s.x, s.y))
+                } else {
+                    None
+                }
+            })
+            .expect("stock should exist");
+        let post_flow = state
+            .elements
+            .iter()
+            .find_map(|e| {
+                if let ViewElement::Flow(f) = e {
+                    (f.uid == births_uid).then_some((f.x, f.y))
+                } else {
+                    None
+                }
+            })
+            .expect("flow should exist");
+
+        let orig_dx = stock_x - flow_x;
+        let orig_dy = stock_y - flow_y;
+        let post_dx = post_stock.0 - post_flow.0;
+        let post_dy = post_stock.1 - post_flow.1;
+        assert!(
+            (orig_dx - post_dx).abs() < 1.0 && (orig_dy - post_dy).abs() < 1.0,
+            "chain relative spacing should be preserved: \
+             orig delta ({}, {}), post delta ({}, {})",
+            orig_dx,
+            orig_dy,
+            post_dx,
+            post_dy
+        );
+
+        // The aux element should have positive coordinates
+        assert!(aux.x > 0.0, "aux x should be positive, got {}", aux.x);
+        assert!(aux.y > 0.0, "aux y should be positive, got {}", aux.y);
+
+        // The aux element's UID should be unique
+        let all_uids: Vec<i32> = state.elements.iter().map(|e| e.get_uid()).collect();
+        let unique_uids: HashSet<i32> = all_uids.iter().copied().collect();
+        assert_eq!(
+            all_uids.len(),
+            unique_uids.len(),
+            "all UIDs should be unique: {:?}",
+            all_uids
+        );
+        assert!(
+            unique_uids.contains(&aux.uid),
+            "aux UID {} should be in the element set",
+            aux.uid
+        );
+        assert_ne!(aux.uid, pop_uid, "aux UID should differ from stock UID");
+        assert_ne!(aux.uid, births_uid, "aux UID should differ from flow UID");
+    }
+
+    #[test]
     fn test_compute_metadata_with_main_alias() {
         let mut model = simple_model();
         model.name = String::new();
