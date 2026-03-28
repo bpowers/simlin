@@ -4932,6 +4932,193 @@ mod tests {
     }
 
     #[test]
+    fn test_build_connectors() {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "birth_rate".to_string(),
+                    equation: datamodel::Equation::Scalar("0.03".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let mut metadata = ComputedMetadata::new_empty();
+        // births depends on birth_rate and population
+        metadata.dep_graph.insert(
+            "births".to_string(),
+            vec!["birth_rate".to_string(), "population".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        // population depends on births (structural inflow)
+        metadata.dep_graph.insert(
+            "population".to_string(),
+            vec!["births".to_string()].into_iter().collect(),
+        );
+        metadata
+            .stock_to_inflows
+            .insert("population".to_string(), vec!["births".to_string()]);
+        metadata
+            .flow_to_stocks
+            .insert("births".to_string(), (None, Some("population".to_string())));
+
+        let mut state = LayoutState::new(&model);
+
+        // Pre-populate positioned view elements (simulating post-layout state)
+        let pop_uid = state.get_or_alloc_uid("population");
+        let births_uid = state.get_or_alloc_uid("births");
+        let br_uid = state.get_or_alloc_uid("birth_rate");
+
+        state.elements.push(ViewElement::Stock(view_element::Stock {
+            name: "population".to_string(),
+            uid: pop_uid,
+            x: 200.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Bottom,
+            compat: None,
+        }));
+        state.positions.insert(pop_uid, Position::new(200.0, 100.0));
+
+        state.elements.push(ViewElement::Flow(view_element::Flow {
+            name: "births".to_string(),
+            uid: births_uid,
+            x: 150.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Top,
+            points: vec![
+                FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: None,
+                },
+                FlowPoint {
+                    x: 200.0,
+                    y: 100.0,
+                    attached_to_uid: Some(pop_uid),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        }));
+        state
+            .positions
+            .insert(births_uid, Position::new(150.0, 100.0));
+
+        state.elements.push(ViewElement::Aux(view_element::Aux {
+            name: "birth_rate".to_string(),
+            uid: br_uid,
+            x: 150.0,
+            y: 50.0,
+            label_side: view_element::LabelSide::Top,
+            compat: None,
+        }));
+        state.positions.insert(br_uid, Position::new(150.0, 50.0));
+
+        build_connectors(&mut state, &model, &metadata).unwrap();
+
+        // Collect all Link elements
+        let links: Vec<&view_element::Link> = state
+            .elements
+            .iter()
+            .filter_map(|e| {
+                if let ViewElement::Link(l) = e {
+                    Some(l)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Non-structural edge: birth_rate -> births should produce a link
+        let br_to_births = links
+            .iter()
+            .find(|l| l.from_uid == br_uid && l.to_uid == births_uid);
+        assert!(
+            br_to_births.is_some(),
+            "expected a link from birth_rate -> births"
+        );
+
+        // Structural stock-flow edge: births -> population (inflow
+        // relationship) should NOT produce a link (already represented by
+        // the flow pipe).
+        let births_to_pop = links
+            .iter()
+            .find(|l| l.from_uid == births_uid && l.to_uid == pop_uid);
+        assert!(
+            births_to_pop.is_none(),
+            "structural flow->stock edge should not produce a link"
+        );
+
+        // The stock->flow structural edge (population -> births) should
+        // create an arc link, not be skipped.  Verify it exists with an
+        // arc shape.
+        let pop_to_births = links
+            .iter()
+            .find(|l| l.from_uid == pop_uid && l.to_uid == births_uid);
+        assert!(
+            pop_to_births.is_some(),
+            "stock->flow structural edge should produce an arc link"
+        );
+        assert!(
+            matches!(pop_to_births.unwrap().shape, LinkShape::Arc(_)),
+            "stock->flow link should have arc shape"
+        );
+
+        // Every link's from_uid and to_uid should reference existing
+        // element UIDs in the state.
+        let all_uids: HashSet<i32> = state.elements.iter().map(|e| e.get_uid()).collect();
+        for link in &links {
+            assert!(
+                all_uids.contains(&link.from_uid),
+                "link from_uid {} not found in elements",
+                link.from_uid
+            );
+            assert!(
+                all_uids.contains(&link.to_uid),
+                "link to_uid {} not found in elements",
+                link.to_uid
+            );
+        }
+
+        // No duplicate links (each (from_uid, to_uid) pair appears at most once)
+        let link_pairs: HashSet<(i32, i32)> =
+            links.iter().map(|l| (l.from_uid, l.to_uid)).collect();
+        assert_eq!(link_pairs.len(), links.len(), "duplicate links detected");
+    }
+
+    #[test]
     fn test_compute_metadata_with_main_alias() {
         let mut model = simple_model();
         model.name = String::new();
