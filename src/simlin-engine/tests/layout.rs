@@ -1161,3 +1161,254 @@ fn test_incremental_add_aux() {
         assert!(uids.insert(uid), "duplicate UID {} found", uid);
     }
 }
+
+/// Helper: collect all Link elements as (from_uid, to_uid) pairs.
+fn collect_links(view: &simlin_engine::datamodel::StockFlow) -> HashSet<(i32, i32)> {
+    view.elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Link(l) => Some((l.from_uid, l.to_uid)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Helper: find the UID of a named view element.
+fn find_element_uid(
+    view: &simlin_engine::datamodel::StockFlow,
+    canonical_ident: &str,
+) -> Option<i32> {
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Stock(s) if normalize(&s.name) == canonical_ident => return Some(s.uid),
+            ViewElement::Flow(f) if normalize(&f.name) == canonical_ident => return Some(f.uid),
+            ViewElement::Aux(a) if normalize(&a.name) == canonical_ident => return Some(a.uid),
+            ViewElement::Module(m) if normalize(&m.name) == canonical_ident => return Some(m.uid),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn test_incremental_combined_ops() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    // SIR model variables:
+    //   stocks: susceptible, infectious, recovered
+    //   flows: succumbing, recovering
+    //   auxes: total_population, duration, contact_infectivity
+    //
+    // Dependency edges (non-structural):
+    //   total_population -> susceptible (init)
+    //   contact_infectivity -> succumbing
+    //   susceptible -> succumbing, infectious -> succumbing
+    //   total_population -> succumbing
+    //   duration -> recovering, infectious -> recovering
+    //
+    // Patch:
+    //   1. Delete contact_infectivity
+    //   2. Rename total_population -> total_pop
+    //   3. Add immunity_rate = 1/duration, change recovering = infectious * immunity_rate
+    //      This inserts immunity_rate between duration and recovering:
+    //      old: duration -> recovering
+    //      new: duration -> immunity_rate -> recovering
+
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let old_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("initial layout should succeed");
+    let original_positions = collect_element_positions(&old_view);
+
+    // Snapshot the position of total_population before rename
+    let tp_position = original_positions
+        .get("total_population")
+        .expect("total_population should exist");
+
+    // Build post-patch model manually
+    let mut patched_project = project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+
+    // Delete contact_infectivity
+    model
+        .variables
+        .retain(|v| canonicalize(v.get_ident()).as_ref() != "contact_infectivity");
+
+    // Rename total_population -> total_pop
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "total_population"
+            && let datamodel::Variable::Aux(a) = var
+        {
+            a.ident = "total_pop".to_string();
+        }
+    }
+
+    // Update succumbing equation to remove contact_infectivity reference
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "succumbing"
+            && let datamodel::Variable::Flow(f) = var
+        {
+            f.equation =
+                datamodel::Equation::Scalar("susceptible*infectious/total_pop".to_string());
+        }
+    }
+
+    // Update susceptible init to reference total_pop
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "susceptible"
+            && let datamodel::Variable::Stock(s) = var
+        {
+            s.equation = datamodel::Equation::Scalar("total_pop".to_string());
+        }
+    }
+
+    // Change recovering equation to use immunity_rate instead of duration
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "recovering"
+            && let datamodel::Variable::Flow(f) = var
+        {
+            f.equation = datamodel::Equation::Scalar("infectious * immunity_rate".to_string());
+        }
+    }
+
+    // Add immunity_rate aux
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "immunity_rate".to_string(),
+            equation: datamodel::Equation::Scalar("1 / duration".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        }));
+
+    // Build the patch
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![
+            ModelOperation::DeleteVariable {
+                ident: "contact_infectivity".to_string(),
+            },
+            ModelOperation::RenameVariable {
+                from: "total_population".to_string(),
+                to: "total_pop".to_string(),
+            },
+            ModelOperation::UpsertAux(datamodel::Aux {
+                ident: "immunity_rate".to_string(),
+                equation: datamodel::Equation::Scalar("1 / duration".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Default::default(),
+            }),
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
+        .expect("incremental layout with combined ops should succeed");
+    let new_positions = collect_element_positions(&new_view);
+
+    // Deleted variable should have no view element
+    assert!(
+        find_element_position(&new_view, "contact_infectivity").is_none(),
+        "contact_infectivity should not have a view element after deletion"
+    );
+
+    // Renamed variable should exist with new name and same position
+    let tp_new_pos = find_element_position(&new_view, "total_pop")
+        .expect("total_pop should have a view element after rename");
+    assert!(
+        (tp_position.0 - tp_new_pos.0).abs() < 0.01 && (tp_position.1 - tp_new_pos.1).abs() < 0.01,
+        "total_pop should have the same position as total_population: ({}, {}) vs ({}, {})",
+        tp_position.0,
+        tp_position.1,
+        tp_new_pos.0,
+        tp_new_pos.1,
+    );
+
+    // New variable should have a view element
+    let ir_pos = find_element_position(&new_view, "immunity_rate")
+        .expect("immunity_rate should have a view element");
+    assert!(
+        ir_pos.0.is_finite() && ir_pos.1.is_finite(),
+        "immunity_rate should have finite coordinates"
+    );
+
+    // All other original elements (excluding deleted/renamed) should preserve position
+    for (ident, &(orig_x, orig_y)) in &original_positions {
+        if ident == "contact_infectivity" || ident == "total_population" {
+            continue;
+        }
+        let (new_x, new_y) = new_positions
+            .get(ident)
+            .unwrap_or_else(|| panic!("element '{}' should still exist", ident));
+        assert!(
+            (orig_x - new_x).abs() < 0.01 && (orig_y - new_y).abs() < 0.01,
+            "element '{}' moved from ({}, {}) to ({}, {})",
+            ident,
+            orig_x,
+            orig_y,
+            new_x,
+            new_y,
+        );
+    }
+
+    // AC5.5: Verify connector updates for the intermediate auxiliary.
+    // In the original model: duration -> recovering (direct link)
+    // In the patched model: duration -> immunity_rate -> recovering
+    let duration_uid = find_element_uid(&new_view, "duration").expect("duration should have a UID");
+    let recovering_uid =
+        find_element_uid(&new_view, "recovering").expect("recovering should have a UID");
+    let immunity_rate_uid =
+        find_element_uid(&new_view, "immunity_rate").expect("immunity_rate should have a UID");
+
+    let links = collect_links(&new_view);
+
+    // Old direct link should be gone
+    assert!(
+        !links.contains(&(duration_uid, recovering_uid)),
+        "direct link duration -> recovering should be removed"
+    );
+
+    // New links through the intermediate should exist
+    assert!(
+        links.contains(&(duration_uid, immunity_rate_uid)),
+        "link duration -> immunity_rate should exist"
+    );
+    assert!(
+        links.contains(&(immunity_rate_uid, recovering_uid)),
+        "link immunity_rate -> recovering should exist"
+    );
+
+    // No dangling link references: every link's from_uid and to_uid
+    // should reference an element that exists in the view.
+    let all_uids: HashSet<i32> = new_view.elements.iter().map(|e| e.get_uid()).collect();
+    for elem in &new_view.elements {
+        if let ViewElement::Link(l) = elem {
+            assert!(
+                all_uids.contains(&l.from_uid),
+                "link from_uid {} references non-existent element",
+                l.from_uid,
+            );
+            assert!(
+                all_uids.contains(&l.to_uid),
+                "link to_uid {} references non-existent element",
+                l.to_uid,
+            );
+        }
+    }
+
+    // All UIDs should be unique
+    let mut uid_set = HashSet::new();
+    for elem in &new_view.elements {
+        let uid = elem.get_uid();
+        assert!(uid_set.insert(uid), "duplicate UID {} found", uid);
+    }
+}
