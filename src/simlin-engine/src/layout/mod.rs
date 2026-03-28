@@ -628,6 +628,274 @@ fn place_new_chain_elements(
     }
 }
 
+/// Run SFDP + annealing with existing elements pinned and only new
+/// elements free to move. This settles new elements into positions
+/// that respect the force-directed layout while preserving all
+/// existing element positions exactly.
+pub fn settle_new_elements(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+    chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
+) -> Result<(), String> {
+    if new_elements.is_empty() {
+        return Ok(());
+    }
+
+    let new_ident_set: HashSet<&str> = new_elements
+        .new_stocks
+        .iter()
+        .chain(&new_elements.new_flows)
+        .chain(&new_elements.new_auxes)
+        .chain(&new_elements.new_modules)
+        .map(|s| s.as_str())
+        .collect();
+
+    let (full_graph, var_to_node) = build_full_graph(state, model, metadata)?;
+
+    // Build constrained graph: pin existing elements, make new chains rigid groups
+    let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
+
+    // Pin all existing (non-new) nodes
+    let existing_node_ids: Vec<String> = var_to_node
+        .iter()
+        .filter(|(ident, _)| !new_ident_set.contains(ident.as_str()))
+        .map(|(_, node_id)| node_id.clone())
+        .collect();
+    constrained_builder.pin(&existing_node_ids);
+
+    // Add rigid groups for new chain elements (same pattern as run_sfdp_with_rigid_chains)
+    for (_stocks, _flows, all_vars) in chains_data {
+        let mut group_members: Vec<String> = Vec::new();
+        let mut added: HashSet<String> = HashSet::new();
+
+        for var_ident in all_vars {
+            if !new_ident_set.contains(var_ident.as_str()) {
+                continue;
+            }
+            if let Some(node_id) = var_to_node.get(var_ident)
+                && added.insert(node_id.clone())
+            {
+                group_members.push(node_id.clone());
+
+                let canonical = canonicalize(var_ident);
+                if let Some(cloud_idents) = state.flow_ident_to_clouds.get(canonical.as_ref()) {
+                    for cloud_ident in cloud_idents {
+                        if let Some(cloud_node) = var_to_node.get(cloud_ident)
+                            && added.insert(cloud_node.clone())
+                        {
+                            group_members.push(cloud_node.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if group_members.len() > 1 {
+            constrained_builder.add_rigid_group(group_members);
+        }
+    }
+
+    let constrained_graph = constrained_builder.build();
+
+    // Seed initial positions: existing elements from state.positions,
+    // new elements from state.positions (which were set by compute_new_element_positions)
+    let mut initial_layout: Layout<String> = BTreeMap::new();
+    for (var_ident, node_id) in &var_to_node {
+        if let Some(uid) = state.uid_manager.get_uid(var_ident)
+            && let Some(&pos) = state.positions.get(&uid)
+        {
+            initial_layout.insert(node_id.clone(), pos);
+            continue;
+        }
+        if let Some(&cloud_uid) = state.cloud_ident_to_uid.get(var_ident)
+            && let Some(&pos) = state.positions.get(&cloud_uid)
+        {
+            initial_layout.insert(node_id.clone(), pos);
+        }
+    }
+
+    let sfdp_config = SfdpConfig {
+        k: 75.0,
+        max_iterations: 5000,
+        convergence_threshold: 0.001,
+        initial_step_size: 0.1,
+        cooling_factor: 0.9995,
+        c: 3.0,
+        ..SfdpConfig::default()
+    };
+
+    let node_to_ident: HashMap<String, String> = var_to_node
+        .iter()
+        .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
+        .collect();
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    let new_node_ids: HashSet<String> = var_to_node
+        .iter()
+        .filter(|(ident, _)| new_ident_set.contains(ident.as_str()))
+        .map(|(_, node_id)| node_id.clone())
+        .collect();
+
+    let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
+        let mut segments = Vec::new();
+
+        for edge in constrained_graph.edges() {
+            let (Some(&from_pos), Some(&to_pos)) = (
+                candidate_layout.get(&edge.from),
+                candidate_layout.get(&edge.to),
+            ) else {
+                continue;
+            };
+
+            if let (Some(from_ident), Some(to_ident)) =
+                (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
+                && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
+            {
+                continue;
+            }
+
+            segments.push(LineSegment {
+                start: from_pos,
+                end: to_pos,
+                from_node: edge.from.clone(),
+                to_node: edge.to.clone(),
+            });
+        }
+
+        for (flow_ident, tmpl) in &state.flow_templates {
+            if tmpl.offsets.len() < 2 {
+                continue;
+            }
+            let Some(node_id) = var_to_node.get(flow_ident) else {
+                continue;
+            };
+            let Some(&center) = candidate_layout.get(node_id) else {
+                continue;
+            };
+
+            let points: Vec<Position> = tmpl
+                .offsets
+                .iter()
+                .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
+                .collect();
+
+            for i in 0..points.len() - 1 {
+                segments.push(LineSegment {
+                    start: points[i],
+                    end: points[i + 1],
+                    from_node: format!("{}#{}", flow_ident, i),
+                    to_node: format!("{}#{}", flow_ident, i + 1),
+                });
+            }
+        }
+
+        segments
+    };
+
+    let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
+    for edge in constrained_graph.edges() {
+        adjacency
+            .entry(edge.from.clone())
+            .or_default()
+            .push((edge.to.clone(), edge.weight));
+        adjacency
+            .entry(edge.to.clone())
+            .or_default()
+            .push((edge.from.clone(), edge.weight));
+    }
+
+    let max_delta_aux = config.annealing_max_delta_aux;
+    let annealing_config = config.clone();
+    let annealing_seed = config.annealing_random_seed;
+
+    let mut annealing_round: usize = 0;
+    let mut last_annealing_iter: usize = 0;
+    let mut best_crossings: usize = usize::MAX;
+    let mut best_layout: Option<Layout<String>> = None;
+
+    let final_layout = compute_layout_from_initial_with_callback(
+        &constrained_graph,
+        &sfdp_config,
+        &initial_layout,
+        annealing_seed,
+        &mut |iter, layout| {
+            if !should_trigger_annealing(
+                iter,
+                annealing_config.annealing_interval,
+                last_annealing_iter,
+                annealing_round,
+                annealing_config.annealing_max_rounds,
+            ) {
+                return None;
+            }
+
+            let result = run_annealing_with_filter(
+                layout,
+                build_segments,
+                &annealing_config,
+                annealing_seed.wrapping_add(annealing_round as u64),
+                |node_id: &String| new_node_ids.contains(node_id),
+                |node_id: &String| {
+                    if new_node_ids.contains(node_id) {
+                        max_delta_aux
+                    } else {
+                        0.0
+                    }
+                },
+                &adjacency,
+            );
+
+            last_annealing_iter = iter;
+            annealing_round += 1;
+
+            if result.crossings < best_crossings {
+                best_crossings = result.crossings;
+                best_layout = Some(result.layout.clone());
+                Some(result.layout)
+            } else {
+                None
+            }
+        },
+    );
+
+    let settled_layout = if let Some(saved) = best_layout {
+        let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
+        if final_crossings > best_crossings {
+            saved
+        } else {
+            final_layout
+        }
+    } else {
+        final_layout
+    };
+
+    // Only update positions for new elements; existing elements stay unchanged
+    for (var_ident, node_id) in &var_to_node {
+        if !new_ident_set.contains(var_ident.as_str()) {
+            continue;
+        }
+        if let Some(&pos) = settled_layout.get(node_id)
+            && let Some(uid) = state.uid_manager.get_uid(var_ident)
+        {
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    Ok(())
+}
+
 /// Perform three-way connector diff: compare old links in LayoutState
 /// against edges derived from the current dep_graph, then preserve
 /// unchanged links, remove stale ones, and create new links with

@@ -4463,3 +4463,434 @@ fn test_new_element_positioning_module_near_connected() {
         dist
     );
 }
+
+/// Build a LayoutState and model suitable for testing settle_new_elements.
+/// `existing` elements are present in both the state and model; `new_idents`
+/// are in the model but not in the state.
+fn make_settlement_scenario(
+    existing: &[(&str, f64, f64, &str)], // (ident, x, y, "stock"|"aux"|"flow")
+    new_vars: &[(&str, &str)],           // (ident, "stock"|"aux"|"flow")
+    dep_graph: &[(&str, &[&str])],       // (var, deps_it_depends_on)
+) -> (LayoutState, datamodel::Model, ComputedMetadata) {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    let mut variables: Vec<datamodel::Variable> = Vec::new();
+    let mut next_uid = 1;
+
+    // Add existing elements to state and model
+    for &(ident, x, y, kind) in existing {
+        let uid = next_uid;
+        next_uid += 1;
+        state.uid_manager.add(uid, ident);
+        state.positions.insert(uid, Position::new(x, y));
+        state
+            .display_names
+            .insert(ident.to_string(), ident.to_string());
+
+        let elem = match kind {
+            "stock" => ViewElement::Stock(view_element::Stock {
+                name: ident.into(),
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            "flow" => ViewElement::Flow(view_element::Flow {
+                name: ident.into(),
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                points: vec![
+                    FlowPoint {
+                        x: x - 50.0,
+                        y,
+                        attached_to_uid: None,
+                    },
+                    FlowPoint {
+                        x: x + 50.0,
+                        y,
+                        attached_to_uid: None,
+                    },
+                ],
+                compat: None,
+                label_compat: None,
+            }),
+            _ => ViewElement::Aux(view_element::Aux {
+                name: ident.into(),
+                uid,
+                x,
+                y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+        };
+        state.elements.push(elem);
+
+        let var = match kind {
+            "stock" => datamodel::Variable::Stock(datamodel::Stock {
+                ident: ident.to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: Vec::new(),
+                outflows: Vec::new(),
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(uid),
+            }),
+            "flow" => datamodel::Variable::Flow(datamodel::Flow {
+                ident: ident.to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(uid),
+            }),
+            _ => datamodel::Variable::Aux(datamodel::Aux {
+                ident: ident.to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(uid),
+            }),
+        };
+        variables.push(var);
+    }
+
+    // Add new variables to model only (not to state)
+    for &(ident, kind) in new_vars {
+        let uid = next_uid;
+        next_uid += 1;
+        state
+            .display_names
+            .insert(ident.to_string(), ident.to_string());
+
+        let var = match kind {
+            "stock" => datamodel::Variable::Stock(datamodel::Stock {
+                ident: ident.to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: Vec::new(),
+                outflows: Vec::new(),
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(uid),
+            }),
+            "flow" => datamodel::Variable::Flow(datamodel::Flow {
+                ident: ident.to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(uid),
+            }),
+            _ => datamodel::Variable::Aux(datamodel::Aux {
+                ident: ident.to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(uid),
+            }),
+        };
+        variables.push(var);
+    }
+
+    let model = datamodel::Model {
+        name: "test".to_string(),
+        sim_specs: None,
+        variables,
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let mut dg = BTreeMap::new();
+    let mut rdg = BTreeMap::new();
+    for &(var, deps) in dep_graph {
+        let dep_set: BTreeSet<String> = deps.iter().map(|s| s.to_string()).collect();
+        dg.insert(var.to_string(), dep_set);
+        for dep in deps {
+            rdg.entry(dep.to_string())
+                .or_insert_with(BTreeSet::new)
+                .insert(var.to_string());
+        }
+    }
+
+    let metadata = ComputedMetadata {
+        chains: Vec::new(),
+        feedback_loops: Vec::new(),
+        dominant_periods: Vec::new(),
+        dep_graph: dg,
+        reverse_dep_graph: rdg,
+        constants: BTreeSet::new(),
+        stock_to_inflows: HashMap::new(),
+        stock_to_outflows: HashMap::new(),
+        flow_to_stocks: HashMap::new(),
+    };
+
+    (state, model, metadata)
+}
+
+/// AC1.2: After settlement, all pre-existing elements have identical
+/// (x, y) coordinates to their pre-settlement positions.
+#[test]
+fn test_pinned_settlement_preserves_existing_positions() {
+    let (mut state, model, metadata) = make_settlement_scenario(
+        &[
+            ("population", 200.0, 200.0, "stock"),
+            ("birth_rate", 300.0, 100.0, "aux"),
+            ("death_rate", 100.0, 300.0, "aux"),
+        ],
+        &[("vaccination_rate", "aux")],
+        &[
+            ("birth_rate", &["population"]),
+            ("death_rate", &["population"]),
+            ("vaccination_rate", &["population"]),
+        ],
+    );
+
+    let new_elements = state.identify_new_elements(&model);
+    assert_eq!(new_elements.new_auxes, vec!["vaccination_rate"]);
+
+    // Compute initial positions for new elements and seed them into state
+    let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
+    for (ident, pos) in &initial_positions {
+        let uid = state.uid_manager.alloc(ident);
+        state.positions.insert(uid, *pos);
+    }
+
+    // Snapshot existing element positions before settlement
+    let existing_idents = ["population", "birth_rate", "death_rate"];
+    let pre_positions: HashMap<String, Position> = existing_idents
+        .iter()
+        .filter_map(|&ident| {
+            let uid = state.uid_manager.get_uid(ident)?;
+            let pos = state.positions.get(&uid)?;
+            Some((ident.to_string(), *pos))
+        })
+        .collect();
+
+    let config = LayoutConfig::default();
+    let chains_data: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+
+    settle_new_elements(
+        &mut state,
+        &config,
+        &model,
+        &metadata,
+        &new_elements,
+        &chains_data,
+    )
+    .expect("settle_new_elements should succeed");
+
+    // Verify all existing element positions are preserved exactly
+    for (ident, pre_pos) in &pre_positions {
+        let uid = state
+            .uid_manager
+            .get_uid(ident)
+            .expect("existing element should have uid");
+        let post_pos = state
+            .positions
+            .get(&uid)
+            .expect("existing element should still have position");
+        assert!(
+            (post_pos.x - pre_pos.x).abs() < 1e-10 && (post_pos.y - pre_pos.y).abs() < 1e-10,
+            "existing element '{}' position changed: ({}, {}) -> ({}, {})",
+            ident,
+            pre_pos.x,
+            pre_pos.y,
+            post_pos.x,
+            post_pos.y,
+        );
+    }
+}
+
+/// AC5.4: New elements have settled positions that differ from their
+/// raw initial placement (SFDP/annealing moved them).
+///
+/// We place the new element at a position intentionally far from its
+/// equilibrium (near connected existing elements) so the force-directed
+/// algorithm must move it during settlement.
+#[test]
+fn test_pinned_settlement_moves_new_elements() {
+    let (mut state, model, metadata) = make_settlement_scenario(
+        &[
+            ("population", 200.0, 200.0, "stock"),
+            ("birth_rate", 300.0, 100.0, "aux"),
+            ("death_rate", 100.0, 300.0, "aux"),
+        ],
+        &[("vaccination_rate", "aux")],
+        &[
+            ("birth_rate", &["population"]),
+            ("death_rate", &["population"]),
+            ("vaccination_rate", &["population", "birth_rate"]),
+        ],
+    );
+
+    let new_elements = state.identify_new_elements(&model);
+
+    // Seed the new element at a position far from its equilibrium:
+    // its connections are at (200,200) and (300,100), centroid ~ (250, 150),
+    // but we deliberately place it far away so SFDP forces will pull it.
+    let far_initial = Position::new(600.0, 600.0);
+    let vr_uid = state.uid_manager.alloc("vaccination_rate");
+    state.positions.insert(vr_uid, far_initial);
+
+    let config = LayoutConfig::default();
+    let chains_data: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+
+    settle_new_elements(
+        &mut state,
+        &config,
+        &model,
+        &metadata,
+        &new_elements,
+        &chains_data,
+    )
+    .expect("settle_new_elements should succeed");
+
+    let final_pos = state
+        .positions
+        .get(&vr_uid)
+        .expect("vaccination_rate should have final position");
+
+    assert!(
+        final_pos.x.is_finite() && final_pos.y.is_finite(),
+        "vaccination_rate should have finite position, got ({}, {})",
+        final_pos.x,
+        final_pos.y,
+    );
+
+    // SFDP should have moved the new element significantly toward its
+    // connected nodes, away from the far initial placement at (600, 600).
+    let moved =
+        (final_pos.x - far_initial.x).abs() > 1.0 || (final_pos.y - far_initial.y).abs() > 1.0;
+    assert!(
+        moved,
+        "vaccination_rate should have moved from initial ({}, {}) to ({}, {})",
+        far_initial.x, far_initial.y, final_pos.x, final_pos.y,
+    );
+}
+
+/// Settlement with no new elements is a no-op.
+#[test]
+fn test_pinned_settlement_noop_when_no_new_elements() {
+    let (mut state, model, metadata) = make_settlement_scenario(
+        &[
+            ("population", 200.0, 200.0, "stock"),
+            ("birth_rate", 300.0, 100.0, "aux"),
+        ],
+        &[],
+        &[("birth_rate", &["population"])],
+    );
+
+    let new_elements = NewElements {
+        new_stocks: Vec::new(),
+        new_flows: Vec::new(),
+        new_auxes: Vec::new(),
+        new_modules: Vec::new(),
+    };
+
+    let pre_positions = state.positions.clone();
+    let config = LayoutConfig::default();
+    let chains_data: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+
+    settle_new_elements(
+        &mut state,
+        &config,
+        &model,
+        &metadata,
+        &new_elements,
+        &chains_data,
+    )
+    .expect("settle_new_elements should succeed");
+
+    assert_eq!(
+        state.positions, pre_positions,
+        "positions should be unchanged when there are no new elements"
+    );
+}
+
+/// Settlement with multiple new elements preserves existing and settles all new.
+#[test]
+fn test_pinned_settlement_multiple_new_elements() {
+    let (mut state, model, metadata) = make_settlement_scenario(
+        &[("center", 200.0, 200.0, "aux")],
+        &[("new_a", "aux"), ("new_b", "aux")],
+        &[("new_a", &["center"]), ("new_b", &["center"])],
+    );
+
+    let new_elements = state.identify_new_elements(&model);
+    assert_eq!(new_elements.new_auxes.len(), 2);
+
+    let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
+    for (ident, pos) in &initial_positions {
+        let uid = state.uid_manager.alloc(ident);
+        state.positions.insert(uid, *pos);
+    }
+
+    let pre_center_pos = *state
+        .positions
+        .get(&state.uid_manager.get_uid("center").unwrap())
+        .unwrap();
+
+    let config = LayoutConfig::default();
+    let chains_data: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+
+    settle_new_elements(
+        &mut state,
+        &config,
+        &model,
+        &metadata,
+        &new_elements,
+        &chains_data,
+    )
+    .expect("settle_new_elements should succeed");
+
+    // Existing position preserved
+    let post_center_pos = *state
+        .positions
+        .get(&state.uid_manager.get_uid("center").unwrap())
+        .unwrap();
+    assert!(
+        (post_center_pos.x - pre_center_pos.x).abs() < 1e-10
+            && (post_center_pos.y - pre_center_pos.y).abs() < 1e-10,
+        "existing center position changed"
+    );
+
+    // Both new elements have valid positions
+    for ident in &["new_a", "new_b"] {
+        let uid = state.uid_manager.get_uid(ident).expect("should have uid");
+        let pos = state
+            .positions
+            .get(&uid)
+            .expect("should have final position");
+        assert!(
+            pos.x.is_finite() && pos.y.is_finite(),
+            "{} should have finite position",
+            ident
+        );
+    }
+}
