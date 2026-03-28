@@ -1485,6 +1485,30 @@ fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
     );
 }
 
+/// apply_rename must format the new label with line breaks, matching
+/// the format used by element creation paths.
+#[test]
+fn test_apply_rename_formats_label() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+
+    let mut state = LayoutState::from_existing_view(&layout, &model);
+    state.apply_rename("birth_rate", "total_birth_rate", "Total Birth Rate");
+
+    let renamed = state.elements.iter().find_map(|e| match e {
+        ViewElement::Aux(a) if a.name.contains("Total") => Some(a),
+        _ => None,
+    });
+    assert!(renamed.is_some(), "renamed element should exist");
+    let name = &renamed.unwrap().name;
+    let expected = format_label_with_line_breaks("Total Birth Rate");
+    assert_eq!(
+        name, &expected,
+        "renamed label should be formatted with line breaks, got '{name}'"
+    );
+}
+
 /// diff_connectors must preserve links that terminate on alias UIDs.
 /// In imported Vensim/XMILE views, causal links often target aliases.
 /// The dep graph uses primary variable UIDs, so alias-targeted links

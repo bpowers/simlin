@@ -3101,7 +3101,10 @@ fn test_apply_rename_updates_element_name() {
         .iter()
         .find(|e| e.get_uid() == 5)
         .expect("element should still exist");
-    assert_eq!(aux.get_name(), Some("New Name"));
+    assert_eq!(
+        aux.get_name(),
+        Some(format_label_with_line_breaks("New Name").as_str())
+    );
 }
 
 #[test]

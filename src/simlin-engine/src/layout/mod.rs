@@ -320,11 +320,12 @@ impl LayoutState {
             if elem.get_uid() != uid {
                 continue;
             }
+            let formatted = format_label_with_line_breaks(new_display_name);
             match elem {
-                ViewElement::Aux(a) => a.name = new_display_name.to_string(),
-                ViewElement::Stock(s) => s.name = new_display_name.to_string(),
-                ViewElement::Flow(f) => f.name = new_display_name.to_string(),
-                ViewElement::Module(m) => m.name = new_display_name.to_string(),
+                ViewElement::Aux(a) => a.name = formatted,
+                ViewElement::Stock(s) => s.name = formatted,
+                ViewElement::Flow(f) => f.name = formatted,
+                ViewElement::Module(m) => m.name = formatted,
                 _ => {}
             }
             break;
@@ -1060,6 +1061,21 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
                 shape,
                 polarity: None,
             }));
+        }
+    }
+
+    // Preserve remaining alias-backed links whose alias-resolved endpoints
+    // match a valid dependency. Imported views may have multiple rendered
+    // connectors for the same dependency (e.g., links to two different
+    // aliases of the same variable).
+    for (&(of, ot), old_link) in &old_links {
+        if consumed_old_links.contains(&(of, ot)) {
+            continue;
+        }
+        let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
+        let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
+        if new_edges.contains(&(rf, rt)) {
+            state.elements.push(old_link.clone());
         }
     }
 }
@@ -4091,6 +4107,33 @@ pub fn incremental_layout(
                     c.y = pos.y;
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Re-snap stock-attached flow endpoints to their stock positions.
+    // SFDP may have moved flow valves while stocks stayed pinned, causing
+    // the point translation above to detach endpoints from their stocks.
+    {
+        let stock_positions: HashMap<i32, Position> = state
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                ViewElement::Stock(s) => Some((s.uid, Position::new(s.x, s.y))),
+                _ => None,
+            })
+            .collect();
+
+        for elem in &mut state.elements {
+            if let ViewElement::Flow(f) = elem {
+                for pt in &mut f.points {
+                    if let Some(attached_uid) = pt.attached_to_uid
+                        && let Some(stock_pos) = stock_positions.get(&attached_uid)
+                    {
+                        pt.x = stock_pos.x;
+                        pt.y = stock_pos.y;
+                    }
+                }
             }
         }
     }
