@@ -4429,6 +4429,167 @@ mod tests {
     }
 
     #[test]
+    fn test_layout_chain() {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let config = LayoutConfig::default();
+
+        let mut metadata = ComputedMetadata::new_empty();
+        metadata
+            .flow_to_stocks
+            .insert("births".to_string(), (None, Some("population".to_string())));
+        metadata
+            .stock_to_inflows
+            .insert("population".to_string(), vec!["births".to_string()]);
+
+        let mut state = LayoutState::new(&model);
+        let stocks = vec!["population".to_string()];
+        let flows = vec!["births".to_string()];
+
+        layout_chain(
+            &mut state,
+            &config,
+            &metadata,
+            &stocks,
+            &flows,
+            Position::new(100.0, 100.0),
+        )
+        .unwrap();
+
+        // 1 stock + 1 flow + 1 cloud (births has no from_stock, so a source cloud is created)
+        let stock_count = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Stock(_)))
+            .count();
+        let flow_count = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Flow(_)))
+            .count();
+        let cloud_count = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Cloud(_)))
+            .count();
+        assert_eq!(stock_count, 1);
+        assert_eq!(flow_count, 1);
+        assert_eq!(
+            cloud_count, 1,
+            "births has no from_stock, so one cloud expected"
+        );
+
+        // Stock and flow are present by name
+        let element_names: HashSet<String> = state
+            .elements
+            .iter()
+            .filter_map(|e| e.get_name().map(|n| canonicalize(n).into_owned()))
+            .collect();
+        assert!(
+            element_names.contains("population"),
+            "stock 'population' missing"
+        );
+        assert!(element_names.contains("births"), "flow 'births' missing");
+
+        // All elements have finite coordinates (normalization happens
+        // later in the pipeline, so pre-normalization clouds at unconnected
+        // endpoints may have negative coordinates).
+        for elem in &state.elements {
+            match elem {
+                ViewElement::Stock(s) => {
+                    assert!(s.x.is_finite(), "stock {} has non-finite x", s.name);
+                    assert!(s.y.is_finite(), "stock {} has non-finite y", s.name);
+                }
+                ViewElement::Flow(f) => {
+                    assert!(f.x.is_finite(), "flow {} has non-finite x", f.name);
+                    assert!(f.y.is_finite(), "flow {} has non-finite y", f.name);
+                }
+                ViewElement::Cloud(c) => {
+                    assert!(c.x.is_finite(), "cloud {} has non-finite x", c.uid);
+                    assert!(c.y.is_finite(), "cloud {} has non-finite y", c.uid);
+                }
+                _ => {}
+            }
+        }
+
+        // UIDs are unique
+        let mut uids: HashSet<i32> = HashSet::new();
+        for elem in &state.elements {
+            let uid = elem.get_uid();
+            assert!(uids.insert(uid), "duplicate UID: {}", uid);
+        }
+
+        // Flow is positioned between the stock and the cloud endpoint.
+        // With (None, Some("population")), the flow should be offset left
+        // of the stock position (inflow from cloud).
+        let stock_elem = state.elements.iter().find_map(|e| {
+            if let ViewElement::Stock(s) = e {
+                Some(s)
+            } else {
+                None
+            }
+        });
+        let flow_elem = state.elements.iter().find_map(|e| {
+            if let ViewElement::Flow(f) = e {
+                Some(f)
+            } else {
+                None
+            }
+        });
+        let stock_elem = stock_elem.expect("stock element should exist");
+        let flow_elem = flow_elem.expect("flow element should exist");
+
+        // The flow's x should differ from the stock's x (not stacked on top)
+        assert!(
+            (flow_elem.x - stock_elem.x).abs() > 1.0,
+            "flow should be offset from stock, got flow.x={} stock.x={}",
+            flow_elem.x,
+            stock_elem.x
+        );
+
+        // Flow points should reference the stock via attached_to_uid
+        let attached_uids: Vec<Option<i32>> = flow_elem
+            .points
+            .iter()
+            .map(|pt| pt.attached_to_uid)
+            .collect();
+        assert!(
+            attached_uids.contains(&Some(stock_elem.uid)),
+            "at least one flow point should be attached to the stock uid, got {:?}",
+            attached_uids
+        );
+    }
+
+    #[test]
     fn test_compute_metadata_with_main_alias() {
         let mut model = simple_model();
         model.name = String::new();
