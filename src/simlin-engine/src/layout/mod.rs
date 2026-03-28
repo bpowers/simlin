@@ -237,6 +237,46 @@ impl LayoutState {
             .cloned()
             .unwrap_or_else(|| canonical_ident.to_string())
     }
+
+    /// Remove all view elements associated with a deleted variable:
+    /// the primary element, any links referencing it, any clouds for
+    /// the flow, and internal cloud bookkeeping maps.
+    pub fn apply_deletion(&mut self, deleted_ident: &str) {
+        let canonical = canonicalize(deleted_ident);
+        let deleted_uid = match self.uid_manager.get_uid(&canonical) {
+            Some(uid) => uid,
+            None => return,
+        };
+
+        self.positions.remove(&deleted_uid);
+
+        self.elements.retain(|elem| {
+            match elem {
+                // Remove the primary element whose UID matches
+                ViewElement::Aux(a) if a.uid == deleted_uid => false,
+                ViewElement::Stock(s) if s.uid == deleted_uid => false,
+                ViewElement::Flow(f) if f.uid == deleted_uid => false,
+                ViewElement::Module(m) if m.uid == deleted_uid => false,
+                // Remove links referencing the deleted UID as source or target
+                ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => {
+                    false
+                }
+                // Remove clouds attached to this flow
+                ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
+                _ => true,
+            }
+        });
+
+        // Clean up cloud bookkeeping for the deleted flow
+        let canonical_str = canonical.into_owned();
+        if let Some(cloud_idents) = self.flow_ident_to_clouds.remove(&canonical_str) {
+            for ci in &cloud_idents {
+                self.cloud_ident_to_uid.remove(ci);
+                self.cloud_ident_to_flow_ident.remove(ci);
+            }
+        }
+        self.display_names.remove(&canonical_str);
+    }
 }
 
 /// Pick a starting stock for chain layout. Returns the stock with the
