@@ -190,7 +190,7 @@ fn test_diagram_sync_null_model_name() {
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(proj, ptr::null(), &mut err);
+        simlin_project_diagram_sync(proj, ptr::null(), ptr::null(), &mut err);
         assert!(!err.is_null(), "null model name should produce an error");
         simlin_error_free(err);
 
@@ -321,8 +321,10 @@ fn test_ac7_2_incremental_layout_via_patch_json() {
             assert_eq!(model.views.len(), 1);
             match &model.views[0] {
                 engine::datamodel::View::StockFlow(sf) => {
-                    let has_extra =
-                        sf.elements.iter().any(|e| e.get_name().is_some_and(|n| n == "extra"));
+                    let has_extra = sf
+                        .elements
+                        .iter()
+                        .any(|e| e.get_name().is_some_and(|n| n == "extra"));
                     assert!(has_extra, "newly added 'extra' must appear in the view");
 
                     for (name, orig_x, orig_y) in &initial_positions {
@@ -330,8 +332,9 @@ fn test_ac7_2_incremental_layout_via_patch_json() {
                             .elements
                             .iter()
                             .find(|e| e.get_name().is_some_and(|n| n == name));
-                        let elem = found
-                            .unwrap_or_else(|| panic!("element '{name}' must still be in the view"));
+                        let elem = found.unwrap_or_else(|| {
+                            panic!("element '{name}' must still be in the view")
+                        });
                         let (x, y) = match elem {
                             engine::datamodel::ViewElement::Aux(a) => (a.x, a.y),
                             engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
