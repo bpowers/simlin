@@ -2957,6 +2957,18 @@ fn compute_bounds(elements: &[ViewElement], config: &LayoutConfig) -> (f64, f64,
                     config.aux_height,
                 );
             }
+            ViewElement::Group(g) => {
+                update_rect(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    g.x,
+                    g.y,
+                    g.x + g.width,
+                    g.y + g.height,
+                );
+            }
             _ => {}
         }
     }
