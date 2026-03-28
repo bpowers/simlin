@@ -3582,6 +3582,239 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
 const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 
 /// Generate a complete stock-flow diagram layout for a model using a single
+/// Apply a model patch incrementally to an existing diagram view,
+/// preserving existing element positions and only placing new or
+/// modified elements.
+///
+/// The `project` must already reflect the post-patch model state
+/// (i.e., `apply_patch` has been called). The `patch` is taken by
+/// reference so callers can inspect the operations; phase 6 adds
+/// `Clone` derives to enable this.
+///
+/// Composition:
+/// 1. Compute metadata for the post-patch model
+/// 2. Seed LayoutState from old view
+/// 3. Process deletions and renames from the patch
+/// 4. Identify new elements, compute initial positions
+/// 5. Create view elements and settle via pinned SFDP
+/// 6. Diff connectors/clouds, polish labels and loop curvature
+/// 7. Build StockFlow from final state
+pub fn incremental_layout(
+    old_view: &datamodel::StockFlow,
+    project: &datamodel::Project,
+    model_name: &str,
+    patch: &crate::patch::ModelPatch,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+) -> Result<datamodel::StockFlow, String> {
+    let config = LayoutConfig::default();
+
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
+
+    // Step 2: Seed state from old view
+    let mut state = LayoutState::from_existing_view(old_view, model);
+
+    // Step 3: Process deletions and renames
+    for op in &patch.ops {
+        match op {
+            crate::patch::ModelOperation::DeleteVariable { ident } => {
+                state.apply_deletion(ident);
+            }
+            crate::patch::ModelOperation::RenameVariable { from, to } => {
+                let new_display = state
+                    .display_names
+                    .get(&canonicalize(to).into_owned())
+                    .cloned()
+                    .unwrap_or_else(|| to.clone());
+                state.apply_rename(from, to, &new_display);
+            }
+            _ => {}
+        }
+    }
+
+    // Step 4: Identify new elements and compute initial positions
+    let new_elements = state.identify_new_elements(model);
+
+    if new_elements.is_empty() {
+        // No new elements: just diff connectors/clouds and rebuild
+        diff_connectors(&mut state, model, &metadata);
+        diff_clouds(&mut state, &metadata);
+        optimize_labels(&mut state, model, &metadata);
+        apply_loop_curvature(&mut state, &config, model, &metadata);
+        validate_view_completeness(&state, model)?;
+
+        let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, &config);
+        let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
+                height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
+            }
+        } else {
+            Rect::default()
+        };
+
+        return Ok(datamodel::StockFlow {
+            name: old_view.name.clone(),
+            elements: state.elements,
+            view_box,
+            zoom: old_view.zoom,
+            use_lettered_polarity: old_view.use_lettered_polarity,
+            font: old_view.font.clone(),
+            sketch_compat: old_view.sketch_compat.clone(),
+        });
+    }
+
+    let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
+
+    // Step 5: Create view elements for new variables and insert their
+    // initial positions into state so settlement can find them.
+    for stock_ident in &new_elements.new_stocks {
+        if let Some(&pos) = initial_positions.get(stock_ident) {
+            let uid = state.get_or_alloc_uid(stock_ident);
+            let name = state.display_name(stock_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            state.elements.push(ViewElement::Stock(view_element::Stock {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }));
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    for flow_ident in &new_elements.new_flows {
+        if let Some(&pos) = initial_positions.get(flow_ident) {
+            let uid = state.get_or_alloc_uid(flow_ident);
+            create_flow_view_element(&mut state, &config, &metadata, flow_ident, uid, pos)?;
+        }
+    }
+
+    for aux_ident in &new_elements.new_auxes {
+        if let Some(&pos) = initial_positions.get(aux_ident) {
+            let uid = state.get_or_alloc_uid(aux_ident);
+            let name = state.display_name(aux_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            state.elements.push(ViewElement::Aux(view_element::Aux {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }));
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    for module_ident in &new_elements.new_modules {
+        if let Some(&pos) = initial_positions.get(module_ident) {
+            let uid = state.get_or_alloc_uid(module_ident);
+            let name = state.display_name(module_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            state
+                .elements
+                .push(ViewElement::Module(view_element::Module {
+                    name: formatted,
+                    uid,
+                    x: pos.x,
+                    y: pos.y,
+                    label_side: LabelSide::Bottom,
+                }));
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    // Step 6: Settle new elements with existing elements pinned
+    let chains_data: Vec<_> = metadata
+        .chains
+        .iter()
+        .map(|c| (c.stocks.clone(), c.flows.clone(), c.all_vars.clone()))
+        .collect();
+    settle_new_elements(
+        &mut state,
+        &config,
+        model,
+        &metadata,
+        &new_elements,
+        &chains_data,
+    )?;
+
+    // Update view element coordinates from settled positions
+    for elem in &mut state.elements {
+        let uid = elem.get_uid();
+        if let Some(&pos) = state.positions.get(&uid) {
+            match elem {
+                ViewElement::Stock(s) => {
+                    s.x = pos.x;
+                    s.y = pos.y;
+                }
+                ViewElement::Flow(f) => {
+                    let dx = pos.x - f.x;
+                    let dy = pos.y - f.y;
+                    f.x = pos.x;
+                    f.y = pos.y;
+                    for pt in &mut f.points {
+                        pt.x += dx;
+                        pt.y += dy;
+                    }
+                }
+                ViewElement::Aux(a) => {
+                    a.x = pos.x;
+                    a.y = pos.y;
+                }
+                ViewElement::Module(m) => {
+                    m.x = pos.x;
+                    m.y = pos.y;
+                }
+                ViewElement::Cloud(c) => {
+                    c.x = pos.x;
+                    c.y = pos.y;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Step 7: Diff connectors and clouds
+    diff_connectors(&mut state, model, &metadata);
+    diff_clouds(&mut state, &metadata);
+
+    // Step 8: Polish
+    optimize_labels(&mut state, model, &metadata);
+    apply_loop_curvature(&mut state, &config, model, &metadata);
+
+    validate_view_completeness(&state, model)?;
+
+    // Step 9: Build StockFlow
+    let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, &config);
+    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
+            height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
+        }
+    } else {
+        Rect::default()
+    };
+
+    Ok(datamodel::StockFlow {
+        name: old_view.name.clone(),
+        elements: state.elements,
+        view_box,
+        zoom: old_view.zoom,
+        use_lettered_polarity: old_view.use_lettered_polarity,
+        font: old_view.font.clone(),
+        sketch_compat: old_view.sketch_compat.clone(),
+    })
+}
+
 /// seed. This is the fast path; for higher-quality results use
 /// [`generate_best_layout`] which tries multiple seeds in parallel.
 ///
