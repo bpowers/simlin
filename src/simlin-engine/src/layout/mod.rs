@@ -1313,6 +1313,340 @@ fn build_connectors(
     Ok(())
 }
 
+/// Determine which sides are available for label placement on a stock,
+/// excluding sides where flows are attached.
+fn calculate_allowed_label_sides_for_stock(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    stock_ident: &str,
+) -> Vec<LabelSide> {
+    let stock_uid = match state.uid_manager.get_uid(stock_ident) {
+        Some(uid) => uid,
+        None => {
+            return vec![
+                LabelSide::Top,
+                LabelSide::Bottom,
+                LabelSide::Left,
+                LabelSide::Right,
+            ];
+        }
+    };
+    let stock_pos = match state.positions.get(&stock_uid) {
+        Some(&pos) => pos,
+        None => {
+            return vec![
+                LabelSide::Top,
+                LabelSide::Bottom,
+                LabelSide::Left,
+                LabelSide::Right,
+            ];
+        }
+    };
+
+    let mut blocked = [false; 4]; // top, bottom, left, right
+
+    let all_flows: Vec<String> = metadata
+        .stock_to_inflows
+        .get(stock_ident)
+        .into_iter()
+        .chain(metadata.stock_to_outflows.get(stock_ident))
+        .flat_map(|v| v.iter())
+        .cloned()
+        .collect();
+
+    for flow_ident in &all_flows {
+        if let Some(flow_uid) = state.uid_manager.get_uid(flow_ident)
+            && let Some(&flow_pos) = state.positions.get(&flow_uid)
+        {
+            let dx = flow_pos.x - stock_pos.x;
+            let dy = flow_pos.y - stock_pos.y;
+            if dx.abs() >= dy.abs() {
+                if dx >= 0.0 {
+                    blocked[3] = true; // right
+                } else {
+                    blocked[2] = true; // left
+                }
+            } else if dy >= 0.0 {
+                blocked[1] = true; // bottom
+            } else {
+                blocked[0] = true; // top
+            }
+        }
+    }
+
+    let sides = [
+        LabelSide::Top,
+        LabelSide::Bottom,
+        LabelSide::Left,
+        LabelSide::Right,
+    ];
+    let allowed: Vec<LabelSide> = sides
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !blocked[*i])
+        .map(|(_, &s)| s)
+        .collect();
+
+    if allowed.is_empty() {
+        vec![
+            LabelSide::Top,
+            LabelSide::Bottom,
+            LabelSide::Left,
+            LabelSide::Right,
+        ]
+    } else {
+        allowed
+    }
+}
+
+/// Apply optimal label placement based on connector angles.
+fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: &ComputedMetadata) {
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            let ident = canonicalize(var.get_ident()).into_owned();
+            state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+        })
+        .collect();
+
+    let ident_positions: HashMap<String, Position> = state
+        .positions
+        .iter()
+        .filter_map(|(uid, pos)| uid_to_ident.get(uid).map(|ident| (ident.clone(), *pos)))
+        .collect();
+
+    let uses = &metadata.dep_graph;
+    let used_by = &metadata.reverse_dep_graph;
+
+    let updates: Vec<(usize, LabelSide)> = state
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, elem)| match elem {
+            ViewElement::Stock(stock) => {
+                let ident = uid_to_ident.get(&stock.uid)?;
+                let allowed = calculate_allowed_label_sides_for_stock(state, metadata, ident);
+                let side = calculate_restricted_label_side(
+                    ident,
+                    &ident_positions,
+                    uses,
+                    used_by,
+                    &allowed,
+                );
+                Some((i, side))
+            }
+            ViewElement::Flow(flow) => {
+                let ident = uid_to_ident.get(&flow.uid)?;
+                if flow.points.len() >= 2 {
+                    let orientation = compute_flow_orientation(&flow.points);
+                    let allowed = match orientation {
+                        FlowOrientation::Horizontal => {
+                            vec![LabelSide::Top, LabelSide::Bottom]
+                        }
+                        FlowOrientation::Vertical => {
+                            vec![LabelSide::Left, LabelSide::Right]
+                        }
+                    };
+                    let side = calculate_restricted_label_side(
+                        ident,
+                        &ident_positions,
+                        uses,
+                        used_by,
+                        &allowed,
+                    );
+                    Some((i, side))
+                } else {
+                    None
+                }
+            }
+            ViewElement::Aux(aux) => {
+                let ident = uid_to_ident.get(&aux.uid)?;
+                let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
+                Some((i, side))
+            }
+            ViewElement::Module(module) => {
+                let ident = uid_to_ident.get(&module.uid)?;
+                let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
+                Some((i, side))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for (i, side) in updates {
+        match &mut state.elements[i] {
+            ViewElement::Stock(s) => s.label_side = side,
+            ViewElement::Flow(f) => f.label_side = side,
+            ViewElement::Aux(a) => a.label_side = side,
+            ViewElement::Module(m) => m.label_side = side,
+            _ => {}
+        }
+    }
+}
+
+/// Apply arc curvature to connectors involved in feedback loops.
+fn apply_loop_curvature(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) {
+    if metadata.feedback_loops.is_empty() {
+        return;
+    }
+
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            let ident = canonicalize(var.get_ident()).into_owned();
+            state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+        })
+        .collect();
+
+    let mut link_map: HashMap<(String, String), usize> = HashMap::new();
+    for (i, elem) in state.elements.iter().enumerate() {
+        if let ViewElement::Link(link) = elem {
+            let from_ident = uid_to_ident.get(&link.from_uid).cloned();
+            let to_ident = uid_to_ident.get(&link.to_uid).cloned();
+            if let (Some(from), Some(to)) = (from_ident, to_ident) {
+                link_map.insert((from, to), i);
+            }
+        }
+    }
+
+    let loops = &metadata.feedback_loops;
+    for i in (0..loops.len()).rev() {
+        let loop_info = &loops[i];
+        let chain = loop_info.causal_chain();
+        if chain.len() < 2 {
+            continue;
+        }
+
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut count = 0;
+        for var in chain {
+            if let Some(uid) = state.uid_manager.get_uid(var)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                sum_x += pos.x;
+                sum_y += pos.y;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let loop_center = Position::new(sum_x / count as f64, sum_y / count as f64);
+
+        for j in 0..chain.len() - 1 {
+            let from = &chain[j];
+            let to = &chain[j + 1];
+
+            let Some(&elem_idx) = link_map.get(&(from.clone(), to.clone())) else {
+                continue;
+            };
+
+            if let ViewElement::Link(link) = &state.elements[elem_idx]
+                && matches!(link.shape, LinkShape::Arc(_))
+            {
+                continue;
+            }
+
+            let from_uid = state.uid_manager.get_uid(from);
+            let to_uid = state.uid_manager.get_uid(to);
+            if let (Some(f_uid), Some(t_uid)) = (from_uid, to_uid)
+                && let (Some(&from_pos), Some(&to_pos)) =
+                    (state.positions.get(&f_uid), state.positions.get(&t_uid))
+            {
+                let arc_angle = calculate_loop_arc_angle(
+                    from_pos,
+                    to_pos,
+                    loop_center,
+                    config.loop_curvature_factor,
+                );
+                if let ViewElement::Link(link) = &mut state.elements[elem_idx] {
+                    link.shape = LinkShape::Arc(arc_angle);
+                }
+            }
+        }
+    }
+}
+
+/// Ensure every stock/flow/aux/module variable in the model has a
+/// corresponding rendered view element.
+fn validate_view_completeness(state: &LayoutState, model: &datamodel::Model) -> Result<(), String> {
+    let mut expected_stocks = BTreeSet::new();
+    let mut expected_flows = BTreeSet::new();
+    let mut expected_auxes = BTreeSet::new();
+    let mut expected_modules = BTreeSet::new();
+
+    for var in &model.variables {
+        match var {
+            datamodel::Variable::Stock(s) => {
+                expected_stocks.insert(canonicalize(&s.ident).into_owned());
+            }
+            datamodel::Variable::Flow(f) => {
+                expected_flows.insert(canonicalize(&f.ident).into_owned());
+            }
+            datamodel::Variable::Aux(a) => {
+                expected_auxes.insert(canonicalize(&a.ident).into_owned());
+            }
+            datamodel::Variable::Module(m) => {
+                expected_modules.insert(canonicalize(&m.ident).into_owned());
+            }
+        }
+    }
+
+    let mut found_stocks = BTreeSet::new();
+    let mut found_flows = BTreeSet::new();
+    let mut found_auxes = BTreeSet::new();
+    let mut found_modules = BTreeSet::new();
+
+    for elem in &state.elements {
+        match elem {
+            ViewElement::Stock(s) => {
+                found_stocks.insert(canonicalize(&s.name).into_owned());
+            }
+            ViewElement::Flow(f) => {
+                found_flows.insert(canonicalize(&f.name).into_owned());
+            }
+            ViewElement::Aux(a) => {
+                found_auxes.insert(canonicalize(&a.name).into_owned());
+            }
+            ViewElement::Module(m) => {
+                found_modules.insert(canonicalize(&m.name).into_owned());
+            }
+            _ => {}
+        }
+    }
+
+    let mut missing = Vec::new();
+    for ident in expected_stocks.difference(&found_stocks) {
+        missing.push(format!("stock '{}'", ident));
+    }
+    for ident in expected_flows.difference(&found_flows) {
+        missing.push(format!("flow '{}'", ident));
+    }
+    for ident in expected_auxes.difference(&found_auxes) {
+        missing.push(format!("aux '{}'", ident));
+    }
+    for ident in expected_modules.difference(&found_modules) {
+        missing.push(format!("module '{}'", ident));
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort();
+    Err(format!(
+        "layout incomplete: missing view elements for {}",
+        missing.join(", ")
+    ))
+}
+
 /// The main layout engine holding all intermediate state.
 struct LayoutEngine<'a> {
     config: LayoutConfig,
@@ -1388,16 +1722,16 @@ impl<'a> LayoutEngine<'a> {
         build_connectors(&mut self.state, self.model, &self.metadata)?;
 
         // Phase 4: Apply optimal label placement
-        self.apply_optimal_label_placement();
+        optimize_labels(&mut self.state, self.model, &self.metadata);
 
         // Phase 5: Normalize coordinates
         normalize_coordinates(&mut self.state.elements, DIAGRAM_ORIGIN_MARGIN);
         self.recalculate_bounds();
 
         // Phase 6: Apply feedback loop curvature
-        self.apply_feedback_loop_curvature();
+        apply_loop_curvature(&mut self.state, &self.config, self.model, &self.metadata);
 
-        self.validate_view_completeness()?;
+        validate_view_completeness(&self.state, self.model)?;
 
         // Phase 7: Compute ViewBox
         let view_box = if !self.state.elements.is_empty() && self.bounds.min_x != f64::MAX {
@@ -1425,281 +1759,6 @@ impl<'a> LayoutEngine<'a> {
             font: None,
             sketch_compat: None,
         })
-    }
-
-    /// Apply optimal label placement based on connector angles.
-    fn apply_optimal_label_placement(&mut self) {
-        // Build position map keyed by ident
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                let ident = canonicalize(var.get_ident()).into_owned();
-                self.state
-                    .uid_manager
-                    .get_uid(&ident)
-                    .map(|uid| (uid, ident))
-            })
-            .collect();
-
-        let ident_positions: HashMap<String, Position> = self
-            .state
-            .positions
-            .iter()
-            .filter_map(|(uid, pos)| uid_to_ident.get(uid).map(|ident| (ident.clone(), *pos)))
-            .collect();
-
-        // Build uses/used_by maps for placement functions
-        let uses = &self.metadata.dep_graph;
-        let used_by = &self.metadata.reverse_dep_graph;
-
-        // Collect element update info (avoid borrow conflict)
-        let updates: Vec<(usize, LabelSide)> = self
-            .state
-            .elements
-            .iter()
-            .enumerate()
-            .filter_map(|(i, elem)| match elem {
-                ViewElement::Stock(stock) => {
-                    let ident = uid_to_ident.get(&stock.uid)?;
-                    let allowed = self.calculate_allowed_label_sides_for_stock(ident);
-                    let side = calculate_restricted_label_side(
-                        ident,
-                        &ident_positions,
-                        uses,
-                        used_by,
-                        &allowed,
-                    );
-                    Some((i, side))
-                }
-                ViewElement::Flow(flow) => {
-                    let ident = uid_to_ident.get(&flow.uid)?;
-                    if flow.points.len() >= 2 {
-                        let orientation = compute_flow_orientation(&flow.points);
-                        let allowed = match orientation {
-                            FlowOrientation::Horizontal => {
-                                vec![LabelSide::Top, LabelSide::Bottom]
-                            }
-                            FlowOrientation::Vertical => {
-                                vec![LabelSide::Left, LabelSide::Right]
-                            }
-                        };
-                        let side = calculate_restricted_label_side(
-                            ident,
-                            &ident_positions,
-                            uses,
-                            used_by,
-                            &allowed,
-                        );
-                        Some((i, side))
-                    } else {
-                        None
-                    }
-                }
-                ViewElement::Aux(aux) => {
-                    let ident = uid_to_ident.get(&aux.uid)?;
-                    let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
-                    Some((i, side))
-                }
-                ViewElement::Module(module) => {
-                    // Modules use the same unconstrained placement as auxiliaries
-                    let ident = uid_to_ident.get(&module.uid)?;
-                    let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
-                    Some((i, side))
-                }
-                _ => None,
-            })
-            .collect();
-
-        for (i, side) in updates {
-            match &mut self.state.elements[i] {
-                ViewElement::Stock(s) => s.label_side = side,
-                ViewElement::Flow(f) => f.label_side = side,
-                ViewElement::Aux(a) => a.label_side = side,
-                ViewElement::Module(m) => m.label_side = side,
-                _ => {}
-            }
-        }
-    }
-
-    /// Determine which sides are available for label placement on a stock,
-    /// excluding sides where flows are attached.
-    fn calculate_allowed_label_sides_for_stock(&self, stock_ident: &str) -> Vec<LabelSide> {
-        let stock_uid = match self.state.uid_manager.get_uid(stock_ident) {
-            Some(uid) => uid,
-            None => {
-                return vec![
-                    LabelSide::Top,
-                    LabelSide::Bottom,
-                    LabelSide::Left,
-                    LabelSide::Right,
-                ];
-            }
-        };
-        let stock_pos = match self.state.positions.get(&stock_uid) {
-            Some(&pos) => pos,
-            None => {
-                return vec![
-                    LabelSide::Top,
-                    LabelSide::Bottom,
-                    LabelSide::Left,
-                    LabelSide::Right,
-                ];
-            }
-        };
-
-        let mut blocked = [false; 4]; // top, bottom, left, right
-
-        let all_flows: Vec<String> = self
-            .metadata
-            .stock_to_inflows
-            .get(stock_ident)
-            .into_iter()
-            .chain(self.metadata.stock_to_outflows.get(stock_ident))
-            .flat_map(|v| v.iter())
-            .cloned()
-            .collect();
-
-        for flow_ident in &all_flows {
-            if let Some(flow_uid) = self.state.uid_manager.get_uid(flow_ident)
-                && let Some(&flow_pos) = self.state.positions.get(&flow_uid)
-            {
-                let dx = flow_pos.x - stock_pos.x;
-                let dy = flow_pos.y - stock_pos.y;
-                if dx.abs() >= dy.abs() {
-                    if dx >= 0.0 {
-                        blocked[3] = true; // right
-                    } else {
-                        blocked[2] = true; // left
-                    }
-                } else if dy >= 0.0 {
-                    blocked[1] = true; // bottom
-                } else {
-                    blocked[0] = true; // top
-                }
-            }
-        }
-
-        let sides = [
-            LabelSide::Top,
-            LabelSide::Bottom,
-            LabelSide::Left,
-            LabelSide::Right,
-        ];
-        let allowed: Vec<LabelSide> = sides
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !blocked[*i])
-            .map(|(_, &s)| s)
-            .collect();
-
-        if allowed.is_empty() {
-            vec![
-                LabelSide::Top,
-                LabelSide::Bottom,
-                LabelSide::Left,
-                LabelSide::Right,
-            ]
-        } else {
-            allowed
-        }
-    }
-
-    /// Apply arc curvature to connectors involved in feedback loops.
-    fn apply_feedback_loop_curvature(&mut self) {
-        if self.metadata.feedback_loops.is_empty() {
-            return;
-        }
-
-        // Build link map: (from_ident, to_ident) -> element index
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                let ident = canonicalize(var.get_ident()).into_owned();
-                self.state
-                    .uid_manager
-                    .get_uid(&ident)
-                    .map(|uid| (uid, ident))
-            })
-            .collect();
-
-        let mut link_map: HashMap<(String, String), usize> = HashMap::new();
-        for (i, elem) in self.state.elements.iter().enumerate() {
-            if let ViewElement::Link(link) = elem {
-                let from_ident = uid_to_ident.get(&link.from_uid).cloned();
-                let to_ident = uid_to_ident.get(&link.to_uid).cloned();
-                if let (Some(from), Some(to)) = (from_ident, to_ident) {
-                    link_map.insert((from, to), i);
-                }
-            }
-        }
-
-        // Process loops in reverse order (least to most important)
-        let loops = &self.metadata.feedback_loops;
-        for i in (0..loops.len()).rev() {
-            let loop_info = &loops[i];
-            let chain = loop_info.causal_chain();
-            if chain.len() < 2 {
-                continue;
-            }
-
-            // Compute loop center
-            let mut sum_x = 0.0;
-            let mut sum_y = 0.0;
-            let mut count = 0;
-            for var in chain {
-                if let Some(uid) = self.state.uid_manager.get_uid(var)
-                    && let Some(&pos) = self.state.positions.get(&uid)
-                {
-                    sum_x += pos.x;
-                    sum_y += pos.y;
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                continue;
-            }
-            let loop_center = Position::new(sum_x / count as f64, sum_y / count as f64);
-
-            // Apply curvature to edges in the loop
-            for j in 0..chain.len() - 1 {
-                let from = &chain[j];
-                let to = &chain[j + 1];
-
-                let Some(&elem_idx) = link_map.get(&(from.clone(), to.clone())) else {
-                    continue;
-                };
-
-                if let ViewElement::Link(link) = &self.state.elements[elem_idx] {
-                    // Don't override existing arcs (e.g. structural stock-flow connections)
-                    if matches!(link.shape, LinkShape::Arc(_)) {
-                        continue;
-                    }
-                }
-
-                let from_uid = self.state.uid_manager.get_uid(from);
-                let to_uid = self.state.uid_manager.get_uid(to);
-                if let (Some(f_uid), Some(t_uid)) = (from_uid, to_uid)
-                    && let (Some(&from_pos), Some(&to_pos)) = (
-                        self.state.positions.get(&f_uid),
-                        self.state.positions.get(&t_uid),
-                    )
-                {
-                    let arc_angle = calculate_loop_arc_angle(
-                        from_pos,
-                        to_pos,
-                        loop_center,
-                        self.config.loop_curvature_factor,
-                    );
-                    if let ViewElement::Link(link) = &mut self.state.elements[elem_idx] {
-                        link.shape = LinkShape::Arc(arc_angle);
-                    }
-                }
-            }
-        }
     }
 
     /// Recalculate bounds from all current element positions, including label extents.
@@ -1803,78 +1862,6 @@ impl<'a> LayoutEngine<'a> {
         }
 
         self.bounds = bounds;
-    }
-
-    /// Ensure every stock/flow/aux/module variable in the model has a
-    /// corresponding rendered view element.
-    fn validate_view_completeness(&self) -> Result<(), String> {
-        let mut expected_stocks = BTreeSet::new();
-        let mut expected_flows = BTreeSet::new();
-        let mut expected_auxes = BTreeSet::new();
-        let mut expected_modules = BTreeSet::new();
-
-        for var in &self.model.variables {
-            match var {
-                datamodel::Variable::Stock(s) => {
-                    expected_stocks.insert(canonicalize(&s.ident).into_owned());
-                }
-                datamodel::Variable::Flow(f) => {
-                    expected_flows.insert(canonicalize(&f.ident).into_owned());
-                }
-                datamodel::Variable::Aux(a) => {
-                    expected_auxes.insert(canonicalize(&a.ident).into_owned());
-                }
-                datamodel::Variable::Module(m) => {
-                    expected_modules.insert(canonicalize(&m.ident).into_owned());
-                }
-            }
-        }
-
-        let mut found_stocks = BTreeSet::new();
-        let mut found_flows = BTreeSet::new();
-        let mut found_auxes = BTreeSet::new();
-        let mut found_modules = BTreeSet::new();
-
-        for elem in &self.state.elements {
-            match elem {
-                ViewElement::Stock(s) => {
-                    found_stocks.insert(canonicalize(&s.name).into_owned());
-                }
-                ViewElement::Flow(f) => {
-                    found_flows.insert(canonicalize(&f.name).into_owned());
-                }
-                ViewElement::Aux(a) => {
-                    found_auxes.insert(canonicalize(&a.name).into_owned());
-                }
-                ViewElement::Module(m) => {
-                    found_modules.insert(canonicalize(&m.name).into_owned());
-                }
-                _ => {}
-            }
-        }
-
-        let mut missing = Vec::new();
-        for ident in expected_stocks.difference(&found_stocks) {
-            missing.push(format!("stock '{}'", ident));
-        }
-        for ident in expected_flows.difference(&found_flows) {
-            missing.push(format!("flow '{}'", ident));
-        }
-        for ident in expected_auxes.difference(&found_auxes) {
-            missing.push(format!("aux '{}'", ident));
-        }
-        for ident in expected_modules.difference(&found_modules) {
-            missing.push(format!("module '{}'", ident));
-        }
-
-        if missing.is_empty() {
-            return Ok(());
-        }
-        missing.sort();
-        Err(format!(
-            "layout incomplete: missing view elements for {}",
-            missing.join(", ")
-        ))
     }
 }
 
