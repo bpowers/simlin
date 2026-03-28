@@ -317,6 +317,236 @@ impl LayoutState {
     }
 }
 
+/// Perform three-way connector diff: compare old links in LayoutState
+/// against edges derived from the current dep_graph, then preserve
+/// unchanged links, remove stale ones, and create new links with
+/// default shapes.
+pub fn diff_connectors(
+    state: &mut LayoutState,
+    _model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) {
+    // Build HashMap<(from_uid, to_uid), ViewElement> for existing links
+    let mut old_links: HashMap<(i32, i32), ViewElement> = HashMap::new();
+    for elem in &state.elements {
+        if let ViewElement::Link(l) = elem {
+            old_links.insert((l.from_uid, l.to_uid), elem.clone());
+        }
+    }
+
+    // Compute new dependency edges from dep_graph, skipping structural flow-stock edges
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    let mut new_edges: HashSet<(i32, i32)> = HashSet::new();
+    let mut new_edge_idents: HashMap<(i32, i32), (String, String)> = HashMap::new();
+
+    for (var, deps) in &metadata.dep_graph {
+        for dep in deps {
+            let from_ident = dep.as_str();
+            let to_ident = var.as_str();
+
+            if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                continue;
+            }
+
+            let from_uid = match state.uid_manager.get_uid(from_ident) {
+                Some(uid) => uid,
+                None => continue,
+            };
+            let to_uid = match state.uid_manager.get_uid(to_ident) {
+                Some(uid) => uid,
+                None => continue,
+            };
+
+            if from_uid != 0 && to_uid != 0 {
+                new_edges.insert((from_uid, to_uid));
+                new_edge_idents.insert(
+                    (from_uid, to_uid),
+                    (from_ident.to_string(), to_ident.to_string()),
+                );
+            }
+        }
+    }
+
+    // Remove all old links from elements
+    state
+        .elements
+        .retain(|elem| !matches!(elem, ViewElement::Link(_)));
+
+    // Add back preserved links (unchanged) and create new links
+    for &(from_uid, to_uid) in &new_edges {
+        if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
+            // Preserved: keep the old link exactly as-is
+            state.elements.push(old_link.clone());
+        } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
+            // Added: create new link with default shape
+            let link_uid = state.uid_manager.alloc("");
+            let shape = if is_structural_stock_flow(
+                from_ident,
+                to_ident,
+                &stock_inflows,
+                &stock_outflows,
+            ) {
+                let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
+                    (state.positions.get(&from_uid), state.positions.get(&to_uid))
+                {
+                    calc_stock_flow_arc_angle(s_pos, f_pos)
+                } else {
+                    -45.0
+                };
+                LinkShape::Arc(arc_angle)
+            } else {
+                LinkShape::Straight
+            };
+
+            state.elements.push(ViewElement::Link(view_element::Link {
+                uid: link_uid,
+                from_uid,
+                to_uid,
+                shape,
+                polarity: None,
+            }));
+        }
+    }
+}
+
+/// Diff clouds for all flows: preserve existing clouds that are still
+/// needed, remove clouds whose flow endpoint is now connected to a
+/// stock, and create new clouds for newly-unconnected flow endpoints.
+pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
+    // Index existing clouds by (flow_uid, is_source).
+    // A source cloud is at the first flow point, a sink at the last.
+    // We distinguish them by checking their position against the flow
+    // element's points when possible, but we can also use a simpler
+    // heuristic: group all clouds by flow_uid.
+    let mut old_clouds_by_flow: HashMap<i32, Vec<ViewElement>> = HashMap::new();
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem {
+            old_clouds_by_flow
+                .entry(c.flow_uid)
+                .or_default()
+                .push(elem.clone());
+        }
+    }
+
+    // Determine which clouds should exist for each flow
+    let mut needed_flow_uids: HashSet<i32> = HashSet::new();
+    // Track which flows need source/sink clouds
+    let mut need_source: HashSet<i32> = HashSet::new();
+    let mut need_sink: HashSet<i32> = HashSet::new();
+
+    for (flow_ident, (from_stock, to_stock)) in &metadata.flow_to_stocks {
+        let flow_uid = match state.uid_manager.get_uid(flow_ident) {
+            Some(uid) => uid,
+            None => continue,
+        };
+        needed_flow_uids.insert(flow_uid);
+        if from_stock.is_none() {
+            need_source.insert(flow_uid);
+        }
+        if to_stock.is_none() {
+            need_sink.insert(flow_uid);
+        }
+    }
+
+    // Snapshot flow endpoint positions before mutating state.elements
+    let flow_endpoints: HashMap<i32, (Position, Position)> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Flow(f) if !f.points.is_empty() => {
+                let first = Position::new(f.points[0].x, f.points[0].y);
+                let last_idx = f.points.len() - 1;
+                let last = Position::new(f.points[last_idx].x, f.points[last_idx].y);
+                Some((f.uid, (first, last)))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Remove all old clouds from elements
+    state
+        .elements
+        .retain(|elem| !matches!(elem, ViewElement::Cloud(_)));
+
+    // For each flow, determine what to keep vs create
+    let all_flow_uids: HashSet<i32> = needed_flow_uids
+        .iter()
+        .chain(old_clouds_by_flow.keys())
+        .copied()
+        .collect();
+
+    for flow_uid in all_flow_uids {
+        let old_clouds = old_clouds_by_flow
+            .get(&flow_uid)
+            .cloned()
+            .unwrap_or_default();
+        let wants_source = need_source.contains(&flow_uid);
+        let wants_sink = need_sink.contains(&flow_uid);
+
+        let needed_count = wants_source as usize + wants_sink as usize;
+
+        if needed_count == 0 {
+            for c in &old_clouds {
+                if let ViewElement::Cloud(cloud) = c {
+                    state.positions.remove(&cloud.uid);
+                }
+            }
+            continue;
+        }
+
+        // Preserve existing clouds up to the number needed
+        let mut preserved = 0;
+        for cloud in &old_clouds {
+            if preserved >= needed_count {
+                if let ViewElement::Cloud(c) = cloud {
+                    state.positions.remove(&c.uid);
+                }
+                continue;
+            }
+            state.elements.push(cloud.clone());
+            preserved += 1;
+        }
+
+        // Create new clouds for any remaining needed count
+        let remaining = needed_count.saturating_sub(preserved);
+        let endpoints = flow_endpoints.get(&flow_uid);
+        for i in 0..remaining {
+            let is_source = if preserved == 0 {
+                if i == 0 { wants_source } else { !wants_source }
+            } else {
+                wants_source && wants_sink && i == 0
+            };
+
+            let pos = if is_source {
+                endpoints.map(|(src, _)| *src)
+            } else {
+                endpoints.map(|(_, sink)| *sink)
+            };
+            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
+
+            let cloud_uid = state.uid_manager.alloc("");
+            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+                uid: cloud_uid,
+                flow_uid,
+                x: cx,
+                y: cy,
+                compat: None,
+            }));
+            state.positions.insert(cloud_uid, Position::new(cx, cy));
+        }
+    }
+}
+
 /// Pick a starting stock for chain layout. Returns the stock with the
 /// highest flow connectivity (inflows + outflows), breaking ties
 /// alphabetically for determinism.
