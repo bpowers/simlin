@@ -154,6 +154,429 @@ impl LayoutState {
     }
 }
 
+/// Pick a starting stock for chain layout. Returns the stock with the
+/// highest flow connectivity (inflows + outflows), breaking ties
+/// alphabetically for determinism.
+fn pick_starting_stock<'b>(metadata: &ComputedMetadata, stocks: &'b [String]) -> Option<&'b str> {
+    stocks
+        .iter()
+        .max_by(|a, b| {
+            let a_count = metadata
+                .stock_to_inflows
+                .get(a.as_str())
+                .map_or(0, |v| v.len())
+                + metadata
+                    .stock_to_outflows
+                    .get(a.as_str())
+                    .map_or(0, |v| v.len());
+            let b_count = metadata
+                .stock_to_inflows
+                .get(b.as_str())
+                .map_or(0, |v| v.len())
+                + metadata
+                    .stock_to_outflows
+                    .get(b.as_str())
+                    .map_or(0, |v| v.len());
+            a_count.cmp(&b_count).then_with(|| b.cmp(a))
+        })
+        .map(|s| s.as_str())
+}
+
+/// Add cloud elements for flow endpoints that don't connect to a stock.
+fn build_clouds_for_flow(
+    state: &mut LayoutState,
+    metadata: &ComputedMetadata,
+    flow_ident: &str,
+    flow_elem: &mut view_element::Flow,
+) {
+    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+    let has_from = from_stock.is_some();
+    let has_to = to_stock.is_some();
+
+    // Source cloud (no from stock)
+    if !has_from && !flow_elem.points.is_empty() {
+        let cx = flow_elem.points[0].x;
+        let cy = flow_elem.points[0].y;
+        let cloud_uid = state.uid_manager.alloc("");
+        let cloud = ViewElement::Cloud(view_element::Cloud {
+            uid: cloud_uid,
+            flow_uid: flow_elem.uid,
+            x: cx,
+            y: cy,
+            compat: None,
+        });
+        state.elements.push(cloud);
+        flow_elem.points[0].attached_to_uid = Some(cloud_uid);
+    }
+
+    // Sink cloud (no to stock)
+    if !has_to && !flow_elem.points.is_empty() {
+        let last_idx = flow_elem.points.len() - 1;
+        let cx = flow_elem.points[last_idx].x;
+        let cy = flow_elem.points[last_idx].y;
+        let cloud_uid = state.uid_manager.alloc("");
+        let cloud = ViewElement::Cloud(view_element::Cloud {
+            uid: cloud_uid,
+            flow_uid: flow_elem.uid,
+            x: cx,
+            y: cy,
+            compat: None,
+        });
+        state.elements.push(cloud);
+        flow_elem.points[last_idx].attached_to_uid = Some(cloud_uid);
+    }
+}
+
+/// Cache a flow's polyline offsets (relative to valve center) for crossing detection.
+fn record_flow_template(state: &mut LayoutState, flow_ident: &str, flow_elem: &view_element::Flow) {
+    if flow_elem.points.len() < 2 {
+        return;
+    }
+    let offsets: Vec<Position> = flow_elem
+        .points
+        .iter()
+        .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
+        .collect();
+    state
+        .flow_templates
+        .insert(flow_ident.to_string(), FlowTemplate { offsets });
+}
+
+/// Create a single flow view element with its flow points and clouds.
+fn create_flow_view_element(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    flow_ident: &str,
+    uid: i32,
+    pos: Position,
+) -> Result<(), String> {
+    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+    let from_stock = from_stock.map(|s| s.to_string());
+    let to_stock = to_stock.map(|s| s.to_string());
+    let name = state.display_name(flow_ident);
+    let formatted = format_label_with_line_breaks(&name);
+
+    let flow_points = match (from_stock.as_deref(), to_stock.as_deref()) {
+        (Some(from), Some(to)) => {
+            let from_uid = state.get_or_alloc_uid(from);
+            let to_uid = state.get_or_alloc_uid(to);
+            let from_pos = state
+                .positions
+                .get(&from_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x - 50.0, pos.y));
+            let to_pos = state
+                .positions
+                .get(&to_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x + 50.0, pos.y));
+            vec![
+                FlowPoint {
+                    x: from_pos.x + config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(from_uid),
+                },
+                FlowPoint {
+                    x: to_pos.x - config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(to_uid),
+                },
+            ]
+        }
+        (Some(from), None) => {
+            let from_uid = state.get_or_alloc_uid(from);
+            let from_pos = state
+                .positions
+                .get(&from_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x - 50.0, pos.y));
+            vec![
+                FlowPoint {
+                    x: from_pos.x + config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(from_uid),
+                },
+                FlowPoint {
+                    x: pos.x + 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+            ]
+        }
+        (None, Some(to)) => {
+            let to_uid = state.get_or_alloc_uid(to);
+            let to_pos = state
+                .positions
+                .get(&to_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x + 50.0, pos.y));
+            vec![
+                FlowPoint {
+                    x: pos.x - 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+                FlowPoint {
+                    x: to_pos.x - config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(to_uid),
+                },
+            ]
+        }
+        (None, None) => {
+            vec![
+                FlowPoint {
+                    x: pos.x - 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+                FlowPoint {
+                    x: pos.x + 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+            ]
+        }
+    };
+
+    let orientation = compute_flow_orientation(&flow_points);
+    let label_side = match orientation {
+        FlowOrientation::Horizontal => LabelSide::Top,
+        FlowOrientation::Vertical => LabelSide::Left,
+    };
+
+    let mut flow_elem = view_element::Flow {
+        name: formatted,
+        uid,
+        x: pos.x,
+        y: pos.y,
+        label_side,
+        points: flow_points,
+        compat: None,
+        label_compat: None,
+    };
+
+    // Add clouds for missing stock endpoints
+    build_clouds_for_flow(state, metadata, flow_ident, &mut flow_elem);
+
+    // Record flow template for crossing detection
+    record_flow_template(state, flow_ident, &flow_elem);
+
+    state.elements.push(ViewElement::Flow(flow_elem));
+    state.positions.insert(uid, pos);
+
+    Ok(())
+}
+
+/// Convert positioned stock/flow identifiers into ViewElements.
+fn create_view_elements(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    positioned: &HashMap<String, Position>,
+    stocks: &[String],
+    flows: &[String],
+) -> Result<(), String> {
+    // Create stock view elements
+    for stock_ident in stocks {
+        if let Some(&pos) = positioned.get(stock_ident) {
+            let uid = state.get_or_alloc_uid(stock_ident);
+            let name = state.display_name(stock_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            let elem = ViewElement::Stock(view_element::Stock {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            });
+            state.elements.push(elem);
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    // Create flow view elements
+    for flow_ident in flows {
+        if let Some(&pos) = positioned.get(flow_ident) {
+            let uid = state.get_or_alloc_uid(flow_ident);
+            create_flow_view_element(state, config, metadata, flow_ident, uid, pos)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Layout a single chain at the given base position using BFS.
+fn layout_chain(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    stocks: &[String],
+    flows: &[String],
+    base_position: Position,
+) -> Result<(), String> {
+    if stocks.is_empty() && flows.is_empty() {
+        return Ok(());
+    }
+
+    let start_stock = match pick_starting_stock(metadata, stocks) {
+        Some(s) => s.to_string(),
+        None => {
+            // Flow-only chain (no stocks). Place flows at base_position.
+            for flow_ident in flows {
+                let uid = state.get_or_alloc_uid(flow_ident);
+                create_flow_view_element(state, config, metadata, flow_ident, uid, base_position)?;
+            }
+            return Ok(());
+        }
+    };
+
+    let mut positioned: HashMap<String, Position> = HashMap::new();
+    positioned.insert(start_stock.clone(), base_position);
+
+    let mut queue = VecDeque::from([WorkItem {
+        id: start_stock.clone(),
+        item_type: WorkItemType::Stock,
+        position: base_position,
+        connected_to: String::new(),
+    }]);
+
+    while let Some(item) = queue.pop_front() {
+        match item.item_type {
+            WorkItemType::Stock => {
+                // First-positioned-wins: if this stock was already placed
+                // (via a different BFS path), keep its existing position
+                // to preserve the order in which chains are laid out.
+                if !positioned.contains_key(&item.id) {
+                    positioned.insert(item.id.clone(), item.position);
+                }
+
+                let stock_pos = positioned[&item.id];
+
+                // Find inflows for this stock
+                let inflows = metadata
+                    .stock_to_inflows
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_default();
+                for inflow_id in &inflows {
+                    if !positioned.contains_key(inflow_id) {
+                        queue.push_back(WorkItem {
+                            id: inflow_id.clone(),
+                            item_type: WorkItemType::Flow,
+                            position: stock_pos,
+                            connected_to: item.id.clone(),
+                        });
+                    }
+                }
+
+                // Find outflows for this stock
+                let outflows = metadata
+                    .stock_to_outflows
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_default();
+                for outflow_id in &outflows {
+                    if !positioned.contains_key(outflow_id) {
+                        queue.push_back(WorkItem {
+                            id: outflow_id.clone(),
+                            item_type: WorkItemType::Flow,
+                            position: stock_pos,
+                            connected_to: item.id.clone(),
+                        });
+                    }
+                }
+            }
+            WorkItemType::Flow => {
+                if positioned.contains_key(&item.id) {
+                    continue;
+                }
+
+                let (from_stock, to_stock) = metadata.connected_stocks(&item.id);
+
+                let flow_pos = match (from_stock, to_stock) {
+                    (Some(from), Some(to)) => {
+                        let from = from.to_string();
+                        let to = to.to_string();
+                        if item.connected_to == from {
+                            // Position sink stock to the right
+                            if !positioned.contains_key(&to) {
+                                let other_pos = Position::new(
+                                    item.position.x
+                                        + config.stock_width
+                                        + config.horizontal_spacing,
+                                    item.position.y,
+                                );
+                                positioned.insert(to.clone(), other_pos);
+                                queue.push_back(WorkItem {
+                                    id: to.clone(),
+                                    item_type: WorkItemType::Stock,
+                                    position: other_pos,
+                                    connected_to: String::new(),
+                                });
+                            }
+                            Position::new(
+                                (item.position.x + positioned[&to].x) / 2.0,
+                                item.position.y,
+                            )
+                        } else {
+                            // Position source stock to the left
+                            if !positioned.contains_key(&from) {
+                                let other_pos = Position::new(
+                                    item.position.x
+                                        - config.stock_width
+                                        - config.horizontal_spacing,
+                                    item.position.y,
+                                );
+                                positioned.insert(from.clone(), other_pos);
+                                queue.push_back(WorkItem {
+                                    id: from.clone(),
+                                    item_type: WorkItemType::Stock,
+                                    position: other_pos,
+                                    connected_to: String::new(),
+                                });
+                            }
+                            Position::new(
+                                (positioned[&from].x + item.position.x) / 2.0,
+                                item.position.y,
+                            )
+                        }
+                    }
+                    (Some(_from), None) => {
+                        // Outflow to cloud
+                        Position::new(
+                            item.position.x
+                                + config.stock_width / 2.0
+                                + config.horizontal_spacing / 2.0,
+                            item.position.y,
+                        )
+                    }
+                    (None, Some(_to)) => {
+                        // Inflow from cloud
+                        Position::new(
+                            item.position.x
+                                - config.stock_width / 2.0
+                                - config.horizontal_spacing / 2.0,
+                            item.position.y,
+                        )
+                    }
+                    (None, None) => {
+                        // Cloud-to-cloud
+                        item.position
+                    }
+                };
+
+                positioned.insert(item.id.clone(), flow_pos);
+            }
+        }
+    }
+
+    // Convert positioned elements to view elements
+    create_view_elements(state, config, metadata, &positioned, stocks, flows)
+}
+
 /// The main layout engine holding all intermediate state.
 struct LayoutEngine<'a> {
     config: LayoutConfig,
@@ -255,38 +678,6 @@ impl<'a> LayoutEngine<'a> {
         })
     }
 
-    /// Pick a starting stock for chain layout. Returns the stock with the
-    /// highest flow connectivity (inflows + outflows), breaking ties
-    /// alphabetically for determinism.
-    fn pick_starting_stock<'b>(&self, stocks: &'b [String]) -> Option<&'b str> {
-        stocks
-            .iter()
-            .max_by(|a, b| {
-                let a_count = self
-                    .metadata
-                    .stock_to_inflows
-                    .get(a.as_str())
-                    .map_or(0, |v| v.len())
-                    + self
-                        .metadata
-                        .stock_to_outflows
-                        .get(a.as_str())
-                        .map_or(0, |v| v.len());
-                let b_count = self
-                    .metadata
-                    .stock_to_inflows
-                    .get(b.as_str())
-                    .map_or(0, |v| v.len())
-                    + self
-                        .metadata
-                        .stock_to_outflows
-                        .get(b.as_str())
-                        .map_or(0, |v| v.len());
-                a_count.cmp(&b_count).then_with(|| b.cmp(a))
-            })
-            .map(|s| s.as_str())
-    }
-
     /// Layout a single chain at the given base position using BFS.
     fn layout_chain_at_position(
         &mut self,
@@ -294,416 +685,14 @@ impl<'a> LayoutEngine<'a> {
         flows: &[String],
         base_position: Position,
     ) -> Result<(), String> {
-        if stocks.is_empty() && flows.is_empty() {
-            return Ok(());
-        }
-
-        let start_stock = match self.pick_starting_stock(stocks) {
-            Some(s) => s.to_string(),
-            None => {
-                // Flow-only chain (no stocks). Place flows at base_position.
-                for flow_ident in flows {
-                    let uid = self.state.get_or_alloc_uid(flow_ident);
-                    self.create_flow_view_element(flow_ident, uid, base_position)?;
-                }
-                return Ok(());
-            }
-        };
-
-        let mut positioned: HashMap<String, Position> = HashMap::new();
-        positioned.insert(start_stock.clone(), base_position);
-
-        let mut queue = VecDeque::from([WorkItem {
-            id: start_stock.clone(),
-            item_type: WorkItemType::Stock,
-            position: base_position,
-            connected_to: String::new(),
-        }]);
-
-        while let Some(item) = queue.pop_front() {
-            match item.item_type {
-                WorkItemType::Stock => {
-                    // First-positioned-wins: if this stock was already placed
-                    // (via a different BFS path), keep its existing position
-                    // to preserve the order in which chains are laid out.
-                    if !positioned.contains_key(&item.id) {
-                        positioned.insert(item.id.clone(), item.position);
-                    }
-
-                    let stock_pos = positioned[&item.id];
-
-                    // Find inflows for this stock
-                    let inflows = self
-                        .metadata
-                        .stock_to_inflows
-                        .get(&item.id)
-                        .cloned()
-                        .unwrap_or_default();
-                    for inflow_id in &inflows {
-                        if !positioned.contains_key(inflow_id) {
-                            queue.push_back(WorkItem {
-                                id: inflow_id.clone(),
-                                item_type: WorkItemType::Flow,
-                                position: stock_pos,
-                                connected_to: item.id.clone(),
-                            });
-                        }
-                    }
-
-                    // Find outflows for this stock
-                    let outflows = self
-                        .metadata
-                        .stock_to_outflows
-                        .get(&item.id)
-                        .cloned()
-                        .unwrap_or_default();
-                    for outflow_id in &outflows {
-                        if !positioned.contains_key(outflow_id) {
-                            queue.push_back(WorkItem {
-                                id: outflow_id.clone(),
-                                item_type: WorkItemType::Flow,
-                                position: stock_pos,
-                                connected_to: item.id.clone(),
-                            });
-                        }
-                    }
-                }
-                WorkItemType::Flow => {
-                    if positioned.contains_key(&item.id) {
-                        continue;
-                    }
-
-                    let (from_stock, to_stock) = self.metadata.connected_stocks(&item.id);
-
-                    let flow_pos = match (from_stock, to_stock) {
-                        (Some(from), Some(to)) => {
-                            let from = from.to_string();
-                            let to = to.to_string();
-                            if item.connected_to == from {
-                                // Position sink stock to the right
-                                if !positioned.contains_key(&to) {
-                                    let other_pos = Position::new(
-                                        item.position.x
-                                            + self.config.stock_width
-                                            + self.config.horizontal_spacing,
-                                        item.position.y,
-                                    );
-                                    positioned.insert(to.clone(), other_pos);
-                                    queue.push_back(WorkItem {
-                                        id: to.clone(),
-                                        item_type: WorkItemType::Stock,
-                                        position: other_pos,
-                                        connected_to: String::new(),
-                                    });
-                                }
-                                Position::new(
-                                    (item.position.x + positioned[&to].x) / 2.0,
-                                    item.position.y,
-                                )
-                            } else {
-                                // Position source stock to the left
-                                if !positioned.contains_key(&from) {
-                                    let other_pos = Position::new(
-                                        item.position.x
-                                            - self.config.stock_width
-                                            - self.config.horizontal_spacing,
-                                        item.position.y,
-                                    );
-                                    positioned.insert(from.clone(), other_pos);
-                                    queue.push_back(WorkItem {
-                                        id: from.clone(),
-                                        item_type: WorkItemType::Stock,
-                                        position: other_pos,
-                                        connected_to: String::new(),
-                                    });
-                                }
-                                Position::new(
-                                    (positioned[&from].x + item.position.x) / 2.0,
-                                    item.position.y,
-                                )
-                            }
-                        }
-                        (Some(_from), None) => {
-                            // Outflow to cloud
-                            Position::new(
-                                item.position.x
-                                    + self.config.stock_width / 2.0
-                                    + self.config.horizontal_spacing / 2.0,
-                                item.position.y,
-                            )
-                        }
-                        (None, Some(_to)) => {
-                            // Inflow from cloud
-                            Position::new(
-                                item.position.x
-                                    - self.config.stock_width / 2.0
-                                    - self.config.horizontal_spacing / 2.0,
-                                item.position.y,
-                            )
-                        }
-                        (None, None) => {
-                            // Cloud-to-cloud
-                            item.position
-                        }
-                    };
-
-                    positioned.insert(item.id.clone(), flow_pos);
-                }
-            }
-        }
-
-        // Convert positioned elements to view elements
-        self.create_view_elements(&positioned, stocks, flows)
-    }
-
-    /// Convert positioned stock/flow identifiers into ViewElements.
-    fn create_view_elements(
-        &mut self,
-        positioned: &HashMap<String, Position>,
-        stocks: &[String],
-        flows: &[String],
-    ) -> Result<(), String> {
-        // Create stock view elements
-        for stock_ident in stocks {
-            if let Some(&pos) = positioned.get(stock_ident) {
-                let uid = self.state.get_or_alloc_uid(stock_ident);
-                let name = self.state.display_name(stock_ident);
-                let formatted = format_label_with_line_breaks(&name);
-                let elem = ViewElement::Stock(view_element::Stock {
-                    name: formatted,
-                    uid,
-                    x: pos.x,
-                    y: pos.y,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                });
-                self.state.elements.push(elem);
-                self.state.positions.insert(uid, pos);
-                self.update_bounds_for_element(
-                    pos.x,
-                    pos.y,
-                    self.config.stock_width,
-                    self.config.stock_height,
-                );
-            }
-        }
-
-        // Create flow view elements
-        for flow_ident in flows {
-            if let Some(&pos) = positioned.get(flow_ident) {
-                let uid = self.state.get_or_alloc_uid(flow_ident);
-                self.create_flow_view_element(flow_ident, uid, pos)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Create a single flow view element with its flow points and clouds.
-    fn create_flow_view_element(
-        &mut self,
-        flow_ident: &str,
-        uid: i32,
-        pos: Position,
-    ) -> Result<(), String> {
-        let (from_stock, to_stock) = self.metadata.connected_stocks(flow_ident);
-        let from_stock = from_stock.map(|s| s.to_string());
-        let to_stock = to_stock.map(|s| s.to_string());
-        let name = self.state.display_name(flow_ident);
-        let formatted = format_label_with_line_breaks(&name);
-
-        let flow_points = match (from_stock.as_deref(), to_stock.as_deref()) {
-            (Some(from), Some(to)) => {
-                let from_uid = self.state.get_or_alloc_uid(from);
-                let to_uid = self.state.get_or_alloc_uid(to);
-                let from_pos = self
-                    .state
-                    .positions
-                    .get(&from_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x - 50.0, pos.y));
-                let to_pos = self
-                    .state
-                    .positions
-                    .get(&to_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x + 50.0, pos.y));
-                vec![
-                    FlowPoint {
-                        x: from_pos.x + self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(from_uid),
-                    },
-                    FlowPoint {
-                        x: to_pos.x - self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(to_uid),
-                    },
-                ]
-            }
-            (Some(from), None) => {
-                let from_uid = self.state.get_or_alloc_uid(from);
-                let from_pos = self
-                    .state
-                    .positions
-                    .get(&from_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x - 50.0, pos.y));
-                vec![
-                    FlowPoint {
-                        x: from_pos.x + self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(from_uid),
-                    },
-                    FlowPoint {
-                        x: pos.x + 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                ]
-            }
-            (None, Some(to)) => {
-                let to_uid = self.state.get_or_alloc_uid(to);
-                let to_pos = self
-                    .state
-                    .positions
-                    .get(&to_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x + 50.0, pos.y));
-                vec![
-                    FlowPoint {
-                        x: pos.x - 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                    FlowPoint {
-                        x: to_pos.x - self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(to_uid),
-                    },
-                ]
-            }
-            (None, None) => {
-                vec![
-                    FlowPoint {
-                        x: pos.x - 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                    FlowPoint {
-                        x: pos.x + 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                ]
-            }
-        };
-
-        let orientation = compute_flow_orientation(&flow_points);
-        let label_side = match orientation {
-            FlowOrientation::Horizontal => LabelSide::Top,
-            FlowOrientation::Vertical => LabelSide::Left,
-        };
-
-        let mut flow_elem = view_element::Flow {
-            name: formatted,
-            uid,
-            x: pos.x,
-            y: pos.y,
-            label_side,
-            points: flow_points,
-            compat: None,
-            label_compat: None,
-        };
-
-        // Update bounds for flow points
-        for pt in &flow_elem.points {
-            self.bounds.update(pt.x, pt.y, pt.x, pt.y);
-        }
-
-        // Add clouds for missing stock endpoints
-        self.add_clouds_for_flow(flow_ident, &mut flow_elem);
-
-        // Record flow template for crossing detection
-        self.record_flow_template(flow_ident, &flow_elem);
-
-        self.state.elements.push(ViewElement::Flow(flow_elem));
-        self.state.positions.insert(uid, pos);
-        self.update_bounds_for_element(
-            pos.x,
-            pos.y,
-            self.config.flow_width,
-            self.config.flow_height,
-        );
-
-        Ok(())
-    }
-
-    /// Add cloud elements for flow endpoints that don't connect to a stock.
-    fn add_clouds_for_flow(&mut self, flow_ident: &str, flow_elem: &mut view_element::Flow) {
-        let (from_stock, to_stock) = self.metadata.connected_stocks(flow_ident);
-        let has_from = from_stock.is_some();
-        let has_to = to_stock.is_some();
-
-        // Source cloud (no from stock)
-        if !has_from && !flow_elem.points.is_empty() {
-            let cx = flow_elem.points[0].x;
-            let cy = flow_elem.points[0].y;
-            let cloud_uid = self.state.uid_manager.alloc("");
-            let cloud = ViewElement::Cloud(view_element::Cloud {
-                uid: cloud_uid,
-                flow_uid: flow_elem.uid,
-                x: cx,
-                y: cy,
-                compat: None,
-            });
-            self.state.elements.push(cloud);
-            flow_elem.points[0].attached_to_uid = Some(cloud_uid);
-            self.bounds.update(
-                cx - self.config.cloud_width / 2.0,
-                cy - self.config.cloud_height / 2.0,
-                cx + self.config.cloud_width / 2.0,
-                cy + self.config.cloud_height / 2.0,
-            );
-        }
-
-        // Sink cloud (no to stock)
-        if !has_to && !flow_elem.points.is_empty() {
-            let last_idx = flow_elem.points.len() - 1;
-            let cx = flow_elem.points[last_idx].x;
-            let cy = flow_elem.points[last_idx].y;
-            let cloud_uid = self.state.uid_manager.alloc("");
-            let cloud = ViewElement::Cloud(view_element::Cloud {
-                uid: cloud_uid,
-                flow_uid: flow_elem.uid,
-                x: cx,
-                y: cy,
-                compat: None,
-            });
-            self.state.elements.push(cloud);
-            flow_elem.points[last_idx].attached_to_uid = Some(cloud_uid);
-            self.bounds.update(
-                cx - self.config.cloud_width / 2.0,
-                cy - self.config.cloud_height / 2.0,
-                cx + self.config.cloud_width / 2.0,
-                cy + self.config.cloud_height / 2.0,
-            );
-        }
-    }
-
-    /// Cache a flow's polyline offsets (relative to valve center) for crossing detection.
-    fn record_flow_template(&mut self, flow_ident: &str, flow_elem: &view_element::Flow) {
-        if flow_elem.points.len() < 2 {
-            return;
-        }
-        let offsets: Vec<Position> = flow_elem
-            .points
-            .iter()
-            .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
-            .collect();
-        self.state
-            .flow_templates
-            .insert(flow_ident.to_string(), FlowTemplate { offsets });
+        layout_chain(
+            &mut self.state,
+            &self.config,
+            &self.metadata,
+            stocks,
+            flows,
+            base_position,
+        )
     }
 
     /// Rebuild flow templates from current view elements.
@@ -1859,12 +1848,6 @@ impl<'a> LayoutEngine<'a> {
         }
 
         self.bounds = bounds;
-    }
-
-    fn update_bounds_for_element(&mut self, cx: f64, cy: f64, width: f64, height: f64) {
-        let hw = width / 2.0;
-        let hh = height / 2.0;
-        self.bounds.update(cx - hw, cy - hh, cx + hw, cy + hh);
     }
 
     /// Ensure every stock/flow/aux/module variable in the model has a
