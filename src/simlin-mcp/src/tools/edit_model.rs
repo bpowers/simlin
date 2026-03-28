@@ -204,11 +204,12 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
 
     let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
+    let model_patch = patch.models.iter().find(|m| m.name == model_name).cloned();
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
 
     if !dry_run && has_variable_ops {
-        sync_diagram(&mut project, &model_name);
+        sync_diagram(&mut project, &model_name, model_patch.as_ref());
     }
 
     let ext = path
@@ -262,19 +263,39 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
 }
 
 /// Regenerate the diagram layout for the named model, replacing its views
-/// in-place.  Preserves the existing zoom level when the model already has
-/// a view.  Layout failures are silently ignored -- a missing diagram is
-/// non-fatal and the model data is still correct.
-fn sync_diagram(project: &mut simlin_engine::datamodel::Project, model_name: &str) {
-    let existing_zoom = project
+/// in-place.  When a model patch is provided and the model already has a
+/// non-empty view, uses incremental layout to preserve existing element
+/// positions.  Falls back to full layout generation otherwise.
+///
+/// Preserves the existing zoom level when the model already has a view.
+/// Layout failures are silently ignored -- a missing diagram is non-fatal
+/// and the model data is still correct.
+fn sync_diagram(
+    project: &mut simlin_engine::datamodel::Project,
+    model_name: &str,
+    model_patch: Option<&simlin_engine::ModelPatch>,
+) {
+    let old_view = project
         .get_model(model_name)
         .and_then(|m| m.views.first())
         .map(|v| match v {
-            simlin_engine::datamodel::View::StockFlow(sf) => sf.zoom,
-        })
-        .filter(|&z| z > 0.0);
+            simlin_engine::datamodel::View::StockFlow(sf) => sf,
+        });
 
-    let mut layout = match simlin_engine::layout::generate_best_layout(project, model_name, None) {
+    let existing_zoom = old_view.map(|sf| sf.zoom).filter(|&z| z > 0.0);
+
+    let new_view = if let (Some(old_sf), Some(patch)) = (old_view, model_patch) {
+        if !old_sf.elements.is_empty() {
+            let old_sf = old_sf.clone();
+            simlin_engine::layout::incremental_layout(&old_sf, project, model_name, patch, None)
+        } else {
+            simlin_engine::layout::generate_best_layout(project, model_name, None)
+        }
+    } else {
+        simlin_engine::layout::generate_best_layout(project, model_name, None)
+    };
+
+    let mut layout = match new_view {
         Ok(l) => l,
         Err(_) => return,
     };

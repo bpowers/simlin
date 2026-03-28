@@ -14,12 +14,14 @@ use std::collections::HashMap;
 /// A patch to apply to a project. Contains project-level operations
 /// (like changing sim specs or adding models) and per-model patches
 /// (like upserting variables or views).
+#[derive(Clone)]
 pub struct ProjectPatch {
     pub project_ops: Vec<ProjectOperation>,
     pub models: Vec<ModelPatch>,
 }
 
 /// A project-level operation.
+#[derive(Clone)]
 pub enum ProjectOperation {
     SetSimSpecs(datamodel::SimSpecs),
     SetSource(datamodel::Source),
@@ -27,12 +29,14 @@ pub enum ProjectOperation {
 }
 
 /// A patch targeting a specific model within the project.
+#[derive(Clone)]
 pub struct ModelPatch {
     pub name: String,
     pub ops: Vec<ModelOperation>,
 }
 
 /// An operation on a single model.
+#[derive(Clone)]
 pub enum ModelOperation {
     UpsertStock(datamodel::Stock),
     UpsertFlow(datamodel::Flow),
