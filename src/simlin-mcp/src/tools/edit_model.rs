@@ -1077,6 +1077,116 @@ mod tests {
         assert_eq!(views, 0, "dry-run must not write regenerated views to disk");
     }
 
+    // ---- incremental layout through MCP path ----
+
+    #[test]
+    fn ac7_1_incremental_layout_preserves_existing_positions() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Start with a project that already has a stock, flow, and a
+        // hand-placed layout.  The known x/y positions let us verify that
+        // incremental layout preserved them rather than regenerating from
+        // scratch.
+        let project_with_layout = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "variables": [
+                    {
+                        "type": "stock",
+                        "name": "population",
+                        "equation": "100",
+                        "inflows": ["births"],
+                        "outflows": []
+                    },
+                    {
+                        "type": "flow",
+                        "name": "births",
+                        "equation": "population * 0.1"
+                    }
+                ],
+                "views": [{
+                    "kind": "stock_flow",
+                    "elements": [
+                        {
+                            "uid": 1,
+                            "type": "stock",
+                            "name": "population",
+                            "x": 300.0,
+                            "y": 200.0,
+                            "labelSide": "bottom"
+                        },
+                        {
+                            "uid": 2,
+                            "type": "flow",
+                            "name": "births",
+                            "x": 200.0,
+                            "y": 200.0,
+                            "labelSide": "bottom",
+                            "points": [
+                                {"x": 100.0, "y": 200.0},
+                                {"x": 300.0, "y": 200.0}
+                            ]
+                        }
+                    ]
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "model.simlin.json", &project_with_layout);
+
+        // Add a new auxiliary -- this triggers sync_diagram with a
+        // ModelPatch, exercising the incremental layout path.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [
+                { "upsertAuxiliary": { "name": "growth_rate", "equation": "0.05" } }
+            ]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let views = saved["models"][0]["views"]
+            .as_array()
+            .expect("views must be an array");
+        assert!(!views.is_empty(), "must have views after edit");
+
+        let elements = views[0]["elements"]
+            .as_array()
+            .expect("view must have elements");
+
+        // The original stock and flow must still be present.
+        let has_population = elements.iter().any(|e| e["name"] == "population");
+        let has_births = elements.iter().any(|e| e["name"] == "births");
+        // View element names use newlines where variable idents use underscores
+        let has_growth_rate = elements.iter().any(|e| e["name"] == "growth\nrate");
+        assert!(has_population, "population stock must be in the view");
+        assert!(has_births, "births flow must be in the view");
+        assert!(
+            has_growth_rate,
+            "newly added growth_rate must appear in the view; elements: {elements:?}"
+        );
+
+        // Verify that the existing elements kept their original positions.
+        // Incremental layout preserves existing placement; a full regeneration
+        // would assign different coordinates.
+        let pop_elem = elements.iter().find(|e| e["name"] == "population").unwrap();
+        let pop_x = pop_elem["x"].as_f64().unwrap();
+        let pop_y = pop_elem["y"].as_f64().unwrap();
+        assert!(
+            (pop_x - 300.0).abs() < 1.0 && (pop_y - 200.0).abs() < 1.0,
+            "population position should be preserved at (300,200), got ({pop_x},{pop_y})"
+        );
+    }
+
     // ---- model name resolution falls back to first model when no "main" ----
 
     #[test]
