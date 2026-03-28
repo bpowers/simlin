@@ -4590,6 +4590,348 @@ mod tests {
     }
 
     #[test]
+    fn test_build_clouds() {
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let mut metadata = ComputedMetadata::new_empty();
+        // births flows into population; no source stock, so a source cloud is needed
+        metadata
+            .flow_to_stocks
+            .insert("births".to_string(), (None, Some("population".to_string())));
+        metadata
+            .stock_to_inflows
+            .insert("population".to_string(), vec!["births".to_string()]);
+
+        let mut state = LayoutState::new(&model);
+
+        let flow_uid = state.get_or_alloc_uid("births");
+        let stock_uid = state.get_or_alloc_uid("population");
+
+        // Simulate post-layout_chain state: a flow element already exists
+        // with points at known positions.  The first point (source end) has
+        // no attached stock; the second point (sink end) is attached to the
+        // population stock.
+        let mut flow_elem = view_element::Flow {
+            name: "births".to_string(),
+            uid: flow_uid,
+            x: 75.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Top,
+            points: vec![
+                view_element::FlowPoint {
+                    x: 50.0,
+                    y: 100.0,
+                    attached_to_uid: None,
+                },
+                view_element::FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: Some(stock_uid),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        };
+
+        let clouds_before = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Cloud(_)))
+            .count();
+        assert_eq!(
+            clouds_before, 0,
+            "no clouds before calling build_clouds_for_flow"
+        );
+
+        build_clouds_for_flow(&mut state, &metadata, "births", &mut flow_elem);
+
+        // Exactly one cloud should be created (source end only; sink is connected)
+        let clouds: Vec<&view_element::Cloud> = state
+            .elements
+            .iter()
+            .filter_map(|e| {
+                if let ViewElement::Cloud(c) = e {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            clouds.len(),
+            1,
+            "expected 1 cloud for the missing source endpoint"
+        );
+
+        let cloud = clouds[0];
+        // The cloud's flow_uid must reference the flow
+        assert_eq!(
+            cloud.flow_uid, flow_uid,
+            "cloud's flow_uid should match the flow"
+        );
+
+        // The cloud should be positioned at the first flow point (source end)
+        assert!(
+            (cloud.x - 50.0).abs() < f64::EPSILON,
+            "cloud x should match source flow point"
+        );
+        assert!(
+            (cloud.y - 100.0).abs() < f64::EPSILON,
+            "cloud y should match source flow point"
+        );
+
+        // The first flow point (source) should now be attached to the cloud
+        assert_eq!(
+            flow_elem.points[0].attached_to_uid,
+            Some(cloud.uid),
+            "source flow point should be attached to the new cloud"
+        );
+
+        // The second flow point (sink) should remain attached to the stock
+        assert_eq!(
+            flow_elem.points[1].attached_to_uid,
+            Some(stock_uid),
+            "sink flow point should still be attached to the stock"
+        );
+
+        // Cloud UID must be unique (different from flow and stock UIDs)
+        let mut uids: HashSet<i32> = HashSet::new();
+        uids.insert(flow_uid);
+        uids.insert(stock_uid);
+        assert!(
+            uids.insert(cloud.uid),
+            "cloud UID {} should be unique",
+            cloud.uid
+        );
+    }
+
+    #[test]
+    fn test_build_clouds_no_cloud_for_connected_endpoint() {
+        // When both endpoints are connected to stocks, no clouds should be
+        // created at all.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "source".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["transfer".to_string()],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "sink".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["transfer".to_string()],
+                    outflows: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "transfer".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(3),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let mut metadata = ComputedMetadata::new_empty();
+        metadata.flow_to_stocks.insert(
+            "transfer".to_string(),
+            (Some("source".to_string()), Some("sink".to_string())),
+        );
+
+        let mut state = LayoutState::new(&model);
+        let flow_uid = state.get_or_alloc_uid("transfer");
+        let source_uid = state.get_or_alloc_uid("source");
+        let sink_uid = state.get_or_alloc_uid("sink");
+
+        let mut flow_elem = view_element::Flow {
+            name: "transfer".to_string(),
+            uid: flow_uid,
+            x: 75.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Top,
+            points: vec![
+                view_element::FlowPoint {
+                    x: 50.0,
+                    y: 100.0,
+                    attached_to_uid: Some(source_uid),
+                },
+                view_element::FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: Some(sink_uid),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        };
+
+        build_clouds_for_flow(&mut state, &metadata, "transfer", &mut flow_elem);
+
+        let cloud_count = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Cloud(_)))
+            .count();
+        assert_eq!(
+            cloud_count, 0,
+            "no clouds when both endpoints are connected to stocks"
+        );
+    }
+
+    #[test]
+    fn test_build_clouds_sink_cloud() {
+        // When the flow has a source stock but no sink stock, a sink cloud
+        // should be created at the last flow point.
+        let model = datamodel::Model {
+            name: TEST_MODEL.to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec![],
+                    outflows: vec!["deaths".to_string()],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(1),
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "deaths".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: Some(2),
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let mut metadata = ComputedMetadata::new_empty();
+        // deaths flows out of population; no sink stock
+        metadata
+            .flow_to_stocks
+            .insert("deaths".to_string(), (Some("population".to_string()), None));
+        metadata
+            .stock_to_outflows
+            .insert("population".to_string(), vec!["deaths".to_string()]);
+
+        let mut state = LayoutState::new(&model);
+        let flow_uid = state.get_or_alloc_uid("deaths");
+        let stock_uid = state.get_or_alloc_uid("population");
+
+        let mut flow_elem = view_element::Flow {
+            name: "deaths".to_string(),
+            uid: flow_uid,
+            x: 125.0,
+            y: 100.0,
+            label_side: view_element::LabelSide::Top,
+            points: vec![
+                view_element::FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: Some(stock_uid),
+                },
+                view_element::FlowPoint {
+                    x: 150.0,
+                    y: 100.0,
+                    attached_to_uid: None,
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        };
+
+        build_clouds_for_flow(&mut state, &metadata, "deaths", &mut flow_elem);
+
+        let clouds: Vec<&view_element::Cloud> = state
+            .elements
+            .iter()
+            .filter_map(|e| {
+                if let ViewElement::Cloud(c) = e {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(clouds.len(), 1, "expected 1 cloud for the missing sink");
+
+        let cloud = clouds[0];
+        assert_eq!(cloud.flow_uid, flow_uid);
+
+        // Cloud should be at the last (sink) flow point
+        assert!(
+            (cloud.x - 150.0).abs() < f64::EPSILON,
+            "cloud x should match sink flow point"
+        );
+        assert!(
+            (cloud.y - 100.0).abs() < f64::EPSILON,
+            "cloud y should match sink flow point"
+        );
+
+        // Source flow point should remain attached to the stock
+        assert_eq!(flow_elem.points[0].attached_to_uid, Some(stock_uid));
+
+        // Sink flow point should now be attached to the cloud
+        assert_eq!(flow_elem.points[1].attached_to_uid, Some(cloud.uid));
+    }
+
+    #[test]
     fn test_compute_metadata_with_main_alias() {
         let mut model = simple_model();
         model.name = String::new();
