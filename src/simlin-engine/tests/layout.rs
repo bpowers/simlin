@@ -873,6 +873,91 @@ fn get_element_position(elem: &ViewElement) -> Option<(f64, f64)> {
     }
 }
 
+#[test]
+fn test_from_existing_view_flow_templates() {
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+    let generated_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+
+    let state = LayoutState::from_existing_view(&generated_view, model);
+
+    // SIR has 2 flows, so flow_templates should be non-empty
+    assert!(
+        !state.flow_templates.is_empty(),
+        "flow_templates should be non-empty for a model with flows"
+    );
+
+    // Collect flow elements from the generated view for comparison
+    let flow_elems: Vec<_> = generated_view
+        .elements
+        .iter()
+        .filter_map(|e| {
+            if let ViewElement::Flow(f) = e {
+                Some(f)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        state.flow_templates.len(),
+        flow_elems.iter().filter(|f| f.points.len() >= 2).count(),
+        "should have a template for each flow with >= 2 points"
+    );
+
+    // Verify each flow template has correct offsets relative to valve center
+    for flow_elem in &flow_elems {
+        if flow_elem.points.len() < 2 {
+            continue;
+        }
+
+        let flow_ident = canonicalize(&flow_elem.name).into_owned();
+        let template = state.flow_templates.get(&flow_ident);
+        assert!(
+            template.is_some(),
+            "flow_templates should contain entry for '{}'",
+            flow_ident
+        );
+        let template = template.unwrap();
+
+        assert_eq!(
+            template.offsets.len(),
+            flow_elem.points.len(),
+            "template offset count should match flow point count for '{}'",
+            flow_ident
+        );
+
+        // Each offset should be the flow point position minus the valve center
+        for (i, (offset, pt)) in template
+            .offsets
+            .iter()
+            .zip(flow_elem.points.iter())
+            .enumerate()
+        {
+            let expected_dx = pt.x - flow_elem.x;
+            let expected_dy = pt.y - flow_elem.y;
+            assert!(
+                (offset.x - expected_dx).abs() < f64::EPSILON,
+                "offset[{}].x for '{}': expected {}, got {}",
+                i,
+                flow_ident,
+                expected_dx,
+                offset.x
+            );
+            assert!(
+                (offset.y - expected_dy).abs() < f64::EPSILON,
+                "offset[{}].y for '{}': expected {}, got {}",
+                i,
+                flow_ident,
+                expected_dy,
+                offset.y
+            );
+        }
+    }
+}
+
 /// Verify that a systems-format model with modules produces a complete,
 /// renderable diagram with ViewElement::Module for each Variable::Module.
 #[test]

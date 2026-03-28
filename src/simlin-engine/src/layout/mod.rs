@@ -170,18 +170,16 @@ impl LayoutState {
             }
         }
 
-        // Build uid-to-ident map for flows (used by flow_templates and cloud maps)
+        // Build uid-to-ident map using the uid_manager (which was seeded from
+        // view elements above), not from model variable UIDs which may be None
+        // for XMILE-parsed models.
         let uid_to_ident: HashMap<i32, String> = model
             .variables
             .iter()
             .filter_map(|var| {
-                let uid = match var {
-                    datamodel::Variable::Stock(s) => s.uid,
-                    datamodel::Variable::Flow(f) => f.uid,
-                    datamodel::Variable::Aux(a) => a.uid,
-                    datamodel::Variable::Module(m) => m.uid,
-                }?;
-                Some((uid, canonicalize(var.get_ident()).into_owned()))
+                let ident = canonicalize(var.get_ident()).into_owned();
+                let uid = uid_manager.get_uid(&ident)?;
+                Some((uid, ident))
             })
             .collect();
 
