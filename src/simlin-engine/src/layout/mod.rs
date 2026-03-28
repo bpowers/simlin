@@ -90,29 +90,25 @@ struct LayoutResult {
     seed: u64,
 }
 
-/// The main layout engine holding all intermediate state.
-struct LayoutEngine<'a> {
-    config: LayoutConfig,
-    model: &'a datamodel::Model,
-    metadata: ComputedMetadata,
-    uid_manager: UidManager,
+/// Shared mutable state for layout generation, separated from immutable
+/// context so it can be passed to standalone layout functions independently.
+pub struct LayoutState {
+    pub uid_manager: UidManager,
 
     /// Canonical ident -> original display name (pre-built for O(1) lookup).
-    display_names: HashMap<String, String>,
+    pub display_names: HashMap<String, String>,
 
-    elements: Vec<ViewElement>,
-    positions: HashMap<i32, Position>,
+    pub elements: Vec<ViewElement>,
+    pub positions: HashMap<i32, Position>,
 
-    flow_templates: HashMap<String, FlowTemplate>,
-    cloud_ident_to_uid: HashMap<String, i32>,
-    cloud_ident_to_flow_ident: HashMap<String, String>,
-    flow_ident_to_clouds: HashMap<String, Vec<String>>,
-
-    bounds: Bounds,
+    pub flow_templates: HashMap<String, FlowTemplate>,
+    pub cloud_ident_to_uid: HashMap<String, i32>,
+    pub cloud_ident_to_flow_ident: HashMap<String, String>,
+    pub flow_ident_to_clouds: HashMap<String, Vec<String>>,
 }
 
-impl<'a> LayoutEngine<'a> {
-    fn new(config: LayoutConfig, model: &'a datamodel::Model, metadata: ComputedMetadata) -> Self {
+impl LayoutState {
+    pub fn new(model: &datamodel::Model) -> Self {
         let mut uid_manager = UidManager::new();
         let mut display_names = HashMap::new();
 
@@ -133,9 +129,6 @@ impl<'a> LayoutEngine<'a> {
         }
 
         Self {
-            config,
-            model,
-            metadata,
             uid_manager,
             display_names,
             elements: Vec::new(),
@@ -144,6 +137,40 @@ impl<'a> LayoutEngine<'a> {
             cloud_ident_to_uid: HashMap::new(),
             cloud_ident_to_flow_ident: HashMap::new(),
             flow_ident_to_clouds: HashMap::new(),
+        }
+    }
+
+    /// Get or allocate a UID for a variable by its canonical ident.
+    pub fn get_or_alloc_uid(&mut self, ident: &str) -> i32 {
+        self.uid_manager.alloc(ident)
+    }
+
+    /// Get the display name for a variable, preferring the original case.
+    pub fn display_name(&self, canonical_ident: &str) -> String {
+        self.display_names
+            .get(canonical_ident)
+            .cloned()
+            .unwrap_or_else(|| canonical_ident.to_string())
+    }
+}
+
+/// The main layout engine holding all intermediate state.
+struct LayoutEngine<'a> {
+    config: LayoutConfig,
+    model: &'a datamodel::Model,
+    metadata: ComputedMetadata,
+    state: LayoutState,
+    bounds: Bounds,
+}
+
+impl<'a> LayoutEngine<'a> {
+    fn new(config: LayoutConfig, model: &'a datamodel::Model, metadata: ComputedMetadata) -> Self {
+        let state = LayoutState::new(model);
+        Self {
+            config,
+            model,
+            metadata,
+            state,
             bounds: Bounds::new(),
         }
     }
@@ -192,7 +219,7 @@ impl<'a> LayoutEngine<'a> {
         self.apply_optimal_label_placement();
 
         // Phase 5: Normalize coordinates
-        normalize_coordinates(&mut self.elements, DIAGRAM_ORIGIN_MARGIN);
+        normalize_coordinates(&mut self.state.elements, DIAGRAM_ORIGIN_MARGIN);
         self.recalculate_bounds();
 
         // Phase 6: Apply feedback loop curvature
@@ -201,7 +228,7 @@ impl<'a> LayoutEngine<'a> {
         self.validate_view_completeness()?;
 
         // Phase 7: Compute ViewBox
-        let view_box = if !self.elements.is_empty() && self.bounds.min_x != f64::MAX {
+        let view_box = if !self.state.elements.is_empty() && self.bounds.min_x != f64::MAX {
             Rect {
                 x: 0.0,
                 y: 0.0,
@@ -219,7 +246,7 @@ impl<'a> LayoutEngine<'a> {
 
         Ok(datamodel::StockFlow {
             name: None,
-            elements: self.elements,
+            elements: self.state.elements,
             view_box,
             zoom: 1.0,
             use_lettered_polarity: false,
@@ -276,7 +303,7 @@ impl<'a> LayoutEngine<'a> {
             None => {
                 // Flow-only chain (no stocks). Place flows at base_position.
                 for flow_ident in flows {
-                    let uid = self.get_or_alloc_uid(flow_ident);
+                    let uid = self.state.get_or_alloc_uid(flow_ident);
                     self.create_flow_view_element(flow_ident, uid, base_position)?;
                 }
                 return Ok(());
@@ -439,8 +466,8 @@ impl<'a> LayoutEngine<'a> {
         // Create stock view elements
         for stock_ident in stocks {
             if let Some(&pos) = positioned.get(stock_ident) {
-                let uid = self.get_or_alloc_uid(stock_ident);
-                let name = self.display_name(stock_ident);
+                let uid = self.state.get_or_alloc_uid(stock_ident);
+                let name = self.state.display_name(stock_ident);
                 let formatted = format_label_with_line_breaks(&name);
                 let elem = ViewElement::Stock(view_element::Stock {
                     name: formatted,
@@ -450,8 +477,8 @@ impl<'a> LayoutEngine<'a> {
                     label_side: LabelSide::Bottom,
                     compat: None,
                 });
-                self.elements.push(elem);
-                self.positions.insert(uid, pos);
+                self.state.elements.push(elem);
+                self.state.positions.insert(uid, pos);
                 self.update_bounds_for_element(
                     pos.x,
                     pos.y,
@@ -464,7 +491,7 @@ impl<'a> LayoutEngine<'a> {
         // Create flow view elements
         for flow_ident in flows {
             if let Some(&pos) = positioned.get(flow_ident) {
-                let uid = self.get_or_alloc_uid(flow_ident);
+                let uid = self.state.get_or_alloc_uid(flow_ident);
                 self.create_flow_view_element(flow_ident, uid, pos)?;
             }
         }
@@ -482,19 +509,21 @@ impl<'a> LayoutEngine<'a> {
         let (from_stock, to_stock) = self.metadata.connected_stocks(flow_ident);
         let from_stock = from_stock.map(|s| s.to_string());
         let to_stock = to_stock.map(|s| s.to_string());
-        let name = self.display_name(flow_ident);
+        let name = self.state.display_name(flow_ident);
         let formatted = format_label_with_line_breaks(&name);
 
         let flow_points = match (from_stock.as_deref(), to_stock.as_deref()) {
             (Some(from), Some(to)) => {
-                let from_uid = self.get_or_alloc_uid(from);
-                let to_uid = self.get_or_alloc_uid(to);
+                let from_uid = self.state.get_or_alloc_uid(from);
+                let to_uid = self.state.get_or_alloc_uid(to);
                 let from_pos = self
+                    .state
                     .positions
                     .get(&from_uid)
                     .copied()
                     .unwrap_or(Position::new(pos.x - 50.0, pos.y));
                 let to_pos = self
+                    .state
                     .positions
                     .get(&to_uid)
                     .copied()
@@ -513,8 +542,9 @@ impl<'a> LayoutEngine<'a> {
                 ]
             }
             (Some(from), None) => {
-                let from_uid = self.get_or_alloc_uid(from);
+                let from_uid = self.state.get_or_alloc_uid(from);
                 let from_pos = self
+                    .state
                     .positions
                     .get(&from_uid)
                     .copied()
@@ -533,8 +563,9 @@ impl<'a> LayoutEngine<'a> {
                 ]
             }
             (None, Some(to)) => {
-                let to_uid = self.get_or_alloc_uid(to);
+                let to_uid = self.state.get_or_alloc_uid(to);
                 let to_pos = self
+                    .state
                     .positions
                     .get(&to_uid)
                     .copied()
@@ -596,8 +627,8 @@ impl<'a> LayoutEngine<'a> {
         // Record flow template for crossing detection
         self.record_flow_template(flow_ident, &flow_elem);
 
-        self.elements.push(ViewElement::Flow(flow_elem));
-        self.positions.insert(uid, pos);
+        self.state.elements.push(ViewElement::Flow(flow_elem));
+        self.state.positions.insert(uid, pos);
         self.update_bounds_for_element(
             pos.x,
             pos.y,
@@ -618,7 +649,7 @@ impl<'a> LayoutEngine<'a> {
         if !has_from && !flow_elem.points.is_empty() {
             let cx = flow_elem.points[0].x;
             let cy = flow_elem.points[0].y;
-            let cloud_uid = self.uid_manager.alloc("");
+            let cloud_uid = self.state.uid_manager.alloc("");
             let cloud = ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
                 flow_uid: flow_elem.uid,
@@ -626,7 +657,7 @@ impl<'a> LayoutEngine<'a> {
                 y: cy,
                 compat: None,
             });
-            self.elements.push(cloud);
+            self.state.elements.push(cloud);
             flow_elem.points[0].attached_to_uid = Some(cloud_uid);
             self.bounds.update(
                 cx - self.config.cloud_width / 2.0,
@@ -641,7 +672,7 @@ impl<'a> LayoutEngine<'a> {
             let last_idx = flow_elem.points.len() - 1;
             let cx = flow_elem.points[last_idx].x;
             let cy = flow_elem.points[last_idx].y;
-            let cloud_uid = self.uid_manager.alloc("");
+            let cloud_uid = self.state.uid_manager.alloc("");
             let cloud = ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
                 flow_uid: flow_elem.uid,
@@ -649,7 +680,7 @@ impl<'a> LayoutEngine<'a> {
                 y: cy,
                 compat: None,
             });
-            self.elements.push(cloud);
+            self.state.elements.push(cloud);
             flow_elem.points[last_idx].attached_to_uid = Some(cloud_uid);
             self.bounds.update(
                 cx - self.config.cloud_width / 2.0,
@@ -670,13 +701,14 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
             .collect();
-        self.flow_templates
+        self.state
+            .flow_templates
             .insert(flow_ident.to_string(), FlowTemplate { offsets });
     }
 
     /// Rebuild flow templates from current view elements.
     fn refresh_flow_templates(&mut self) {
-        self.flow_templates.clear();
+        self.state.flow_templates.clear();
 
         let uid_to_ident: HashMap<i32, String> = self
             .model
@@ -685,13 +717,16 @@ impl<'a> LayoutEngine<'a> {
             .filter_map(|var| match var {
                 datamodel::Variable::Flow(f) => {
                     let ident = canonicalize(&f.ident).into_owned();
-                    self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+                    self.state
+                        .uid_manager
+                        .get_uid(&ident)
+                        .map(|uid| (uid, ident))
                 }
                 _ => None,
             })
             .collect();
 
-        for elem in &self.elements {
+        for elem in &self.state.elements {
             if let ViewElement::Flow(flow_elem) = elem
                 && let Some(ident) = uid_to_ident.get(&flow_elem.uid)
                 && flow_elem.points.len() >= 2
@@ -701,7 +736,8 @@ impl<'a> LayoutEngine<'a> {
                     .iter()
                     .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
                     .collect();
-                self.flow_templates
+                self.state
+                    .flow_templates
                     .insert(ident.clone(), FlowTemplate { offsets });
             }
         }
@@ -742,9 +778,9 @@ impl<'a> LayoutEngine<'a> {
     /// Build an undirected graph with all model variables and cloud nodes for SFDP.
     fn build_full_graph(&mut self) -> Result<(Graph<String>, HashMap<String, String>), String> {
         // Reset cloud mappings
-        self.cloud_ident_to_uid.clear();
-        self.cloud_ident_to_flow_ident.clear();
-        self.flow_ident_to_clouds.clear();
+        self.state.cloud_ident_to_uid.clear();
+        self.state.cloud_ident_to_flow_ident.clear();
+        self.state.flow_ident_to_clouds.clear();
 
         let flow_uid_to_ident: HashMap<i32, String> = self
             .model
@@ -753,7 +789,10 @@ impl<'a> LayoutEngine<'a> {
             .filter_map(|var| match var {
                 datamodel::Variable::Flow(f) => {
                     let ident = canonicalize(&f.ident).into_owned();
-                    self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+                    self.state
+                        .uid_manager
+                        .get_uid(&ident)
+                        .map(|uid| (uid, ident))
                 }
                 _ => None,
             })
@@ -798,7 +837,7 @@ impl<'a> LayoutEngine<'a> {
         }
 
         // Add cloud nodes
-        for elem in &self.elements {
+        for elem in &self.state.elements {
             if let ViewElement::Cloud(cloud) = elem {
                 let flow_ident = match flow_uid_to_ident.get(&cloud.flow_uid) {
                     Some(ident) => ident.clone(),
@@ -825,11 +864,14 @@ impl<'a> LayoutEngine<'a> {
                 let cloud_node = var_to_node[&cloud_ident].clone();
                 builder.add_edge(flow_node.clone(), cloud_node, 1.0);
 
-                self.cloud_ident_to_uid
+                self.state
+                    .cloud_ident_to_uid
                     .insert(cloud_ident.clone(), cloud.uid);
-                self.cloud_ident_to_flow_ident
+                self.state
+                    .cloud_ident_to_flow_ident
                     .insert(cloud_ident.clone(), flow_ident.clone());
-                self.flow_ident_to_clouds
+                self.state
+                    .flow_ident_to_clouds
                     .entry(flow_ident)
                     .or_default()
                     .push(cloud_ident);
@@ -856,15 +898,15 @@ impl<'a> LayoutEngine<'a> {
             for var_ident in all_vars {
                 if let Some(node_id) = var_to_node.get(var_ident) {
                     // Only include positioned elements in the rigid group
-                    let uid = self.uid_manager.get_uid(var_ident);
-                    let is_positioned = uid.is_some_and(|u| self.positions.contains_key(&u));
+                    let uid = self.state.uid_manager.get_uid(var_ident);
+                    let is_positioned = uid.is_some_and(|u| self.state.positions.contains_key(&u));
                     if is_positioned && added.insert(node_id.clone()) {
                         group_members.push(node_id.clone());
 
                         // Also add clouds attached to flows in this chain
                         let canonical = canonicalize(var_ident);
                         if let Some(cloud_idents) =
-                            self.flow_ident_to_clouds.get(canonical.as_ref())
+                            self.state.flow_ident_to_clouds.get(canonical.as_ref())
                         {
                             for cloud_ident in cloud_idents {
                                 if let Some(cloud_node) = var_to_node.get(cloud_ident)
@@ -888,6 +930,7 @@ impl<'a> LayoutEngine<'a> {
         // Build initial layout from existing positions
         let mut initial_layout: Layout<String> = BTreeMap::new();
         let cloud_uid_to_pos: HashMap<i32, Position> = self
+            .state
             .elements
             .iter()
             .filter_map(|elem| {
@@ -906,8 +949,8 @@ impl<'a> LayoutEngine<'a> {
 
         for (var_ident, node_id) in var_to_node {
             // Try existing positioned elements first
-            if let Some(uid) = self.uid_manager.get_uid(var_ident)
-                && let Some(&pos) = self.positions.get(&uid)
+            if let Some(uid) = self.state.uid_manager.get_uid(var_ident)
+                && let Some(&pos) = self.state.positions.get(&uid)
             {
                 initial_layout.insert(node_id.clone(), pos);
                 center_x += pos.x;
@@ -917,15 +960,15 @@ impl<'a> LayoutEngine<'a> {
             }
 
             // Try cloud positions
-            if let Some(&cloud_uid) = self.cloud_ident_to_uid.get(var_ident) {
+            if let Some(&cloud_uid) = self.state.cloud_ident_to_uid.get(var_ident) {
                 if let Some(&pos) = cloud_uid_to_pos.get(&cloud_uid) {
                     initial_layout.insert(node_id.clone(), pos);
                     continue;
                 }
                 // Fall back to flow position for clouds
-                if let Some(flow_ident) = self.cloud_ident_to_flow_ident.get(var_ident)
-                    && let Some(flow_uid) = self.uid_manager.get_uid(flow_ident)
-                    && let Some(&pos) = self.positions.get(&flow_uid)
+                if let Some(flow_ident) = self.state.cloud_ident_to_flow_ident.get(var_ident)
+                    && let Some(flow_uid) = self.state.uid_manager.get_uid(flow_ident)
+                    && let Some(&pos) = self.state.positions.get(&flow_uid)
                 {
                     initial_layout.insert(node_id.clone(), pos);
                     continue;
@@ -1037,7 +1080,7 @@ impl<'a> LayoutEngine<'a> {
                 });
             }
 
-            for (flow_ident, tmpl) in &self.flow_templates {
+            for (flow_ident, tmpl) in &self.state.flow_templates {
                 if tmpl.offsets.len() < 2 {
                     continue;
                 }
@@ -1167,13 +1210,16 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .filter_map(|var| {
                 let ident = canonicalize(var.get_ident()).into_owned();
-                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+                self.state
+                    .uid_manager
+                    .get_uid(&ident)
+                    .map(|uid| (uid, ident))
             })
             .collect();
 
         let mut flow_deltas: HashMap<i32, Position> = HashMap::new();
 
-        for elem in &mut self.elements {
+        for elem in &mut self.state.elements {
             match elem {
                 ViewElement::Stock(stock) => {
                     if let Some(ident) = uid_to_ident.get(&stock.uid)
@@ -1181,7 +1227,7 @@ impl<'a> LayoutEngine<'a> {
                     {
                         stock.x = pos.x;
                         stock.y = pos.y;
-                        self.positions.insert(stock.uid, pos);
+                        self.state.positions.insert(stock.uid, pos);
                     }
                 }
                 ViewElement::Flow(flow) => {
@@ -1198,7 +1244,7 @@ impl<'a> LayoutEngine<'a> {
                         }
                         flow.x = pos.x;
                         flow.y = pos.y;
-                        self.positions.insert(flow.uid, pos);
+                        self.state.positions.insert(flow.uid, pos);
                         flow_deltas.insert(flow.uid, Position::new(dx, dy));
                     }
                 }
@@ -1208,7 +1254,7 @@ impl<'a> LayoutEngine<'a> {
                     {
                         aux.x = pos.x;
                         aux.y = pos.y;
-                        self.positions.insert(aux.uid, pos);
+                        self.state.positions.insert(aux.uid, pos);
                     }
                 }
                 ViewElement::Module(module) => {
@@ -1217,7 +1263,7 @@ impl<'a> LayoutEngine<'a> {
                     {
                         module.x = pos.x;
                         module.y = pos.y;
-                        self.positions.insert(module.uid, pos);
+                        self.state.positions.insert(module.uid, pos);
                     }
                 }
                 ViewElement::Cloud(cloud) => {
@@ -1244,12 +1290,12 @@ impl<'a> LayoutEngine<'a> {
         layout: &Layout<String>,
         var_to_node: &HashMap<String, String>,
     ) -> Result<(), String> {
-        let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
+        let existing_uids: HashSet<i32> = self.state.elements.iter().map(|e| e.get_uid()).collect();
 
         for var in &self.model.variables {
             if let datamodel::Variable::Aux(aux) = var {
                 let canonical = canonicalize(&aux.ident);
-                let uid = self.uid_manager.alloc(&canonical);
+                let uid = self.state.uid_manager.alloc(&canonical);
                 if existing_uids.contains(&uid) {
                     continue;
                 }
@@ -1265,7 +1311,7 @@ impl<'a> LayoutEngine<'a> {
                         )
                     })?;
 
-                let name = self.display_name(&canonical);
+                let name = self.state.display_name(&canonical);
                 let formatted = format_label_with_line_breaks(&name);
                 let elem = ViewElement::Aux(view_element::Aux {
                     name: formatted,
@@ -1275,8 +1321,8 @@ impl<'a> LayoutEngine<'a> {
                     label_side: LabelSide::Bottom,
                     compat: None,
                 });
-                self.elements.push(elem);
-                self.positions.insert(uid, pos);
+                self.state.elements.push(elem);
+                self.state.positions.insert(uid, pos);
             }
         }
         Ok(())
@@ -1289,12 +1335,12 @@ impl<'a> LayoutEngine<'a> {
         layout: &Layout<String>,
         var_to_node: &HashMap<String, String>,
     ) -> Result<(), String> {
-        let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
+        let existing_uids: HashSet<i32> = self.state.elements.iter().map(|e| e.get_uid()).collect();
 
         for var in &self.model.variables {
             if let datamodel::Variable::Module(m) = var {
                 let canonical = canonicalize(&m.ident);
-                let uid = self.uid_manager.alloc(&canonical);
+                let uid = self.state.uid_manager.alloc(&canonical);
                 if existing_uids.contains(&uid) {
                     continue;
                 }
@@ -1310,7 +1356,7 @@ impl<'a> LayoutEngine<'a> {
                         )
                     })?;
 
-                let name = self.display_name(&canonical);
+                let name = self.state.display_name(&canonical);
                 let formatted = format_label_with_line_breaks(&name);
                 let elem = ViewElement::Module(view_element::Module {
                     name: formatted,
@@ -1319,8 +1365,8 @@ impl<'a> LayoutEngine<'a> {
                     y: pos.y,
                     label_side: LabelSide::Bottom,
                 });
-                self.elements.push(elem);
-                self.positions.insert(uid, pos);
+                self.state.elements.push(elem);
+                self.state.positions.insert(uid, pos);
             }
         }
         Ok(())
@@ -1375,7 +1421,7 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 }
 
-                let from_uid = match self.uid_manager.get_uid(from_ident) {
+                let from_uid = match self.state.uid_manager.get_uid(from_ident) {
                     Some(uid) => uid,
                     None => {
                         if model_var_idents.contains(from_ident) {
@@ -1387,7 +1433,7 @@ impl<'a> LayoutEngine<'a> {
                         continue;
                     }
                 };
-                let to_uid = match self.uid_manager.get_uid(to_ident) {
+                let to_uid = match self.state.uid_manager.get_uid(to_ident) {
                     Some(uid) => uid,
                     None => {
                         if model_var_idents.contains(to_ident) {
@@ -1407,14 +1453,15 @@ impl<'a> LayoutEngine<'a> {
                     ));
                 }
 
-                let link_uid = self.uid_manager.alloc("");
+                let link_uid = self.state.uid_manager.alloc("");
                 let mut shape = LinkShape::Straight;
 
                 // Check for structural stock->flow connections that need an arc
                 if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
-                    let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
-                        (self.positions.get(&from_uid), self.positions.get(&to_uid))
-                    {
+                    let arc_angle = if let (Some(&s_pos), Some(&f_pos)) = (
+                        self.state.positions.get(&from_uid),
+                        self.state.positions.get(&to_uid),
+                    ) {
                         calc_stock_flow_arc_angle(s_pos, f_pos)
                     } else {
                         -45.0
@@ -1429,7 +1476,7 @@ impl<'a> LayoutEngine<'a> {
                     shape,
                     polarity: None,
                 });
-                self.elements.push(link);
+                self.state.elements.push(link);
             }
         }
 
@@ -1445,11 +1492,15 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .filter_map(|var| {
                 let ident = canonicalize(var.get_ident()).into_owned();
-                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+                self.state
+                    .uid_manager
+                    .get_uid(&ident)
+                    .map(|uid| (uid, ident))
             })
             .collect();
 
         let ident_positions: HashMap<String, Position> = self
+            .state
             .positions
             .iter()
             .filter_map(|(uid, pos)| uid_to_ident.get(uid).map(|ident| (ident.clone(), *pos)))
@@ -1461,6 +1512,7 @@ impl<'a> LayoutEngine<'a> {
 
         // Collect element update info (avoid borrow conflict)
         let updates: Vec<(usize, LabelSide)> = self
+            .state
             .elements
             .iter()
             .enumerate()
@@ -1517,7 +1569,7 @@ impl<'a> LayoutEngine<'a> {
             .collect();
 
         for (i, side) in updates {
-            match &mut self.elements[i] {
+            match &mut self.state.elements[i] {
                 ViewElement::Stock(s) => s.label_side = side,
                 ViewElement::Flow(f) => f.label_side = side,
                 ViewElement::Aux(a) => a.label_side = side,
@@ -1530,7 +1582,7 @@ impl<'a> LayoutEngine<'a> {
     /// Determine which sides are available for label placement on a stock,
     /// excluding sides where flows are attached.
     fn calculate_allowed_label_sides_for_stock(&self, stock_ident: &str) -> Vec<LabelSide> {
-        let stock_uid = match self.uid_manager.get_uid(stock_ident) {
+        let stock_uid = match self.state.uid_manager.get_uid(stock_ident) {
             Some(uid) => uid,
             None => {
                 return vec![
@@ -1541,7 +1593,7 @@ impl<'a> LayoutEngine<'a> {
                 ];
             }
         };
-        let stock_pos = match self.positions.get(&stock_uid) {
+        let stock_pos = match self.state.positions.get(&stock_uid) {
             Some(&pos) => pos,
             None => {
                 return vec![
@@ -1566,8 +1618,8 @@ impl<'a> LayoutEngine<'a> {
             .collect();
 
         for flow_ident in &all_flows {
-            if let Some(flow_uid) = self.uid_manager.get_uid(flow_ident)
-                && let Some(&flow_pos) = self.positions.get(&flow_uid)
+            if let Some(flow_uid) = self.state.uid_manager.get_uid(flow_ident)
+                && let Some(&flow_pos) = self.state.positions.get(&flow_uid)
             {
                 let dx = flow_pos.x - stock_pos.x;
                 let dy = flow_pos.y - stock_pos.y;
@@ -1623,12 +1675,15 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .filter_map(|var| {
                 let ident = canonicalize(var.get_ident()).into_owned();
-                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+                self.state
+                    .uid_manager
+                    .get_uid(&ident)
+                    .map(|uid| (uid, ident))
             })
             .collect();
 
         let mut link_map: HashMap<(String, String), usize> = HashMap::new();
-        for (i, elem) in self.elements.iter().enumerate() {
+        for (i, elem) in self.state.elements.iter().enumerate() {
             if let ViewElement::Link(link) = elem {
                 let from_ident = uid_to_ident.get(&link.from_uid).cloned();
                 let to_ident = uid_to_ident.get(&link.to_uid).cloned();
@@ -1652,8 +1707,8 @@ impl<'a> LayoutEngine<'a> {
             let mut sum_y = 0.0;
             let mut count = 0;
             for var in chain {
-                if let Some(uid) = self.uid_manager.get_uid(var)
-                    && let Some(&pos) = self.positions.get(&uid)
+                if let Some(uid) = self.state.uid_manager.get_uid(var)
+                    && let Some(&pos) = self.state.positions.get(&uid)
                 {
                     sum_x += pos.x;
                     sum_y += pos.y;
@@ -1674,18 +1729,20 @@ impl<'a> LayoutEngine<'a> {
                     continue;
                 };
 
-                if let ViewElement::Link(link) = &self.elements[elem_idx] {
+                if let ViewElement::Link(link) = &self.state.elements[elem_idx] {
                     // Don't override existing arcs (e.g. structural stock-flow connections)
                     if matches!(link.shape, LinkShape::Arc(_)) {
                         continue;
                     }
                 }
 
-                let from_uid = self.uid_manager.get_uid(from);
-                let to_uid = self.uid_manager.get_uid(to);
+                let from_uid = self.state.uid_manager.get_uid(from);
+                let to_uid = self.state.uid_manager.get_uid(to);
                 if let (Some(f_uid), Some(t_uid)) = (from_uid, to_uid)
-                    && let (Some(&from_pos), Some(&to_pos)) =
-                        (self.positions.get(&f_uid), self.positions.get(&t_uid))
+                    && let (Some(&from_pos), Some(&to_pos)) = (
+                        self.state.positions.get(&f_uid),
+                        self.state.positions.get(&t_uid),
+                    )
                 {
                     let arc_angle = calculate_loop_arc_angle(
                         from_pos,
@@ -1693,7 +1750,7 @@ impl<'a> LayoutEngine<'a> {
                         loop_center,
                         self.config.loop_curvature_factor,
                     );
-                    if let ViewElement::Link(link) = &mut self.elements[elem_idx] {
+                    if let ViewElement::Link(link) = &mut self.state.elements[elem_idx] {
                         link.shape = LinkShape::Arc(arc_angle);
                     }
                 }
@@ -1711,7 +1768,7 @@ impl<'a> LayoutEngine<'a> {
             bounds.update(cx - hw, cy - hh, cx + hw, cy + hh);
         };
 
-        for elem in &self.elements {
+        for elem in &self.state.elements {
             match elem {
                 ViewElement::Stock(s) => {
                     update(
@@ -1810,19 +1867,6 @@ impl<'a> LayoutEngine<'a> {
         self.bounds.update(cx - hw, cy - hh, cx + hw, cy + hh);
     }
 
-    /// Get or allocate a UID for a variable by its canonical ident.
-    fn get_or_alloc_uid(&mut self, ident: &str) -> i32 {
-        self.uid_manager.alloc(ident)
-    }
-
-    /// Get the display name for a variable, preferring the original case.
-    fn display_name(&self, canonical_ident: &str) -> String {
-        self.display_names
-            .get(canonical_ident)
-            .cloned()
-            .unwrap_or_else(|| canonical_ident.to_string())
-    }
-
     /// Ensure every stock/flow/aux/module variable in the model has a
     /// corresponding rendered view element.
     fn validate_view_completeness(&self) -> Result<(), String> {
@@ -1853,7 +1897,7 @@ impl<'a> LayoutEngine<'a> {
         let mut found_auxes = BTreeSet::new();
         let mut found_modules = BTreeSet::new();
 
-        for elem in &self.elements {
+        for elem in &self.state.elements {
             match elem {
                 ViewElement::Stock(s) => {
                     found_stocks.insert(canonicalize(&s.name).into_owned());
