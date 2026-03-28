@@ -2868,6 +2868,18 @@ fn compute_bounds(elements: &[ViewElement], config: &LayoutConfig) -> (f64, f64,
                     config.cloud_height,
                 );
             }
+            ViewElement::Alias(a) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    a.x,
+                    a.y,
+                    config.aux_width,
+                    config.aux_height,
+                );
+            }
             _ => {}
         }
     }
@@ -3672,13 +3684,17 @@ fn build_stock_flow_from_state(
     config: &LayoutConfig,
     template: &datamodel::StockFlow,
 ) -> datamodel::StockFlow {
-    let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
+    let (bmin_x, bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
     let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+        // Account for elements at negative coordinates (e.g. from imported
+        // or hand-edited views preserved by incremental layout).
+        let vb_x = (bmin_x - DIAGRAM_ORIGIN_MARGIN).min(0.0);
+        let vb_y = (bmin_y - DIAGRAM_ORIGIN_MARGIN).min(0.0);
         Rect {
-            x: 0.0,
-            y: 0.0,
-            width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
-            height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
+            x: vb_x,
+            y: vb_y,
+            width: bmax_x - vb_x + DIAGRAM_ORIGIN_MARGIN,
+            height: bmax_y - vb_y + DIAGRAM_ORIGIN_MARGIN,
         }
     } else {
         Rect::default()

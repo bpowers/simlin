@@ -1484,3 +1484,49 @@ fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
         "fill flow should have cloud endpoints after stock-to-aux kind change"
     );
 }
+
+/// When an existing view has elements at negative coordinates,
+/// build_stock_flow_from_state must produce a view_box that encompasses
+/// them. Previously the view_box was always anchored at (0,0).
+#[test]
+fn test_build_stock_flow_from_state_negative_coordinate_view_box() {
+    let config = LayoutConfig::default();
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+
+    let mut state = LayoutState::from_existing_view(&layout, &model);
+
+    // Move an element to negative coordinates
+    for elem in &mut state.elements {
+        if let ViewElement::Aux(a) = elem
+            && canonicalize(&a.name).as_ref() == "birth_rate"
+        {
+            a.x = -100.0;
+            a.y = -50.0;
+            let uid = a.uid;
+            state.positions.insert(uid, Position::new(-100.0, -50.0));
+        }
+    }
+
+    let result = build_stock_flow_from_state(state, &config, &layout);
+
+    // The view box must encompass the element at (-100, -50)
+    assert!(
+        result.view_box.x <= -100.0,
+        "view_box.x ({}) must be <= -100.0 to encompass element at x=-100",
+        result.view_box.x
+    );
+    assert!(
+        result.view_box.y <= -50.0,
+        "view_box.y ({}) must be <= -50.0 to encompass element at y=-50",
+        result.view_box.y
+    );
+    // The right edge must still encompass the positive elements
+    let right_edge = result.view_box.x + result.view_box.width;
+    assert!(
+        right_edge > 100.0,
+        "view_box right edge ({}) must extend past positive elements",
+        right_edge
+    );
+}
