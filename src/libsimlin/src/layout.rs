@@ -12,10 +12,16 @@ use std::os::raw::c_char;
 
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
+use crate::patch::{convert_json_project_patch, JsonProjectPatch};
 use crate::{clear_out_error, require_project, store_error, SimlinErrorCode, SimlinProject};
 
 /// Generate the best automatic layout for the named model and replace its
 /// views in-place.
+///
+/// When `patch_json` is non-NULL, deserializes it as a JSON project patch
+/// and uses incremental layout (preserving existing element positions) if
+/// the model already has a non-empty view.  When NULL, always generates a
+/// full layout from scratch.
 ///
 /// Preserves the existing zoom level if the model already has a view with
 /// zoom > 0. Works on all targets including WASM (uses a serial fallback
@@ -24,11 +30,13 @@ use crate::{clear_out_error, require_project, store_error, SimlinErrorCode, Siml
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
 /// - `model_name` must be a valid null-terminated UTF-8 string
+/// - `patch_json` may be null; when non-null must be a valid null-terminated UTF-8 JSON string
 /// - `out_error` may be null
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_diagram_sync(
     project: *mut SimlinProject,
     model_name: *const c_char,
+    patch_json: *const c_char,
     out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
@@ -64,6 +72,49 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         }
     };
 
+    // Deserialize the optional patch JSON up front, before acquiring locks.
+    let model_patch = if !patch_json.is_null() {
+        let json_str = match CStr::from_ptr(patch_json).to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("patch_json is not valid UTF-8"),
+                );
+                return;
+            }
+        };
+        let json_patch: JsonProjectPatch = match serde_json::from_str(json_str) {
+            Ok(p) => p,
+            Err(e) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message(format!("failed to parse patch_json: {e}")),
+                );
+                return;
+            }
+        };
+        let engine_patch = match convert_json_project_patch(json_patch) {
+            Ok(p) => p,
+            Err(e) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message(format!("failed to convert patch: {e}")),
+                );
+                return;
+            }
+        };
+        engine_patch
+            .models
+            .into_iter()
+            .find(|m| m.name == model_name_str)
+    } else {
+        None
+    };
+
     let mut datamodel_locked = proj.datamodel.lock().unwrap();
 
     // Check model existence up front so we can distinguish "not found"
@@ -77,14 +128,15 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         return;
     }
 
-    // Preserve existing zoom if the model already has a view
-    let existing_zoom = datamodel_locked
+    // Extract old view info before generating layout
+    let old_view = datamodel_locked
         .get_model(model_name_str)
         .and_then(|m| m.views.first())
         .map(|v| match v {
-            engine::datamodel::View::StockFlow(sf) => sf.zoom,
-        })
-        .filter(|&z| z > 0.0);
+            engine::datamodel::View::StockFlow(sf) => sf,
+        });
+
+    let existing_zoom = old_view.map(|sf| sf.zoom).filter(|&z| z > 0.0);
 
     // Layout generation requires the salsa db for dependency extraction
     // and LTM analysis. The project must have been synced first.
@@ -104,17 +156,35 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
     drop(sync_locked);
 
     let db_state = Some((&mut *db_locked, source_project));
-    let mut layout =
-        match engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state) {
-            Ok(l) => l,
-            Err(msg) => {
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
-                );
-                return;
-            }
-        };
+
+    // Use incremental layout when a patch and existing non-empty view are available
+    let new_view = if let (Some(old_sf), Some(ref mp)) = (old_view, &model_patch) {
+        if !old_sf.elements.is_empty() {
+            let old_sf = old_sf.clone();
+            engine::layout::incremental_layout(
+                &old_sf,
+                &datamodel_locked,
+                model_name_str,
+                mp,
+                db_state,
+            )
+        } else {
+            engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
+        }
+    } else {
+        engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
+    };
+
+    let mut layout = match new_view {
+        Ok(l) => l,
+        Err(msg) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
+            );
+            return;
+        }
+    };
 
     if let Some(zoom) = existing_zoom {
         layout.zoom = zoom;
