@@ -3634,6 +3634,10 @@ pub fn incremental_layout(
     patch: &crate::patch::ModelPatch,
     db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
+    if old_view.elements.is_empty() {
+        return generate_best_layout(project, model_name, db_state);
+    }
+
     let config = LayoutConfig::default();
 
     let not_found = || format!("model '{}' not found in project", model_name);

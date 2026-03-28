@@ -1412,3 +1412,45 @@ fn test_incremental_combined_ops() {
         assert!(uid_set.insert(uid), "duplicate UID {} found", uid);
     }
 }
+
+#[test]
+fn test_incremental_fallback_to_full_layout() {
+    use simlin_engine::ModelPatch;
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let model = project.get_model(MAIN_MODEL).expect("model should exist");
+
+    let empty_view = datamodel::StockFlow {
+        name: None,
+        elements: Vec::new(),
+        view_box: datamodel::Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    };
+
+    let empty_patch = ModelPatch {
+        name: String::new(),
+        ops: Vec::new(),
+    };
+
+    let incremental_result =
+        incremental_layout(&empty_view, &project, MAIN_MODEL, &empty_patch, None)
+            .expect("incremental layout with empty view should succeed");
+
+    let full_result = generate_best_layout(&project, MAIN_MODEL, None)
+        .expect("generate_best_layout should succeed");
+
+    // Both should produce views covering all model variables
+    verify_layout(&incremental_result, model, "incremental fallback");
+    verify_layout(&full_result, model, "full layout");
+
+    assert_eq!(
+        incremental_result.elements.len(),
+        full_result.elements.len(),
+        "fallback should produce the same number of elements as full layout"
+    );
+}
