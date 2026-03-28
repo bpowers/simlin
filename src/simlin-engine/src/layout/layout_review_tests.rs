@@ -8,6 +8,45 @@ use crate::datamodel;
 // Tests for code review feedback fixes
 
 #[test]
+fn test_build_stock_flow_from_state_resets_invalid_zoom() {
+    // When a template view has zoom <= 0 (e.g. from an imported or
+    // hand-authored JSON view), build_stock_flow_from_state should
+    // fall back to 1.0 instead of preserving the invalid value.
+    let config = LayoutConfig::default();
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+
+    // Seed state from the generated layout, then build with a zero-zoom template
+    let state = LayoutState::from_existing_view(&layout, &model);
+    let mut bad_template = layout.clone();
+    bad_template.zoom = 0.0;
+
+    let result = build_stock_flow_from_state(state, &config, &bad_template);
+    assert!(
+        result.zoom > 0.0,
+        "zoom must be positive, got {}",
+        result.zoom
+    );
+    assert!(
+        (result.zoom - 1.0).abs() < f64::EPSILON,
+        "invalid zoom should reset to 1.0, got {}",
+        result.zoom
+    );
+
+    // Also test negative zoom
+    let state2 = LayoutState::from_existing_view(&layout, &model);
+    let mut neg_template = layout;
+    neg_template.zoom = -1.5;
+    let result2 = build_stock_flow_from_state(state2, &config, &neg_template);
+    assert!(
+        (result2.zoom - 1.0).abs() < f64::EPSILON,
+        "negative zoom should reset to 1.0, got {}",
+        result2.zoom
+    );
+}
+
+#[test]
 fn test_apply_deletion_removes_alias_of_deleted_var() {
     // Issue 2: apply_deletion must also remove Alias elements where
     // alias_of_uid == deleted_uid.

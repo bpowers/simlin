@@ -9,7 +9,7 @@ use std::ptr;
 
 use simlin::*;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
+use simlin_engine::{self as engine, datamodel};
 
 use common::open_project_from_datamodel;
 
@@ -347,6 +347,151 @@ fn test_ac7_2_incremental_layout_via_patch_json() {
                              expected ({orig_x},{orig_y}), got ({x},{y})"
                         );
                     }
+                }
+            }
+        }
+
+        simlin_project_unref(proj);
+    }
+}
+
+/// When a project has a model with name "" (common for single-model XMILE imports),
+/// the FFI caller passes "main" and get_model handles the alias. The patch filter
+/// must also honor this alias so that a patch with model name "" is matched when
+/// model_name_str is "main".
+#[test]
+fn test_diagram_sync_main_alias_empty_model_name_patch() {
+    let project = datamodel::Project {
+        name: "alias_test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![datamodel::Model {
+            name: String::new(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: Vec::new(),
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: None,
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: None,
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let proj = open_project_from_datamodel(&project);
+
+    unsafe {
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        // Generate initial layout
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        assert!(err.is_null(), "initial diagram_sync should succeed");
+
+        // Move an element to a distinctive position that a full layout would
+        // never produce. If incremental layout is taken, this position is preserved.
+        // If full layout runs instead, it will be overwritten.
+        const MARKER_X: f64 = 9999.0;
+        const MARKER_Y: f64 = 8888.0;
+        {
+            let mut dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model_mut("main").unwrap();
+            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+                for elem in &mut sf.elements {
+                    if let engine::datamodel::ViewElement::Stock(s) = elem {
+                        if s.name == "level" {
+                            s.x = MARKER_X;
+                            s.y = MARKER_Y;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply patch with model name "" (matching actual stored name, not the alias)
+        let patch_json = r#"{
+            "models": [{
+                "name": "",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "extra", "equation": "42" } }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        err = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        assert!(err.is_null(), "patch should succeed");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Call diagram_sync with "main" and the patch (which uses "")
+        let patch_cstr = CString::new(patch_json).unwrap();
+        err = ptr::null_mut();
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), patch_cstr.as_ptr(), &mut err);
+        assert!(err.is_null(), "incremental diagram_sync should succeed");
+
+        // Verify incremental path was taken: marker position must be preserved
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            match &model.views[0] {
+                engine::datamodel::View::StockFlow(sf) => {
+                    let has_extra = sf
+                        .elements
+                        .iter()
+                        .any(|e| e.get_name().is_some_and(|n| n == "extra"));
+                    assert!(
+                        has_extra,
+                        "newly added 'extra' must appear in the view after incremental layout"
+                    );
+
+                    let level = sf
+                        .elements
+                        .iter()
+                        .find(|e| e.get_name().is_some_and(|n| n == "level"))
+                        .expect("'level' must still be in the view");
+                    let (x, y) = match level {
+                        engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                        _ => panic!("'level' should be a Stock"),
+                    };
+                    assert!(
+                        (x - MARKER_X).abs() < 1.0 && (y - MARKER_Y).abs() < 1.0,
+                        "'level' marker position should be preserved by incremental path: \
+                         expected ({MARKER_X},{MARKER_Y}), got ({x},{y})"
+                    );
                 }
             }
         }

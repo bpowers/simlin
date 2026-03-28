@@ -111,10 +111,13 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         // ProjectPatch may legally contain multiple ModelPatch entries for the
         // same model (e.g. two separate UpsertFlow ops on the same model).
         // Using find() would silently drop all but the first matching entry.
+        // Mirror the alias logic in datamodel::Project::get_model: treat
+        // "main" and "" as equivalent so that patches using the stored model
+        // name ("") are matched when the caller passes "main".
         let matching_ops: Vec<_> = engine_patch
             .models
             .iter()
-            .filter(|m| m.name == model_name_str)
+            .filter(|m| m.name == model_name_str || (model_name_str == "main" && m.name.is_empty()))
             .flat_map(|m| m.ops.iter().cloned())
             .collect();
         if matching_ops.is_empty() {

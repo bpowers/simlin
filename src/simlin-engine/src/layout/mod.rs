@@ -244,6 +244,13 @@ impl LayoutState {
     /// Remove all view elements associated with a deleted variable:
     /// the primary element, any links referencing it, any clouds for
     /// the flow, and internal cloud bookkeeping maps.
+    /// Remove a variable and its associated view elements (clouds, aliases, links)
+    /// from the layout state.
+    ///
+    /// The ident-to-UID mapping is intentionally retained in `uid_manager` so that
+    /// `identify_new_elements` can detect the UID as orphaned (present in uid_manager
+    /// but absent from elements) and rebuild the element with the correct type.
+    /// This is used by the flow-reset and kind-change paths in `incremental_layout`.
     pub fn apply_deletion(&mut self, deleted_ident: &str) {
         let canonical = canonicalize(deleted_ident);
         let deleted_uid = match self.uid_manager.get_uid(&canonical) {
@@ -3683,7 +3690,11 @@ fn build_stock_flow_from_state(
         name: template.name.clone(),
         elements: state.elements,
         view_box,
-        zoom: template.zoom,
+        zoom: if template.zoom > 0.0 {
+            template.zoom
+        } else {
+            1.0
+        },
         use_lettered_polarity: template.use_lettered_polarity,
         font: template.font.clone(),
         sketch_compat: template.sketch_compat.clone(),
