@@ -1784,8 +1784,7 @@ fn compute_bounds(elements: &[ViewElement], config: &LayoutConfig) -> (f64, f64,
     (min_x, min_y, max_x, max_y)
 }
 
-/// Compose all layout blocks into a complete stock-flow diagram, producing
-/// identical output to the `LayoutEngine::generate_layout` pipeline.
+/// Compose all layout blocks into a complete stock-flow diagram.
 pub fn fresh_layout(
     model: &datamodel::Model,
     metadata: &ComputedMetadata,
