@@ -250,22 +250,29 @@ impl LayoutState {
 
         self.positions.remove(&deleted_uid);
 
-        self.elements.retain(|elem| {
-            match elem {
-                // Remove the primary element whose UID matches
-                ViewElement::Aux(a) if a.uid == deleted_uid => false,
-                ViewElement::Stock(s) if s.uid == deleted_uid => false,
-                ViewElement::Flow(f) if f.uid == deleted_uid => false,
-                ViewElement::Module(m) if m.uid == deleted_uid => false,
-                // Remove links referencing the deleted UID as source or target
-                ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => {
-                    false
-                }
-                // Remove clouds attached to this flow
-                ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
-                _ => true,
-            }
+        // Collect UIDs of clouds being removed so we can clean up their positions
+        let removed_cloud_uids: Vec<i32> = self
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Cloud(c) if c.flow_uid == deleted_uid => Some(c.uid),
+                _ => None,
+            })
+            .collect();
+
+        self.elements.retain(|elem| match elem {
+            ViewElement::Aux(a) if a.uid == deleted_uid => false,
+            ViewElement::Stock(s) if s.uid == deleted_uid => false,
+            ViewElement::Flow(f) if f.uid == deleted_uid => false,
+            ViewElement::Module(m) if m.uid == deleted_uid => false,
+            ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => false,
+            ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
+            _ => true,
         });
+
+        for cloud_uid in &removed_cloud_uids {
+            self.positions.remove(cloud_uid);
+        }
 
         // Clean up cloud bookkeeping for the deleted flow
         let canonical_str = canonical.into_owned();
@@ -5624,5 +5631,284 @@ mod tests {
         );
         let metadata = metadata.unwrap();
         assert!(!metadata.dep_graph.is_empty());
+    }
+
+    /// Build a LayoutState with known elements for deletion tests.
+    /// Layout: stock(uid=1) --flow(uid=2)--> with aux(uid=3) feeding
+    /// into the flow via a link, plus clouds on the flow endpoints,
+    /// and a link from aux to flow.
+    fn make_deletion_state() -> LayoutState {
+        let mut state = LayoutState {
+            uid_manager: UidManager::new(),
+            display_names: HashMap::new(),
+            elements: Vec::new(),
+            positions: HashMap::new(),
+            flow_templates: HashMap::new(),
+            cloud_ident_to_uid: HashMap::new(),
+            cloud_ident_to_flow_ident: HashMap::new(),
+            flow_ident_to_clouds: HashMap::new(),
+        };
+
+        // Register named elements
+        state.uid_manager.add(1, "population");
+        state.uid_manager.add(2, "births");
+        state.uid_manager.add(3, "birth_rate");
+        // Unnamed elements (clouds and links) get sequential UIDs
+        state.uid_manager.add(10, "");
+        state.uid_manager.add(11, "");
+        state.uid_manager.add(20, "");
+
+        state
+            .display_names
+            .insert("population".into(), "population".into());
+        state.display_names.insert("births".into(), "births".into());
+        state
+            .display_names
+            .insert("birth_rate".into(), "birth_rate".into());
+
+        // Stock
+        state.elements.push(ViewElement::Stock(view_element::Stock {
+            name: "population".into(),
+            uid: 1,
+            x: 100.0,
+            y: 100.0,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        }));
+        state.positions.insert(1, Position::new(100.0, 100.0));
+
+        // Flow
+        state.elements.push(ViewElement::Flow(view_element::Flow {
+            name: "births".into(),
+            uid: 2,
+            x: 50.0,
+            y: 100.0,
+            label_side: LabelSide::Bottom,
+            points: vec![
+                FlowPoint {
+                    x: 0.0,
+                    y: 100.0,
+                    attached_to_uid: Some(10),
+                },
+                FlowPoint {
+                    x: 100.0,
+                    y: 100.0,
+                    attached_to_uid: Some(1),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        }));
+        state.positions.insert(2, Position::new(50.0, 100.0));
+
+        // Aux
+        state.elements.push(ViewElement::Aux(view_element::Aux {
+            name: "birth_rate".into(),
+            uid: 3,
+            x: 50.0,
+            y: 50.0,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        }));
+        state.positions.insert(3, Position::new(50.0, 50.0));
+
+        // Source cloud for the flow
+        state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            uid: 10,
+            flow_uid: 2,
+            x: 0.0,
+            y: 100.0,
+            compat: None,
+        }));
+        state.positions.insert(10, Position::new(0.0, 100.0));
+        state.cloud_ident_to_uid.insert("__cloud_10".into(), 10);
+        state
+            .cloud_ident_to_flow_ident
+            .insert("__cloud_10".into(), "births".into());
+        state
+            .flow_ident_to_clouds
+            .entry("births".into())
+            .or_default()
+            .push("__cloud_10".into());
+
+        // Sink cloud for the flow
+        state.elements.push(ViewElement::Cloud(view_element::Cloud {
+            uid: 11,
+            flow_uid: 2,
+            x: 100.0,
+            y: 100.0,
+            compat: None,
+        }));
+        state.positions.insert(11, Position::new(100.0, 100.0));
+        state.cloud_ident_to_uid.insert("__cloud_11".into(), 11);
+        state
+            .cloud_ident_to_flow_ident
+            .insert("__cloud_11".into(), "births".into());
+        state
+            .flow_ident_to_clouds
+            .entry("births".into())
+            .or_default()
+            .push("__cloud_11".into());
+
+        // Link from birth_rate(3) to births(2)
+        state.elements.push(ViewElement::Link(view_element::Link {
+            uid: 20,
+            from_uid: 3,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+            polarity: None,
+        }));
+
+        state
+    }
+
+    #[test]
+    fn test_apply_deletion_removes_aux_element() {
+        let mut state = make_deletion_state();
+
+        let had_aux = state
+            .elements
+            .iter()
+            .any(|e| matches!(e, ViewElement::Aux(a) if a.uid == 3));
+        assert!(had_aux, "precondition: aux should exist before deletion");
+
+        state.apply_deletion("birth_rate");
+
+        let has_aux = state
+            .elements
+            .iter()
+            .any(|e| matches!(e, ViewElement::Aux(a) if a.uid == 3));
+        assert!(!has_aux, "aux element should be removed after deletion");
+        assert!(
+            !state.positions.contains_key(&3),
+            "position should be removed"
+        );
+    }
+
+    #[test]
+    fn test_apply_deletion_removes_links_referencing_deleted_uid() {
+        let mut state = make_deletion_state();
+
+        let link_count_before = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Link(_)))
+            .count();
+        assert_eq!(link_count_before, 1, "precondition: one link");
+
+        // Delete the aux that is the source of the link
+        state.apply_deletion("birth_rate");
+
+        let link_count_after = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Link(_)))
+            .count();
+        assert_eq!(
+            link_count_after, 0,
+            "link from deleted element should be removed"
+        );
+    }
+
+    #[test]
+    fn test_apply_deletion_removes_links_to_deleted_uid() {
+        let mut state = make_deletion_state();
+
+        // Delete the flow that is the target of the link
+        state.apply_deletion("births");
+
+        let link_count = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Link(_)))
+            .count();
+        assert_eq!(link_count, 0, "link to deleted element should be removed");
+    }
+
+    #[test]
+    fn test_apply_deletion_removes_clouds_for_deleted_flow() {
+        let mut state = make_deletion_state();
+
+        let cloud_count_before = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Cloud(_)))
+            .count();
+        assert_eq!(cloud_count_before, 2, "precondition: two clouds");
+
+        state.apply_deletion("births");
+
+        let cloud_count_after = state
+            .elements
+            .iter()
+            .filter(|e| matches!(e, ViewElement::Cloud(_)))
+            .count();
+        assert_eq!(
+            cloud_count_after, 0,
+            "clouds for deleted flow should be removed"
+        );
+        assert!(
+            state.flow_ident_to_clouds.is_empty(),
+            "flow_ident_to_clouds should be cleaned up"
+        );
+        assert!(
+            state.cloud_ident_to_uid.is_empty(),
+            "cloud_ident_to_uid should be cleaned up"
+        );
+        assert!(
+            state.cloud_ident_to_flow_ident.is_empty(),
+            "cloud_ident_to_flow_ident should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn test_apply_deletion_noop_for_unknown_ident() {
+        let mut state = make_deletion_state();
+        let elem_count_before = state.elements.len();
+
+        state.apply_deletion("nonexistent_var");
+
+        assert_eq!(
+            state.elements.len(),
+            elem_count_before,
+            "deleting unknown ident should be a no-op"
+        );
+    }
+
+    #[test]
+    fn test_apply_deletion_all_chain_elements() {
+        let mut state = make_deletion_state();
+
+        // Delete everything: aux, flow, stock -- order matters for
+        // verifying cascading cleanup
+        state.apply_deletion("birth_rate");
+        state.apply_deletion("births");
+        state.apply_deletion("population");
+
+        assert!(
+            state.elements.is_empty(),
+            "all elements should be removed after deleting entire chain; remaining: {:?}",
+            state
+                .elements
+                .iter()
+                .map(|e| e.get_uid())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            state.positions.is_empty(),
+            "all positions should be removed"
+        );
+        assert!(
+            state.cloud_ident_to_uid.is_empty(),
+            "cloud maps should be empty"
+        );
+        assert!(
+            state.cloud_ident_to_flow_ident.is_empty(),
+            "cloud flow maps should be empty"
+        );
+        assert!(
+            state.flow_ident_to_clouds.is_empty(),
+            "flow cloud maps should be empty"
+        );
     }
 }
