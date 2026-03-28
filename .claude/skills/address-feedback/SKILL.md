@@ -1,5 +1,5 @@
 ---
-name: address-feedback-local
+name: address-feedback
 description: Improve the current branch's changes by getting code reviews in a loop until all feedback is addressed
 ---
 
@@ -37,12 +37,10 @@ git push
 
 Then run both reviews and collect their output:
 
-**Codex review** -- run this EXACT command with a 30-minute timeout:
+**Codex review** -- run with a 30-minute timeout:
 ```bash
-codex -c 'model="gpt-5.4"' -c 'model_reasoning_effort="xhigh"' exec review --json --base origin/main | tee /tmp/codex.stdout | jq -r 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text'
+./scripts/codex-review
 ```
-
-If that command can't be run exactly, return an error to the user, as it means we need to update our environment, skills or prompts.
 
 **Claude review** -- launch a sub-agent that invokes the `/review` skill.  Use the Task tool with `subagent_type: "general-purpose"` and a prompt like:
 
@@ -69,7 +67,9 @@ Ignore suggestions that:
 - Would add unnecessary complexity
 - The reviewer convinced itself weren't actually problems
 
-**Deferred feedback**: Suggestions that are valid but out of scope for this PR (theoretical edge cases, future enhancements, design limitations that don't affect current usage) must NOT be silently dropped. For each such item, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a detailed description of the concern. The agent will check for duplicates and file a GitHub issue or tech-debt entry as appropriate.
+**Deferred feedback**: Only defer feedback that is genuinely unrelated to this PR's changes -- pre-existing issues in untouched code, future feature requests, or theoretical concerns about code paths this PR does not introduce or modify. For each deferred item, spawn the `track-issue` agent (via the Task tool with `subagent_type: "track-issue"`) with a detailed description.
+
+**CRITICAL**: P0/P1/P2 feedback about code introduced or modified by THIS PR must NEVER be deferred. If a reviewer flags a correctness, data-loss, or behavioral bug in code that this branch touches, fix it in this review cycle. Deferring P1 feedback on your own changes is not acceptable -- it means shipping a known bug. When in doubt about whether feedback is "in scope", err on the side of fixing it.
 
 If ANY feedback would genuinely improve the code:
 - Think deeply about each piece of feedback
