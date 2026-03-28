@@ -993,16 +993,45 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
         }
     }
 
+    // Build alias UID -> primary variable UID mapping so that old links
+    // targeting aliases are recognized as semantically equivalent to the
+    // primary variable link. Without this, imported views with causal links
+    // terminating on aliases would lose those links after an incremental edit.
+    let alias_to_primary: HashMap<i32, i32> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Alias(a) => Some((a.uid, a.alias_of_uid)),
+            _ => None,
+        })
+        .collect();
+
     // Remove all old links from elements
     state
         .elements
         .retain(|elem| !matches!(elem, ViewElement::Link(_)));
+
+    // Track which old links have been consumed so each is used at most once.
+    let mut consumed_old_links: HashSet<(i32, i32)> = HashSet::new();
 
     // Add back preserved links (unchanged) and create new links
     for &(from_uid, to_uid) in &new_edges {
         if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
             // Preserved: keep the old link exactly as-is
             state.elements.push(old_link.clone());
+            consumed_old_links.insert((from_uid, to_uid));
+        } else if let Some((&key, old_link)) = old_links.iter().find(|&(&(of, ot), _)| {
+            if consumed_old_links.contains(&(of, ot)) {
+                return false;
+            }
+            let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
+            let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
+            rf == from_uid && rt == to_uid
+        }) {
+            // Preserved via alias: the old link targets an alias whose primary
+            // variable matches this dependency edge. Keep the alias link as-is.
+            state.elements.push(old_link.clone());
+            consumed_old_links.insert(key);
         } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
             // Added: create new link with default shape
             let link_uid = state.uid_manager.alloc("");
@@ -3744,6 +3773,21 @@ pub fn incremental_layout(
 ) -> Result<datamodel::StockFlow, String> {
     if old_view.elements.is_empty() {
         return generate_best_layout(project, model_name, db_state);
+    }
+
+    // View-only patches (UpsertView/DeleteView) don't affect model variables,
+    // so the diagram should be returned unchanged. Without this guard, the
+    // diff_connectors and optimize_labels passes would rewrite connectors and
+    // labels even though nothing structurally changed.
+    let has_variable_ops = patch.ops.iter().any(|op| {
+        !matches!(
+            op,
+            crate::patch::ModelOperation::UpsertView { .. }
+                | crate::patch::ModelOperation::DeleteView { .. }
+        )
+    });
+    if !has_variable_ops {
+        return Ok(old_view.clone());
     }
 
     let config = LayoutConfig::default();

@@ -1485,6 +1485,168 @@ fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
     );
 }
 
+/// diff_connectors must preserve links that terminate on alias UIDs.
+/// In imported Vensim/XMILE views, causal links often target aliases.
+/// The dep graph uses primary variable UIDs, so alias-targeted links
+/// must be recognized as semantically equivalent.
+#[test]
+fn test_diff_connectors_preserves_alias_links() {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    // Variable "a" (uid=1) depends on "b" (uid=2)
+    state.uid_manager.add(1, "a");
+    state.uid_manager.add(2, "b");
+    state.display_names.insert("a".into(), "a".into());
+    state.display_names.insert("b".into(), "b".into());
+
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "a".into(),
+        uid: 1,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(100.0, 100.0));
+
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "b".into(),
+        uid: 2,
+        x: 300.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(2, Position::new(300.0, 100.0));
+
+    // Alias of "b" at uid=10
+    let alias_uid = 10;
+    state.uid_manager.add(alias_uid, "");
+    state.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias_uid,
+        alias_of_uid: 2,
+        x: 200.0,
+        y: 200.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(alias_uid, Position::new(200.0, 200.0));
+
+    // Existing link from "b" primary (uid=2) to alias of "b" is not interesting.
+    // What matters: link from "a" to alias_of_b (instead of from "a" to "b" primary)
+    let link_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: link_uid,
+        from_uid: 2,
+        to_uid: 1,
+        shape: view_element::LinkShape::Arc(45.0),
+        polarity: None,
+    }));
+
+    // Replace with a link from alias_of_b to "a"
+    state
+        .elements
+        .retain(|e| !matches!(e, ViewElement::Link(_)));
+    let alias_link_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: alias_link_uid,
+        from_uid: alias_uid, // from alias of b
+        to_uid: 1,           // to a
+        shape: view_element::LinkShape::Arc(30.0),
+        polarity: None,
+    }));
+
+    // Metadata: "a" depends on "b" (dep_graph: a -> [b])
+    let mut metadata = ComputedMetadata::new_empty();
+    metadata
+        .dep_graph
+        .insert("a".to_string(), ["b".to_string()].into_iter().collect());
+
+    diff_connectors(&mut state, &metadata);
+
+    // The link from alias_of_b to "a" should be preserved (not replaced by b->a)
+    let alias_link = state
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Link(l) if l.from_uid == alias_uid && l.to_uid == 1));
+    assert!(
+        alias_link.is_some(),
+        "link from alias of b (uid={}) to a (uid=1) should be preserved",
+        alias_uid
+    );
+
+    // The original arc shape should be preserved
+    if let Some(ViewElement::Link(l)) = alias_link {
+        assert!(
+            matches!(l.shape, view_element::LinkShape::Arc(angle) if (angle - 30.0).abs() < 0.01),
+            "alias link shape should be preserved, got {:?}",
+            l.shape
+        );
+    }
+}
+
+/// When a patch contains only view ops (UpsertView/DeleteView), the
+/// incremental layout must return the old view unchanged. The
+/// diff_connectors and optimize_labels passes should not run.
+#[test]
+fn test_incremental_layout_view_only_patch_returns_unchanged() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let old_view =
+        generate_layout(&project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Move an element to a distinctive position
+    let mut modified_view = old_view.clone();
+    for elem in &mut modified_view.elements {
+        if let ViewElement::Aux(a) = elem
+            && canonicalize(&a.name).as_ref() == "birth_rate"
+        {
+            a.x = 5555.0;
+            a.y = 4444.0;
+        }
+    }
+
+    // Create a view-only patch
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![crate::patch::ModelOperation::UpsertView {
+            index: 0,
+            view: datamodel::View::StockFlow(old_view.clone()),
+        }],
+    };
+
+    let result = incremental_layout(&modified_view, &project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    // The view should be returned unchanged (same as modified_view, not rebuilt)
+    let birth_rate = result
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "birth_rate" => Some(a),
+            _ => None,
+        })
+        .expect("birth_rate should be in result");
+
+    assert!(
+        (birth_rate.x - 5555.0).abs() < 0.01 && (birth_rate.y - 4444.0).abs() < 0.01,
+        "view-only patch should return the old view unchanged, got ({}, {})",
+        birth_rate.x,
+        birth_rate.y
+    );
+}
+
 /// When an existing view has elements at negative coordinates,
 /// build_stock_flow_from_state must produce a view_box that encompasses
 /// them. Previously the view_box was always anchored at (0,0).
