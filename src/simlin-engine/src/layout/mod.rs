@@ -424,7 +424,6 @@ pub fn compute_new_element_positions(
         metadata,
         new_elements,
         &new_set,
-        &bbox_min,
         &bbox_max,
         &mut result,
     );
@@ -455,16 +454,20 @@ fn existing_bounding_box(state: &LayoutState) -> (Position, Position) {
     (Position::new(min_x, min_y), Position::new(max_x, max_y))
 }
 
-/// Collect positions of existing elements connected to a given ident
-/// via dep_graph (things `ident` depends on) and reverse_dep_graph
+/// Collect (uid, position) pairs for existing elements connected to a given
+/// ident via dep_graph (things `ident` depends on) and reverse_dep_graph
 /// (things that depend on `ident`), excluding other new elements.
+///
+/// Returning UIDs alongside positions lets callers build grouping keys
+/// directly from stable identifiers rather than doing a position-based
+/// reverse lookup.
 fn connected_existing_positions(
     state: &LayoutState,
     metadata: &ComputedMetadata,
     ident: &str,
     new_set: &HashSet<&str>,
-) -> Vec<Position> {
-    let mut positions = Vec::new();
+) -> Vec<(i32, Position)> {
+    let mut pairs = Vec::new();
     let mut seen = HashSet::new();
 
     // Forward: things this element depends on
@@ -476,7 +479,7 @@ fn connected_existing_positions(
             if let Some(uid) = state.uid_manager.get_uid(dep)
                 && let Some(&pos) = state.positions.get(&uid)
             {
-                positions.push(pos);
+                pairs.push((uid, pos));
             }
         }
     }
@@ -490,12 +493,12 @@ fn connected_existing_positions(
             if let Some(uid) = state.uid_manager.get_uid(dep)
                 && let Some(&pos) = state.positions.get(&uid)
             {
-                positions.push(pos);
+                pairs.push((uid, pos));
             }
         }
     }
 
-    positions
+    pairs
 }
 
 /// Centroid of a non-empty set of positions.
@@ -536,20 +539,13 @@ fn place_new_point_elements(
             continue;
         }
 
-        let center = centroid(&connected);
+        let positions: Vec<Position> = connected.iter().map(|(_, p)| *p).collect();
+        let center = centroid(&positions);
         ident_centroids.insert(ident.clone(), center);
 
-        // Build a sorted key from connected existing UIDs for grouping
-        let mut uid_key: Vec<i32> = connected
-            .iter()
-            .filter_map(|pos| {
-                state
-                    .positions
-                    .iter()
-                    .find(|(_, p)| (p.x - pos.x).abs() < 0.001 && (p.y - pos.y).abs() < 0.001)
-                    .map(|(&uid, _)| uid)
-            })
-            .collect();
+        // Build a sorted UID key for grouping elements that share the same
+        // connection set, so they can be spread into a ring rather than stacked.
+        let mut uid_key: Vec<i32> = connected.iter().map(|(uid, _)| *uid).collect();
         uid_key.sort();
         uid_key.dedup();
 
@@ -591,7 +587,6 @@ fn place_new_chain_elements(
     metadata: &ComputedMetadata,
     new_elements: &NewElements,
     new_set: &HashSet<&str>,
-    _bbox_min: &Position,
     bbox_max: &Position,
     result: &mut HashMap<String, Position>,
 ) {
@@ -605,7 +600,8 @@ fn place_new_chain_elements(
             let pos = Position::new(bbox_max.x + 150.0, bbox_max.y + offset_y);
             result.insert(stock_ident.clone(), pos);
         } else {
-            let center = centroid(&connected);
+            let positions: Vec<Position> = connected.iter().map(|(_, p)| *p).collect();
+            let center = centroid(&positions);
             result.insert(
                 stock_ident.clone(),
                 Position::new(center.x + offset_x, center.y + offset_y),
@@ -619,7 +615,8 @@ fn place_new_chain_elements(
             let pos = Position::new(bbox_max.x + 200.0, bbox_max.y + offset_y);
             result.insert(flow_ident.clone(), pos);
         } else {
-            let center = centroid(&connected);
+            let positions: Vec<Position> = connected.iter().map(|(_, p)| *p).collect();
+            let center = centroid(&positions);
             result.insert(
                 flow_ident.clone(),
                 Position::new(center.x + offset_x, center.y),
@@ -3577,11 +3574,42 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
     annealing::count_crossings(&segments)
 }
 
+/// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
+/// metadata (name, zoom, font, sketch_compat) from `template`.
+///
+/// The view box is derived from the bounding box of `state.elements`; an
+/// empty or degenerate element set produces a zero-area default box.
+fn build_stock_flow_from_state(
+    state: LayoutState,
+    config: &LayoutConfig,
+    template: &datamodel::StockFlow,
+) -> datamodel::StockFlow {
+    let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
+    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
+            height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
+        }
+    } else {
+        Rect::default()
+    };
+    datamodel::StockFlow {
+        name: template.name.clone(),
+        elements: state.elements,
+        view_box,
+        zoom: template.zoom,
+        use_lettered_polarity: template.use_lettered_polarity,
+        font: template.font.clone(),
+        sketch_compat: template.sketch_compat.clone(),
+    }
+}
+
 /// Seeds for parallel layout generation. Each seed produces a different SFDP
 /// layout; the one with fewest connector crossings is selected.
 const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 
-/// Generate a complete stock-flow diagram layout for a model using a single
 /// Apply a model patch incrementally to an existing diagram view,
 /// preserving existing element positions and only placing new or
 /// modified elements.
@@ -3643,28 +3671,7 @@ pub fn incremental_layout(
         optimize_labels(&mut state, model, &metadata);
         apply_loop_curvature(&mut state, &config, model, &metadata);
         validate_view_completeness(&state, model)?;
-
-        let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, &config);
-        let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
-                height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
-            }
-        } else {
-            Rect::default()
-        };
-
-        return Ok(datamodel::StockFlow {
-            name: old_view.name.clone(),
-            elements: state.elements,
-            view_box,
-            zoom: old_view.zoom,
-            use_lettered_polarity: old_view.use_lettered_polarity,
-            font: old_view.font.clone(),
-            sketch_compat: old_view.sketch_compat.clone(),
-        });
+        return Ok(build_stock_flow_from_state(state, &config, old_view));
     }
 
     let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
@@ -3792,29 +3799,10 @@ pub fn incremental_layout(
     validate_view_completeness(&state, model)?;
 
     // Step 9: Build StockFlow
-    let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, &config);
-    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
-            height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
-        }
-    } else {
-        Rect::default()
-    };
-
-    Ok(datamodel::StockFlow {
-        name: old_view.name.clone(),
-        elements: state.elements,
-        view_box,
-        zoom: old_view.zoom,
-        use_lettered_polarity: old_view.use_lettered_polarity,
-        font: old_view.font.clone(),
-        sketch_compat: old_view.sketch_compat.clone(),
-    })
+    Ok(build_stock_flow_from_state(state, &config, old_view))
 }
 
+/// Generate a complete stock-flow diagram layout for a model using a single
 /// seed. This is the fast path; for higher-quality results use
 /// [`generate_best_layout`] which tries multiple seeds in parallel.
 ///
