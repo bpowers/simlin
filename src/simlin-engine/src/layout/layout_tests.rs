@@ -3244,3 +3244,641 @@ fn test_apply_rename_flow() {
     assert_eq!(state.uid_manager.get_uid("arrivals"), Some(2));
     assert_eq!(state.uid_manager.get_uid("births"), None);
 }
+
+// --- diff_connectors tests ---
+
+/// Build a LayoutState and ComputedMetadata for connector diff tests.
+///
+/// Model:  birth_rate(3) -> births(2) -> population(1)
+///                          death_rate(5) -> deaths(4) -> population(1)
+///
+/// Links: birth_rate->births (uid=20, Arc(45.0)),
+///        death_rate->deaths (uid=21, Straight)
+///
+/// Stock-flow structural edges (population<->births, population<->deaths)
+/// are NOT represented as links.
+fn make_connector_diff_state() -> (LayoutState, ComputedMetadata) {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    state.uid_manager.add(1, "population");
+    state.uid_manager.add(2, "births");
+    state.uid_manager.add(3, "birth_rate");
+    state.uid_manager.add(4, "deaths");
+    state.uid_manager.add(5, "death_rate");
+    state.uid_manager.add(20, "");
+    state.uid_manager.add(21, "");
+
+    state
+        .display_names
+        .insert("population".into(), "population".into());
+    state.display_names.insert("births".into(), "births".into());
+    state
+        .display_names
+        .insert("birth_rate".into(), "birth_rate".into());
+    state.display_names.insert("deaths".into(), "deaths".into());
+    state
+        .display_names
+        .insert("death_rate".into(), "death_rate".into());
+
+    // Stock
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "population".into(),
+        uid: 1,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(200.0, 100.0));
+
+    // Flow births
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "births".into(),
+        uid: 2,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 50.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+            FlowPoint {
+                x: 200.0,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(100.0, 100.0));
+
+    // Aux birth_rate
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "birth_rate".into(),
+        uid: 3,
+        x: 100.0,
+        y: 50.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(3, Position::new(100.0, 50.0));
+
+    // Flow deaths
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "deaths".into(),
+        uid: 4,
+        x: 300.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 200.0,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+            FlowPoint {
+                x: 400.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(4, Position::new(300.0, 100.0));
+
+    // Aux death_rate
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "death_rate".into(),
+        uid: 5,
+        x: 300.0,
+        y: 50.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(5, Position::new(300.0, 50.0));
+
+    // Link: birth_rate -> births with custom Arc shape
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: 20,
+        from_uid: 3,
+        to_uid: 2,
+        shape: LinkShape::Arc(45.0),
+        polarity: Some(view_element::LinkPolarity::Positive),
+    }));
+
+    // Link: death_rate -> deaths (straight)
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: 21,
+        from_uid: 5,
+        to_uid: 4,
+        shape: LinkShape::Straight,
+        polarity: None,
+    }));
+
+    // Structural stock->flow links (population->births, population->deaths)
+    // These use Arc shapes in the standard layout.
+    state.uid_manager.add(22, "");
+    state.uid_manager.add(23, "");
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: 22,
+        from_uid: 1,
+        to_uid: 2,
+        shape: LinkShape::Arc(-45.0),
+        polarity: None,
+    }));
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: 23,
+        from_uid: 1,
+        to_uid: 4,
+        shape: LinkShape::Arc(-45.0),
+        polarity: None,
+    }));
+
+    // Build matching metadata
+    let mut dep_graph = BTreeMap::new();
+    // births depends on population and birth_rate
+    dep_graph.insert(
+        "births".into(),
+        BTreeSet::from(["population".into(), "birth_rate".into()]),
+    );
+    // deaths depends on population and death_rate
+    dep_graph.insert(
+        "deaths".into(),
+        BTreeSet::from(["population".into(), "death_rate".into()]),
+    );
+    // population depends on births and deaths (structural stock-flow edges)
+    dep_graph.insert(
+        "population".into(),
+        BTreeSet::from(["births".into(), "deaths".into()]),
+    );
+
+    let metadata = ComputedMetadata {
+        chains: Vec::new(),
+        feedback_loops: Vec::new(),
+        dominant_periods: Vec::new(),
+        dep_graph,
+        reverse_dep_graph: BTreeMap::new(),
+        constants: BTreeSet::new(),
+        stock_to_inflows: HashMap::from([("population".into(), vec!["births".into()])]),
+        stock_to_outflows: HashMap::from([("population".into(), vec!["deaths".into()])]),
+        flow_to_stocks: HashMap::from([
+            ("births".into(), (None, Some("population".to_string()))),
+            ("deaths".into(), (Some("population".to_string()), None)),
+        ]),
+    };
+
+    (state, metadata)
+}
+
+fn make_connector_diff_model() -> datamodel::Model {
+    datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "population".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["births".to_string()],
+                outflows: vec!["deaths".to_string()],
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "births".to_string(),
+                equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
+                ai_state: None,
+                uid: Some(2),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "birth_rate".to_string(),
+                equation: datamodel::Equation::Scalar("0.03".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
+                ai_state: None,
+                uid: Some(3),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "deaths".to_string(),
+                equation: datamodel::Equation::Scalar("population * death_rate".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
+                ai_state: None,
+                uid: Some(4),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "death_rate".to_string(),
+                equation: datamodel::Equation::Scalar("0.01".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..datamodel::Compat::default()
+                },
+                ai_state: None,
+                uid: Some(5),
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    }
+}
+
+#[test]
+fn test_diff_connectors_preserves_existing_links() {
+    let (mut state, metadata) = make_connector_diff_state();
+    let model = make_connector_diff_model();
+
+    diff_connectors(&mut state, &model, &metadata);
+
+    // birth_rate(3)->births(2) should still exist with Arc(45.0) and Positive polarity
+    let link_br = state
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 3 && l.to_uid == 2));
+    assert!(
+        link_br.is_some(),
+        "birth_rate->births link should be preserved"
+    );
+    if let Some(ViewElement::Link(l)) = link_br {
+        assert_eq!(
+            l.shape,
+            LinkShape::Arc(45.0),
+            "arc shape should be preserved"
+        );
+        assert_eq!(
+            l.polarity,
+            Some(view_element::LinkPolarity::Positive),
+            "polarity should be preserved"
+        );
+    }
+
+    // death_rate(5)->deaths(4) should still exist with Straight shape
+    let link_dr = state
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 5 && l.to_uid == 4));
+    assert!(
+        link_dr.is_some(),
+        "death_rate->deaths link should be preserved"
+    );
+    if let Some(ViewElement::Link(l)) = link_dr {
+        assert_eq!(
+            l.shape,
+            LinkShape::Straight,
+            "straight shape should be preserved"
+        );
+        assert_eq!(l.polarity, None, "None polarity should be preserved");
+    }
+}
+
+#[test]
+fn test_diff_connectors_removes_stale_links() {
+    let (mut state, mut metadata) = make_connector_diff_state();
+    let model = make_connector_diff_model();
+
+    // Remove death_rate from the dep_graph for deaths, so the
+    // death_rate->deaths link should be removed
+    if let Some(deps) = metadata.dep_graph.get_mut("deaths") {
+        deps.remove("death_rate");
+    }
+
+    diff_connectors(&mut state, &model, &metadata);
+
+    // death_rate->deaths link should no longer exist
+    let link_dr = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 5 && l.to_uid == 4));
+    assert!(!link_dr, "death_rate->deaths link should be removed");
+
+    // birth_rate->births should still be preserved
+    let link_br = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 3 && l.to_uid == 2));
+    assert!(link_br, "birth_rate->births link should be preserved");
+}
+
+#[test]
+fn test_diff_connectors_adds_new_links() {
+    let (mut state, mut metadata) = make_connector_diff_state();
+    let model = make_connector_diff_model();
+
+    // Add a new dependency: births also depends on death_rate (contrived)
+    if let Some(deps) = metadata.dep_graph.get_mut("births") {
+        deps.insert("death_rate".into());
+    }
+
+    let link_count_before = state
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Link(_)))
+        .count();
+    assert_eq!(link_count_before, 4, "precondition: four links");
+
+    diff_connectors(&mut state, &model, &metadata);
+
+    // New link: death_rate(5)->births(2)
+    let new_link = state
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 5 && l.to_uid == 2));
+    assert!(
+        new_link.is_some(),
+        "new death_rate->births link should be created"
+    );
+    if let Some(ViewElement::Link(l)) = new_link {
+        assert_eq!(
+            l.shape,
+            LinkShape::Straight,
+            "new non-structural link should be Straight"
+        );
+    }
+
+    // Total should now be 5 links (4 existing + 1 new)
+    let link_count_after = state
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Link(_)))
+        .count();
+    assert_eq!(link_count_after, 5, "should have five links after addition");
+}
+
+#[test]
+fn test_diff_connectors_noop_same_dep_graph() {
+    let (mut state, metadata) = make_connector_diff_state();
+    let model = make_connector_diff_model();
+
+    // Snapshot element UIDs and link details before diff
+    let links_before: Vec<(i32, i32, LinkShape)> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Link(l) => Some((l.from_uid, l.to_uid, l.shape.clone())),
+            _ => None,
+        })
+        .collect();
+    let total_before = state.elements.len();
+
+    diff_connectors(&mut state, &model, &metadata);
+
+    let links_after: Vec<(i32, i32, LinkShape)> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Link(l) => Some((l.from_uid, l.to_uid, l.shape.clone())),
+            _ => None,
+        })
+        .collect();
+    let total_after = state.elements.len();
+
+    assert_eq!(total_before, total_after, "element count should not change");
+
+    // Every link from before should still be present with the same shape
+    for (from, to, shape) in &links_before {
+        let found = links_after
+            .iter()
+            .any(|(f, t, s)| f == from && t == to && s == shape);
+        assert!(
+            found,
+            "link ({} -> {}) with shape {:?} should be preserved in no-op diff",
+            from, to, shape
+        );
+    }
+}
+
+#[test]
+fn test_diff_connectors_structural_flow_stock_skipped() {
+    let (mut state, metadata) = make_connector_diff_state();
+    let model = make_connector_diff_model();
+
+    diff_connectors(&mut state, &model, &metadata);
+
+    // births(2)->population(1) is structural flow->stock. The dep_graph
+    // has this as population depending on births, which would be
+    // from=births(2), to=population(1). This direction is filtered by
+    // is_structural_flow_stock, so no link should exist.
+    let flow_to_stock_link = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 2 && l.to_uid == 1));
+    assert!(
+        !flow_to_stock_link,
+        "structural flow->stock edge should not be represented as a link"
+    );
+
+    // But population(1)->births(2) is structural stock->flow. This
+    // SHOULD have an Arc link, matching build_connectors behavior.
+    let stock_to_flow_link = state
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Link(l) if l.from_uid == 1 && l.to_uid == 2));
+    assert!(
+        stock_to_flow_link.is_some(),
+        "structural stock->flow edge should have an Arc link"
+    );
+    if let Some(ViewElement::Link(l)) = stock_to_flow_link {
+        assert!(
+            matches!(l.shape, LinkShape::Arc(_)),
+            "structural stock->flow link should have Arc shape, got {:?}",
+            l.shape
+        );
+    }
+}
+
+// --- diff_clouds tests ---
+
+#[test]
+fn test_diff_clouds_preserves_needed_clouds() {
+    let (mut state, metadata) = make_connector_diff_state();
+
+    // Add clouds for births flow (source cloud, no from_stock)
+    let cloud_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid,
+        flow_uid: 2,
+        x: 50.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(cloud_uid, Position::new(50.0, 100.0));
+
+    diff_clouds(&mut state, &metadata);
+
+    // The source cloud for births should still exist (births has no from_stock)
+    let has_births_cloud = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Cloud(c) if c.flow_uid == 2));
+    assert!(
+        has_births_cloud,
+        "source cloud for births should be preserved"
+    );
+
+    // Position of preserved cloud should be maintained
+    let preserved_cloud = state.elements.iter().find_map(|e| match e {
+        ViewElement::Cloud(c) if c.flow_uid == 2 => Some(c),
+        _ => None,
+    });
+    if let Some(c) = preserved_cloud {
+        assert!(
+            state.positions.contains_key(&c.uid),
+            "preserved cloud position should exist"
+        );
+    }
+}
+
+#[test]
+fn test_diff_clouds_removes_unneeded_clouds() {
+    let (mut state, mut metadata) = make_connector_diff_state();
+
+    // Add source cloud for births
+    let cloud_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid,
+        flow_uid: 2,
+        x: 50.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(cloud_uid, Position::new(50.0, 100.0));
+
+    // Now change metadata so births has BOTH endpoints connected
+    metadata.flow_to_stocks.insert(
+        "births".into(),
+        (
+            Some("other_stock".to_string()),
+            Some("population".to_string()),
+        ),
+    );
+
+    diff_clouds(&mut state, &metadata);
+
+    // Cloud for births should be removed since both endpoints are connected
+    let has_births_cloud = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Cloud(c) if c.flow_uid == 2));
+    assert!(
+        !has_births_cloud,
+        "cloud for births should be removed when both endpoints are connected"
+    );
+}
+
+#[test]
+fn test_diff_clouds_creates_new_clouds() {
+    let (mut state, mut metadata) = make_connector_diff_state();
+
+    // Set deaths to have no to_stock (sink cloud needed) and no existing cloud
+    metadata
+        .flow_to_stocks
+        .insert("deaths".into(), (Some("population".to_string()), None));
+
+    // Verify no cloud for deaths exists yet
+    let has_deaths_cloud_before = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Cloud(c) if c.flow_uid == 4));
+    assert!(!has_deaths_cloud_before, "precondition: no deaths cloud");
+
+    diff_clouds(&mut state, &metadata);
+
+    // A sink cloud for deaths should now exist
+    let has_deaths_cloud = state
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Cloud(c) if c.flow_uid == 4));
+    assert!(has_deaths_cloud, "sink cloud for deaths should be created");
+}
+
+#[test]
+fn test_diff_clouds_noop_when_unchanged() {
+    let (mut state, metadata) = make_connector_diff_state();
+
+    // Add source cloud for births (matching metadata: births has no from_stock)
+    let cloud_uid_births = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid_births,
+        flow_uid: 2,
+        x: 50.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(cloud_uid_births, Position::new(50.0, 100.0));
+
+    // Add sink cloud for deaths (matching metadata: deaths has no to_stock)
+    let cloud_uid_deaths = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid_deaths,
+        flow_uid: 4,
+        x: 400.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(cloud_uid_deaths, Position::new(400.0, 100.0));
+
+    let cloud_count_before = state
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Cloud(_)))
+        .count();
+
+    diff_clouds(&mut state, &metadata);
+
+    let cloud_count_after = state
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Cloud(_)))
+        .count();
+
+    assert_eq!(
+        cloud_count_before, cloud_count_after,
+        "cloud count should not change when metadata is unchanged"
+    );
+}
