@@ -59,6 +59,23 @@ pub enum ModelOperation {
     },
 }
 
+/// Returns true when the patch only touches views (UpsertView/DeleteView)
+/// and has no project-level operations. View-only patches don't affect
+/// equations, variables, or simulation, so callers can skip recompilation.
+pub fn is_view_only_patch(patch: &ProjectPatch) -> bool {
+    if !patch.project_ops.is_empty() {
+        return false;
+    }
+    patch.models.iter().all(|mp| {
+        mp.ops.iter().all(|op| {
+            matches!(
+                op,
+                ModelOperation::UpsertView { .. } | ModelOperation::DeleteView { .. }
+            )
+        })
+    })
+}
+
 pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Result<()> {
     let mut staged = project.clone();
 
@@ -2783,5 +2800,74 @@ mod tests {
             }
             _ => panic!("expected stock"),
         }
+    }
+
+    #[test]
+    fn test_is_view_only_patch() {
+        let view_patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertView {
+                    index: 0,
+                    view: datamodel::View::StockFlow(datamodel::StockFlow {
+                        name: None,
+                        elements: vec![],
+                        view_box: Default::default(),
+                        zoom: 1.0,
+                        use_lettered_polarity: false,
+                        font: None,
+                        sketch_compat: None,
+                    }),
+                }],
+            }],
+        };
+        assert!(is_view_only_patch(&view_patch));
+
+        let mixed_patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![
+                    ModelOperation::UpsertView {
+                        index: 0,
+                        view: datamodel::View::StockFlow(datamodel::StockFlow {
+                            name: None,
+                            elements: vec![],
+                            view_box: Default::default(),
+                            zoom: 1.0,
+                            use_lettered_polarity: false,
+                            font: None,
+                            sketch_compat: None,
+                        }),
+                    },
+                    ModelOperation::UpsertAux(datamodel::Aux {
+                        ident: "x".to_string(),
+                        equation: datamodel::Equation::Scalar("1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: Default::default(),
+                    }),
+                ],
+            }],
+        };
+        assert!(!is_view_only_patch(&mixed_patch));
+
+        let empty_patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![],
+        };
+        assert!(is_view_only_patch(&empty_patch));
+
+        let project_op_patch = ProjectPatch {
+            project_ops: vec![ProjectOperation::AddModel {
+                name: "test".to_string(),
+            }],
+            models: vec![],
+        };
+        assert!(!is_view_only_patch(&project_op_patch));
     }
 }

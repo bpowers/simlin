@@ -420,6 +420,43 @@ describe('DirectBackend', () => {
 
       backend.projectDispose(projectHandle);
     });
+
+    it('should apply an upsertView patch without crashing (pan regression)', () => {
+      const projectHandle = backend.projectOpenXmile(loadTestXmile());
+      const modelNames = backend.projectGetModelNames(projectHandle);
+
+      const patch = {
+        models: [
+          {
+            name: modelNames[0],
+            ops: [
+              {
+                type: 'upsertView' as const,
+                payload: {
+                  index: 0,
+                  view: {
+                    elements: [
+                      { type: 'stock', uid: 1, name: 'Teacup Temperature', x: 300, y: 200, labelSide: 'bottom' },
+                      { type: 'flow', uid: 2, name: 'Heat Loss to Room', x: 200, y: 200, points: [{ x: 300, y: 200 }, { x: 100, y: 200 }], labelSide: 'bottom' },
+                      { type: 'cloud', uid: 3, flowUid: 2, x: 100, y: 200 },
+                      { type: 'aux', uid: 4, name: 'Room Temperature', x: 200, y: 340, labelSide: 'bottom' },
+                      { type: 'link', uid: 5, fromUid: 1, toUid: 2, arc: 30 },
+                      { type: 'link', uid: 6, fromUid: 4, toUid: 2, arc: -30 },
+                    ],
+                    viewBox: { x: -150, y: -100, width: 800, height: 600 },
+                    zoom: 1.0,
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const errors = backend.projectApplyPatch(projectHandle, patch, false, true);
+      expect(Array.isArray(errors)).toBe(true);
+      backend.projectDispose(projectHandle);
+    });
   });
 
   describe('Vensim support', () => {

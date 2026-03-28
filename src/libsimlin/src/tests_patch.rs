@@ -345,3 +345,278 @@ fn test_apply_patch_errors_include_snippets() {
         simlin_project_unref(proj);
     }
 }
+
+/// View-only patches take a fast path that skips compilation.
+/// Verify the patch is actually applied to the datamodel.
+#[test]
+fn test_apply_patch_upsert_view_fast_path() {
+    let datamodel = TestProject::new("view_fast_path")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("s", "100", &["f"], &[], None)
+        .flow("f", "s * 0.1", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Apply a view-only patch
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertView",
+                    "payload": {
+                        "index": 0,
+                        "view": {
+                            "elements": [
+                                { "type": "stock", "uid": 1, "name": "s", "x": 100, "y": 100, "labelSide": "bottom" }
+                            ],
+                            "viewBox": { "x": 0, "y": 0, "width": 800, "height": 600 },
+                            "zoom": 1.5
+                        }
+                    }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+        assert!(out_error.is_null(), "view-only patch should succeed");
+
+        // Verify the view was persisted by serializing the project
+        let mut out_buffer: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut serialize_err: *mut SimlinError = ptr::null_mut();
+        simlin_project_serialize_json(
+            proj,
+            0, // Native format
+            &mut out_buffer,
+            &mut out_len,
+            &mut serialize_err,
+        );
+        assert!(serialize_err.is_null());
+        let json = std::str::from_utf8(std::slice::from_raw_parts(out_buffer, out_len)).unwrap();
+        assert!(json.contains("800"), "serialized JSON should contain the view width");
+
+        simlin_free(out_buffer);
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        simlin_project_unref(proj);
+    }
+}
+
+/// Regression test: upsertView patch on a real XMILE model with existing
+/// views must not panic/trap. Exercises the same path as queueViewUpdate
+/// in the diagram editor (panning the canvas).
+#[test]
+fn test_apply_patch_upsert_view_xmile_model() {
+    let teacup_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src/pysimlin/tests/fixtures/teacup.stmx");
+    if !teacup_path.exists() {
+        eprintln!("missing teacup.stmx fixture; skipping");
+        return;
+    }
+    let data = std::fs::read(&teacup_path).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_xmile(
+            data.as_ptr(),
+            data.len(),
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null(), "project_open_xmile failed");
+        assert!(!proj.is_null());
+
+        // Apply an upsertView patch (simulates panning the diagram)
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertView",
+                    "payload": {
+                        "index": 0,
+                        "view": {
+                            "elements": [
+                                { "type": "stock", "uid": 1, "name": "Teacup Temperature", "x": 300, "y": 200, "labelSide": "bottom" },
+                                { "type": "flow", "uid": 2, "name": "Heat Loss to Room", "x": 200, "y": 200, "points": [{"x": 300, "y": 200}, {"x": 100, "y": 200}], "labelSide": "bottom" },
+                                { "type": "cloud", "uid": 3, "flowUid": 2, "x": 100, "y": 200 },
+                                { "type": "aux", "uid": 4, "name": "Room Temperature", "x": 200, "y": 340, "labelSide": "bottom" },
+                                { "type": "link", "uid": 5, "fromUid": 1, "toUid": 2, "arc": 30 },
+                                { "type": "link", "uid": 6, "fromUid": 4, "toUid": 2, "arc": -30 }
+                            ],
+                            "viewBox": { "x": -150, "y": -100, "width": 800, "height": 600 },
+                            "zoom": 1.0
+                        }
+                    }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+
+        if !out_error.is_null() {
+            let code = simlin_error_get_code(out_error);
+            let msg_ptr = simlin_error_get_message(out_error);
+            let msg = if msg_ptr.is_null() {
+                "(null)"
+            } else {
+                CStr::from_ptr(msg_ptr).to_str().unwrap()
+            };
+            simlin_error_free(out_error);
+            panic!("upsertView patch on xmile model should not fail: code={:?}, msg={}", code, msg);
+        }
+
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        simlin_project_unref(proj);
+    }
+}
+
+/// Regression test: upsertView patch (triggered by panning the diagram)
+/// must not panic/trap. This exercises the same code path as
+/// queueViewUpdate in the diagram editor.
+#[test]
+fn test_apply_patch_upsert_view_does_not_panic() {
+    let datamodel = TestProject::new("upsert_view_pan")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.03", None)
+        .flow("deaths", "population * 0.01", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Simulate the view patch that queueViewUpdate sends when the user pans.
+        // The view includes stock/flow/aux/cloud/link elements and a viewBox.
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertView",
+                    "payload": {
+                        "index": 0,
+                        "view": {
+                            "elements": [
+                                { "type": "stock", "uid": 1, "name": "population", "x": 100, "y": 100, "labelSide": "bottom" },
+                                { "type": "flow", "uid": 2, "name": "births", "x": 50, "y": 100, "points": [{"x": 0, "y": 100}, {"x": 100, "y": 100}], "labelSide": "bottom" },
+                                { "type": "cloud", "uid": 3, "flowUid": 2, "x": 0, "y": 100 },
+                                { "type": "flow", "uid": 4, "name": "deaths", "x": 150, "y": 100, "points": [{"x": 100, "y": 100}, {"x": 200, "y": 100}], "labelSide": "bottom" },
+                                { "type": "cloud", "uid": 5, "flowUid": 4, "x": 200, "y": 100 },
+                                { "type": "link", "uid": 6, "fromUid": 1, "toUid": 2, "arc": 30 }
+                            ],
+                            "viewBox": { "x": -50, "y": -50, "width": 800, "height": 600 },
+                            "zoom": 1.0
+                        }
+                    }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+
+        if !out_error.is_null() {
+            let code = simlin_error_get_code(out_error);
+            let msg_ptr = simlin_error_get_message(out_error);
+            let msg = if msg_ptr.is_null() {
+                "(null)"
+            } else {
+                CStr::from_ptr(msg_ptr).to_str().unwrap()
+            };
+            simlin_error_free(out_error);
+            panic!("upsertView patch should not fail: code={:?}, msg={}", code, msg);
+        }
+
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Now simulate a second pan (updated viewBox), same as a continuous pan gesture
+        let patch_json2 = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertView",
+                    "payload": {
+                        "index": 0,
+                        "view": {
+                            "elements": [
+                                { "type": "stock", "uid": 1, "name": "population", "x": 100, "y": 100, "labelSide": "bottom" },
+                                { "type": "flow", "uid": 2, "name": "births", "x": 50, "y": 100, "points": [{"x": 0, "y": 100}, {"x": 100, "y": 100}], "labelSide": "bottom" },
+                                { "type": "cloud", "uid": 3, "flowUid": 2, "x": 0, "y": 100 },
+                                { "type": "flow", "uid": 4, "name": "deaths", "x": 150, "y": 100, "points": [{"x": 100, "y": 100}, {"x": 200, "y": 100}], "labelSide": "bottom" },
+                                { "type": "cloud", "uid": 5, "flowUid": 4, "x": 200, "y": 100 },
+                                { "type": "link", "uid": 6, "fromUid": 1, "toUid": 2, "arc": 30 }
+                            ],
+                            "viewBox": { "x": -100, "y": -80, "width": 800, "height": 600 },
+                            "zoom": 1.0
+                        }
+                    }
+                }]
+            }]
+        }"#;
+        let patch_bytes2 = patch_json2.as_bytes();
+        collected = ptr::null_mut();
+        out_error = ptr::null_mut();
+
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes2.as_ptr(),
+            patch_bytes2.len(),
+            false,
+            true,
+            &mut collected,
+            &mut out_error,
+        );
+
+        if !out_error.is_null() {
+            let code = simlin_error_get_code(out_error);
+            let msg_ptr = simlin_error_get_message(out_error);
+            let msg = if msg_ptr.is_null() {
+                "(null)"
+            } else {
+                CStr::from_ptr(msg_ptr).to_str().unwrap()
+            };
+            simlin_error_free(out_error);
+            panic!("second upsertView patch should not fail: code={:?}, msg={}", code, msg);
+        }
+
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        simlin_project_unref(proj);
+    }
+}

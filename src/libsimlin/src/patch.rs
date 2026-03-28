@@ -420,10 +420,26 @@ pub(crate) unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
+    // View-only patches (UpsertView/DeleteView) don't affect variables,
+    // equations, or simulation results. Skip the expensive compilation
+    // and diagnostic validation and apply directly to the datamodel.
+    let view_only = engine::is_view_only_patch(&patch);
+
     // Hold the datamodel lock for the entire operation. This prevents
     // concurrent patchers from snapshotting a stale datamodel between
     // our validation and commit phases.
     let mut datamodel_locked = project_ref.datamodel.lock().unwrap();
+
+    if view_only && !dry_run {
+        if let Err(err) = engine::apply_patch(&mut datamodel_locked, patch) {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code))
+                    .with_message(format!("failed to apply patch: {err}")),
+            );
+        }
+        return;
+    }
 
     // Snapshot the pre-patch warning baseline atomically under
     // db + sync_state locks.

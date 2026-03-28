@@ -12,7 +12,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode,
     ModuleId, Op2, Opcode, RuntimeView, STACK_CAPACITY, TempId,
 };
-use crate::common::{Canonical, Ident, Result};
+use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::match_dimensions_two_pass;
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
@@ -161,7 +161,7 @@ impl CompiledSimulation {
     }
 
     pub fn n_slots(&self) -> usize {
-        self.modules[&self.root].n_slots
+        self.modules.get(&self.root).map_or(0, |m| m.n_slots)
     }
 
     pub fn is_constant_offset(&self, off: usize) -> bool {
@@ -360,7 +360,9 @@ fn collect_constant_info(
     base_off: usize,
 ) -> HashMap<usize, Vec<BytecodeLocation>> {
     let mut result: HashMap<usize, Vec<BytecodeLocation>> = HashMap::new();
-    let module = &modules[module_key];
+    let Some(module) = modules.get(module_key) else {
+        return result;
+    };
 
     // First pass: identify which absolute offsets are overridable (flows only).
     let mut flow_offsets: HashMap<usize, Vec<BytecodeLocation>> = HashMap::new();
@@ -463,7 +465,13 @@ impl Vm {
             return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
 
-        let root_module = &sim.modules[&sim.root];
+        let root_module = sim.modules.get(&sim.root).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::NotSimulatable,
+                Some("compiled simulation missing root module".to_string()),
+            )
+        })?;
         let n_slots = root_module.n_slots;
         let n_chunks = sim.specs.n_chunks;
         let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
