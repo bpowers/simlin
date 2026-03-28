@@ -20,7 +20,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 ### Project lifecycle
 
 - **`src/project.rs`** - Load, reference-count, and query projects:
-  - `simlin_project_open_{protobuf,json,xmile,vensim}()` - Load from various formats
+  - `simlin_project_open_{protobuf,json,xmile,vensim,systems}()` - Load from various formats
   - `simlin_project_open_vensim_with_data()` - Load MDL with a `FilesystemDataProvider` for resolving GET DIRECT external data references (CSV/Excel). Accepts a `data_dir` path; feature-gated on `file_io`
   - `simlin_project_{ref,unref}()` - Reference counting
   - `simlin_project_get_model()` - Get model handle by name (or default)
@@ -44,7 +44,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 ### Serialization
 
 - **`src/serialization.rs`** - Export projects:
-  - `simlin_project_serialize_{protobuf,json,xmile,svg}()`
+  - `simlin_project_serialize_{protobuf,json,xmile,systems,svg}()`
 
 ### Analysis
 
@@ -72,7 +72,25 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 
 ## Tests
 
-- **`src/tests_remaining.rs`** - FFI integration tests (JSON roundtrips, null pointer handling)
-- **`src/tests_incremental.rs`** - Incremental compilation path verification tests (apply_patch round-trips, salsa DB sync)
-- **`src/tests_patch.rs`** - Patch-specific tests for error collection and validation
-- **`testdata/`** - Test models: `SIR.mdl`, `SIR.stmx`, `SIR_output.csv`, `SIR_project.pb`
+Integration tests live in `tests/` (standard Rust layout), organized by FFI module:
+
+- **`tests/project.rs`** - Project lifecycle: open from all formats, get_model, add_model, is_simulatable, error API
+- **`tests/serialization.rs`** - Serialize to protobuf, JSON, XMILE, systems format
+- **`tests/simulation.rs`** - Simulation lifecycle: create, run, set/get values, reset, concurrency
+- **`tests/model.rs`** - Model queries: var count/names/JSON, LaTeX equations, sim specs, links
+- **`tests/patch.rs`** - JSON patch application, error collection, unit warnings, XMILE patches
+- **`tests/incremental.rs`** - Incremental compilation path (patch-then-sim, snapshot isolation)
+- **`tests/analysis.rs`** - Causal analysis: incoming links, loop detection, loop scores
+- **`tests/rendering.rs`** - SVG and PNG diagram rendering
+- **`tests/diagram.rs`** - Diagram layout sync
+- **`tests/errors.rs`** - Error formatting, error kind mapping, diagnostics
+- **`tests/memory.rs`** - Allocator alignment
+- **`tests/common/mod.rs`** - Shared test helpers (`open_project_from_datamodel`)
+
+Unit tests (needing `pub(crate)` access) remain inline:
+
+- **`src/tests_concurrency.rs`** - Concurrency tests using internal patch test hooks
+
+Test fixtures:
+
+- **`testdata/`** - Test models: `SIR.mdl`, `SIR.stmx`, `SIR_output.csv`, `SIR_project.pb`, `hiring.txt`

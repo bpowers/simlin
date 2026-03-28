@@ -616,6 +616,20 @@ SimlinProject *simlin_project_open_vensim_with_data(const uint8_t *data,
                                                     uintptr_t data_dir_len,
                                                     SimlinError **out_error);
 
+// Open a project from systems format data
+//
+// Parses and translates a system dynamics model from the systems format
+// (`.txt` line-oriented notation). Returns NULL and populates `out_error`
+// on failure.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes
+// - `out_error` may be null
+// - The returned project must be freed with `simlin_project_unref`
+SimlinProject *simlin_project_open_systems(const uint8_t *data,
+                                           uintptr_t len,
+                                           SimlinError **out_error);
+
 // Check if a project's model can be simulated
 //
 // Returns true if the model can be simulated (i.e., can be compiled to a VM
@@ -707,6 +721,22 @@ void simlin_project_serialize_xmile(SimlinProject *project,
                                     uint8_t **out_buffer,
                                     uintptr_t *out_len,
                                     SimlinError **out_error);
+
+// Serialize a project to systems format
+//
+// Exports a project to the systems format (`.txt` line-oriented notation).
+// The output buffer contains the text as UTF-8 encoded bytes.
+//
+// Caller must free output with `simlin_free`.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `out_buffer` and `out_len` must be valid pointers
+// - `out_error` may be null
+void simlin_project_serialize_systems(SimlinProject *project,
+                                      uint8_t **out_buffer,
+                                      uintptr_t *out_len,
+                                      SimlinError **out_error);
 
 // Render a project model's diagram as SVG
 //

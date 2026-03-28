@@ -292,6 +292,76 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
     }
 }
 
+/// Serialize a project to systems format
+///
+/// Exports a project to the systems format (`.txt` line-oriented notation).
+/// The output buffer contains the text as UTF-8 encoded bytes.
+///
+/// Caller must free output with `simlin_free`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `out_buffer` and `out_len` must be valid pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_serialize_systems(
+    project: *mut SimlinProject,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let proj = match require_project(project) {
+        Ok(p) => p,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    let datamodel_locked = proj.datamodel.lock().unwrap();
+    match simlin_engine::to_systems(&datamodel_locked) {
+        Ok(systems_str) => {
+            let bytes = systems_str.into_bytes();
+            let len = bytes.len();
+
+            let buf = simlin_malloc(len);
+            if buf.is_null() {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("allocation failed while exporting systems format"),
+                );
+                return;
+            }
+
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+            *out_buffer = buf;
+            *out_len = len;
+        }
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code))
+                    .with_message(format!("failed to export systems format: {err}")),
+            );
+        }
+    }
+}
+
 /// Render a project model's diagram as SVG
 ///
 /// Renders the stock-and-flow diagram for the named model to a standalone

@@ -653,6 +653,67 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
     }
 }
 
+/// Open a project from systems format data
+///
+/// Parses and translates a system dynamics model from the systems format
+/// (`.txt` line-oriented notation). Returns NULL and populates `out_error`
+/// on failure.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes
+/// - `out_error` may be null
+/// - The returned project must be freed with `simlin_project_unref`
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_open_systems(
+    data: *const u8,
+    len: usize,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinProject {
+    clear_out_error(out_error);
+    if data.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("data pointer must not be NULL"),
+        );
+        return ptr::null_mut();
+    }
+
+    let slice = std::slice::from_raw_parts(data, len);
+    let contents = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("systems format data is not valid UTF-8"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    match simlin_engine::open_systems(contents) {
+        Ok(datamodel_project) => {
+            let (db, sync_state) = new_synced_db(&datamodel_project);
+            let boxed = Box::new(SimlinProject {
+                datamodel: Mutex::new(datamodel_project),
+                db: Mutex::new(db),
+                sync_state: Mutex::new(Some(sync_state)),
+                ref_count: AtomicUsize::new(1),
+            });
+            Box::into_raw(boxed)
+        }
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::from(err.code))
+                    .with_message(format!("failed to import systems format: {err}")),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Check if a project's model can be simulated
 ///
 /// Returns true if the model can be simulated (i.e., can be compiled to a VM

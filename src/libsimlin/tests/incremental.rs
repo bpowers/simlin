@@ -2,9 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Acceptance-criteria tests for incremental compilation (AC3.x).
+mod common;
 
-/// AC3.1: apply_patch followed by sim_new triggers only one compilation
+use std::ffi::CStr;
+use std::ptr;
+
+use simlin::*;
+use simlin_engine::test_common::TestProject;
+use simlin_engine::{self as engine};
+
+use common::open_project_from_datamodel;
+
 /// pass (not two), because the salsa DB is shared and sim_new's
 /// compilation is a salsa cache hit from the patch application.
 ///
@@ -306,7 +314,10 @@ fn test_rejected_patch_does_not_leak_staged_state() {
         assert!(!model.is_null());
 
         let sim = simlin_sim_new(model, false, &mut out_error);
-        assert!(!sim.is_null(), "sim_new should succeed after rejected patch");
+        assert!(
+            !sim.is_null(),
+            "sim_new should succeed after rejected patch"
+        );
         assert!(out_error.is_null());
 
         simlin_sim_run_to_end(sim, &mut out_error);
