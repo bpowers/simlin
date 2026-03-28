@@ -135,9 +135,25 @@ fn test_existing_bounding_box_negative_positions() {
     };
     let mut state = LayoutState::new(&model);
 
-    // Insert elements at negative coordinates
+    // Insert variable elements at negative coordinates
     let uid_a = state.uid_manager.alloc("a");
     let uid_b = state.uid_manager.alloc("b");
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "a".into(),
+        uid: uid_a,
+        x: -500.0,
+        y: -300.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "b".into(),
+        uid: uid_b,
+        x: -100.0,
+        y: -50.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
     state.positions.insert(uid_a, Position::new(-500.0, -300.0));
     state.positions.insert(uid_b, Position::new(-100.0, -50.0));
 

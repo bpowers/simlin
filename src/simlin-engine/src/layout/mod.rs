@@ -453,25 +453,47 @@ pub fn compute_new_element_positions(
     result
 }
 
-/// Bounding box of all existing positioned elements.
+/// Bounding box of variable elements (stocks, flows, auxes, modules) only.
+/// Excludes aliases, groups, and clouds so that outlier non-variable elements
+/// don't push new variable placement far from the actual model graph.
 /// Returns ((min_x, min_y), (max_x, max_y)).
-/// When no positions exist, returns a default origin area.
+/// When no variable elements exist, returns a default origin area.
 fn existing_bounding_box(state: &LayoutState) -> (Position, Position) {
-    if state.positions.is_empty() {
-        return (
-            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
-            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
-        );
-    }
+    let variable_uids: HashSet<i32> = state
+        .elements
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
+        })
+        .map(|e| e.get_uid())
+        .collect();
+
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
-    for pos in state.positions.values() {
+    let mut found = false;
+    for (&uid, pos) in &state.positions {
+        if !variable_uids.contains(&uid) {
+            continue;
+        }
+        found = true;
         min_x = min_x.min(pos.x);
         min_y = min_y.min(pos.y);
         max_x = max_x.max(pos.x);
         max_y = max_y.max(pos.y);
+    }
+    if !found {
+        return (
+            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
+            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
+        );
     }
     (Position::new(min_x, min_y), Position::new(max_x, max_y))
 }
@@ -550,14 +572,21 @@ fn place_new_point_elements(
     // so we can spread apart those that share the same connection set.
     let mut connection_groups: HashMap<Vec<i32>, Vec<String>> = HashMap::new();
     let mut ident_centroids: HashMap<String, Position> = HashMap::new();
+    let mut disconnected_index: usize = 0;
 
     for ident in new_idents {
         let connected = connected_existing_positions(state, metadata, ident, new_set);
         if connected.is_empty() {
-            // No connections to existing elements: place at periphery
+            // No connections to existing elements: place at periphery,
+            // staggering vertically so multiple disconnected inserts don't overlap.
             let periphery_x = bbox_max.x + 150.0;
             let center_y = (bbox_min.y + bbox_max.y) / 2.0;
-            result.insert(ident.clone(), Position::new(periphery_x, center_y));
+            let offset_y = disconnected_index as f64 * 80.0;
+            disconnected_index += 1;
+            result.insert(
+                ident.clone(),
+                Position::new(periphery_x, center_y + offset_y),
+            );
             continue;
         }
 
@@ -588,7 +617,10 @@ fn place_new_point_elements(
                 .unwrap_or(Position::new(bbox_max.x + 150.0, bbox_min.y));
 
             if group_count == 1 {
-                result.insert(ident.clone(), base);
+                // Offset slightly from the centroid so SFDP has non-zero
+                // initial displacement. Without this, a new element seeded
+                // exactly on its only neighbor gets zero force and stays stacked.
+                result.insert(ident.clone(), Position::new(base.x + 50.0, base.y + 30.0));
             } else {
                 let angle = i as f64 * 2.0 * PI / group_count.max(8) as f64;
                 let radius = 50.0;
