@@ -970,6 +970,53 @@ pub fn settle_new_elements(
     Ok(())
 }
 
+/// Re-snap stock-attached flow endpoints to stock edges after SFDP settlement.
+///
+/// SFDP may move flow valves while stocks stay pinned, causing the
+/// proportional point translation to detach endpoints from their stocks.
+/// This function restores each attached endpoint to the correct stock
+/// edge, using the flow valve position to determine which face of the
+/// stock rectangle the flow approaches from.
+pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
+    let stock_positions: HashMap<i32, Position> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some((s.uid, Position::new(s.x, s.y))),
+            _ => None,
+        })
+        .collect();
+
+    let half_w = config.stock_width / 2.0;
+    let half_h = config.stock_height / 2.0;
+
+    for elem in &mut state.elements {
+        if let ViewElement::Flow(f) = elem {
+            let valve = Position::new(f.x, f.y);
+            for pt in &mut f.points {
+                if let Some(attached_uid) = pt.attached_to_uid
+                    && let Some(stock_pos) = stock_positions.get(&attached_uid)
+                {
+                    let dx = valve.x - stock_pos.x;
+                    let dy = valve.y - stock_pos.y;
+
+                    // Determine which face the flow approaches from using
+                    // aspect-ratio-normalized comparison of dx vs dy.
+                    if half_h * dx.abs() >= half_w * dy.abs() {
+                        // Horizontal approach: snap to left or right edge
+                        pt.x = stock_pos.x + dx.signum() * half_w;
+                        pt.y = stock_pos.y;
+                    } else {
+                        // Vertical approach: snap to top or bottom edge
+                        pt.x = stock_pos.x;
+                        pt.y = stock_pos.y + dy.signum() * half_h;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Perform three-way connector diff: compare old links in LayoutState
 /// against edges derived from the current dep_graph, then preserve
 /// unchanged links, remove stale ones, and create new links with
@@ -1197,36 +1244,80 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
             continue;
         }
 
-        // Preserve existing clouds up to the number needed
-        let mut preserved = 0;
-        for cloud in &old_clouds {
-            if preserved >= needed_count {
-                if let ViewElement::Cloud(c) = cloud {
-                    state.positions.remove(&c.uid);
-                }
-                continue;
+        // Preserve existing clouds by matching to needed roles (source/sink)
+        // based on proximity to flow endpoints, rather than iteration order.
+        let endpoints = flow_endpoints.get(&flow_uid);
+        let mut preserved_source = false;
+        let mut preserved_sink = false;
+        let mut used_uids: HashSet<i32> = HashSet::new();
+
+        let find_nearest =
+            |clouds: &[ViewElement], target: &Position, exclude: &HashSet<i32>| -> Option<i32> {
+                clouds
+                    .iter()
+                    .filter_map(|c| match c {
+                        ViewElement::Cloud(cloud) if !exclude.contains(&cloud.uid) => {
+                            let d = (cloud.x - target.x).powi(2) + (cloud.y - target.y).powi(2);
+                            Some((cloud.uid, d))
+                        }
+                        _ => None,
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(uid, _)| uid)
+            };
+
+        if let Some((src_pos, snk_pos)) = endpoints {
+            if wants_source && let Some(uid) = find_nearest(&old_clouds, src_pos, &used_uids) {
+                used_uids.insert(uid);
+                preserved_source = true;
             }
-            state.elements.push(cloud.clone());
-            preserved += 1;
+            if wants_sink && let Some(uid) = find_nearest(&old_clouds, snk_pos, &used_uids) {
+                used_uids.insert(uid);
+                preserved_sink = true;
+            }
+        } else {
+            // No endpoint info: preserve in order as a fallback
+            for cloud in &old_clouds {
+                if let ViewElement::Cloud(c) = cloud {
+                    if wants_source && !preserved_source {
+                        used_uids.insert(c.uid);
+                        preserved_source = true;
+                    } else if wants_sink && !preserved_sink {
+                        used_uids.insert(c.uid);
+                        preserved_sink = true;
+                    }
+                }
+            }
         }
 
-        // Create new clouds for any remaining needed count
-        let remaining = needed_count.saturating_sub(preserved);
-        let endpoints = flow_endpoints.get(&flow_uid);
-        for i in 0..remaining {
-            let is_source = if preserved == 0 {
-                if i == 0 { wants_source } else { !wants_source }
-            } else {
-                wants_source && wants_sink && i == 0
-            };
+        // Push preserved clouds and remove positions of discarded ones
+        for cloud in &old_clouds {
+            if let ViewElement::Cloud(c) = cloud {
+                if used_uids.contains(&c.uid) {
+                    state.elements.push(cloud.clone());
+                } else {
+                    state.positions.remove(&c.uid);
+                }
+            }
+        }
 
-            let pos = if is_source {
-                endpoints.map(|(src, _)| *src)
-            } else {
-                endpoints.map(|(_, sink)| *sink)
-            };
+        // Create new clouds for roles that couldn't be filled from old clouds
+        if wants_source && !preserved_source {
+            let pos = endpoints.map(|(src, _)| *src);
             let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
-
+            let cloud_uid = state.uid_manager.alloc("");
+            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+                uid: cloud_uid,
+                flow_uid,
+                x: cx,
+                y: cy,
+                compat: None,
+            }));
+            state.positions.insert(cloud_uid, Position::new(cx, cy));
+        }
+        if wants_sink && !preserved_sink {
+            let pos = endpoints.map(|(_, sink)| *sink);
+            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
             let cloud_uid = state.uid_manager.alloc("");
             state.elements.push(ViewElement::Cloud(view_element::Cloud {
                 uid: cloud_uid,
@@ -4155,32 +4246,7 @@ pub fn incremental_layout(
         }
     }
 
-    // Re-snap stock-attached flow endpoints to their stock positions.
-    // SFDP may have moved flow valves while stocks stayed pinned, causing
-    // the point translation above to detach endpoints from their stocks.
-    {
-        let stock_positions: HashMap<i32, Position> = state
-            .elements
-            .iter()
-            .filter_map(|e| match e {
-                ViewElement::Stock(s) => Some((s.uid, Position::new(s.x, s.y))),
-                _ => None,
-            })
-            .collect();
-
-        for elem in &mut state.elements {
-            if let ViewElement::Flow(f) = elem {
-                for pt in &mut f.points {
-                    if let Some(attached_uid) = pt.attached_to_uid
-                        && let Some(stock_pos) = stock_positions.get(&attached_uid)
-                    {
-                        pt.x = stock_pos.x;
-                        pt.y = stock_pos.y;
-                    }
-                }
-            }
-        }
-    }
+    resnap_flow_endpoints(&mut state, &config);
 
     // Step 7: Diff connectors and clouds
     diff_connectors(&mut state, &metadata);

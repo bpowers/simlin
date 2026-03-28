@@ -61,7 +61,7 @@ impl UidManager {
         }
 
         if uid >= self.next {
-            self.next = uid + 1;
+            self.next = uid.saturating_add(1);
         }
     }
 
@@ -186,6 +186,18 @@ mod tests {
 
         assert_eq!(mgr.get_uid("new_name"), Some(5));
         assert_eq!(mgr.get_uid("old_name"), None);
+    }
+
+    #[test]
+    fn test_uid_manager_add_i32_max_saturates() {
+        let mut mgr = UidManager::new();
+        mgr.add(i32::MAX, "max_var");
+
+        assert_eq!(mgr.get_uid("max_var"), Some(i32::MAX));
+
+        // next should be i32::MAX (saturated), not wrap to i32::MIN
+        let uid = mgr.alloc("another");
+        assert_eq!(uid, i32::MAX);
     }
 
     #[test]

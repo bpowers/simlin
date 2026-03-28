@@ -532,7 +532,14 @@ fn test_select_best_layout_fewest_crossings() {
         Ok(LayoutResult {
             view: datamodel::StockFlow {
                 name: None,
-                elements: Vec::new(),
+                elements: vec![ViewElement::Aux(view_element::Aux {
+                    name: "from_5_crossings".to_string(),
+                    uid: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: LabelSide::Bottom,
+                    compat: None,
+                })],
                 view_box: Rect {
                     x: 0.0,
                     y: 0.0,
@@ -550,7 +557,14 @@ fn test_select_best_layout_fewest_crossings() {
         Ok(LayoutResult {
             view: datamodel::StockFlow {
                 name: None,
-                elements: Vec::new(),
+                elements: vec![ViewElement::Aux(view_element::Aux {
+                    name: "from_2_crossings".to_string(),
+                    uid: 2,
+                    x: 0.0,
+                    y: 0.0,
+                    label_side: LabelSide::Bottom,
+                    compat: None,
+                })],
                 view_box: Rect {
                     x: 0.0,
                     y: 0.0,
@@ -567,8 +581,13 @@ fn test_select_best_layout_fewest_crossings() {
         }),
     ];
     let best = select_best_layout(results).unwrap();
-    // Should pick the one with 2 crossings
-    assert!(best.elements.is_empty());
+    // Should pick the one with 2 crossings (fewer is better)
+    assert_eq!(best.elements.len(), 1);
+    if let ViewElement::Aux(aux) = &best.elements[0] {
+        assert_eq!(aux.name, "from_2_crossings");
+    } else {
+        unreachable!("expected Aux element");
+    }
 }
 
 #[test]
@@ -3800,6 +3819,374 @@ fn test_diff_clouds_noop_when_unchanged() {
     assert_eq!(
         cloud_count_before, cloud_count_after,
         "cloud count should not change when metadata is unchanged"
+    );
+}
+
+// -- diff_clouds role-based preservation tests --
+
+/// When a flow transitions from 2 clouds to 1 (source end gets connected to a
+/// stock), the preserved cloud should be the one at the *sink* end — not
+/// whichever happens to appear first in the element list.
+#[test]
+fn test_diff_clouds_preserves_correct_role_on_reduction() {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    state.uid_manager.add(1, "stock_a");
+    state.uid_manager.add(2, "my_flow");
+
+    // Stock at x=400 (will be connected to flow's sink end)
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "stock_a".into(),
+        uid: 1,
+        x: 400.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(400.0, 100.0));
+
+    // Flow from (50,100) to (350,100)
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "my_flow".into(),
+        uid: 2,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 50.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+            FlowPoint {
+                x: 350.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(200.0, 100.0));
+
+    // Source cloud at source end (50, 100) — pushed first
+    let source_cloud_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: source_cloud_uid,
+        flow_uid: 2,
+        x: 50.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(source_cloud_uid, Position::new(50.0, 100.0));
+
+    // Sink cloud at sink end (350, 100) — pushed second
+    let sink_cloud_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: sink_cloud_uid,
+        flow_uid: 2,
+        x: 350.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(sink_cloud_uid, Position::new(350.0, 100.0));
+
+    // Metadata: source end is now connected to stock_a, only sink cloud needed
+    let metadata = ComputedMetadata {
+        chains: Vec::new(),
+        feedback_loops: Vec::new(),
+        dominant_periods: Vec::new(),
+        dep_graph: BTreeMap::new(),
+        reverse_dep_graph: BTreeMap::new(),
+        constants: BTreeSet::new(),
+        stock_to_inflows: HashMap::new(),
+        stock_to_outflows: HashMap::from([("stock_a".into(), vec!["my_flow".into()])]),
+        flow_to_stocks: HashMap::from([("my_flow".into(), (Some("stock_a".to_string()), None))]),
+    };
+
+    diff_clouds(&mut state, &metadata);
+
+    // Should have exactly 1 cloud remaining
+    let clouds: Vec<_> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Cloud(c) if c.flow_uid == 2 => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        clouds.len(),
+        1,
+        "should have exactly 1 cloud after reduction"
+    );
+
+    // The preserved cloud should be near the sink end (350, 100), not the source end (50, 100)
+    let cloud = clouds[0];
+    assert!(
+        (cloud.x - 350.0).abs() < 1.0,
+        "preserved cloud should be at sink position (350), not source (50); got x={}",
+        cloud.x
+    );
+}
+
+// -- resnap_flow_endpoints tests --
+
+/// A horizontal flow with its source endpoint at the stock's right edge
+/// should remain at the right edge after re-snap, not shift to the center.
+#[test]
+fn test_resnap_preserves_stock_edge_position() {
+    let config = LayoutConfig::default();
+    let half_w = config.stock_width / 2.0;
+
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    state.uid_manager.add(1, "stock_a");
+    state.uid_manager.add(2, "my_flow");
+
+    // Stock at (200, 100)
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "stock_a".into(),
+        uid: 1,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(200.0, 100.0));
+
+    // Flow with source endpoint already at stock's right edge
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "my_flow".into(),
+        uid: 2,
+        x: 300.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 200.0 + half_w,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+            FlowPoint {
+                x: 400.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(300.0, 100.0));
+
+    resnap_flow_endpoints(&mut state, &config);
+
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == 2 => Some(f),
+            _ => None,
+        })
+        .unwrap();
+
+    let pt = &flow.points[0];
+    assert!(
+        (pt.x - (200.0 + half_w)).abs() < 0.01,
+        "source endpoint should stay at stock right edge ({}), got {}",
+        200.0 + half_w,
+        pt.x
+    );
+    assert!(
+        (pt.y - 100.0).abs() < 0.01,
+        "source endpoint y should be at stock center y (100), got {}",
+        pt.y
+    );
+}
+
+/// A flow whose valve is to the left of the stock should have its
+/// endpoint snapped to the stock's left edge.
+#[test]
+fn test_resnap_snaps_to_correct_face() {
+    let config = LayoutConfig::default();
+    let half_w = config.stock_width / 2.0;
+
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    state.uid_manager.add(1, "stock_a");
+    state.uid_manager.add(2, "inflow");
+
+    // Stock at (300, 100)
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "stock_a".into(),
+        uid: 1,
+        x: 300.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(300.0, 100.0));
+
+    // Flow valve at (200, 100) — to the left of stock
+    // Sink endpoint at stock center (simulating the old buggy re-snap)
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "inflow".into(),
+        uid: 2,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 100.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+            FlowPoint {
+                x: 300.0,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(200.0, 100.0));
+
+    resnap_flow_endpoints(&mut state, &config);
+
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == 2 => Some(f),
+            _ => None,
+        })
+        .unwrap();
+
+    // Sink endpoint should be at the stock's LEFT edge (valve is to the left)
+    let pt = &flow.points[1];
+    assert!(
+        (pt.x - (300.0 - half_w)).abs() < 0.01,
+        "sink endpoint should be at stock left edge ({}), got {}",
+        300.0 - half_w,
+        pt.x
+    );
+    assert!(
+        (pt.y - 100.0).abs() < 0.01,
+        "sink endpoint y should be at stock center y (100), got {}",
+        pt.y
+    );
+}
+
+/// Vertical flow approaching from below should snap to the stock's bottom edge.
+#[test]
+fn test_resnap_vertical_flow_snaps_to_bottom_edge() {
+    let config = LayoutConfig::default();
+    let half_h = config.stock_height / 2.0;
+
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    state.uid_manager.add(1, "stock_a");
+    state.uid_manager.add(2, "vert_flow");
+
+    // Stock at (200, 100)
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "stock_a".into(),
+        uid: 1,
+        x: 200.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(200.0, 100.0));
+
+    // Vertical flow: valve at (200, 250), below the stock
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "vert_flow".into(),
+        uid: 2,
+        x: 200.0,
+        y: 250.0,
+        label_side: LabelSide::Left,
+        points: vec![
+            FlowPoint {
+                x: 200.0,
+                y: 200.0,
+                attached_to_uid: Some(1),
+            },
+            FlowPoint {
+                x: 200.0,
+                y: 400.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(200.0, 250.0));
+
+    resnap_flow_endpoints(&mut state, &config);
+
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == 2 => Some(f),
+            _ => None,
+        })
+        .unwrap();
+
+    // Source endpoint should be at the stock's bottom edge
+    let pt = &flow.points[0];
+    assert!(
+        (pt.x - 200.0).abs() < 0.01,
+        "endpoint x should be at stock center x (200), got {}",
+        pt.x
+    );
+    assert!(
+        (pt.y - (100.0 + half_h)).abs() < 0.01,
+        "endpoint y should be at stock bottom edge ({}), got {}",
+        100.0 + half_h,
+        pt.y
     );
 }
 
