@@ -1647,6 +1647,264 @@ fn validate_view_completeness(state: &LayoutState, model: &datamodel::Model) -> 
     ))
 }
 
+/// Compute the bounding box of all layout elements, including label extents.
+fn compute_bounds(elements: &[ViewElement], config: &LayoutConfig) -> (f64, f64, f64, f64) {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    let update = |min_x: &mut f64,
+                  min_y: &mut f64,
+                  max_x: &mut f64,
+                  max_y: &mut f64,
+                  cx: f64,
+                  cy: f64,
+                  w: f64,
+                  h: f64| {
+        let hw = w / 2.0;
+        let hh = h / 2.0;
+        if cx - hw < *min_x {
+            *min_x = cx - hw;
+        }
+        if cy - hh < *min_y {
+            *min_y = cy - hh;
+        }
+        if cx + hw > *max_x {
+            *max_x = cx + hw;
+        }
+        if cy + hh > *max_y {
+            *max_y = cy + hh;
+        }
+    };
+
+    let update_rect = |min_x: &mut f64,
+                       min_y: &mut f64,
+                       max_x: &mut f64,
+                       max_y: &mut f64,
+                       x0: f64,
+                       y0: f64,
+                       x1: f64,
+                       y1: f64| {
+        if x0 < *min_x {
+            *min_x = x0;
+        }
+        if y0 < *min_y {
+            *min_y = y0;
+        }
+        if x1 > *max_x {
+            *max_x = x1;
+        }
+        if y1 > *max_y {
+            *max_y = y1;
+        }
+    };
+
+    for elem in elements {
+        match elem {
+            ViewElement::Stock(s) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    s.x,
+                    s.y,
+                    config.stock_width,
+                    config.stock_height,
+                );
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &s.name,
+                    s.x,
+                    s.y,
+                    s.label_side,
+                    config.stock_width,
+                    config.stock_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Flow(f) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    f.x,
+                    f.y,
+                    config.flow_width,
+                    config.flow_height,
+                );
+                for pt in &f.points {
+                    update_rect(
+                        &mut min_x, &mut min_y, &mut max_x, &mut max_y, pt.x, pt.y, pt.x, pt.y,
+                    );
+                }
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &f.name,
+                    f.x,
+                    f.y,
+                    f.label_side,
+                    config.flow_width,
+                    config.flow_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Aux(a) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    a.x,
+                    a.y,
+                    config.aux_width,
+                    config.aux_height,
+                );
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &a.name,
+                    a.x,
+                    a.y,
+                    a.label_side,
+                    config.aux_width,
+                    config.aux_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Module(m) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    m.x,
+                    m.y,
+                    config.module_width,
+                    config.module_height,
+                );
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &m.name,
+                    m.x,
+                    m.y,
+                    m.label_side,
+                    config.module_width,
+                    config.module_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Cloud(c) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    c.x,
+                    c.y,
+                    config.cloud_width,
+                    config.cloud_height,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (min_x, min_y, max_x, max_y)
+}
+
+/// Compose all layout blocks into a complete stock-flow diagram, producing
+/// identical output to the `LayoutEngine::generate_layout` pipeline.
+pub fn fresh_layout(
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    config: &LayoutConfig,
+) -> Result<datamodel::StockFlow, String> {
+    let chains = &metadata.chains;
+    if chains.is_empty() && model.variables.is_empty() {
+        return Ok(datamodel::StockFlow {
+            name: None,
+            elements: Vec::new(),
+            view_box: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
+        });
+    }
+
+    let mut state = LayoutState::new(model);
+
+    // Phase 1: Compute chain positions using SFDP
+    let chain_positions = compute_chain_positions(chains, metadata, config);
+
+    // Phase 2: Layout each chain at its position
+    let chains_data: Vec<_> = chains
+        .iter()
+        .map(|c| (c.stocks.clone(), c.flows.clone(), c.all_vars.clone()))
+        .collect();
+    for (i, (stocks, flows, _all_vars)) in chains_data.iter().enumerate() {
+        let position = chain_positions
+            .get(&i)
+            .copied()
+            .unwrap_or(Position::new(config.start_x, config.start_y));
+        layout_chain(&mut state, config, metadata, stocks, flows, position)?;
+    }
+
+    // Phase 3: Position auxiliaries and create connectors
+    place_auxiliaries(&mut state, config, model, metadata, &chains_data)?;
+    build_connectors(&mut state, model, metadata)?;
+
+    // Phase 4: Apply optimal label placement
+    optimize_labels(&mut state, model, metadata);
+
+    // Phase 5: Normalize coordinates
+    normalize_coordinates(&mut state.elements, DIAGRAM_ORIGIN_MARGIN);
+
+    // Phase 6: Apply feedback loop curvature
+    apply_loop_curvature(&mut state, config, model, metadata);
+
+    validate_view_completeness(&state, model)?;
+
+    // Phase 7: Compute ViewBox from final element positions
+    let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
+    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
+            height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
+        }
+    } else {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }
+    };
+
+    Ok(datamodel::StockFlow {
+        name: None,
+        elements: state.elements,
+        view_box,
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    })
+}
+
 /// The main layout engine holding all intermediate state.
 struct LayoutEngine<'a> {
     config: LayoutConfig,
