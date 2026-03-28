@@ -160,6 +160,8 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
     // Use incremental layout when a patch and existing non-empty view are available
     let new_view = if let (Some(old_sf), Some(ref mp)) = (old_view, &model_patch) {
         if !old_sf.elements.is_empty() {
+            // Clone required: old_sf borrows from datamodel_locked, but
+            // incremental_layout also needs &datamodel_locked for the project.
             let old_sf = old_sf.clone();
             engine::layout::incremental_layout(
                 &old_sf,

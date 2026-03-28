@@ -267,6 +267,7 @@ impl LayoutState {
             ViewElement::Module(m) if m.uid == deleted_uid => false,
             ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => false,
             ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
+            ViewElement::Alias(a) if a.alias_of_uid == deleted_uid => false,
             _ => true,
         });
 
@@ -443,8 +444,8 @@ fn existing_bounding_box(state: &LayoutState) -> (Position, Position) {
     }
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
     for pos in state.positions.values() {
         min_x = min_x.min(pos.x);
         min_y = min_y.min(pos.y);
@@ -3658,6 +3659,81 @@ pub fn incremental_layout(
                 state.apply_rename(from, to, &new_display);
             }
             _ => {}
+        }
+    }
+
+    // Between steps 3 and 4: detect flows whose stock connections changed.
+    // A flow element keeps its old attached_to_uid values when preserved in state,
+    // so a flow that moved from one stock to another would keep stale endpoints.
+    // Remove such flows (and their clouds) so identify_new_elements picks them
+    // up as new and they get rebuilt with correct endpoints.
+    {
+        let uid_to_ident: HashMap<i32, String> = model
+            .variables
+            .iter()
+            .filter_map(|var| {
+                let ident = canonicalize(var.get_ident()).into_owned();
+                state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            })
+            .collect();
+
+        let flows_to_reset: Vec<String> = state
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                let flow = match elem {
+                    ViewElement::Flow(f) => f,
+                    _ => return None,
+                };
+                let flow_ident = uid_to_ident.get(&flow.uid)?;
+                let (expected_from, expected_to) = metadata.flow_to_stocks.get(flow_ident)?;
+
+                // Collect the stock UIDs currently referenced by this flow's endpoints
+                let attached_uids: Vec<i32> = flow
+                    .points
+                    .iter()
+                    .filter_map(|pt| pt.attached_to_uid)
+                    .collect();
+
+                let expected_from_uid = expected_from
+                    .as_deref()
+                    .and_then(|s| state.uid_manager.get_uid(s));
+                let expected_to_uid = expected_to
+                    .as_deref()
+                    .and_then(|s| state.uid_manager.get_uid(s));
+
+                // The flow needs rebuilding if either expected stock UID is missing
+                // from the attached endpoints (the stock connection changed).
+                let from_matches = match expected_from_uid {
+                    None => true, // no from-stock expected (cloud source)
+                    Some(uid) => attached_uids.contains(&uid),
+                };
+                let to_matches = match expected_to_uid {
+                    None => true, // no to-stock expected (cloud sink)
+                    Some(uid) => attached_uids.contains(&uid),
+                };
+
+                if from_matches && to_matches {
+                    None
+                } else {
+                    Some(flow_ident.clone())
+                }
+            })
+            .collect();
+
+        for flow_ident in flows_to_reset {
+            // apply_deletion removes the element from state.elements but leaves
+            // the UID in uid_manager. identify_new_elements will see a UID with
+            // no corresponding element and classify the flow as new, causing
+            // create_flow_view_element to rebuild it with correct endpoints.
+            state.apply_deletion(&flow_ident);
+            // Re-insert the display name removed by apply_deletion so the
+            // rebuilt flow element uses the original name.
+            let canonical = canonicalize(&flow_ident).into_owned();
+            state
+                .display_names
+                .entry(canonical)
+                .or_insert_with(|| flow_ident.clone());
         }
     }
 

@@ -4811,3 +4811,291 @@ fn test_pinned_settlement_multiple_new_elements() {
         );
     }
 }
+
+// Tests for code review feedback fixes
+
+#[test]
+fn test_apply_deletion_removes_alias_of_deleted_var() {
+    // Issue 2: apply_deletion must also remove Alias elements where
+    // alias_of_uid == deleted_uid.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "rate".to_string(),
+            equation: datamodel::Equation::Scalar("0.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let mut state = LayoutState::new(&model);
+
+    // Add the aux element and an alias pointing to it
+    let aux_uid = state.get_or_alloc_uid("rate");
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "rate".to_string(),
+        uid: aux_uid,
+        x: 100.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(aux_uid, Position::new(100.0, 100.0));
+
+    let alias_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias_uid,
+        alias_of_uid: aux_uid,
+        x: 200.0,
+        y: 200.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+
+    assert_eq!(state.elements.len(), 2);
+
+    // Delete the aux -- the alias should be removed too
+    state.apply_deletion("rate");
+
+    let alias_count = state
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Alias(_)))
+        .count();
+    assert_eq!(
+        alias_count, 0,
+        "alias of deleted aux should have been removed"
+    );
+    assert!(
+        state.elements.is_empty(),
+        "all elements should be gone after deleting the only var"
+    );
+}
+
+#[test]
+fn test_existing_bounding_box_negative_positions() {
+    // Issue 3: existing_bounding_box initializes max_x/max_y with f64::MIN
+    // instead of f64::NEG_INFINITY. Verify the bounding box correctly
+    // encompasses elements at negative coordinates.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "x".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let mut state = LayoutState::new(&model);
+
+    // Insert elements at negative coordinates
+    let uid_a = state.uid_manager.alloc("a");
+    let uid_b = state.uid_manager.alloc("b");
+    state.positions.insert(uid_a, Position::new(-500.0, -300.0));
+    state.positions.insert(uid_b, Position::new(-100.0, -50.0));
+
+    let (min_pos, max_pos) = existing_bounding_box(&state);
+
+    assert!(
+        (min_pos.x - (-500.0)).abs() < 1e-9,
+        "min_x should be -500, got {}",
+        min_pos.x
+    );
+    assert!(
+        (min_pos.y - (-300.0)).abs() < 1e-9,
+        "min_y should be -300, got {}",
+        min_pos.y
+    );
+    assert!(
+        (max_pos.x - (-100.0)).abs() < 1e-9,
+        "max_x should be -100, got {}",
+        max_pos.x
+    );
+    assert!(
+        (max_pos.y - (-50.0)).abs() < 1e-9,
+        "max_y should be -50, got {}",
+        max_pos.y
+    );
+}
+
+#[test]
+fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
+    // Issue 1: When a flow's stock connections change (e.g., F moves from
+    // being an inflow to stock A to being an inflow to stock B), the flow
+    // element should be rebuilt with the new attached_to_uid values.
+
+    // Build a model: stock_a <-- flow_f (flow_f is an inflow to stock_a)
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["flow_f".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("50".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "flow_f".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(3),
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify old_view: flow_f has an endpoint attached to stock_a
+    let stock_a_uid = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_a should be in old_view");
+
+    let flow_f_in_old = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in old_view");
+
+    let old_attached_to_stock_a = flow_f_in_old
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_a_uid));
+    assert!(
+        old_attached_to_stock_a,
+        "flow_f should initially have an endpoint attached to stock_a"
+    );
+
+    // Now patch: move flow_f to be an inflow to stock_b instead
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    for var in &mut model.variables {
+        match var {
+            datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
+                s.inflows.clear();
+            }
+            datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
+                s.inflows = vec!["flow_f".to_string()];
+            }
+            _ => {}
+        }
+    }
+
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            crate::patch::ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            crate::patch::ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("50".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["flow_f".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after topology change should succeed");
+
+    // Find stock_b's UID in the new view
+    let stock_b_uid = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_b should be in new_view");
+
+    // flow_f should now have an endpoint attached to stock_b, not stock_a
+    let flow_f_in_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in new_view");
+
+    let attached_to_stock_b = flow_f_in_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_b_uid));
+    assert!(
+        attached_to_stock_b,
+        "flow_f should have an endpoint attached to stock_b after topology change, points: {:?}",
+        flow_f_in_new.points
+    );
+
+    // flow_f should NOT still be attached to stock_a
+    let still_attached_to_stock_a = flow_f_in_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_a_uid));
+    assert!(
+        !still_attached_to_stock_a,
+        "flow_f should NOT still be attached to stock_a after topology change"
+    );
+}
