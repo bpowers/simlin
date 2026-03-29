@@ -1760,57 +1760,29 @@ pub fn link_score_equation_text<'db>(
     let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
     let to_is_module = to_var.is_module();
 
-    let equation = if !from_is_module && to_is_module {
-        // input_src -> module: use composite reference if available
-        if let crate::variable::Variable::Module {
-            model_name, inputs, ..
-        } = &to_var
-        {
-            let composite_ports = get_stdlib_composite_ports();
-            let port = inputs.iter().find(|i| i.src == from_ident).map(|i| &i.dst);
-            let has_composite = port.is_some()
-                && composite_ports
-                    .get(model_name)
-                    .is_some_and(|ports| ports.contains(port.unwrap()));
+    // Implicit module variables (from SMOOTH/DELAY expansion) cannot be
+    // meaningfully referenced in LTM ceteris-paribus equations: they
+    // occupy multiple layout slots and PREVIOUS of a module·output
+    // requires compilation context that the per-fragment mini-context
+    // cannot provide. Skip link scores involving these modules; the
+    // loops they participate in will still have scores for the
+    // non-module links in the circuit.
+    if from_is_module || to_is_module {
+        return None;
+    }
 
-            if let (true, Some(port)) = (has_composite, port) {
-                crate::ltm_augment::generate_module_input_link_score_eq(&to_ident, port)
-            } else {
-                crate::ltm_augment::generate_module_link_score_eq(&from_ident, &to_ident)
-            }
-        } else {
-            crate::ltm_augment::generate_module_link_score_eq(&from_ident, &to_ident)
-        }
-    } else if from_is_module && !to_is_module {
-        // module -> downstream: standard ceteris-paribus formula
-        let mut all_vars = HashMap::new();
-        if let Some(ref fv) = from_var {
-            all_vars.insert(from_ident.clone(), fv.clone());
-        }
-        all_vars.insert(to_ident.clone(), to_var.clone());
-        crate::ltm_augment::generate_link_score_equation_for_link(
-            &from_ident,
-            &to_ident,
-            &to_var,
-            &all_vars,
-        )
-    } else if from_is_module && to_is_module {
-        // module -> module: no downstream equation to analyze
-        crate::ltm_augment::generate_module_link_score_eq(&from_ident, &to_ident)
-    } else {
-        // Non-module link: standard ceteris-paribus formula
-        let mut all_vars = HashMap::new();
-        if let Some(ref fv) = from_var {
-            all_vars.insert(from_ident.clone(), fv.clone());
-        }
-        all_vars.insert(to_ident.clone(), to_var.clone());
-        crate::ltm_augment::generate_link_score_equation_for_link(
-            &from_ident,
-            &to_ident,
-            &to_var,
-            &all_vars,
-        )
-    };
+    // Standard ceteris-paribus formula for non-module links
+    let mut all_vars = HashMap::new();
+    if let Some(ref fv) = from_var {
+        all_vars.insert(from_ident.clone(), fv.clone());
+    }
+    all_vars.insert(to_ident.clone(), to_var.clone());
+    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+        &from_ident,
+        &to_ident,
+        &to_var,
+        &all_vars,
+    );
 
     Some(LtmSyntheticVar {
         name: var_name,
@@ -1890,6 +1862,7 @@ pub fn ensure_stdlib_composite_ports_initialized() {
 /// inside a tracked function query on the caller's db.
 /// On wasm32, threads are unavailable so we initialize directly --
 /// the caller must ensure no salsa DB is currently attached.
+#[cfg(test)]
 fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap {
     use std::sync::OnceLock;
     static PORTS: OnceLock<crate::ltm_augment::CompositePortMap> = OnceLock::new();
@@ -2017,6 +1990,23 @@ pub fn model_ltm_synthetic_variables(
         .collect();
 
     assign_loop_ids(&mut loops);
+
+    // Filter out loops that contain implicit module variables (SMOOTH,
+    // DELAY, etc.). These modules occupy multiple layout slots and
+    // their link score equations cannot be compiled in the per-fragment
+    // mini-context. Loops without module nodes are scored normally.
+    let implicit_info = model_implicit_var_info(db, model, project);
+    let has_module_node = |loop_item: &Loop| {
+        loop_item.links.iter().any(|link| {
+            implicit_info
+                .get(link.from.as_str())
+                .is_some_and(|m| m.is_module)
+                || implicit_info
+                    .get(link.to.as_str())
+                    .is_some_and(|m| m.is_module)
+        })
+    };
+    loops.retain(|l| !has_module_node(l));
 
     // Collect unique link endpoints from loops, then compute per-link equations
     let mut seen_links: HashSet<(String, String)> = HashSet::new();
@@ -5042,9 +5032,6 @@ pub fn assemble_module(
                     );
                     if let Some(result) = im_fragment {
                         all_fragments.insert(im_name.clone(), result);
-                        // Implicit modules participate in initials and stocks
-                        // runlists. Their names are added to the dependency
-                        // graph's runlists below.
                     }
                 }
             }

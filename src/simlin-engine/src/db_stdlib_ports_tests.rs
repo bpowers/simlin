@@ -89,13 +89,12 @@ fn test_link_score_equation_text_uses_composite_for_smth1_module_input() {
         "composite-port cache should contain {port_name:?} for {model_name:?}"
     );
 
-    let lsv = link_score_equation_text(&db, link_id, source_model, sync.project)
-        .as_ref()
-        .expect("link score should be generated for the module input link");
-
-    assert_eq!(
-        lsv.equation,
-        format!("\"{module_name}·$⁚ltm⁚composite⁚input\""),
-        "dynamic module inputs should use cached composite references"
+    // Module-involving links are skipped during LTM link score generation
+    // because implicit module variables (SMOOTH/DELAY) occupy multiple
+    // layout slots and cannot be correctly compiled in the per-fragment
+    // mini-context. Verify that the link score is None.
+    assert!(
+        link_score_equation_text(&db, link_id, source_model, sync.project).is_none(),
+        "module-involving links should be skipped"
     );
 }

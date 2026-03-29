@@ -692,25 +692,57 @@ pub(super) fn compile_ltm_equation_fragment(
             let dep_size = variable_size(db, *dep_source_var, project);
             let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
             dep_variables.push((dep_ident, dep_var, dep_size));
-        } else if implicit_info.contains_key(effective) {
-            // Dep is an implicit var from the model (SMOOTH/DELAY internal)
-            dep_variables.push((
-                dep_ident.clone(),
-                crate::variable::Variable::Var {
-                    ident: dep_ident,
-                    ast: None,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
-                1,
-            ));
+        } else if let Some(im_meta) = implicit_info.get(effective) {
+            // Dep is an implicit var from the model (SMOOTH/DELAY expansion).
+            // Module-type implicits need their full size and Module variant so
+            // the compiler can resolve submodel offset lookups. Scalar implicits
+            // (helper auxes) use a plain Var stub.
+            if im_meta.is_module
+                && let Some(ref mn) = im_meta.model_name
+            {
+                let sub_size = {
+                    let sub_canonical = canonicalize(mn);
+                    project_models
+                        .get(sub_canonical.as_ref())
+                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .unwrap_or(1)
+                };
+                dep_variables.push((
+                    dep_ident.clone(),
+                    crate::variable::Variable::Module {
+                        ident: dep_ident.clone(),
+                        model_name: Ident::new(mn),
+                        units: None,
+                        inputs: vec![],
+                        errors: vec![],
+                        unit_errors: vec![],
+                    },
+                    sub_size,
+                ));
+                implicit_module_refs.insert(dep_ident, (Ident::new(mn), BTreeSet::new()));
+                let sub_canonical = canonicalize(mn);
+                if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+                    implicit_submodels.push((mn.to_string(), *sub_model));
+                }
+            } else {
+                dep_variables.push((
+                    dep_ident.clone(),
+                    crate::variable::Variable::Var {
+                        ident: dep_ident,
+                        ast: None,
+                        init_ast: None,
+                        eqn: None,
+                        units: None,
+                        tables: vec![],
+                        non_negative: false,
+                        is_flow: false,
+                        is_table_only: false,
+                        errors: vec![],
+                        unit_errors: vec![],
+                    },
+                    im_meta.size,
+                ));
+            }
         }
         // Dep could also be another LTM var (e.g., loop score refs link scores)
         // These are scalar auxes with 1 slot.
@@ -1235,6 +1267,120 @@ pub(super) fn compile_ltm_implicit_var_fragment(
                 ));
             }
         }
+    } else {
+        // Non-module implicit vars (e.g., temp args from PREVIOUS rewrite)
+        // may reference module variables from the parent model. Collect
+        // those dependencies so the compilation context can resolve them.
+        let dep_idents = if let Some(ast) = lowered.ast() {
+            crate::variable::identifier_set(ast, &[], None)
+        } else {
+            HashSet::new()
+        };
+
+        let implicit_info = model_implicit_var_info(db, model, project);
+
+        for dep_ident_str in &dep_idents {
+            let dep_str = dep_ident_str.as_str();
+            let effective = dep_str.strip_prefix('\u{00B7}').unwrap_or(dep_str);
+
+            if effective == implicit_name.as_str()
+                || matches!(effective, "time" | "dt" | "initial_time" | "final_time")
+            {
+                continue;
+            }
+
+            // Handle dotted module·port references (e.g., module·output).
+            // Extract the module variable name and add it as a dependency.
+            if let Some(dot_pos) = effective.find('\u{00B7}') {
+                let module_var_name = &effective[..dot_pos];
+                let dep_ident = Ident::new(module_var_name);
+                if mini_metadata.contains_key(&dep_ident)
+                    || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
+                {
+                    continue;
+                }
+                // Check model's implicit module vars (SMOOTH/DELAY instances)
+                if let Some(im_meta) = implicit_info.get(module_var_name)
+                    && im_meta.is_module
+                    && let Some(ref mn) = im_meta.model_name
+                {
+                    dep_variables.push((
+                        dep_ident.clone(),
+                        crate::variable::Variable::Module {
+                            ident: dep_ident,
+                            model_name: Ident::new(mn),
+                            units: None,
+                            inputs: vec![],
+                            errors: vec![],
+                            unit_errors: vec![],
+                        },
+                        im_meta.size,
+                    ));
+                    module_refs.insert(
+                        Ident::new(module_var_name),
+                        (Ident::new(mn), BTreeSet::new()),
+                    );
+                } else if let Some(dep_sv) = source_vars.get(module_var_name)
+                    && dep_sv.kind(db) == SourceVariableKind::Module
+                {
+                    let mod_model_name = dep_sv.model_name(db);
+                    let sub_canonical = canonicalize(mod_model_name);
+                    let sub_size = project_models
+                        .get(sub_canonical.as_ref())
+                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .unwrap_or(1);
+                    dep_variables.push((
+                        dep_ident.clone(),
+                        crate::variable::Variable::Module {
+                            ident: dep_ident,
+                            model_name: Ident::new(mod_model_name),
+                            units: None,
+                            inputs: vec![],
+                            errors: vec![],
+                            unit_errors: vec![],
+                        },
+                        sub_size,
+                    ));
+                    module_refs.insert(
+                        Ident::new(module_var_name),
+                        (Ident::new(mod_model_name), BTreeSet::new()),
+                    );
+                }
+                continue;
+            }
+
+            let dep_ident = Ident::new(effective);
+            if mini_metadata.contains_key(&dep_ident)
+                || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
+            {
+                continue;
+            }
+
+            if let Some(dep_sv) = source_vars.get(effective) {
+                let dep_dims = variable_dimensions(db, *dep_sv, project);
+                let dep_size = variable_size(db, *dep_sv, project);
+                let dep_var = build_stub_variable(db, dep_sv, &dep_ident, dep_dims);
+                dep_variables.push((dep_ident, dep_var, dep_size));
+            } else {
+                dep_variables.push((
+                    dep_ident.clone(),
+                    crate::variable::Variable::Var {
+                        ident: dep_ident,
+                        ast: None,
+                        init_ast: None,
+                        eqn: None,
+                        units: None,
+                        tables: vec![],
+                        non_negative: false,
+                        is_flow: false,
+                        is_table_only: false,
+                        errors: vec![],
+                        unit_errors: vec![],
+                    },
+                    1,
+                ));
+            }
+        }
     }
 
     for (dep_ident, dep_var, dep_size) in &dep_variables {
@@ -1257,12 +1403,21 @@ pub(super) fn compile_ltm_implicit_var_fragment(
     > = HashMap::new();
     all_metadata.insert(model_name_ident.clone(), mini_metadata);
 
-    // Build sub-model metadata for module-type implicit vars
+    // Build sub-model metadata for module-type implicit vars and any
+    // module dependencies discovered during dependency collection.
     if meta.is_module
         && let Some(model_name) = &meta.model_name
     {
         let sub_canonical = canonicalize(model_name);
         if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
+            build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
+        }
+    }
+    for (sub_model_name, _input_set) in module_refs.values() {
+        let sub_canonical = canonicalize(sub_model_name.as_str());
+        if let Some(sub_model) = project_models.get(sub_canonical.as_ref())
+            && !all_metadata.contains_key(sub_model_name)
+        {
             build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
         }
     }

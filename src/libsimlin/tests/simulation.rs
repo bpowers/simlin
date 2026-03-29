@@ -1514,3 +1514,68 @@ fn test_ltm_enabled_sim() {
         simlin_project_unref(proj);
     }
 }
+
+#[test]
+fn test_mark2_mdl_simulates_through_ffi() {
+    let mdl_path = "../../test/bobby/vdf/econ/mark2.mdl";
+    let data = std::fs::read(mdl_path).unwrap_or_else(|e| panic!("read {mdl_path}: {e}"));
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_vensim(
+            data.as_ptr(),
+            data.len(),
+            &mut err as *mut *mut SimlinError,
+        );
+        if !err.is_null() {
+            let code = simlin_error_get_code(err);
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if msg_ptr.is_null() {
+                ""
+            } else {
+                CStr::from_ptr(msg_ptr).to_str().unwrap()
+            };
+            simlin_error_free(err);
+            panic!("open_vensim failed: {:?}: {}", code, msg);
+        }
+        assert!(!proj.is_null());
+
+        err = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
+        if !err.is_null() {
+            let code = simlin_error_get_code(err);
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if msg_ptr.is_null() {
+                ""
+            } else {
+                CStr::from_ptr(msg_ptr).to_str().unwrap()
+            };
+            simlin_error_free(err);
+            panic!("sim_new failed: {:?}: {}", code, msg);
+        }
+        assert!(!sim.is_null());
+
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err as *mut *mut SimlinError);
+        if !err.is_null() {
+            let code = simlin_error_get_code(err);
+            let msg_ptr = simlin_error_get_message(err);
+            let msg = if msg_ptr.is_null() {
+                ""
+            } else {
+                CStr::from_ptr(msg_ptr).to_str().unwrap()
+            };
+            simlin_error_free(err);
+            panic!("run_to_end failed: {:?}: {}", code, msg);
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

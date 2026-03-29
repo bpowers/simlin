@@ -1444,3 +1444,64 @@ SAVEPER = TIME STEP ~~|
     let vm_results = vm.into_results();
     ensure_results(&results, &vm_results);
 }
+
+#[test]
+fn mark2_mdl_compiles_incrementally() {
+    let contents =
+        std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
+    let project = open_vensim(&contents).expect("parse mark2.mdl");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("mark2.mdl should compile incrementally");
+    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("VM should run to completion");
+}
+
+/// Reproduce the browser path: open_vensim → protobuf serialize → protobuf
+/// deserialize → compile. The app round-trips through protobuf between
+/// import and simulation.
+#[test]
+fn mark2_mdl_compiles_after_protobuf_roundtrip() {
+    use prost::Message;
+
+    let contents =
+        std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
+    let project = open_vensim(&contents).expect("parse mark2.mdl");
+
+    // Serialize to protobuf (as the app does in NewProject.tsx)
+    let pb = serialize(&project).expect("serialize to protobuf");
+    let mut buf = Vec::new();
+    pb.encode(&mut buf).expect("encode protobuf");
+
+    // Deserialize from protobuf (as the app does when loading from storage)
+    let pb2 = project_io::Project::decode(buf.as_slice()).expect("decode protobuf");
+    let project2 = deserialize(pb2);
+
+    // Compile the round-tripped project
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project2, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("mark2.mdl should compile after protobuf round-trip");
+    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("VM should run to completion");
+}
+
+/// The browser's model.run() defaults analyzeLtm=true, so simNew is called
+/// with enable_ltm=true. Models with SMOOTH/DELAY that participate in
+/// feedback loops must compile with LTM enabled.
+#[test]
+fn mark2_mdl_compiles_with_ltm_enabled() {
+    use simlin_engine::db::set_project_ltm_enabled;
+
+    let contents =
+        std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
+    let project = open_vensim(&contents).expect("parse mark2.mdl");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("mark2.mdl should compile with LTM enabled");
+    let mut vm = Vm::new(compiled).expect("VM creation should succeed");
+    vm.run_to_end().expect("VM should run to completion");
+}
