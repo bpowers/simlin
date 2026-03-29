@@ -909,38 +909,9 @@ fn test_ac2_1_valid_patch_accepted_and_simulatable() {
     }
 }
 
-// ── Stdlib composite ports initialization ─────────────────────────────
-//
-// On WASM, get_stdlib_composite_ports() creates a temporary SimlinDb
-// during first initialization.  If called lazily inside a salsa tracked
-// function, this second DB conflicts with the already-attached project
-// DB and panics ("Cannot change database mid-query").  The fix is to
-// eagerly call ensure_stdlib_composite_ports_initialized() before
-// entering any salsa query when LTM is enabled.
-
-/// Source scan: verify that simlin_sim_new eagerly initializes the
-/// stdlib composite ports cache before entering the salsa query.
-/// Without this, the first LTM simulation on WASM panics with
-/// "Cannot change database mid-query" because the lazy OnceLock init
-/// creates a second SimlinDb inside a tracked function.
-#[test]
-fn test_stdlib_composite_ports_initialized_before_ltm_query() {
-    let sim_rs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/simulation.rs");
-    let source = std::fs::read_to_string(&sim_rs)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", sim_rs.display(), e));
-
-    assert!(
-        source.contains("ensure_stdlib_composite_ports_initialized"),
-        "simulation.rs must call ensure_stdlib_composite_ports_initialized() \
-         before compile_project_incremental when LTM is enabled; without this, \
-         the first LTM simulation on WASM panics because the lazy OnceLock \
-         init creates a second SimlinDb inside a tracked function"
-    );
-}
-
 /// Functional regression: simNew with enable_ltm=true on a stock-flow
 /// model must succeed.  This exercises the LTM compilation path
-/// including link_score_equation_text -> get_stdlib_composite_ports.
+/// including loop detection and link score generation.
 #[test]
 fn test_sim_new_ltm_with_stock_flow_model() {
     let datamodel = TestProject::new("ltm_stock_flow")

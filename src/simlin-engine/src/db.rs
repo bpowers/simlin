@@ -1791,9 +1791,9 @@ pub fn link_score_equation_text<'db>(
 }
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
-/// from each input port to "output".  Shared by `get_stdlib_composite_ports`
-/// (which only needs the port *names*) and `module_ltm_synthetic_variables`
-/// (which also uses the pathway structures for equation generation).
+/// from each input port to "output".  Used by `get_stdlib_composite_ports`
+/// (test-only, needs port *names*) and `module_ltm_synthetic_variables`
+/// (uses the pathway structures for equation generation).
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
 ) -> HashMap<crate::common::Ident<crate::common::Canonical>, Vec<Vec<crate::ltm::Link>>> {
@@ -1841,17 +1841,6 @@ pub fn module_ilink_equation_text<'db>(
         name: var_name,
         equation,
     })
-}
-
-/// Eagerly initialize the stdlib composite ports cache.
-///
-/// Must be called OUTSIDE any salsa query because the initialization
-/// creates a temporary `SimlinDb` which conflicts with any
-/// already-attached database.  On native targets the init runs on a
-/// dedicated thread so this is only strictly necessary on WASM, but
-/// calling it eagerly is harmless and idempotent everywhere.
-pub fn ensure_stdlib_composite_ports_initialized() {
-    let _ = get_stdlib_composite_ports();
 }
 
 /// Compute stdlib composite ports (cached in a process-wide OnceLock).

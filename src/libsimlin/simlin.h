@@ -449,6 +449,24 @@ void simlin_model_get_sim_specs_json(SimlinModel *model,
                                      uintptr_t *out_len,
                                      SimlinError **out_error);
 
+// Install the panic hook so that subsequent panics stash their message
+// in a buffer readable via `simlin_get_panic_message()`.
+//
+// Call once from JS after WASM instantiation.
+void simlin_init(void);
+
+// Return the last panic message as a null-terminated C string, or null
+// if no panic has been recorded.  The pointer is valid until the next
+// panic or until `simlin_clear_panic_message()` is called.
+//
+// # Safety
+// The returned pointer borrows the global buffer and must not be freed
+// by the caller.
+const char *simlin_get_panic_message(void);
+
+// Clear the stored panic message.
+void simlin_clear_panic_message(void);
+
 // Applies a JSON patch to the project datamodel.
 //
 // # Safety

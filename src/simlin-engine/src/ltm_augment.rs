@@ -31,6 +31,7 @@ pub(crate) type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)
 
 /// Map from module model name to the set of input ports that have composite
 /// link score variables (i.e., ports with causal pathways to the output).
+#[cfg(any(test, feature = "testing"))]
 pub(crate) type CompositePortMap = HashMap<Ident<Canonical>, HashSet<Ident<Canonical>>>;
 
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
@@ -351,6 +352,7 @@ fn quote_ident(ident: &str) -> String {
 }
 
 /// Generate link score equation for links involving modules (black box treatment)
+#[cfg(any(test, feature = "testing"))]
 fn generate_module_link_score_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
@@ -783,6 +785,7 @@ fn generate_max_abs_chain(pathway_names: &[String]) -> String {
 /// Generate a composite link score equation for a parent model link where
 /// the target is a dynamic module. References the module's internal
 /// composite score via interpunct notation.
+#[cfg(any(test, feature = "testing"))]
 fn generate_module_input_link_score_equation(
     module_ident: &Ident<Canonical>,
     input_port: &Ident<Canonical>,
