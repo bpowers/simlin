@@ -276,8 +276,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   ): Map<UID, ViewElement> {
     const selection = new Map<UID, ViewElement>();
     for (const uid of props.selection) {
-      if (uid === inCreationUid && inCreation) {
-        selection.set(uid, inCreation);
+      if (uid === inCreationUid) {
+        if (inCreation) {
+          selection.set(uid, inCreation);
+        }
+        // When inCreation is undefined the async Editor update hasn't
+        // finished yet — skip this transient UID; the next render after
+        // Editor.setState will carry the real selection.
       } else {
         const e = getOrThrow(elements, uid);
         selection.set(e.uid, e);
