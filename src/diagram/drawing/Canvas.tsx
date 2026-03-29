@@ -39,7 +39,7 @@ import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
-import { Connector, ConnectorProps, computeLinkCreationArc, getVisualCenter } from './Connector';
+import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
@@ -48,7 +48,6 @@ import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
-import { updateArcAngle } from '../arc-utils';
 import { shouldShowVariableDetails } from './pointer-utils';
 import {
   computeMouseDownSelection,
@@ -219,6 +218,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   // resolved on mouseUp based on whether a drag occurred.
   deferredSingleSelectUid: UID | undefined;
   deferredIsText: boolean | undefined;
+
+  // Link drag state (creation and reattachment): tracks the arc shown during
+  // the last render so the persisted value on mouse-up exactly matches the
+  // visual, and stores the pointer type to distinguish mouse from touch.
+  draggedLinkArc: number | undefined;
+  dragPointerType: string | undefined;
 
   constructor(props: CanvasProps) {
     super(props);
@@ -533,10 +538,13 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     const from = this.selectionUpdates.get(element.fromUid) || this.getElementByUid(element.fromUid);
     let to = this.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
-    const toUid = to.uid;
     let isSticky = false;
-    const isCreatingLink = isMovingArrow && isSelected && this.state.inCreation?.type === 'link';
-    if (isMovingArrow && isSelected && this.selectionCenterOffset) {
+
+    // Dragging this link's arrowhead — covers both new-link creation and
+    // reattaching an existing link.  Unified: straight line when not over
+    // a target, dynamic arc when snapped to a valid target.
+    const isDraggingLink = isMovingArrow && isSelected;
+    if (isDraggingLink && this.selectionCenterOffset) {
       const validTarget = this.cachedElements.find((e: ViewElement) => {
         if (e.type !== 'aux' && e.type !== 'flow') {
           return false;
@@ -550,34 +558,26 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         const off = this.selectionCenterOffset;
         const delta = this.state.moveDelta ?? { x: 0, y: 0 };
         const canvasOffset = this.getCanvasOffset();
-        // if to isn't a valid target, that means it is the fauxTarget
         to = {
           ...(to as AuxViewElement),
           x: off.x - delta.x - canvasOffset.x,
           y: off.y - delta.y - canvasOffset.y,
           isZeroRadius: true,
         };
-        if (isCreatingLink) {
-          element = { ...element, arc: undefined };
-        }
+      }
+
+      const isTouch = this.dragPointerType === 'touch';
+      if (isSticky && !isTouch) {
+        const arcPt = this.getArcPoint();
+        const arc = arcPt ? computeLinkCreationArc(from, to, arcPt) : undefined;
+        element = { ...element, arc };
+        this.draggedLinkArc = arc;
+      } else {
+        element = { ...element, arc: undefined };
+        this.draggedLinkArc = undefined;
       }
     }
-    // When dragging a link arrow (isMovingArrow), adjust arc based on the dynamic to position.
-    // During creation, the arc comes from arcPoint via Connector rendering instead.
-    if (isMovingArrow && !isCreatingLink) {
-      const oldTo = getOrThrow(this.elements, toUid);
-      const oldFrom = getOrThrow(this.elements, from.uid);
-      const oldToVisual = getVisualCenter(oldTo);
-      const oldFromVisual = getVisualCenter(oldFrom);
-      const toVisual = getVisualCenter(to);
-      const fromVisual = getVisualCenter(from);
 
-      // Endpoints moved differently - adjust arc based on rotation
-      const oldθ = Math.atan2(oldToVisual.cy - oldFromVisual.cy, oldToVisual.cx - oldFromVisual.cx);
-      const newθ = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffθ = oldθ - newθ;
-      element = { ...element, arc: updateArcAngle(element.arc, radToDeg(diffθ)) };
-    }
     const props: ConnectorProps = {
       element,
       from,
@@ -586,7 +586,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isDashed: to.type === 'stock',
       onSelection: this.handleEditConnector,
     };
-    if (isSelected && (isCreatingLink ? isSticky : !isSticky)) {
+    // When not dragging: pass arcPoint for existing arc-adjustment interactions
+    // (e.g. clicking the arc mid-line to curve it). During link dragging the arc
+    // is already computed on the element, so arcPoint would interfere.
+    if (isSelected && !isSticky && !isDraggingLink) {
       props.arcPoint = this.getArcPoint();
     }
     // this.elementBounds = this.elementBounds.push(Connector.bounds(props));
@@ -804,11 +807,15 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     if (this.state.moveDelta) {
       const moveDelta = defined(this.state.moveDelta);
 
+      // When dragging a single link arrow (creation or reattachment),
+      // suppress arcPoint so processLinks doesn't compute a rotation-based
+      // arc.  connector() handles arc computation directly.
+      const isDraggingLink = this.state.isMovingArrow && this.props.selection.size === 1;
       const { updatedElements } = applyGroupMovement({
         elements: this.elements.values(),
         selection: this.props.selection,
         delta: moveDelta,
-        arcPoint: this.getArcPoint(),
+        arcPoint: isDraggingLink ? undefined : this.getArcPoint(),
         segmentIndex: this.state.draggingSegmentIndex,
       });
 
@@ -824,6 +831,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     this.selectionCenterOffset = undefined;
     this.deferredSingleSelectUid = undefined;
     this.deferredIsText = undefined;
+    this.dragPointerType = undefined;
+    this.draggedLinkArc = undefined;
 
     this.setState(pointerStateReset());
 
@@ -956,14 +965,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             return isValid || false;
           });
           if (element.type === 'link' && validTarget) {
-            let linkToAttach = element;
-            if (this.state.inCreation) {
-              const creationArcPoint = this.getArcPoint();
-              const linkFrom = this.getElementByUid(element.fromUid);
-              if (creationArcPoint) {
-                linkToAttach = { ...linkToAttach, arc: computeLinkCreationArc(linkFrom, validTarget, creationArcPoint) };
-              }
-            }
+            // Use the arc that was last rendered — cached by connector()
+            // so the saved link matches the visual exactly.  Works for
+            // both new-link creation and existing-link reattachment.
+            const linkToAttach = { ...element, arc: this.draggedLinkArc };
             this.props.onAttachLink(linkToAttach, defined(validTarget.ident));
           } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
@@ -1888,6 +1893,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // This ensures smooth dragging from where the user clicked
     this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
 
+    if (isMovingArrow) {
+      this.dragPointerType = e.pointerType;
+      this.draggedLinkArc = undefined;
+    }
+
     if (!isEditingName) {
       (e.target as Element).setPointerCapture(e.pointerId);
     }
@@ -1898,6 +1908,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     if (selectedTool === 'link' && isNamedViewElement(element)) {
       isEditingName = false;
       isMovingArrow = true;
+      this.dragPointerType = e.pointerType;
+      this.draggedLinkArc = undefined;
       inCreation = {
         type: 'link',
         uid: inCreationUid,

@@ -24,7 +24,6 @@ import type {
 } from '@simlin/engine';
 import type { ErrorDetail } from '@simlin/engine';
 import { stockFlowViewToJson } from './view-conversion';
-import { updateArcAngle, radToDeg } from './arc-utils';
 import {
   Project,
   Model,
@@ -67,7 +66,6 @@ import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point, searchableName } from './drawing/common';
-import { getVisualCenter } from './drawing/Connector';
 import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
@@ -1034,15 +1032,6 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     let { selection } = this.state;
     let view = defined(this.getView());
 
-    const getUid = (uid: number) => {
-      for (const e of view.elements) {
-        if (e.uid === uid) {
-          return e;
-        }
-      }
-      throw new Error(`unknown uid ${uid}`);
-    };
-
     const getName = (ident: string) => {
       for (const e of view.elements) {
         if (isNamedViewElement(e) && e.ident === ident) {
@@ -1052,34 +1041,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       throw new Error(`unknown name ${ident}`);
     };
 
-    let elements = view.elements.map((element: ViewElement) => {
-      if (element.uid !== link.uid) {
-        return element;
-      }
-
-      if (element.type !== 'link') {
-        return element;
-      }
-
-      const from = getUid(element.fromUid);
-      const oldTo = getUid(element.toUid);
-      const to = getName(defined(newTarget));
-
-      const fromVisual = getVisualCenter(from);
-      const oldToVisual = getVisualCenter(oldTo);
-      const toVisual = getVisualCenter(to);
-      const oldTheta = Math.atan2(oldToVisual.cy - fromVisual.cy, oldToVisual.cx - fromVisual.cx);
-      const newTheta = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffTheta = oldTheta - newTheta;
-      const angle = updateArcAngle(element.arc, radToDeg(diffTheta));
-
-      return {
-        ...element,
-        arc: angle,
-        toUid: to.uid,
-      };
-    });
     let nextUid = view.nextUid;
+    let elements: ViewElement[];
     if (link.uid === inCreationUid) {
       const to = getName(newTarget);
       const newLink: LinkViewElement = {
@@ -1087,8 +1050,18 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         uid: nextUid++,
         toUid: to.uid,
       };
-      elements = [...elements, newLink];
+      elements = [...view.elements, newLink];
       selection = new Set([newLink.uid]);
+    } else {
+      // Reattachment: Canvas already computed the correct arc in
+      // link.arc, so we just update the target.
+      const to = getName(defined(newTarget));
+      elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== link.uid || element.type !== 'link') {
+          return element;
+        }
+        return { ...element, arc: link.arc, toUid: to.uid };
+      });
     }
     view = { ...view, nextUid, elements };
 
