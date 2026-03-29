@@ -64,6 +64,13 @@ export async function init(_wasmPathOrBuffer?: WasmSourceProvider): Promise<void
   if (wasmExports.memory instanceof WebAssembly.Memory) {
     wasmMemory = wasmExports.memory;
   }
+
+  // Install the Rust panic hook so panic messages are captured in a
+  // global buffer rather than silently lost to `unreachable` traps.
+  const initFn = wasmExports.simlin_init as (() => void) | undefined;
+  if (initFn) {
+    initFn();
+  }
 }
 
 /**
@@ -126,6 +133,48 @@ export async function ensureInitialized(wasmSource?: WasmSourceProvider): Promis
  */
 export function configureWasm(_config: WasmConfig = {}): void {
   // No-op in browser builds - bundler handles WASM loading
+}
+
+/**
+ * Retrieve the last Rust panic message from the WASM global buffer.
+ * Returns null if no panic has been recorded or WASM is not initialized.
+ *
+ * Call this after catching a `RuntimeError: unreachable` to get the
+ * actual panic text (file, line, message) instead of just "unreachable".
+ */
+export function getPanicMessage(): string | null {
+  if (wasmExports === null || wasmMemory === null) {
+    return null;
+  }
+  const fn = wasmExports.simlin_get_panic_message as (() => number) | undefined;
+  if (!fn) {
+    return null;
+  }
+  const ptr = fn();
+  if (ptr === 0) {
+    return null;
+  }
+  // Read null-terminated UTF-8 string from WASM memory
+  const view = new Uint8Array(wasmMemory.buffer);
+  let end = ptr;
+  const limit = Math.min(ptr + 8192, view.length);
+  while (end < limit && view[end] !== 0) {
+    end++;
+  }
+  return new TextDecoder().decode(view.slice(ptr, end));
+}
+
+/**
+ * Clear the stored panic message.
+ */
+export function clearPanicMessage(): void {
+  if (wasmExports === null) {
+    return;
+  }
+  const fn = wasmExports.simlin_clear_panic_message as (() => void) | undefined;
+  if (fn) {
+    fn();
+  }
 }
 
 /**

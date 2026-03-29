@@ -12,6 +12,7 @@
 import { DirectBackend } from './direct-backend';
 import type { ProjectHandle, ModelHandle, SimHandle } from './backend';
 import { SimlinJsonFormat } from './internal/types';
+import { getPanicMessage, clearPanicMessage } from '@simlin/engine/internal/wasm';
 import { JsonProjectPatch } from './json-types';
 import {
   WorkerRequest,
@@ -534,6 +535,18 @@ export class WorkerServer {
   }
 
   private sendError(requestId: number, err: unknown): void {
+    // When a WASM trap fires (RuntimeError: unreachable), the Rust panic
+    // message is stashed in a global buffer by our custom panic hook.
+    // Retrieve it and attach it to the error for debuggability.
+    if (err instanceof WebAssembly.RuntimeError) {
+      const panicMsg = getPanicMessage();
+      if (panicMsg) {
+        clearPanicMessage();
+        const enriched = new Error(`WASM panic: ${panicMsg}`);
+        this.postMessage({ type: 'error', requestId, error: serializeError(enriched) });
+        return;
+      }
+    }
     this.postMessage({ type: 'error', requestId, error: serializeError(err) });
   }
 }

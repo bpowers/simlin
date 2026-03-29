@@ -1871,14 +1871,25 @@ pub fn module_ilink_equation_text<'db>(
     })
 }
 
+/// Eagerly initialize the stdlib composite ports cache.
+///
+/// Must be called OUTSIDE any salsa query because the initialization
+/// creates a temporary `SimlinDb` which conflicts with any
+/// already-attached database.  On native targets the init runs on a
+/// dedicated thread so this is only strictly necessary on WASM, but
+/// calling it eagerly is harmless and idempotent everywhere.
+pub fn ensure_stdlib_composite_ports_initialized() {
+    let _ = get_stdlib_composite_ports();
+}
+
 /// Compute stdlib composite ports (cached in a process-wide OnceLock).
 /// These are static properties of stdlib models and never change.
 ///
 /// On native targets, uses a separate thread for initialization because
 /// syncing creates a separate salsa db, which conflicts if we're
 /// inside a tracked function query on the caller's db.
-/// On wasm32, threads are unavailable so we initialize directly (safe
-/// because WASM is single-threaded).
+/// On wasm32, threads are unavailable so we initialize directly --
+/// the caller must ensure no salsa DB is currently attached.
 fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap {
     use std::sync::OnceLock;
     static PORTS: OnceLock<crate::ltm_augment::CompositePortMap> = OnceLock::new();

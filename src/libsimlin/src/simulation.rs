@@ -51,6 +51,14 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
+    // Eagerly warm the stdlib composite ports cache before entering any
+    // salsa query.  The initialization creates a temporary SimlinDb which
+    // would conflict with the project's attached DB if run lazily inside
+    // a tracked function (on WASM where threads are unavailable).
+    if enable_ltm {
+        engine::db::ensure_stdlib_composite_ports_initialized();
+    }
+
     // Salsa-based incremental compilation. Both LTM and non-LTM paths
     // use the same pipeline; the only difference is the ltm_enabled flag
     // on the SourceProject input. The DB is kept in sync by apply_patch
