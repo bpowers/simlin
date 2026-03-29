@@ -1070,6 +1070,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   };
 
   async updateView(view: StockFlowView) {
+    // Optimistic update: reflect the new view in state immediately so the
+    // UI never flashes stale positions while the async engine round-trip
+    // (applyPatch + serialize) completes.
+    this.setView(view);
+    this.setState({ projectVersion: this.state.projectVersion + 0.001 });
+
     const engine = this.engine();
     if (engine) {
       const ops: JsonModelOperation[] = [
@@ -1172,17 +1178,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
 
     const elements = view.elements.map((el) => updatedElements.get(el.uid) ?? el);
-    const newView = { ...view, elements };
-
-    // Optimistic update: apply moved positions to state immediately.
-    // Canvas clears its visual moveDelta offset synchronously after calling
-    // this handler, so without this update there would be a flash where
-    // elements render at old positions while the async engine round-trip
-    // (applyPatch + serialize) completes.
-    this.setView(newView);
-    this.setState({ projectVersion: this.state.projectVersion + 0.001 });
-
-    await this.updateView(newView);
+    await this.updateView({ ...view, elements });
   };
 
   handleDrawerToggle = (isOpen: boolean) => {
@@ -1360,6 +1356,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   async queueViewUpdate(view: StockFlowView): Promise<void> {
+    // Optimistic update: same pattern as updateView — reflect the new
+    // viewBox/zoom in state immediately to avoid a frame of flicker.
+    this.setView(view);
+    this.setState({ projectVersion: this.state.projectVersion + 0.001 });
+
     const engine = this.engine();
     if (engine) {
       const ops: JsonModelOperation[] = [
@@ -1385,12 +1386,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     } else {
       // there exists a race where we need to center/update the viewBox when
       // displaying a newly imported model, but the async wasm stuff doesn't
-      // complete before we want to save the viewBox change.  In this case update
-      // the view in place, and set a flag we check when finalizing installation
-      // of the new engine.
+      // complete before we want to save the viewBox change.  In this case
+      // set a flag we check when finalizing installation of the new engine.
       this.newEngineShouldPullView = true;
       this.newEngineQueuedView = view;
-      this.setView(view);
     }
   }
 
