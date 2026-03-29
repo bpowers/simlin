@@ -61,8 +61,19 @@ impl UidManager {
         }
 
         if uid >= self.next {
-            self.next = uid + 1;
+            self.next = uid.saturating_add(1);
         }
+    }
+
+    /// Update the ident associated with an existing UID, keeping the
+    /// UID itself stable.  A no-op when `old_ident` is not tracked.
+    pub fn rename(&mut self, old_ident: &str, new_ident: &str) {
+        let uid = match self.reverse.remove(old_ident) {
+            Some(uid) => uid,
+            None => return,
+        };
+        self.seen.insert(uid, new_ident.to_string());
+        self.reverse.insert(new_ident.to_string(), uid);
     }
 
     /// Look up the UID for a named element.
@@ -164,5 +175,39 @@ mod tests {
         mgr.add(5, "var_a");
         mgr.add(10, "var_a");
         assert_eq!(mgr.get_uid("var_a"), Some(10));
+    }
+
+    #[test]
+    fn test_uid_manager_rename_updates_mapping() {
+        let mut mgr = UidManager::new();
+        mgr.add(5, "old_name");
+
+        mgr.rename("old_name", "new_name");
+
+        assert_eq!(mgr.get_uid("new_name"), Some(5));
+        assert_eq!(mgr.get_uid("old_name"), None);
+    }
+
+    #[test]
+    fn test_uid_manager_add_i32_max_saturates() {
+        let mut mgr = UidManager::new();
+        mgr.add(i32::MAX, "max_var");
+
+        assert_eq!(mgr.get_uid("max_var"), Some(i32::MAX));
+
+        // next should be i32::MAX (saturated), not wrap to i32::MIN
+        let uid = mgr.alloc("another");
+        assert_eq!(uid, i32::MAX);
+    }
+
+    #[test]
+    fn test_uid_manager_rename_noop_for_unknown() {
+        let mut mgr = UidManager::new();
+        mgr.add(5, "existing");
+
+        mgr.rename("nonexistent", "something");
+
+        assert_eq!(mgr.get_uid("existing"), Some(5));
+        assert_eq!(mgr.get_uid("something"), None);
     }
 }

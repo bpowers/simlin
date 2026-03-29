@@ -835,6 +835,8 @@ fn test_ac2_6_compile_simulation_not_in_patch_path() {
     );
 }
 
+// AC7.2 test (incremental layout via patch_json) lives in tests/diagram.rs
+
 /// AC2.1: Valid equation patch is accepted and produces correct simulation
 /// results using the incremental compilation path. Verifies that the
 /// value change flows through the incremental pipeline to affect

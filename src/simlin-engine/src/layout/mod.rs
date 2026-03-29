@@ -35,40 +35,6 @@ use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
 
-/// Tracks the bounding box of all layout elements.
-struct Bounds {
-    min_x: f64,
-    min_y: f64,
-    max_x: f64,
-    max_y: f64,
-}
-
-impl Bounds {
-    fn new() -> Self {
-        Self {
-            min_x: f64::MAX,
-            min_y: f64::MAX,
-            max_x: f64::NEG_INFINITY,
-            max_y: f64::NEG_INFINITY,
-        }
-    }
-
-    fn update(&mut self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) {
-        if min_x < self.min_x {
-            self.min_x = min_x;
-        }
-        if min_y < self.min_y {
-            self.min_y = min_y;
-        }
-        if max_x > self.max_x {
-            self.max_x = max_x;
-        }
-        if max_y > self.max_y {
-            self.max_y = max_y;
-        }
-    }
-}
-
 /// A queued element during chain layout BFS traversal.
 struct WorkItem {
     id: String,
@@ -90,29 +56,25 @@ struct LayoutResult {
     seed: u64,
 }
 
-/// The main layout engine holding all intermediate state.
-struct LayoutEngine<'a> {
-    config: LayoutConfig,
-    model: &'a datamodel::Model,
-    metadata: ComputedMetadata,
-    uid_manager: UidManager,
+/// Shared mutable state for layout generation, separated from immutable
+/// context so it can be passed to standalone layout functions independently.
+pub struct LayoutState {
+    pub uid_manager: UidManager,
 
     /// Canonical ident -> original display name (pre-built for O(1) lookup).
-    display_names: HashMap<String, String>,
+    pub display_names: HashMap<String, String>,
 
-    elements: Vec<ViewElement>,
-    positions: HashMap<i32, Position>,
+    pub elements: Vec<ViewElement>,
+    pub positions: HashMap<i32, Position>,
 
-    flow_templates: HashMap<String, FlowTemplate>,
-    cloud_ident_to_uid: HashMap<String, i32>,
-    cloud_ident_to_flow_ident: HashMap<String, String>,
-    flow_ident_to_clouds: HashMap<String, Vec<String>>,
-
-    bounds: Bounds,
+    pub flow_templates: HashMap<String, FlowTemplate>,
+    pub cloud_ident_to_uid: HashMap<String, i32>,
+    pub cloud_ident_to_flow_ident: HashMap<String, String>,
+    pub flow_ident_to_clouds: HashMap<String, Vec<String>>,
 }
 
-impl<'a> LayoutEngine<'a> {
-    fn new(config: LayoutConfig, model: &'a datamodel::Model, metadata: ComputedMetadata) -> Self {
+impl LayoutState {
+    pub fn new(model: &datamodel::Model) -> Self {
         let mut uid_manager = UidManager::new();
         let mut display_names = HashMap::new();
 
@@ -133,9 +95,6 @@ impl<'a> LayoutEngine<'a> {
         }
 
         Self {
-            config,
-            model,
-            metadata,
             uid_manager,
             display_names,
             elements: Vec::new(),
@@ -144,1330 +103,2576 @@ impl<'a> LayoutEngine<'a> {
             cloud_ident_to_uid: HashMap::new(),
             cloud_ident_to_flow_ident: HashMap::new(),
             flow_ident_to_clouds: HashMap::new(),
-            bounds: Bounds::new(),
         }
     }
 
-    /// Main pipeline: produce a complete stock-flow diagram layout.
-    fn generate_layout(mut self) -> Result<datamodel::StockFlow, String> {
-        let chains = &self.metadata.chains;
-        if chains.is_empty() && self.model.variables.is_empty() {
-            return Ok(datamodel::StockFlow {
-                name: None,
-                elements: Vec::new(),
-                view_box: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
-                },
-                zoom: 1.0,
-                use_lettered_polarity: false,
-                font: None,
-                sketch_compat: None,
-            });
-        }
+    /// Seed all layout state from an existing diagram view, enabling
+    /// incremental layout to preserve existing element positions.
+    pub fn from_existing_view(old_view: &datamodel::StockFlow, model: &datamodel::Model) -> Self {
+        let mut uid_manager = UidManager::new();
+        let mut display_names = HashMap::new();
+        let mut positions = HashMap::new();
+        let mut flow_templates = HashMap::new();
+        let mut cloud_ident_to_uid = HashMap::new();
+        let mut cloud_ident_to_flow_ident = HashMap::new();
+        let mut flow_ident_to_clouds: HashMap<String, Vec<String>> = HashMap::new();
 
-        // Phase 1: Compute chain positions using SFDP
-        let chain_positions = compute_chain_positions(chains, &self.metadata, &self.config);
+        // Seed display names and UID manager from model variables
+        for var in &model.variables {
+            let ident = var.get_ident();
+            let canonical = canonicalize(ident).into_owned();
+            display_names.insert(canonical, ident.to_string());
 
-        // Phase 2: Layout each chain at its position
-        // Need to clone chain data since self is borrowed mutably below
-        let chains_data: Vec<_> = chains
-            .iter()
-            .map(|c| (c.stocks.clone(), c.flows.clone(), c.all_vars.clone()))
-            .collect();
-        for (i, (stocks, flows, _all_vars)) in chains_data.iter().enumerate() {
-            let position = chain_positions
-                .get(&i)
-                .copied()
-                .unwrap_or(Position::new(self.config.start_x, self.config.start_y));
-            self.layout_chain_at_position(stocks, flows, position)?;
-        }
-
-        // Phase 3: Position auxiliaries and create connectors
-        self.layout_auxiliaries_and_connectors(&chains_data)?;
-
-        // Phase 4: Apply optimal label placement
-        self.apply_optimal_label_placement();
-
-        // Phase 5: Normalize coordinates
-        normalize_coordinates(&mut self.elements, DIAGRAM_ORIGIN_MARGIN);
-        self.recalculate_bounds();
-
-        // Phase 6: Apply feedback loop curvature
-        self.apply_feedback_loop_curvature();
-
-        self.validate_view_completeness()?;
-
-        // Phase 7: Compute ViewBox
-        let view_box = if !self.elements.is_empty() && self.bounds.min_x != f64::MAX {
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: self.bounds.max_x + DIAGRAM_ORIGIN_MARGIN,
-                height: self.bounds.max_y + DIAGRAM_ORIGIN_MARGIN,
+            if let Some(uid) = match var {
+                datamodel::Variable::Stock(s) => s.uid,
+                datamodel::Variable::Flow(f) => f.uid,
+                datamodel::Variable::Aux(a) => a.uid,
+                datamodel::Variable::Module(m) => m.uid,
+            } {
+                uid_manager.add(uid, ident);
             }
-        } else {
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            }
-        };
-
-        Ok(datamodel::StockFlow {
-            name: None,
-            elements: self.elements,
-            view_box,
-            zoom: 1.0,
-            use_lettered_polarity: false,
-            font: None,
-            sketch_compat: None,
-        })
-    }
-
-    /// Pick a starting stock for chain layout. Returns the stock with the
-    /// highest flow connectivity (inflows + outflows), breaking ties
-    /// alphabetically for determinism.
-    fn pick_starting_stock<'b>(&self, stocks: &'b [String]) -> Option<&'b str> {
-        stocks
-            .iter()
-            .max_by(|a, b| {
-                let a_count = self
-                    .metadata
-                    .stock_to_inflows
-                    .get(a.as_str())
-                    .map_or(0, |v| v.len())
-                    + self
-                        .metadata
-                        .stock_to_outflows
-                        .get(a.as_str())
-                        .map_or(0, |v| v.len());
-                let b_count = self
-                    .metadata
-                    .stock_to_inflows
-                    .get(b.as_str())
-                    .map_or(0, |v| v.len())
-                    + self
-                        .metadata
-                        .stock_to_outflows
-                        .get(b.as_str())
-                        .map_or(0, |v| v.len());
-                a_count.cmp(&b_count).then_with(|| b.cmp(a))
-            })
-            .map(|s| s.as_str())
-    }
-
-    /// Layout a single chain at the given base position using BFS.
-    fn layout_chain_at_position(
-        &mut self,
-        stocks: &[String],
-        flows: &[String],
-        base_position: Position,
-    ) -> Result<(), String> {
-        if stocks.is_empty() && flows.is_empty() {
-            return Ok(());
         }
 
-        let start_stock = match self.pick_starting_stock(stocks) {
-            Some(s) => s.to_string(),
-            None => {
-                // Flow-only chain (no stocks). Place flows at base_position.
-                for flow_ident in flows {
-                    let uid = self.get_or_alloc_uid(flow_ident);
-                    self.create_flow_view_element(flow_ident, uid, base_position)?;
+        // Seed UID manager from view elements and extract positions
+        for elem in &old_view.elements {
+            match elem {
+                ViewElement::Aux(a) => {
+                    uid_manager.add(a.uid, &canonicalize(&a.name));
+                    positions.insert(a.uid, Position::new(a.x, a.y));
                 }
-                return Ok(());
-            }
-        };
-
-        let mut positioned: HashMap<String, Position> = HashMap::new();
-        positioned.insert(start_stock.clone(), base_position);
-
-        let mut queue = VecDeque::from([WorkItem {
-            id: start_stock.clone(),
-            item_type: WorkItemType::Stock,
-            position: base_position,
-            connected_to: String::new(),
-        }]);
-
-        while let Some(item) = queue.pop_front() {
-            match item.item_type {
-                WorkItemType::Stock => {
-                    // First-positioned-wins: if this stock was already placed
-                    // (via a different BFS path), keep its existing position
-                    // to preserve the order in which chains are laid out.
-                    if !positioned.contains_key(&item.id) {
-                        positioned.insert(item.id.clone(), item.position);
-                    }
-
-                    let stock_pos = positioned[&item.id];
-
-                    // Find inflows for this stock
-                    let inflows = self
-                        .metadata
-                        .stock_to_inflows
-                        .get(&item.id)
-                        .cloned()
-                        .unwrap_or_default();
-                    for inflow_id in &inflows {
-                        if !positioned.contains_key(inflow_id) {
-                            queue.push_back(WorkItem {
-                                id: inflow_id.clone(),
-                                item_type: WorkItemType::Flow,
-                                position: stock_pos,
-                                connected_to: item.id.clone(),
-                            });
-                        }
-                    }
-
-                    // Find outflows for this stock
-                    let outflows = self
-                        .metadata
-                        .stock_to_outflows
-                        .get(&item.id)
-                        .cloned()
-                        .unwrap_or_default();
-                    for outflow_id in &outflows {
-                        if !positioned.contains_key(outflow_id) {
-                            queue.push_back(WorkItem {
-                                id: outflow_id.clone(),
-                                item_type: WorkItemType::Flow,
-                                position: stock_pos,
-                                connected_to: item.id.clone(),
-                            });
-                        }
-                    }
+                ViewElement::Stock(s) => {
+                    uid_manager.add(s.uid, &canonicalize(&s.name));
+                    positions.insert(s.uid, Position::new(s.x, s.y));
                 }
-                WorkItemType::Flow => {
-                    if positioned.contains_key(&item.id) {
-                        continue;
-                    }
-
-                    let (from_stock, to_stock) = self.metadata.connected_stocks(&item.id);
-
-                    let flow_pos = match (from_stock, to_stock) {
-                        (Some(from), Some(to)) => {
-                            let from = from.to_string();
-                            let to = to.to_string();
-                            if item.connected_to == from {
-                                // Position sink stock to the right
-                                if !positioned.contains_key(&to) {
-                                    let other_pos = Position::new(
-                                        item.position.x
-                                            + self.config.stock_width
-                                            + self.config.horizontal_spacing,
-                                        item.position.y,
-                                    );
-                                    positioned.insert(to.clone(), other_pos);
-                                    queue.push_back(WorkItem {
-                                        id: to.clone(),
-                                        item_type: WorkItemType::Stock,
-                                        position: other_pos,
-                                        connected_to: String::new(),
-                                    });
-                                }
-                                Position::new(
-                                    (item.position.x + positioned[&to].x) / 2.0,
-                                    item.position.y,
-                                )
-                            } else {
-                                // Position source stock to the left
-                                if !positioned.contains_key(&from) {
-                                    let other_pos = Position::new(
-                                        item.position.x
-                                            - self.config.stock_width
-                                            - self.config.horizontal_spacing,
-                                        item.position.y,
-                                    );
-                                    positioned.insert(from.clone(), other_pos);
-                                    queue.push_back(WorkItem {
-                                        id: from.clone(),
-                                        item_type: WorkItemType::Stock,
-                                        position: other_pos,
-                                        connected_to: String::new(),
-                                    });
-                                }
-                                Position::new(
-                                    (positioned[&from].x + item.position.x) / 2.0,
-                                    item.position.y,
-                                )
-                            }
-                        }
-                        (Some(_from), None) => {
-                            // Outflow to cloud
-                            Position::new(
-                                item.position.x
-                                    + self.config.stock_width / 2.0
-                                    + self.config.horizontal_spacing / 2.0,
-                                item.position.y,
-                            )
-                        }
-                        (None, Some(_to)) => {
-                            // Inflow from cloud
-                            Position::new(
-                                item.position.x
-                                    - self.config.stock_width / 2.0
-                                    - self.config.horizontal_spacing / 2.0,
-                                item.position.y,
-                            )
-                        }
-                        (None, None) => {
-                            // Cloud-to-cloud
-                            item.position
-                        }
-                    };
-
-                    positioned.insert(item.id.clone(), flow_pos);
+                ViewElement::Flow(f) => {
+                    uid_manager.add(f.uid, &canonicalize(&f.name));
+                    positions.insert(f.uid, Position::new(f.x, f.y));
+                }
+                ViewElement::Module(m) => {
+                    uid_manager.add(m.uid, &canonicalize(&m.name));
+                    positions.insert(m.uid, Position::new(m.x, m.y));
+                }
+                ViewElement::Group(g) => {
+                    // Groups are not looked up by name for variable operations,
+                    // so register with an empty ident to prevent collisions with
+                    // model variables that happen to share the same name.
+                    uid_manager.add(g.uid, "");
+                    positions.insert(g.uid, Position::new(g.x, g.y));
+                }
+                ViewElement::Cloud(c) => {
+                    uid_manager.add(c.uid, "");
+                    positions.insert(c.uid, Position::new(c.x, c.y));
+                }
+                ViewElement::Link(l) => {
+                    uid_manager.add(l.uid, "");
+                }
+                ViewElement::Alias(a) => {
+                    uid_manager.add(a.uid, "");
+                    positions.insert(a.uid, Position::new(a.x, a.y));
                 }
             }
         }
 
-        // Convert positioned elements to view elements
-        self.create_view_elements(&positioned, stocks, flows)
-    }
-
-    /// Convert positioned stock/flow identifiers into ViewElements.
-    fn create_view_elements(
-        &mut self,
-        positioned: &HashMap<String, Position>,
-        stocks: &[String],
-        flows: &[String],
-    ) -> Result<(), String> {
-        // Create stock view elements
-        for stock_ident in stocks {
-            if let Some(&pos) = positioned.get(stock_ident) {
-                let uid = self.get_or_alloc_uid(stock_ident);
-                let name = self.display_name(stock_ident);
-                let formatted = format_label_with_line_breaks(&name);
-                let elem = ViewElement::Stock(view_element::Stock {
-                    name: formatted,
-                    uid,
-                    x: pos.x,
-                    y: pos.y,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                });
-                self.elements.push(elem);
-                self.positions.insert(uid, pos);
-                self.update_bounds_for_element(
-                    pos.x,
-                    pos.y,
-                    self.config.stock_width,
-                    self.config.stock_height,
-                );
-            }
-        }
-
-        // Create flow view elements
-        for flow_ident in flows {
-            if let Some(&pos) = positioned.get(flow_ident) {
-                let uid = self.get_or_alloc_uid(flow_ident);
-                self.create_flow_view_element(flow_ident, uid, pos)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Create a single flow view element with its flow points and clouds.
-    fn create_flow_view_element(
-        &mut self,
-        flow_ident: &str,
-        uid: i32,
-        pos: Position,
-    ) -> Result<(), String> {
-        let (from_stock, to_stock) = self.metadata.connected_stocks(flow_ident);
-        let from_stock = from_stock.map(|s| s.to_string());
-        let to_stock = to_stock.map(|s| s.to_string());
-        let name = self.display_name(flow_ident);
-        let formatted = format_label_with_line_breaks(&name);
-
-        let flow_points = match (from_stock.as_deref(), to_stock.as_deref()) {
-            (Some(from), Some(to)) => {
-                let from_uid = self.get_or_alloc_uid(from);
-                let to_uid = self.get_or_alloc_uid(to);
-                let from_pos = self
-                    .positions
-                    .get(&from_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x - 50.0, pos.y));
-                let to_pos = self
-                    .positions
-                    .get(&to_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x + 50.0, pos.y));
-                vec![
-                    FlowPoint {
-                        x: from_pos.x + self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(from_uid),
-                    },
-                    FlowPoint {
-                        x: to_pos.x - self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(to_uid),
-                    },
-                ]
-            }
-            (Some(from), None) => {
-                let from_uid = self.get_or_alloc_uid(from);
-                let from_pos = self
-                    .positions
-                    .get(&from_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x - 50.0, pos.y));
-                vec![
-                    FlowPoint {
-                        x: from_pos.x + self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(from_uid),
-                    },
-                    FlowPoint {
-                        x: pos.x + 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                ]
-            }
-            (None, Some(to)) => {
-                let to_uid = self.get_or_alloc_uid(to);
-                let to_pos = self
-                    .positions
-                    .get(&to_uid)
-                    .copied()
-                    .unwrap_or(Position::new(pos.x + 50.0, pos.y));
-                vec![
-                    FlowPoint {
-                        x: pos.x - 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                    FlowPoint {
-                        x: to_pos.x - self.config.stock_width / 2.0,
-                        y: pos.y,
-                        attached_to_uid: Some(to_uid),
-                    },
-                ]
-            }
-            (None, None) => {
-                vec![
-                    FlowPoint {
-                        x: pos.x - 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                    FlowPoint {
-                        x: pos.x + 50.0,
-                        y: pos.y,
-                        attached_to_uid: None,
-                    },
-                ]
-            }
-        };
-
-        let orientation = compute_flow_orientation(&flow_points);
-        let label_side = match orientation {
-            FlowOrientation::Horizontal => LabelSide::Top,
-            FlowOrientation::Vertical => LabelSide::Left,
-        };
-
-        let mut flow_elem = view_element::Flow {
-            name: formatted,
-            uid,
-            x: pos.x,
-            y: pos.y,
-            label_side,
-            points: flow_points,
-            compat: None,
-            label_compat: None,
-        };
-
-        // Update bounds for flow points
-        for pt in &flow_elem.points {
-            self.bounds.update(pt.x, pt.y, pt.x, pt.y);
-        }
-
-        // Add clouds for missing stock endpoints
-        self.add_clouds_for_flow(flow_ident, &mut flow_elem);
-
-        // Record flow template for crossing detection
-        self.record_flow_template(flow_ident, &flow_elem);
-
-        self.elements.push(ViewElement::Flow(flow_elem));
-        self.positions.insert(uid, pos);
-        self.update_bounds_for_element(
-            pos.x,
-            pos.y,
-            self.config.flow_width,
-            self.config.flow_height,
-        );
-
-        Ok(())
-    }
-
-    /// Add cloud elements for flow endpoints that don't connect to a stock.
-    fn add_clouds_for_flow(&mut self, flow_ident: &str, flow_elem: &mut view_element::Flow) {
-        let (from_stock, to_stock) = self.metadata.connected_stocks(flow_ident);
-        let has_from = from_stock.is_some();
-        let has_to = to_stock.is_some();
-
-        // Source cloud (no from stock)
-        if !has_from && !flow_elem.points.is_empty() {
-            let cx = flow_elem.points[0].x;
-            let cy = flow_elem.points[0].y;
-            let cloud_uid = self.uid_manager.alloc("");
-            let cloud = ViewElement::Cloud(view_element::Cloud {
-                uid: cloud_uid,
-                flow_uid: flow_elem.uid,
-                x: cx,
-                y: cy,
-                compat: None,
-            });
-            self.elements.push(cloud);
-            flow_elem.points[0].attached_to_uid = Some(cloud_uid);
-            self.bounds.update(
-                cx - self.config.cloud_width / 2.0,
-                cy - self.config.cloud_height / 2.0,
-                cx + self.config.cloud_width / 2.0,
-                cy + self.config.cloud_height / 2.0,
-            );
-        }
-
-        // Sink cloud (no to stock)
-        if !has_to && !flow_elem.points.is_empty() {
-            let last_idx = flow_elem.points.len() - 1;
-            let cx = flow_elem.points[last_idx].x;
-            let cy = flow_elem.points[last_idx].y;
-            let cloud_uid = self.uid_manager.alloc("");
-            let cloud = ViewElement::Cloud(view_element::Cloud {
-                uid: cloud_uid,
-                flow_uid: flow_elem.uid,
-                x: cx,
-                y: cy,
-                compat: None,
-            });
-            self.elements.push(cloud);
-            flow_elem.points[last_idx].attached_to_uid = Some(cloud_uid);
-            self.bounds.update(
-                cx - self.config.cloud_width / 2.0,
-                cy - self.config.cloud_height / 2.0,
-                cx + self.config.cloud_width / 2.0,
-                cy + self.config.cloud_height / 2.0,
-            );
-        }
-    }
-
-    /// Cache a flow's polyline offsets (relative to valve center) for crossing detection.
-    fn record_flow_template(&mut self, flow_ident: &str, flow_elem: &view_element::Flow) {
-        if flow_elem.points.len() < 2 {
-            return;
-        }
-        let offsets: Vec<Position> = flow_elem
-            .points
-            .iter()
-            .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
-            .collect();
-        self.flow_templates
-            .insert(flow_ident.to_string(), FlowTemplate { offsets });
-    }
-
-    /// Rebuild flow templates from current view elements.
-    fn refresh_flow_templates(&mut self) {
-        self.flow_templates.clear();
-
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
+        // Build uid-to-ident map using the uid_manager (which was seeded from
+        // view elements above), not from model variable UIDs which may be None
+        // for XMILE-parsed models.
+        let uid_to_ident: HashMap<i32, String> = model
             .variables
             .iter()
-            .filter_map(|var| match var {
-                datamodel::Variable::Flow(f) => {
-                    let ident = canonicalize(&f.ident).into_owned();
-                    self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
-                }
-                _ => None,
+            .filter_map(|var| {
+                let ident = canonicalize(var.get_ident()).into_owned();
+                let uid = uid_manager.get_uid(&ident)?;
+                Some((uid, ident))
             })
             .collect();
 
-        for elem in &self.elements {
-            if let ViewElement::Flow(flow_elem) = elem
-                && let Some(ident) = uid_to_ident.get(&flow_elem.uid)
-                && flow_elem.points.len() >= 2
+        // Populate flow_templates from existing flow elements
+        for elem in &old_view.elements {
+            if let ViewElement::Flow(f) = elem
+                && let Some(ident) = uid_to_ident.get(&f.uid)
+                && f.points.len() >= 2
             {
-                let offsets: Vec<Position> = flow_elem
+                let offsets: Vec<Position> = f
                     .points
                     .iter()
-                    .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
+                    .map(|pt| Position::new(pt.x - f.x, pt.y - f.y))
                     .collect();
-                self.flow_templates
-                    .insert(ident.clone(), FlowTemplate { offsets });
+                flow_templates.insert(ident.clone(), FlowTemplate { offsets });
             }
         }
-    }
 
-    /// Phase 3: Position auxiliaries using SFDP with rigid chain groups, then create connectors.
-    fn layout_auxiliaries_and_connectors(
-        &mut self,
-        chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
-    ) -> Result<(), String> {
-        self.refresh_flow_templates();
-
-        let (full_graph, var_to_node) = self.build_full_graph()?;
-
-        if full_graph.node_count() == 0 {
-            return Ok(());
+        // Populate cloud maps from existing cloud elements
+        for elem in &old_view.elements {
+            if let ViewElement::Cloud(c) = elem {
+                let cloud_ident = make_cloud_node_ident(c.uid);
+                if let Some(flow_ident) = uid_to_ident.get(&c.flow_uid) {
+                    cloud_ident_to_uid.insert(cloud_ident.clone(), c.uid);
+                    cloud_ident_to_flow_ident.insert(cloud_ident.clone(), flow_ident.clone());
+                    flow_ident_to_clouds
+                        .entry(flow_ident.clone())
+                        .or_default()
+                        .push(cloud_ident);
+                }
+            }
         }
 
-        // Run SFDP with rigid chains (takes ownership of full_graph)
-        let layout = self.run_sfdp_with_rigid_chains(full_graph, chains_data, &var_to_node)?;
-
-        // Apply SFDP positions to all elements
-        self.apply_layout_positions(&layout, &var_to_node)?;
-
-        // Create auxiliary view elements for any not yet created
-        self.create_missing_auxiliary_elements(&layout, &var_to_node)?;
-
-        // Create module view elements for any not yet created
-        self.create_missing_module_elements(&layout, &var_to_node)?;
-
-        // Create connector (link) view elements
-        self.create_connectors()?;
-
-        self.recalculate_bounds();
-        Ok(())
+        Self {
+            uid_manager,
+            display_names,
+            elements: old_view.elements.clone(),
+            positions,
+            flow_templates,
+            cloud_ident_to_uid,
+            cloud_ident_to_flow_ident,
+            flow_ident_to_clouds,
+        }
     }
 
-    /// Build an undirected graph with all model variables and cloud nodes for SFDP.
-    fn build_full_graph(&mut self) -> Result<(Graph<String>, HashMap<String, String>), String> {
-        // Reset cloud mappings
-        self.cloud_ident_to_uid.clear();
-        self.cloud_ident_to_flow_ident.clear();
-        self.flow_ident_to_clouds.clear();
+    /// Get or allocate a UID for a variable by its canonical ident.
+    pub fn get_or_alloc_uid(&mut self, ident: &str) -> i32 {
+        self.uid_manager.alloc(ident)
+    }
 
-        let flow_uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
+    /// Get the display name for a variable, preferring the original case.
+    pub fn display_name(&self, canonical_ident: &str) -> String {
+        self.display_names
+            .get(canonical_ident)
+            .cloned()
+            .unwrap_or_else(|| canonical_ident.to_string())
+    }
+
+    /// Remove a variable and its associated view elements (clouds, aliases, links)
+    /// from the layout state.
+    ///
+    /// The ident-to-UID mapping is intentionally retained in `uid_manager` so that
+    /// `identify_new_elements` can detect the UID as orphaned (present in uid_manager
+    /// but absent from elements) and rebuild the element with the correct type.
+    /// This is used by the flow-reset and kind-change paths in `incremental_layout`.
+    pub fn apply_deletion(&mut self, deleted_ident: &str) {
+        let canonical = canonicalize(deleted_ident);
+        let deleted_uid = match self.uid_manager.get_uid(&canonical) {
+            Some(uid) => uid,
+            None => return,
+        };
+
+        self.positions.remove(&deleted_uid);
+
+        // Collect UIDs of clouds and aliases being removed so we can clean up their positions
+        let removed_cloud_uids: Vec<i32> = self
+            .elements
             .iter()
-            .filter_map(|var| match var {
-                datamodel::Variable::Flow(f) => {
-                    let ident = canonicalize(&f.ident).into_owned();
-                    self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
-                }
+            .filter_map(|elem| match elem {
+                ViewElement::Cloud(c) if c.flow_uid == deleted_uid => Some(c.uid),
                 _ => None,
             })
             .collect();
 
-        let mut var_to_node: HashMap<String, String> = HashMap::new();
-        let mut node_to_var: HashMap<String, String> = HashMap::new();
-        let mut builder = GraphBuilder::<String>::new_undirected();
-        let mut node_index = 0;
-
-        // Add all variables from the dependency graph as nodes
-        let all_vars: BTreeSet<String> = self
-            .metadata
-            .dep_graph
-            .keys()
-            .chain(
-                self.metadata
-                    .dep_graph
-                    .values()
-                    .flat_map(|deps| deps.iter()),
-            )
-            .cloned()
-            .collect();
-
-        for var_ident in &all_vars {
-            let node_id = format!("node_{}", node_index);
-            var_to_node.insert(var_ident.clone(), node_id.clone());
-            node_to_var.insert(node_id.clone(), var_ident.clone());
-            builder.add_node(node_id);
-            node_index += 1;
-        }
-
-        // Add edges from dependency graph
-        for (from_ident, deps) in &self.metadata.dep_graph {
-            if let Some(from_node) = var_to_node.get(from_ident) {
-                for to_ident in deps {
-                    if let Some(to_node) = var_to_node.get(to_ident) {
-                        builder.add_edge(from_node.clone(), to_node.clone(), 1.0);
-                    }
-                }
-            }
-        }
-
-        // Add cloud nodes
-        for elem in &self.elements {
-            if let ViewElement::Cloud(cloud) = elem {
-                let flow_ident = match flow_uid_to_ident.get(&cloud.flow_uid) {
-                    Some(ident) => ident.clone(),
-                    None => {
-                        return Err(format!(
-                            "build_full_graph: cloud {} references unknown flow UID {}",
-                            cloud.uid, cloud.flow_uid
-                        ));
-                    }
-                };
-
-                let cloud_ident = make_cloud_node_ident(cloud.uid);
-                if !var_to_node.contains_key(&cloud_ident) {
-                    let node_id = format!("node_{}", node_index);
-                    builder.add_node(node_id.clone());
-                    var_to_node.insert(cloud_ident.clone(), node_id.clone());
-                    node_to_var.insert(node_id, cloud_ident.clone());
-                    node_index += 1;
-                }
-
-                let flow_node = var_to_node.get(&flow_ident).ok_or_else(|| {
-                    format!("build_full_graph: missing node for flow '{}'", flow_ident)
-                })?;
-                let cloud_node = var_to_node[&cloud_ident].clone();
-                builder.add_edge(flow_node.clone(), cloud_node, 1.0);
-
-                self.cloud_ident_to_uid
-                    .insert(cloud_ident.clone(), cloud.uid);
-                self.cloud_ident_to_flow_ident
-                    .insert(cloud_ident.clone(), flow_ident.clone());
-                self.flow_ident_to_clouds
-                    .entry(flow_ident)
-                    .or_default()
-                    .push(cloud_ident);
-            }
-        }
-
-        Ok((builder.build(), var_to_node))
-    }
-
-    /// Run SFDP with chain elements locked into rigid groups.
-    fn run_sfdp_with_rigid_chains(
-        &self,
-        full_graph: Graph<String>,
-        chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<Layout<String>, String> {
-        let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
-
-        // Create one rigid group per chain
-        for (_stocks, _flows, all_vars) in chains_data {
-            let mut group_members: Vec<String> = Vec::new();
-            let mut added: HashSet<String> = HashSet::new();
-
-            for var_ident in all_vars {
-                if let Some(node_id) = var_to_node.get(var_ident) {
-                    // Only include positioned elements in the rigid group
-                    let uid = self.uid_manager.get_uid(var_ident);
-                    let is_positioned = uid.is_some_and(|u| self.positions.contains_key(&u));
-                    if is_positioned && added.insert(node_id.clone()) {
-                        group_members.push(node_id.clone());
-
-                        // Also add clouds attached to flows in this chain
-                        let canonical = canonicalize(var_ident);
-                        if let Some(cloud_idents) =
-                            self.flow_ident_to_clouds.get(canonical.as_ref())
-                        {
-                            for cloud_ident in cloud_idents {
-                                if let Some(cloud_node) = var_to_node.get(cloud_ident)
-                                    && added.insert(cloud_node.clone())
-                                {
-                                    group_members.push(cloud_node.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if group_members.len() > 1 {
-                constrained_builder.add_rigid_group(group_members);
-            }
-        }
-
-        let constrained_graph = constrained_builder.build();
-
-        // Build initial layout from existing positions
-        let mut initial_layout: Layout<String> = BTreeMap::new();
-        let cloud_uid_to_pos: HashMap<i32, Position> = self
+        let removed_alias_uids: Vec<i32> = self
             .elements
             .iter()
-            .filter_map(|elem| {
-                if let ViewElement::Cloud(cloud) = elem {
-                    Some((cloud.uid, Position::new(cloud.x, cloud.y)))
-                } else {
-                    None
-                }
+            .filter_map(|elem| match elem {
+                ViewElement::Alias(a) if a.alias_of_uid == deleted_uid => Some(a.uid),
+                _ => None,
             })
             .collect();
 
-        // Pre-compute center from known positions for auxiliary placement
-        let mut center_x = self.config.start_x;
-        let mut center_y = self.config.start_y;
-        let mut count = 0;
+        self.elements.retain(|elem| match elem {
+            ViewElement::Aux(a) if a.uid == deleted_uid => false,
+            ViewElement::Stock(s) if s.uid == deleted_uid => false,
+            ViewElement::Flow(f) if f.uid == deleted_uid => false,
+            ViewElement::Module(m) if m.uid == deleted_uid => false,
+            ViewElement::Link(l) if l.from_uid == deleted_uid || l.to_uid == deleted_uid => false,
+            ViewElement::Cloud(c) if c.flow_uid == deleted_uid => false,
+            ViewElement::Alias(a) if a.alias_of_uid == deleted_uid => false,
+            _ => true,
+        });
 
-        for (var_ident, node_id) in var_to_node {
-            // Try existing positioned elements first
-            if let Some(uid) = self.uid_manager.get_uid(var_ident)
-                && let Some(&pos) = self.positions.get(&uid)
-            {
-                initial_layout.insert(node_id.clone(), pos);
-                center_x += pos.x;
-                center_y += pos.y;
-                count += 1;
-                continue;
-            }
-
-            // Try cloud positions
-            if let Some(&cloud_uid) = self.cloud_ident_to_uid.get(var_ident) {
-                if let Some(&pos) = cloud_uid_to_pos.get(&cloud_uid) {
-                    initial_layout.insert(node_id.clone(), pos);
-                    continue;
-                }
-                // Fall back to flow position for clouds
-                if let Some(flow_ident) = self.cloud_ident_to_flow_ident.get(var_ident)
-                    && let Some(flow_uid) = self.uid_manager.get_uid(flow_ident)
-                    && let Some(&pos) = self.positions.get(&flow_uid)
-                {
-                    initial_layout.insert(node_id.clone(), pos);
-                    continue;
-                }
-            }
+        for cloud_uid in &removed_cloud_uids {
+            self.positions.remove(cloud_uid);
         }
 
-        // Average the accumulated positions with the start position (which was
-        // used as the initial accumulator value) to bias the center toward the
-        // configured origin when few nodes are positioned.
-        if count > 0 {
-            center_x /= (count + 1) as f64;
-            center_y /= (count + 1) as f64;
+        for alias_uid in &removed_alias_uids {
+            self.positions.remove(alias_uid);
         }
 
-        let mut aux_index = 0;
-        for node_id in var_to_node.values() {
-            if initial_layout.contains_key(node_id) {
-                continue;
-            }
-            // Unpositioned node; place in circle around center
-            let angle = aux_index as f64 * 2.0 * PI / 8.0;
-            let radius = 100.0;
-            initial_layout.insert(
-                node_id.clone(),
-                Position::new(
-                    center_x + radius * angle.cos(),
-                    center_y + radius * angle.sin(),
-                ),
-            );
-            aux_index += 1;
-        }
-
-        // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
-        // are overridden for auxiliary layout. Other SFDP parameters stay at
-        // their defaults (notably p=-1.0 and step size=0.1) to avoid runaway
-        // repulsion that can fling disconnected chains far apart.
-        let sfdp_config = SfdpConfig {
-            k: 75.0,
-            max_iterations: 5000,
-            convergence_threshold: 0.001,
-            initial_step_size: 0.1,
-            cooling_factor: 0.9995,
-            c: 3.0,
-            ..SfdpConfig::default()
-        };
-
-        let node_to_ident: HashMap<String, String> = var_to_node
-            .iter()
-            .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
-            .collect();
-        let stock_inflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_inflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let stock_outflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_outflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let aux_node_ids: HashSet<String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                if let datamodel::Variable::Aux(aux) = var {
-                    let canonical = canonicalize(&aux.ident);
-                    var_to_node.get(canonical.as_ref()).cloned()
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
-            let mut segments = Vec::new();
-
-            for edge in constrained_graph.edges() {
-                let (Some(&from_pos), Some(&to_pos)) = (
-                    candidate_layout.get(&edge.from),
-                    candidate_layout.get(&edge.to),
-                ) else {
-                    continue;
-                };
-
-                // Graph edges follow dep_graph direction (stock → flow for
-                // structural deps). Skip these since they're rendered as
-                // pipes, not connectors.
-                if let (Some(from_ident), Some(to_ident)) =
-                    (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
-                    && is_structural_stock_flow(
-                        from_ident,
-                        to_ident,
-                        &stock_inflows,
-                        &stock_outflows,
-                    )
-                {
-                    continue;
-                }
-
-                segments.push(LineSegment {
-                    start: from_pos,
-                    end: to_pos,
-                    from_node: edge.from.clone(),
-                    to_node: edge.to.clone(),
-                });
-            }
-
-            for (flow_ident, tmpl) in &self.flow_templates {
-                if tmpl.offsets.len() < 2 {
-                    continue;
-                }
-                let Some(node_id) = var_to_node.get(flow_ident) else {
-                    continue;
-                };
-                let Some(&center) = candidate_layout.get(node_id) else {
-                    continue;
-                };
-
-                let points: Vec<Position> = tmpl
-                    .offsets
-                    .iter()
-                    .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
-                    .collect();
-
-                for i in 0..points.len() - 1 {
-                    segments.push(LineSegment {
-                        start: points[i],
-                        end: points[i + 1],
-                        from_node: format!("{}#{}", flow_ident, i),
-                        to_node: format!("{}#{}", flow_ident, i + 1),
-                    });
-                }
-            }
-
-            segments
-        };
-
-        // Build adjacency map for coupled motion
-        let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
-        for edge in constrained_graph.edges() {
-            adjacency
-                .entry(edge.from.clone())
-                .or_default()
-                .push((edge.to.clone(), edge.weight));
-            adjacency
-                .entry(edge.to.clone())
-                .or_default()
-                .push((edge.from.clone(), edge.weight));
-        }
-
-        let max_delta_aux = self.config.annealing_max_delta_aux;
-        let max_delta_chain = self.config.annealing_max_delta_chain;
-        let annealing_config = self.config.clone();
-        let annealing_seed = self.config.annealing_random_seed;
-
-        // Interleaved annealing state
-        let mut annealing_round: usize = 0;
-        let mut last_annealing_iter: usize = 0;
-        let mut best_crossings: usize = usize::MAX;
-        let mut best_layout: Option<Layout<String>> = None;
-
-        let final_layout = compute_layout_from_initial_with_callback(
-            &constrained_graph,
-            &sfdp_config,
-            &initial_layout,
-            annealing_seed,
-            &mut |iter, layout| {
-                if !should_trigger_annealing(
-                    iter,
-                    annealing_config.annealing_interval,
-                    last_annealing_iter,
-                    annealing_round,
-                    annealing_config.annealing_max_rounds,
-                ) {
-                    return None;
-                }
-
-                let result = run_annealing_with_filter(
-                    layout,
-                    build_segments,
-                    &annealing_config,
-                    annealing_seed.wrapping_add(annealing_round as u64),
-                    |node_id: &String| aux_node_ids.contains(node_id),
-                    |node_id: &String| {
-                        if aux_node_ids.contains(node_id) {
-                            max_delta_aux
-                        } else {
-                            max_delta_chain
-                        }
-                    },
-                    &adjacency,
-                );
-
-                last_annealing_iter = iter;
-                annealing_round += 1;
-
-                if result.crossings < best_crossings {
-                    best_crossings = result.crossings;
-                    best_layout = Some(result.layout.clone());
-                    Some(result.layout)
-                } else {
-                    None
-                }
-            },
-        );
-
-        // If SFDP drifted after a good annealing round, the final layout
-        // may be worse than the best we found. Compare and keep the better one.
-        if let Some(saved) = best_layout {
-            let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
-            if final_crossings > best_crossings {
-                return Ok(saved);
+        // Clean up cloud bookkeeping for the deleted flow
+        let canonical_str = canonical.into_owned();
+        if let Some(cloud_idents) = self.flow_ident_to_clouds.remove(&canonical_str) {
+            for ci in &cloud_idents {
+                self.cloud_ident_to_uid.remove(ci);
+                self.cloud_ident_to_flow_ident.remove(ci);
             }
         }
-
-        Ok(final_layout)
+        self.display_names.remove(&canonical_str);
     }
 
-    /// Update all element coordinates from SFDP results.
-    fn apply_layout_positions(
-        &mut self,
-        layout: &Layout<String>,
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        // Build ident -> position map
-        let layout_by_ident: HashMap<String, Position> = var_to_node
-            .iter()
-            .filter_map(|(ident, node_id)| layout.get(node_id).map(|&pos| (ident.clone(), pos)))
-            .collect();
-
-        // Build uid -> ident map
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                let ident = canonicalize(var.get_ident()).into_owned();
-                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
-            })
-            .collect();
-
-        let mut flow_deltas: HashMap<i32, Position> = HashMap::new();
+    /// Update a variable's identity in-place while preserving its
+    /// position and UID.  Updates the element name, uid_manager
+    /// mapping, and display_names entry.
+    pub fn apply_rename(&mut self, old_ident: &str, new_ident: &str, new_display_name: &str) {
+        let old_canonical = canonicalize(old_ident).into_owned();
+        let uid = match self.uid_manager.get_uid(&old_canonical) {
+            Some(uid) => uid,
+            None => return,
+        };
 
         for elem in &mut self.elements {
+            if elem.get_uid() != uid {
+                continue;
+            }
+            let formatted = format_label_with_line_breaks(new_display_name);
             match elem {
-                ViewElement::Stock(stock) => {
-                    if let Some(ident) = uid_to_ident.get(&stock.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        stock.x = pos.x;
-                        stock.y = pos.y;
-                        self.positions.insert(stock.uid, pos);
-                    }
-                }
-                ViewElement::Flow(flow) => {
-                    if let Some(ident) = uid_to_ident.get(&flow.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        let dx = pos.x - flow.x;
-                        let dy = pos.y - flow.y;
-                        if dx != 0.0 || dy != 0.0 {
-                            for pt in &mut flow.points {
-                                pt.x += dx;
-                                pt.y += dy;
-                            }
-                        }
-                        flow.x = pos.x;
-                        flow.y = pos.y;
-                        self.positions.insert(flow.uid, pos);
-                        flow_deltas.insert(flow.uid, Position::new(dx, dy));
-                    }
-                }
-                ViewElement::Aux(aux) => {
-                    if let Some(ident) = uid_to_ident.get(&aux.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        aux.x = pos.x;
-                        aux.y = pos.y;
-                        self.positions.insert(aux.uid, pos);
-                    }
-                }
-                ViewElement::Module(module) => {
-                    if let Some(ident) = uid_to_ident.get(&module.uid)
-                        && let Some(&pos) = layout_by_ident.get(ident)
-                    {
-                        module.x = pos.x;
-                        module.y = pos.y;
-                        self.positions.insert(module.uid, pos);
-                    }
-                }
-                ViewElement::Cloud(cloud) => {
-                    let cloud_ident = make_cloud_node_ident(cloud.uid);
-                    if let Some(&pos) = layout_by_ident.get(&cloud_ident) {
-                        cloud.x = pos.x;
-                        cloud.y = pos.y;
-                    } else if let Some(&delta) = flow_deltas.get(&cloud.flow_uid) {
-                        cloud.x += delta.x;
-                        cloud.y += delta.y;
-                    }
-                }
+                ViewElement::Aux(a) => a.name = formatted,
+                ViewElement::Stock(s) => s.name = formatted,
+                ViewElement::Flow(f) => f.name = formatted,
+                ViewElement::Module(m) => m.name = formatted,
                 _ => {}
             }
+            break;
         }
 
-        self.recalculate_bounds();
-        Ok(())
+        let new_canonical = canonicalize(new_ident).into_owned();
+        self.uid_manager.rename(&old_canonical, &new_canonical);
+        self.display_names.remove(&old_canonical);
+        self.display_names
+            .insert(new_canonical, new_display_name.to_string());
     }
 
-    /// Create auxiliary view elements for variables not yet in the elements list.
-    fn create_missing_auxiliary_elements(
-        &mut self,
-        layout: &Layout<String>,
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<(), String> {
+    /// Walk model variables and identify which ones are not yet represented
+    /// in this layout state (either no UID mapping or no view element with
+    /// that UID), classifying each by variable type.
+    pub fn identify_new_elements(&self, model: &datamodel::Model) -> NewElements {
         let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
 
-        for var in &self.model.variables {
-            if let datamodel::Variable::Aux(aux) = var {
-                let canonical = canonicalize(&aux.ident);
-                let uid = self.uid_manager.alloc(&canonical);
-                if existing_uids.contains(&uid) {
-                    continue;
+        let mut new_stocks = Vec::new();
+        let mut new_flows = Vec::new();
+        let mut new_auxes = Vec::new();
+        let mut new_modules = Vec::new();
+
+        for var in &model.variables {
+            let canonical = canonicalize(var.get_ident()).into_owned();
+            let is_new = match self.uid_manager.get_uid(&canonical) {
+                None => true,
+                Some(uid) => !existing_uids.contains(&uid),
+            };
+
+            if is_new {
+                match var {
+                    datamodel::Variable::Stock(_) => new_stocks.push(canonical),
+                    datamodel::Variable::Flow(_) => new_flows.push(canonical),
+                    datamodel::Variable::Aux(_) => new_auxes.push(canonical),
+                    datamodel::Variable::Module(_) => new_modules.push(canonical),
                 }
-
-                let pos = var_to_node
-                    .get(canonical.as_ref())
-                    .and_then(|node_id| layout.get(node_id))
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "create_missing_auxiliary_elements: no layout position for aux '{}'",
-                            canonical.as_ref()
-                        )
-                    })?;
-
-                let name = self.display_name(&canonical);
-                let formatted = format_label_with_line_breaks(&name);
-                let elem = ViewElement::Aux(view_element::Aux {
-                    name: formatted,
-                    uid,
-                    x: pos.x,
-                    y: pos.y,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                });
-                self.elements.push(elem);
-                self.positions.insert(uid, pos);
             }
         }
-        Ok(())
+
+        NewElements {
+            new_stocks,
+            new_flows,
+            new_auxes,
+            new_modules,
+        }
     }
+}
 
-    /// Create module view elements for variables not yet in the elements list.
-    /// Follows the same pattern as `create_missing_auxiliary_elements`.
-    fn create_missing_module_elements(
-        &mut self,
-        layout: &Layout<String>,
-        var_to_node: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        let existing_uids: HashSet<i32> = self.elements.iter().map(|e| e.get_uid()).collect();
+/// Variables in the model that have no corresponding view element in
+/// the current layout state, classified by type.
+pub struct NewElements {
+    pub new_stocks: Vec<String>,
+    pub new_flows: Vec<String>,
+    pub new_auxes: Vec<String>,
+    pub new_modules: Vec<String>,
+}
 
-        for var in &self.model.variables {
-            if let datamodel::Variable::Module(m) = var {
-                let canonical = canonicalize(&m.ident);
-                let uid = self.uid_manager.alloc(&canonical);
-                if existing_uids.contains(&uid) {
-                    continue;
-                }
+impl NewElements {
+    pub fn is_empty(&self) -> bool {
+        self.new_stocks.is_empty()
+            && self.new_flows.is_empty()
+            && self.new_auxes.is_empty()
+            && self.new_modules.is_empty()
+    }
+}
 
-                let pos = var_to_node
-                    .get(canonical.as_ref())
-                    .and_then(|node_id| layout.get(node_id))
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "create_missing_module_elements: no layout position for module '{}'",
-                            canonical.as_ref()
-                        )
-                    })?;
+/// Compute initial positions for newly-added elements based on their
+/// dependency connections to existing elements.
+///
+/// Three placement strategies:
+/// - Connected aux/module: centroid of connected existing elements with
+///   ring spreading when multiple new elements share the same connections
+/// - Connected chain element: near connected existing elements with offset
+/// - Disconnected element: at the diagram periphery beyond existing bounds
+pub fn compute_new_element_positions(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+) -> HashMap<String, Position> {
+    let mut result: HashMap<String, Position> = HashMap::new();
 
-                let name = self.display_name(&canonical);
-                let formatted = format_label_with_line_breaks(&name);
-                let elem = ViewElement::Module(view_element::Module {
-                    name: formatted,
-                    uid,
-                    x: pos.x,
-                    y: pos.y,
-                    label_side: LabelSide::Bottom,
-                });
-                self.elements.push(elem);
-                self.positions.insert(uid, pos);
+    let new_set: HashSet<&str> = new_elements
+        .new_stocks
+        .iter()
+        .chain(&new_elements.new_flows)
+        .chain(&new_elements.new_auxes)
+        .chain(&new_elements.new_modules)
+        .map(|s| s.as_str())
+        .collect();
+
+    // Compute bounding box of all existing positioned elements for periphery placement
+    let (bbox_min, bbox_max) = existing_bounding_box(state);
+
+    // Place new auxes and modules near connected existing elements
+    place_new_point_elements(
+        state,
+        metadata,
+        &new_elements.new_auxes,
+        &new_set,
+        &bbox_min,
+        &bbox_max,
+        &mut result,
+    );
+    place_new_point_elements(
+        state,
+        metadata,
+        &new_elements.new_modules,
+        &new_set,
+        &bbox_min,
+        &bbox_max,
+        &mut result,
+    );
+
+    // Place new stocks and flows (chain elements)
+    place_new_chain_elements(
+        state,
+        metadata,
+        new_elements,
+        &new_set,
+        &bbox_max,
+        &mut result,
+    );
+
+    result
+}
+
+/// Bounding box of variable elements (stocks, flows, auxes, modules) only.
+/// Excludes aliases, groups, and clouds so that outlier non-variable elements
+/// don't push new variable placement far from the actual model graph.
+/// Returns ((min_x, min_y), (max_x, max_y)).
+/// When no variable elements exist, returns a default origin area.
+fn existing_bounding_box(state: &LayoutState) -> (Position, Position) {
+    let variable_uids: HashSet<i32> = state
+        .elements
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ViewElement::Stock(_)
+                    | ViewElement::Flow(_)
+                    | ViewElement::Aux(_)
+                    | ViewElement::Module(_)
+            )
+        })
+        .map(|e| e.get_uid())
+        .collect();
+
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut found = false;
+    for (&uid, pos) in &state.positions {
+        if !variable_uids.contains(&uid) {
+            continue;
+        }
+        found = true;
+        min_x = min_x.min(pos.x);
+        min_y = min_y.min(pos.y);
+        max_x = max_x.max(pos.x);
+        max_y = max_y.max(pos.y);
+    }
+    if !found {
+        return (
+            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
+            Position::new(DIAGRAM_ORIGIN_MARGIN, DIAGRAM_ORIGIN_MARGIN),
+        );
+    }
+    (Position::new(min_x, min_y), Position::new(max_x, max_y))
+}
+
+/// Collect (uid, position) pairs for existing elements connected to a given
+/// ident via dep_graph (things `ident` depends on) and reverse_dep_graph
+/// (things that depend on `ident`), excluding other new elements.
+///
+/// Returning UIDs alongside positions lets callers build grouping keys
+/// directly from stable identifiers rather than doing a position-based
+/// reverse lookup.
+fn connected_existing_positions(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    ident: &str,
+    new_set: &HashSet<&str>,
+) -> Vec<(i32, Position)> {
+    let mut pairs = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Forward: things this element depends on
+    if let Some(deps) = metadata.dep_graph.get(ident) {
+        for dep in deps {
+            if new_set.contains(dep.as_str()) || !seen.insert(dep.as_str()) {
+                continue;
+            }
+            if let Some(uid) = state.uid_manager.get_uid(dep)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                pairs.push((uid, pos));
             }
         }
-        Ok(())
     }
 
-    /// Create link view elements for all non-structural dependency edges.
-    fn create_connectors(&mut self) -> Result<(), String> {
-        let mut link_set: HashSet<String> = HashSet::new();
+    // Reverse: things that depend on this element
+    if let Some(dependents) = metadata.reverse_dep_graph.get(ident) {
+        for dep in dependents {
+            if new_set.contains(dep.as_str()) || !seen.insert(dep.as_str()) {
+                continue;
+            }
+            if let Some(uid) = state.uid_manager.get_uid(dep)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                pairs.push((uid, pos));
+            }
+        }
+    }
 
-        let model_var_idents: HashSet<String> = self
-            .model
-            .variables
-            .iter()
-            .map(|v| canonicalize(v.get_ident()).into_owned())
-            .collect();
+    pairs
+}
 
-        // Build lookup sets for structural connections
-        let stock_inflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_inflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let stock_outflows: HashMap<String, HashSet<String>> = self
-            .metadata
-            .stock_to_outflows
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
+/// Centroid of a non-empty set of positions.
+fn centroid(positions: &[Position]) -> Position {
+    let n = positions.len() as f64;
+    let sum_x: f64 = positions.iter().map(|p| p.x).sum();
+    let sum_y: f64 = positions.iter().map(|p| p.y).sum();
+    Position::new(sum_x / n, sum_y / n)
+}
 
-        let dep_entries: Vec<(String, Vec<String>)> = self
-            .metadata
-            .dep_graph
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
+/// Place new aux or module elements near their connected existing elements,
+/// spreading multiple elements that share the same connections into a ring.
+fn place_new_point_elements(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    new_idents: &[String],
+    new_set: &HashSet<&str>,
+    bbox_min: &Position,
+    bbox_max: &Position,
+    result: &mut HashMap<String, Position>,
+) {
+    if new_idents.is_empty() {
+        return;
+    }
 
-        for (dependent_ident, dependencies) in &dep_entries {
-            for dependency_ident in dependencies {
-                // Metadata stores var -> dependencies, but view connectors are
-                // dependency -> dependent.
-                let from_ident = dependency_ident.as_str();
-                let to_ident = dependent_ident.as_str();
+    // Group new elements by their set of connected existing element UIDs
+    // so we can spread apart those that share the same connection set.
+    let mut connection_groups: HashMap<Vec<i32>, Vec<String>> = HashMap::new();
+    let mut ident_centroids: HashMap<String, Position> = HashMap::new();
+    let mut disconnected_index: usize = 0;
 
-                // Skip structural flow-to-stock connections
-                if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+    for ident in new_idents {
+        let connected = connected_existing_positions(state, metadata, ident, new_set);
+        if connected.is_empty() {
+            // No connections to existing elements: place at periphery,
+            // staggering vertically so multiple disconnected inserts don't overlap.
+            let periphery_x = bbox_max.x + 150.0;
+            let center_y = (bbox_min.y + bbox_max.y) / 2.0;
+            let offset_y = disconnected_index as f64 * 80.0;
+            disconnected_index += 1;
+            result.insert(
+                ident.clone(),
+                Position::new(periphery_x, center_y + offset_y),
+            );
+            continue;
+        }
+
+        let positions: Vec<Position> = connected.iter().map(|(_, p)| *p).collect();
+        let center = centroid(&positions);
+        ident_centroids.insert(ident.clone(), center);
+
+        // Build a sorted UID key for grouping elements that share the same
+        // connection set, so they can be spread into a ring rather than stacked.
+        let mut uid_key: Vec<i32> = connected.iter().map(|(uid, _)| *uid).collect();
+        uid_key.sort();
+        uid_key.dedup();
+
+        connection_groups
+            .entry(uid_key)
+            .or_default()
+            .push(ident.clone());
+    }
+
+    // Place each group, spreading elements in a ring when multiple share
+    // the same connection set (AC4.4).
+    for group in connection_groups.values() {
+        let group_count = group.len();
+        for (i, ident) in group.iter().enumerate() {
+            let base = ident_centroids
+                .get(ident)
+                .copied()
+                .unwrap_or(Position::new(bbox_max.x + 150.0, bbox_min.y));
+
+            if group_count == 1 {
+                // Offset slightly from the centroid so SFDP has non-zero
+                // initial displacement. Without this, a new element seeded
+                // exactly on its only neighbor gets zero force and stays stacked.
+                result.insert(ident.clone(), Position::new(base.x + 50.0, base.y + 30.0));
+            } else {
+                let angle = i as f64 * 2.0 * PI / group_count.max(8) as f64;
+                let radius = 50.0;
+                result.insert(
+                    ident.clone(),
+                    Position::new(base.x + radius * angle.cos(), base.y + radius * angle.sin()),
+                );
+            }
+        }
+    }
+}
+
+/// Place new stock and flow elements.  When connected to existing
+/// structure, place near the connected elements; when disconnected,
+/// place at the diagram periphery.
+fn place_new_chain_elements(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+    new_set: &HashSet<&str>,
+    bbox_max: &Position,
+    result: &mut HashMap<String, Position>,
+) {
+    let offset_x = 100.0;
+    let offset_y = 50.0;
+
+    for stock_ident in &new_elements.new_stocks {
+        let connected = connected_existing_positions(state, metadata, stock_ident, new_set);
+        if connected.is_empty() {
+            // Periphery placement
+            let pos = Position::new(bbox_max.x + 150.0, bbox_max.y + offset_y);
+            result.insert(stock_ident.clone(), pos);
+        } else {
+            let positions: Vec<Position> = connected.iter().map(|(_, p)| *p).collect();
+            let center = centroid(&positions);
+            result.insert(
+                stock_ident.clone(),
+                Position::new(center.x + offset_x, center.y + offset_y),
+            );
+        }
+    }
+
+    for flow_ident in &new_elements.new_flows {
+        let connected = connected_existing_positions(state, metadata, flow_ident, new_set);
+        if connected.is_empty() {
+            let pos = Position::new(bbox_max.x + 200.0, bbox_max.y + offset_y);
+            result.insert(flow_ident.clone(), pos);
+        } else {
+            let positions: Vec<Position> = connected.iter().map(|(_, p)| *p).collect();
+            let center = centroid(&positions);
+            result.insert(
+                flow_ident.clone(),
+                Position::new(center.x + offset_x, center.y),
+            );
+        }
+    }
+}
+
+/// Run SFDP + annealing with existing elements pinned and only new
+/// elements free to move. This settles new elements into positions
+/// that respect the force-directed layout while preserving all
+/// existing element positions exactly.
+pub fn settle_new_elements(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    new_elements: &NewElements,
+    chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
+) -> Result<(), String> {
+    if new_elements.is_empty() {
+        return Ok(());
+    }
+
+    let new_ident_set: HashSet<&str> = new_elements
+        .new_stocks
+        .iter()
+        .chain(&new_elements.new_flows)
+        .chain(&new_elements.new_auxes)
+        .chain(&new_elements.new_modules)
+        .map(|s| s.as_str())
+        .collect();
+
+    let (full_graph, var_to_node) = build_full_graph(state, model, metadata)?;
+
+    // Build constrained graph: pin existing elements, make new chains rigid groups
+    let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
+
+    // Pin all existing (non-new) nodes
+    let existing_node_ids: Vec<String> = var_to_node
+        .iter()
+        .filter(|(ident, _)| !new_ident_set.contains(ident.as_str()))
+        .map(|(_, node_id)| node_id.clone())
+        .collect();
+    constrained_builder.pin(&existing_node_ids);
+
+    // Add rigid groups for new chain elements (same pattern as run_sfdp_with_rigid_chains)
+    for (_stocks, _flows, all_vars) in chains_data {
+        let mut group_members: Vec<String> = Vec::new();
+        let mut added: HashSet<String> = HashSet::new();
+
+        for var_ident in all_vars {
+            if !new_ident_set.contains(var_ident.as_str()) {
+                continue;
+            }
+            if let Some(node_id) = var_to_node.get(var_ident)
+                && added.insert(node_id.clone())
+            {
+                group_members.push(node_id.clone());
+
+                let canonical = canonicalize(var_ident);
+                if let Some(cloud_idents) = state.flow_ident_to_clouds.get(canonical.as_ref()) {
+                    for cloud_ident in cloud_idents {
+                        if let Some(cloud_node) = var_to_node.get(cloud_ident)
+                            && added.insert(cloud_node.clone())
+                        {
+                            group_members.push(cloud_node.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if group_members.len() > 1 {
+            constrained_builder.add_rigid_group(group_members);
+        }
+    }
+
+    let constrained_graph = constrained_builder.build();
+
+    // Seed initial positions: existing elements from state.positions,
+    // new elements from state.positions (which were set by compute_new_element_positions)
+    let mut initial_layout: Layout<String> = BTreeMap::new();
+    for (var_ident, node_id) in &var_to_node {
+        if let Some(uid) = state.uid_manager.get_uid(var_ident)
+            && let Some(&pos) = state.positions.get(&uid)
+        {
+            initial_layout.insert(node_id.clone(), pos);
+            continue;
+        }
+        if let Some(&cloud_uid) = state.cloud_ident_to_uid.get(var_ident)
+            && let Some(&pos) = state.positions.get(&cloud_uid)
+        {
+            initial_layout.insert(node_id.clone(), pos);
+        }
+    }
+
+    let sfdp_config = SfdpConfig {
+        k: 75.0,
+        max_iterations: 5000,
+        convergence_threshold: 0.001,
+        initial_step_size: 0.1,
+        cooling_factor: 0.9995,
+        c: 3.0,
+        ..SfdpConfig::default()
+    };
+
+    let node_to_ident: HashMap<String, String> = var_to_node
+        .iter()
+        .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
+        .collect();
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    let new_node_ids: HashSet<String> = var_to_node
+        .iter()
+        .filter(|(ident, _)| new_ident_set.contains(ident.as_str()))
+        .map(|(_, node_id)| node_id.clone())
+        .collect();
+
+    let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
+        let mut segments = Vec::new();
+
+        for edge in constrained_graph.edges() {
+            let (Some(&from_pos), Some(&to_pos)) = (
+                candidate_layout.get(&edge.from),
+                candidate_layout.get(&edge.to),
+            ) else {
+                continue;
+            };
+
+            if let (Some(from_ident), Some(to_ident)) =
+                (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
+                && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
+            {
+                continue;
+            }
+
+            segments.push(LineSegment {
+                start: from_pos,
+                end: to_pos,
+                from_node: edge.from.clone(),
+                to_node: edge.to.clone(),
+            });
+        }
+
+        for (flow_ident, tmpl) in &state.flow_templates {
+            if tmpl.offsets.len() < 2 {
+                continue;
+            }
+            let Some(node_id) = var_to_node.get(flow_ident) else {
+                continue;
+            };
+            let Some(&center) = candidate_layout.get(node_id) else {
+                continue;
+            };
+
+            let points: Vec<Position> = tmpl
+                .offsets
+                .iter()
+                .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
+                .collect();
+
+            for i in 0..points.len() - 1 {
+                segments.push(LineSegment {
+                    start: points[i],
+                    end: points[i + 1],
+                    from_node: format!("{}#{}", flow_ident, i),
+                    to_node: format!("{}#{}", flow_ident, i + 1),
+                });
+            }
+        }
+
+        segments
+    };
+
+    let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
+    for edge in constrained_graph.edges() {
+        adjacency
+            .entry(edge.from.clone())
+            .or_default()
+            .push((edge.to.clone(), edge.weight));
+        adjacency
+            .entry(edge.to.clone())
+            .or_default()
+            .push((edge.from.clone(), edge.weight));
+    }
+
+    let max_delta_aux = config.annealing_max_delta_aux;
+    let annealing_config = config.clone();
+    let annealing_seed = config.annealing_random_seed;
+
+    let mut annealing_round: usize = 0;
+    let mut last_annealing_iter: usize = 0;
+    let mut best_crossings: usize = usize::MAX;
+    let mut best_layout: Option<Layout<String>> = None;
+
+    let final_layout = compute_layout_from_initial_with_callback(
+        &constrained_graph,
+        &sfdp_config,
+        &initial_layout,
+        annealing_seed,
+        &mut |iter, layout| {
+            if !should_trigger_annealing(
+                iter,
+                annealing_config.annealing_interval,
+                last_annealing_iter,
+                annealing_round,
+                annealing_config.annealing_max_rounds,
+            ) {
+                return None;
+            }
+
+            let result = run_annealing_with_filter(
+                layout,
+                build_segments,
+                &annealing_config,
+                annealing_seed.wrapping_add(annealing_round as u64),
+                |node_id: &String| new_node_ids.contains(node_id),
+                |node_id: &String| {
+                    if new_node_ids.contains(node_id) {
+                        max_delta_aux
+                    } else {
+                        0.0
+                    }
+                },
+                &adjacency,
+            );
+
+            last_annealing_iter = iter;
+            annealing_round += 1;
+
+            if result.crossings < best_crossings {
+                best_crossings = result.crossings;
+                best_layout = Some(result.layout.clone());
+                Some(result.layout)
+            } else {
+                None
+            }
+        },
+    );
+
+    let settled_layout = if let Some(saved) = best_layout {
+        let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
+        if final_crossings > best_crossings {
+            saved
+        } else {
+            final_layout
+        }
+    } else {
+        final_layout
+    };
+
+    // Only update positions for new elements; existing elements stay unchanged
+    for (var_ident, node_id) in &var_to_node {
+        if !new_ident_set.contains(var_ident.as_str()) {
+            continue;
+        }
+        if let Some(&pos) = settled_layout.get(node_id)
+            && let Some(uid) = state.uid_manager.get_uid(var_ident)
+        {
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    // Also update positions for clouds of new flows.  SFDP moves cloud nodes in a rigid
+    // group together with their parent flow, but the loop above skips cloud idents since
+    // they are not model variables and therefore not in new_ident_set.  Without recording
+    // the settled cloud positions here, the coordinate update loop in incremental_layout
+    // cannot apply the flow's displacement to the cloud element, leaving the cloud stranded
+    // at its creation position while the flow endpoint shifts.
+    for var_ident in var_to_node.keys() {
+        if !new_ident_set.contains(var_ident.as_str()) {
+            continue;
+        }
+        let canonical = canonicalize(var_ident);
+        if let Some(cloud_idents) = state.flow_ident_to_clouds.get(canonical.as_ref()) {
+            for cloud_ident in cloud_idents {
+                if let Some(&cloud_uid) = state.cloud_ident_to_uid.get(cloud_ident)
+                    && let Some(cloud_node) = var_to_node.get(cloud_ident)
+                    && let Some(&pos) = settled_layout.get(cloud_node)
+                {
+                    state.positions.insert(cloud_uid, pos);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Re-snap stock-attached flow endpoints to stock edges after SFDP settlement.
+///
+/// SFDP may move flow valves while stocks stay pinned, causing the
+/// proportional point translation to detach endpoints from their stocks.
+/// This function restores each attached endpoint to the correct stock
+/// edge, using the flow valve position to determine which face of the
+/// stock rectangle the flow approaches from.
+pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
+    let stock_positions: HashMap<i32, Position> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some((s.uid, Position::new(s.x, s.y))),
+            _ => None,
+        })
+        .collect();
+
+    let half_w = config.stock_width / 2.0;
+    let half_h = config.stock_height / 2.0;
+
+    for elem in &mut state.elements {
+        if let ViewElement::Flow(f) = elem {
+            let valve = Position::new(f.x, f.y);
+            for pt in &mut f.points {
+                if let Some(attached_uid) = pt.attached_to_uid
+                    && let Some(stock_pos) = stock_positions.get(&attached_uid)
+                {
+                    let dx = valve.x - stock_pos.x;
+                    let dy = valve.y - stock_pos.y;
+
+                    // Determine which face the flow approaches from using
+                    // aspect-ratio-normalized comparison of dx vs dy.
+                    if half_h * dx.abs() >= half_w * dy.abs() {
+                        // Horizontal approach: snap to left or right edge
+                        pt.x = stock_pos.x + dx.signum() * half_w;
+                        pt.y = stock_pos.y;
+                    } else {
+                        // Vertical approach: snap to top or bottom edge
+                        pt.x = stock_pos.x;
+                        pt.y = stock_pos.y + dy.signum() * half_h;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Perform three-way connector diff: compare old links in LayoutState
+/// against edges derived from the current dep_graph, then preserve
+/// unchanged links, remove stale ones, and create new links with
+/// default shapes.
+pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
+    // Build HashMap<(from_uid, to_uid), ViewElement> for existing links
+    let mut old_links: HashMap<(i32, i32), ViewElement> = HashMap::new();
+    for elem in &state.elements {
+        if let ViewElement::Link(l) = elem {
+            old_links.insert((l.from_uid, l.to_uid), elem.clone());
+        }
+    }
+
+    // Compute new dependency edges from dep_graph, skipping structural flow-stock edges
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    let mut new_edges: HashSet<(i32, i32)> = HashSet::new();
+    let mut new_edge_idents: HashMap<(i32, i32), (String, String)> = HashMap::new();
+
+    for (var, deps) in &metadata.dep_graph {
+        for dep in deps {
+            let from_ident = dep.as_str();
+            let to_ident = var.as_str();
+
+            if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                continue;
+            }
+
+            let from_uid = match state.uid_manager.get_uid(from_ident) {
+                Some(uid) => uid,
+                None => continue,
+            };
+            let to_uid = match state.uid_manager.get_uid(to_ident) {
+                Some(uid) => uid,
+                None => continue,
+            };
+
+            if from_uid != 0 && to_uid != 0 {
+                new_edges.insert((from_uid, to_uid));
+                new_edge_idents.insert(
+                    (from_uid, to_uid),
+                    (from_ident.to_string(), to_ident.to_string()),
+                );
+            }
+        }
+    }
+
+    // Build alias UID -> primary variable UID mapping so that old links
+    // targeting aliases are recognized as semantically equivalent to the
+    // primary variable link. Without this, imported views with causal links
+    // terminating on aliases would lose those links after an incremental edit.
+    let alias_to_primary: HashMap<i32, i32> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Alias(a) => Some((a.uid, a.alias_of_uid)),
+            _ => None,
+        })
+        .collect();
+
+    // Remove all old links from elements
+    state
+        .elements
+        .retain(|elem| !matches!(elem, ViewElement::Link(_)));
+
+    // Track which old links have been consumed so each is used at most once.
+    let mut consumed_old_links: HashSet<(i32, i32)> = HashSet::new();
+
+    // Add back preserved links (unchanged) and create new links
+    for &(from_uid, to_uid) in &new_edges {
+        if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
+            // Preserved: keep the old link exactly as-is
+            state.elements.push(old_link.clone());
+            consumed_old_links.insert((from_uid, to_uid));
+        } else if let Some((&key, old_link)) = old_links.iter().find(|&(&(of, ot), _)| {
+            if consumed_old_links.contains(&(of, ot)) {
+                return false;
+            }
+            let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
+            let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
+            rf == from_uid && rt == to_uid
+        }) {
+            // Preserved via alias: the old link targets an alias whose primary
+            // variable matches this dependency edge. Keep the alias link as-is.
+            state.elements.push(old_link.clone());
+            consumed_old_links.insert(key);
+        } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
+            // Added: create new link with default shape
+            let link_uid = state.uid_manager.alloc("");
+            let shape = if is_structural_stock_flow(
+                from_ident,
+                to_ident,
+                &stock_inflows,
+                &stock_outflows,
+            ) {
+                let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
+                    (state.positions.get(&from_uid), state.positions.get(&to_uid))
+                {
+                    calc_stock_flow_arc_angle(s_pos, f_pos)
+                } else {
+                    -45.0
+                };
+                LinkShape::Arc(arc_angle)
+            } else {
+                LinkShape::Straight
+            };
+
+            state.elements.push(ViewElement::Link(view_element::Link {
+                uid: link_uid,
+                from_uid,
+                to_uid,
+                shape,
+                polarity: None,
+            }));
+        }
+    }
+
+    // Preserve remaining alias-backed links whose alias-resolved endpoints
+    // match a valid dependency. Imported views may have multiple rendered
+    // connectors for the same dependency (e.g., links to two different
+    // aliases of the same variable).
+    for (&(of, ot), old_link) in &old_links {
+        if consumed_old_links.contains(&(of, ot)) {
+            continue;
+        }
+        let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
+        let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
+        if new_edges.contains(&(rf, rt)) {
+            state.elements.push(old_link.clone());
+        }
+    }
+}
+
+/// Diff clouds for all flows: preserve existing clouds that are still
+/// needed, remove clouds whose flow endpoint is now connected to a
+/// stock, and create new clouds for newly-unconnected flow endpoints.
+pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
+    // Index existing clouds by (flow_uid, is_source).
+    // A source cloud is at the first flow point, a sink at the last.
+    // We distinguish them by checking their position against the flow
+    // element's points when possible, but we can also use a simpler
+    // heuristic: group all clouds by flow_uid.
+    let mut old_clouds_by_flow: HashMap<i32, Vec<ViewElement>> = HashMap::new();
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem {
+            old_clouds_by_flow
+                .entry(c.flow_uid)
+                .or_default()
+                .push(elem.clone());
+        }
+    }
+
+    // Determine which clouds should exist for each flow
+    let mut needed_flow_uids: HashSet<i32> = HashSet::new();
+    // Track which flows need source/sink clouds
+    let mut need_source: HashSet<i32> = HashSet::new();
+    let mut need_sink: HashSet<i32> = HashSet::new();
+
+    for (flow_ident, (from_stock, to_stock)) in &metadata.flow_to_stocks {
+        let flow_uid = match state.uid_manager.get_uid(flow_ident) {
+            Some(uid) => uid,
+            None => continue,
+        };
+        needed_flow_uids.insert(flow_uid);
+        if from_stock.is_none() {
+            need_source.insert(flow_uid);
+        }
+        if to_stock.is_none() {
+            need_sink.insert(flow_uid);
+        }
+    }
+
+    // Snapshot flow endpoint positions before mutating state.elements
+    let flow_endpoints: HashMap<i32, (Position, Position)> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Flow(f) if !f.points.is_empty() => {
+                let first = Position::new(f.points[0].x, f.points[0].y);
+                let last_idx = f.points.len() - 1;
+                let last = Position::new(f.points[last_idx].x, f.points[last_idx].y);
+                Some((f.uid, (first, last)))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Remove all old clouds from elements
+    state
+        .elements
+        .retain(|elem| !matches!(elem, ViewElement::Cloud(_)));
+
+    // For each flow, determine what to keep vs create
+    let all_flow_uids: HashSet<i32> = needed_flow_uids
+        .iter()
+        .chain(old_clouds_by_flow.keys())
+        .copied()
+        .collect();
+
+    for flow_uid in all_flow_uids {
+        let old_clouds = old_clouds_by_flow
+            .get(&flow_uid)
+            .cloned()
+            .unwrap_or_default();
+        let wants_source = need_source.contains(&flow_uid);
+        let wants_sink = need_sink.contains(&flow_uid);
+
+        let needed_count = wants_source as usize + wants_sink as usize;
+
+        if needed_count == 0 {
+            for c in &old_clouds {
+                if let ViewElement::Cloud(cloud) = c {
+                    state.positions.remove(&cloud.uid);
+                }
+            }
+            continue;
+        }
+
+        // Preserve existing clouds by matching to needed roles (source/sink)
+        // based on proximity to flow endpoints, rather than iteration order.
+        let endpoints = flow_endpoints.get(&flow_uid);
+        let mut preserved_source = false;
+        let mut preserved_sink = false;
+        let mut used_uids: HashSet<i32> = HashSet::new();
+
+        let find_nearest =
+            |clouds: &[ViewElement], target: &Position, exclude: &HashSet<i32>| -> Option<i32> {
+                clouds
+                    .iter()
+                    .filter_map(|c| match c {
+                        ViewElement::Cloud(cloud) if !exclude.contains(&cloud.uid) => {
+                            let d = (cloud.x - target.x).powi(2) + (cloud.y - target.y).powi(2);
+                            Some((cloud.uid, d))
+                        }
+                        _ => None,
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(uid, _)| uid)
+            };
+
+        if let Some((src_pos, snk_pos)) = endpoints {
+            if wants_source && let Some(uid) = find_nearest(&old_clouds, src_pos, &used_uids) {
+                used_uids.insert(uid);
+                preserved_source = true;
+            }
+            if wants_sink && let Some(uid) = find_nearest(&old_clouds, snk_pos, &used_uids) {
+                used_uids.insert(uid);
+                preserved_sink = true;
+            }
+        } else {
+            // No endpoint info: preserve in order as a fallback
+            for cloud in &old_clouds {
+                if let ViewElement::Cloud(c) = cloud {
+                    if wants_source && !preserved_source {
+                        used_uids.insert(c.uid);
+                        preserved_source = true;
+                    } else if wants_sink && !preserved_sink {
+                        used_uids.insert(c.uid);
+                        preserved_sink = true;
+                    }
+                }
+            }
+        }
+
+        // Push preserved clouds and remove positions of discarded ones
+        for cloud in &old_clouds {
+            if let ViewElement::Cloud(c) = cloud {
+                if used_uids.contains(&c.uid) {
+                    state.elements.push(cloud.clone());
+                } else {
+                    state.positions.remove(&c.uid);
+                }
+            }
+        }
+
+        // Create new clouds for roles that couldn't be filled from old clouds
+        if wants_source && !preserved_source {
+            let pos = endpoints.map(|(src, _)| *src);
+            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
+            let cloud_uid = state.uid_manager.alloc("");
+            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+                uid: cloud_uid,
+                flow_uid,
+                x: cx,
+                y: cy,
+                compat: None,
+            }));
+            state.positions.insert(cloud_uid, Position::new(cx, cy));
+        }
+        if wants_sink && !preserved_sink {
+            let pos = endpoints.map(|(_, sink)| *sink);
+            let (cx, cy) = pos.map_or((0.0, 0.0), |p| (p.x, p.y));
+            let cloud_uid = state.uid_manager.alloc("");
+            state.elements.push(ViewElement::Cloud(view_element::Cloud {
+                uid: cloud_uid,
+                flow_uid,
+                x: cx,
+                y: cy,
+                compat: None,
+            }));
+            state.positions.insert(cloud_uid, Position::new(cx, cy));
+        }
+    }
+
+    // Repair pass: for XMILE-imported views a cloud element may exist but the
+    // corresponding flow point's attached_to_uid may be None.  Wire up any
+    // unattached flow endpoints to their matching cloud.
+    //
+    // Build a map from flow_uid to the clouds that now exist for it.
+    let mut clouds_by_flow: HashMap<i32, Vec<(i32, f64, f64)>> = HashMap::new();
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem {
+            clouds_by_flow
+                .entry(c.flow_uid)
+                .or_default()
+                .push((c.uid, c.x, c.y));
+        }
+    }
+
+    for elem in &mut state.elements {
+        let flow = match elem {
+            ViewElement::Flow(f) => f,
+            _ => continue,
+        };
+        let Some(clouds) = clouds_by_flow.get(&flow.uid) else {
+            continue;
+        };
+        if flow.points.len() < 2 {
+            continue;
+        }
+
+        // For each flow endpoint (source=0, sink=last) that is unattached,
+        // assign the nearest cloud.  We use a simple squared-distance heuristic
+        // which is correct for both single-cloud and two-cloud cases.
+        let last = flow.points.len() - 1;
+        for pt_idx in [0, last] {
+            if flow.points[pt_idx].attached_to_uid.is_some() {
+                continue;
+            }
+            let px = flow.points[pt_idx].x;
+            let py = flow.points[pt_idx].y;
+            let nearest = clouds.iter().min_by(|(_, ax, ay), (_, bx, by)| {
+                let da = (ax - px).powi(2) + (ay - py).powi(2);
+                let db = (bx - px).powi(2) + (by - py).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if let Some(&(cloud_uid, _, _)) = nearest {
+                flow.points[pt_idx].attached_to_uid = Some(cloud_uid);
+            }
+        }
+    }
+}
+
+/// Pick a starting stock for chain layout. Returns the stock with the
+/// highest flow connectivity (inflows + outflows), breaking ties
+/// alphabetically for determinism.
+fn pick_starting_stock<'b>(metadata: &ComputedMetadata, stocks: &'b [String]) -> Option<&'b str> {
+    stocks
+        .iter()
+        .max_by(|a, b| {
+            let a_count = metadata
+                .stock_to_inflows
+                .get(a.as_str())
+                .map_or(0, |v| v.len())
+                + metadata
+                    .stock_to_outflows
+                    .get(a.as_str())
+                    .map_or(0, |v| v.len());
+            let b_count = metadata
+                .stock_to_inflows
+                .get(b.as_str())
+                .map_or(0, |v| v.len())
+                + metadata
+                    .stock_to_outflows
+                    .get(b.as_str())
+                    .map_or(0, |v| v.len());
+            a_count.cmp(&b_count).then_with(|| b.cmp(a))
+        })
+        .map(|s| s.as_str())
+}
+
+/// Add cloud elements for flow endpoints that don't connect to a stock.
+fn build_clouds_for_flow(
+    state: &mut LayoutState,
+    metadata: &ComputedMetadata,
+    flow_ident: &str,
+    flow_elem: &mut view_element::Flow,
+) {
+    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+    let has_from = from_stock.is_some();
+    let has_to = to_stock.is_some();
+
+    // Source cloud (no from stock)
+    if !has_from && !flow_elem.points.is_empty() {
+        let cx = flow_elem.points[0].x;
+        let cy = flow_elem.points[0].y;
+        let cloud_uid = state.uid_manager.alloc("");
+        let cloud = ViewElement::Cloud(view_element::Cloud {
+            uid: cloud_uid,
+            flow_uid: flow_elem.uid,
+            x: cx,
+            y: cy,
+            compat: None,
+        });
+        state.elements.push(cloud);
+        flow_elem.points[0].attached_to_uid = Some(cloud_uid);
+    }
+
+    // Sink cloud (no to stock)
+    if !has_to && !flow_elem.points.is_empty() {
+        let last_idx = flow_elem.points.len() - 1;
+        let cx = flow_elem.points[last_idx].x;
+        let cy = flow_elem.points[last_idx].y;
+        let cloud_uid = state.uid_manager.alloc("");
+        let cloud = ViewElement::Cloud(view_element::Cloud {
+            uid: cloud_uid,
+            flow_uid: flow_elem.uid,
+            x: cx,
+            y: cy,
+            compat: None,
+        });
+        state.elements.push(cloud);
+        flow_elem.points[last_idx].attached_to_uid = Some(cloud_uid);
+    }
+}
+
+/// Cache a flow's polyline offsets (relative to valve center) for crossing detection.
+fn record_flow_template(state: &mut LayoutState, flow_ident: &str, flow_elem: &view_element::Flow) {
+    if flow_elem.points.len() < 2 {
+        return;
+    }
+    let offsets: Vec<Position> = flow_elem
+        .points
+        .iter()
+        .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
+        .collect();
+    state
+        .flow_templates
+        .insert(flow_ident.to_string(), FlowTemplate { offsets });
+}
+
+/// Create a single flow view element with its flow points and clouds.
+fn create_flow_view_element(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    flow_ident: &str,
+    uid: i32,
+    pos: Position,
+) -> Result<(), String> {
+    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+    let from_stock = from_stock.map(|s| s.to_string());
+    let to_stock = to_stock.map(|s| s.to_string());
+    let name = state.display_name(flow_ident);
+    let formatted = format_label_with_line_breaks(&name);
+
+    let flow_points = match (from_stock.as_deref(), to_stock.as_deref()) {
+        (Some(from), Some(to)) => {
+            let from_uid = state.get_or_alloc_uid(from);
+            let to_uid = state.get_or_alloc_uid(to);
+            let from_pos = state
+                .positions
+                .get(&from_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x - 50.0, pos.y));
+            let to_pos = state
+                .positions
+                .get(&to_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x + 50.0, pos.y));
+            vec![
+                FlowPoint {
+                    x: from_pos.x + config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(from_uid),
+                },
+                FlowPoint {
+                    x: to_pos.x - config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(to_uid),
+                },
+            ]
+        }
+        (Some(from), None) => {
+            let from_uid = state.get_or_alloc_uid(from);
+            let from_pos = state
+                .positions
+                .get(&from_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x - 50.0, pos.y));
+            vec![
+                FlowPoint {
+                    x: from_pos.x + config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(from_uid),
+                },
+                FlowPoint {
+                    x: pos.x + 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+            ]
+        }
+        (None, Some(to)) => {
+            let to_uid = state.get_or_alloc_uid(to);
+            let to_pos = state
+                .positions
+                .get(&to_uid)
+                .copied()
+                .unwrap_or(Position::new(pos.x + 50.0, pos.y));
+            vec![
+                FlowPoint {
+                    x: pos.x - 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+                FlowPoint {
+                    x: to_pos.x - config.stock_width / 2.0,
+                    y: pos.y,
+                    attached_to_uid: Some(to_uid),
+                },
+            ]
+        }
+        (None, None) => {
+            vec![
+                FlowPoint {
+                    x: pos.x - 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+                FlowPoint {
+                    x: pos.x + 50.0,
+                    y: pos.y,
+                    attached_to_uid: None,
+                },
+            ]
+        }
+    };
+
+    let orientation = compute_flow_orientation(&flow_points);
+    let label_side = match orientation {
+        FlowOrientation::Horizontal => LabelSide::Top,
+        FlowOrientation::Vertical => LabelSide::Left,
+    };
+
+    let mut flow_elem = view_element::Flow {
+        name: formatted,
+        uid,
+        x: pos.x,
+        y: pos.y,
+        label_side,
+        points: flow_points,
+        compat: None,
+        label_compat: None,
+    };
+
+    // Add clouds for missing stock endpoints
+    build_clouds_for_flow(state, metadata, flow_ident, &mut flow_elem);
+
+    // Record flow template for crossing detection
+    record_flow_template(state, flow_ident, &flow_elem);
+
+    state.elements.push(ViewElement::Flow(flow_elem));
+    state.positions.insert(uid, pos);
+
+    Ok(())
+}
+
+/// Convert positioned stock/flow identifiers into ViewElements.
+fn create_view_elements(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    positioned: &HashMap<String, Position>,
+    stocks: &[String],
+    flows: &[String],
+) -> Result<(), String> {
+    // Create stock view elements
+    for stock_ident in stocks {
+        if let Some(&pos) = positioned.get(stock_ident) {
+            let uid = state.get_or_alloc_uid(stock_ident);
+            let name = state.display_name(stock_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            let elem = ViewElement::Stock(view_element::Stock {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            });
+            state.elements.push(elem);
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    // Create flow view elements
+    for flow_ident in flows {
+        if let Some(&pos) = positioned.get(flow_ident) {
+            let uid = state.get_or_alloc_uid(flow_ident);
+            create_flow_view_element(state, config, metadata, flow_ident, uid, pos)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Layout a single chain at the given base position using BFS.
+fn layout_chain(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    stocks: &[String],
+    flows: &[String],
+    base_position: Position,
+) -> Result<(), String> {
+    if stocks.is_empty() && flows.is_empty() {
+        return Ok(());
+    }
+
+    let start_stock = match pick_starting_stock(metadata, stocks) {
+        Some(s) => s.to_string(),
+        None => {
+            // Flow-only chain (no stocks). Place flows at base_position.
+            for flow_ident in flows {
+                let uid = state.get_or_alloc_uid(flow_ident);
+                create_flow_view_element(state, config, metadata, flow_ident, uid, base_position)?;
+            }
+            return Ok(());
+        }
+    };
+
+    let mut positioned: HashMap<String, Position> = HashMap::new();
+    positioned.insert(start_stock.clone(), base_position);
+
+    let mut queue = VecDeque::from([WorkItem {
+        id: start_stock.clone(),
+        item_type: WorkItemType::Stock,
+        position: base_position,
+        connected_to: String::new(),
+    }]);
+
+    while let Some(item) = queue.pop_front() {
+        match item.item_type {
+            WorkItemType::Stock => {
+                // First-positioned-wins: if this stock was already placed
+                // (via a different BFS path), keep its existing position
+                // to preserve the order in which chains are laid out.
+                if !positioned.contains_key(&item.id) {
+                    positioned.insert(item.id.clone(), item.position);
+                }
+
+                let stock_pos = positioned[&item.id];
+
+                // Find inflows for this stock
+                let inflows = metadata
+                    .stock_to_inflows
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_default();
+                for inflow_id in &inflows {
+                    if !positioned.contains_key(inflow_id) {
+                        queue.push_back(WorkItem {
+                            id: inflow_id.clone(),
+                            item_type: WorkItemType::Flow,
+                            position: stock_pos,
+                            connected_to: item.id.clone(),
+                        });
+                    }
+                }
+
+                // Find outflows for this stock
+                let outflows = metadata
+                    .stock_to_outflows
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_default();
+                for outflow_id in &outflows {
+                    if !positioned.contains_key(outflow_id) {
+                        queue.push_back(WorkItem {
+                            id: outflow_id.clone(),
+                            item_type: WorkItemType::Flow,
+                            position: stock_pos,
+                            connected_to: item.id.clone(),
+                        });
+                    }
+                }
+            }
+            WorkItemType::Flow => {
+                if positioned.contains_key(&item.id) {
                     continue;
                 }
 
-                let link_key = format!("{}->{}", from_ident, to_ident);
-                if !link_set.insert(link_key) {
-                    continue;
+                let (from_stock, to_stock) = metadata.connected_stocks(&item.id);
+
+                let flow_pos = match (from_stock, to_stock) {
+                    (Some(from), Some(to)) => {
+                        let from = from.to_string();
+                        let to = to.to_string();
+                        if item.connected_to == from {
+                            // Position sink stock to the right
+                            if !positioned.contains_key(&to) {
+                                let other_pos = Position::new(
+                                    item.position.x
+                                        + config.stock_width
+                                        + config.horizontal_spacing,
+                                    item.position.y,
+                                );
+                                positioned.insert(to.clone(), other_pos);
+                                queue.push_back(WorkItem {
+                                    id: to.clone(),
+                                    item_type: WorkItemType::Stock,
+                                    position: other_pos,
+                                    connected_to: String::new(),
+                                });
+                            }
+                            Position::new(
+                                (item.position.x + positioned[&to].x) / 2.0,
+                                item.position.y,
+                            )
+                        } else {
+                            // Position source stock to the left
+                            if !positioned.contains_key(&from) {
+                                let other_pos = Position::new(
+                                    item.position.x
+                                        - config.stock_width
+                                        - config.horizontal_spacing,
+                                    item.position.y,
+                                );
+                                positioned.insert(from.clone(), other_pos);
+                                queue.push_back(WorkItem {
+                                    id: from.clone(),
+                                    item_type: WorkItemType::Stock,
+                                    position: other_pos,
+                                    connected_to: String::new(),
+                                });
+                            }
+                            Position::new(
+                                (positioned[&from].x + item.position.x) / 2.0,
+                                item.position.y,
+                            )
+                        }
+                    }
+                    (Some(_from), None) => {
+                        // Outflow to cloud
+                        Position::new(
+                            item.position.x
+                                + config.stock_width / 2.0
+                                + config.horizontal_spacing / 2.0,
+                            item.position.y,
+                        )
+                    }
+                    (None, Some(_to)) => {
+                        // Inflow from cloud
+                        Position::new(
+                            item.position.x
+                                - config.stock_width / 2.0
+                                - config.horizontal_spacing / 2.0,
+                            item.position.y,
+                        )
+                    }
+                    (None, None) => {
+                        // Cloud-to-cloud
+                        item.position
+                    }
+                };
+
+                positioned.insert(item.id.clone(), flow_pos);
+            }
+        }
+    }
+
+    // Convert positioned elements to view elements
+    create_view_elements(state, config, metadata, &positioned, stocks, flows)
+}
+
+/// Rebuild flow templates from current view elements.
+fn refresh_flow_templates(state: &mut LayoutState, model: &datamodel::Model) {
+    state.flow_templates.clear();
+
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            datamodel::Variable::Flow(f) => {
+                let ident = canonicalize(&f.ident).into_owned();
+                state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for elem in &state.elements {
+        if let ViewElement::Flow(flow_elem) = elem
+            && let Some(ident) = uid_to_ident.get(&flow_elem.uid)
+            && flow_elem.points.len() >= 2
+        {
+            let offsets: Vec<Position> = flow_elem
+                .points
+                .iter()
+                .map(|pt| Position::new(pt.x - flow_elem.x, pt.y - flow_elem.y))
+                .collect();
+            state
+                .flow_templates
+                .insert(ident.clone(), FlowTemplate { offsets });
+        }
+    }
+}
+
+/// Build an undirected graph with all model variables and cloud nodes for SFDP.
+fn build_full_graph(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) -> Result<(Graph<String>, HashMap<String, String>), String> {
+    state.cloud_ident_to_uid.clear();
+    state.cloud_ident_to_flow_ident.clear();
+    state.flow_ident_to_clouds.clear();
+
+    let flow_uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            datamodel::Variable::Flow(f) => {
+                let ident = canonicalize(&f.ident).into_owned();
+                state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut var_to_node: HashMap<String, String> = HashMap::new();
+    let mut node_to_var: HashMap<String, String> = HashMap::new();
+    let mut builder = GraphBuilder::<String>::new_undirected();
+    let mut node_index = 0;
+
+    let all_vars: BTreeSet<String> = metadata
+        .dep_graph
+        .keys()
+        .chain(metadata.dep_graph.values().flat_map(|deps| deps.iter()))
+        .cloned()
+        .collect();
+
+    for var_ident in &all_vars {
+        let node_id = format!("node_{}", node_index);
+        var_to_node.insert(var_ident.clone(), node_id.clone());
+        node_to_var.insert(node_id.clone(), var_ident.clone());
+        builder.add_node(node_id);
+        node_index += 1;
+    }
+
+    for (from_ident, deps) in &metadata.dep_graph {
+        if let Some(from_node) = var_to_node.get(from_ident) {
+            for to_ident in deps {
+                if let Some(to_node) = var_to_node.get(to_ident) {
+                    builder.add_edge(from_node.clone(), to_node.clone(), 1.0);
                 }
+            }
+        }
+    }
 
-                let from_uid = match self.uid_manager.get_uid(from_ident) {
-                    Some(uid) => uid,
-                    None => {
-                        if model_var_idents.contains(from_ident) {
-                            return Err(format!(
-                                "create_connectors: missing UID for model variable '{}'",
-                                from_ident
-                            ));
-                        }
-                        continue;
-                    }
-                };
-                let to_uid = match self.uid_manager.get_uid(to_ident) {
-                    Some(uid) => uid,
-                    None => {
-                        if model_var_idents.contains(to_ident) {
-                            return Err(format!(
-                                "create_connectors: missing UID for model variable '{}'",
-                                to_ident
-                            ));
-                        }
-                        continue;
-                    }
-                };
-
-                if from_uid == 0 || to_uid == 0 {
+    for elem in &state.elements {
+        if let ViewElement::Cloud(cloud) = elem {
+            let flow_ident = match flow_uid_to_ident.get(&cloud.flow_uid) {
+                Some(ident) => ident.clone(),
+                None => {
                     return Err(format!(
-                        "create_connectors: invalid UID 0 in edge {} -> {}",
-                        from_ident, to_ident
+                        "build_full_graph: cloud {} references unknown flow UID {}",
+                        cloud.uid, cloud.flow_uid
                     ));
                 }
+            };
 
-                let link_uid = self.uid_manager.alloc("");
-                let mut shape = LinkShape::Straight;
+            let cloud_ident = make_cloud_node_ident(cloud.uid);
+            if !var_to_node.contains_key(&cloud_ident) {
+                let node_id = format!("node_{}", node_index);
+                builder.add_node(node_id.clone());
+                var_to_node.insert(cloud_ident.clone(), node_id.clone());
+                node_to_var.insert(node_id, cloud_ident.clone());
+                node_index += 1;
+            }
 
-                // Check for structural stock->flow connections that need an arc
-                if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
-                    let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
-                        (self.positions.get(&from_uid), self.positions.get(&to_uid))
-                    {
-                        calc_stock_flow_arc_angle(s_pos, f_pos)
-                    } else {
-                        -45.0
-                    };
-                    shape = LinkShape::Arc(arc_angle);
+            let flow_node = var_to_node.get(&flow_ident).ok_or_else(|| {
+                format!("build_full_graph: missing node for flow '{}'", flow_ident)
+            })?;
+            let cloud_node = var_to_node[&cloud_ident].clone();
+            builder.add_edge(flow_node.clone(), cloud_node, 1.0);
+
+            state
+                .cloud_ident_to_uid
+                .insert(cloud_ident.clone(), cloud.uid);
+            state
+                .cloud_ident_to_flow_ident
+                .insert(cloud_ident.clone(), flow_ident.clone());
+            state
+                .flow_ident_to_clouds
+                .entry(flow_ident)
+                .or_default()
+                .push(cloud_ident);
+        }
+    }
+
+    Ok((builder.build(), var_to_node))
+}
+
+/// Run SFDP with chain elements locked into rigid groups.
+fn run_sfdp_with_rigid_chains(
+    state: &LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    full_graph: Graph<String>,
+    chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
+    var_to_node: &HashMap<String, String>,
+) -> Result<Layout<String>, String> {
+    let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
+
+    for (_stocks, _flows, all_vars) in chains_data {
+        let mut group_members: Vec<String> = Vec::new();
+        let mut added: HashSet<String> = HashSet::new();
+
+        for var_ident in all_vars {
+            if let Some(node_id) = var_to_node.get(var_ident) {
+                let uid = state.uid_manager.get_uid(var_ident);
+                let is_positioned = uid.is_some_and(|u| state.positions.contains_key(&u));
+                if is_positioned && added.insert(node_id.clone()) {
+                    group_members.push(node_id.clone());
+
+                    let canonical = canonicalize(var_ident);
+                    if let Some(cloud_idents) = state.flow_ident_to_clouds.get(canonical.as_ref()) {
+                        for cloud_ident in cloud_idents {
+                            if let Some(cloud_node) = var_to_node.get(cloud_ident)
+                                && added.insert(cloud_node.clone())
+                            {
+                                group_members.push(cloud_node.clone());
+                            }
+                        }
+                    }
                 }
-
-                let link = ViewElement::Link(view_element::Link {
-                    uid: link_uid,
-                    from_uid,
-                    to_uid,
-                    shape,
-                    polarity: None,
-                });
-                self.elements.push(link);
             }
         }
 
-        Ok(())
+        if group_members.len() > 1 {
+            constrained_builder.add_rigid_group(group_members);
+        }
     }
 
-    /// Apply optimal label placement based on connector angles.
-    fn apply_optimal_label_placement(&mut self) {
-        // Build position map keyed by ident
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                let ident = canonicalize(var.get_ident()).into_owned();
-                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
-            })
-            .collect();
+    let constrained_graph = constrained_builder.build();
 
-        let ident_positions: HashMap<String, Position> = self
-            .positions
-            .iter()
-            .filter_map(|(uid, pos)| uid_to_ident.get(uid).map(|ident| (ident.clone(), *pos)))
-            .collect();
+    let mut initial_layout: Layout<String> = BTreeMap::new();
+    let cloud_uid_to_pos: HashMap<i32, Position> = state
+        .elements
+        .iter()
+        .filter_map(|elem| {
+            if let ViewElement::Cloud(cloud) = elem {
+                Some((cloud.uid, Position::new(cloud.x, cloud.y)))
+            } else {
+                None
+            }
+        })
+        .collect();
 
-        // Build uses/used_by maps for placement functions
-        let uses = &self.metadata.dep_graph;
-        let used_by = &self.metadata.reverse_dep_graph;
+    let mut center_x = config.start_x;
+    let mut center_y = config.start_y;
+    let mut count = 0;
 
-        // Collect element update info (avoid borrow conflict)
-        let updates: Vec<(usize, LabelSide)> = self
-            .elements
-            .iter()
-            .enumerate()
-            .filter_map(|(i, elem)| match elem {
-                ViewElement::Stock(stock) => {
-                    let ident = uid_to_ident.get(&stock.uid)?;
-                    let allowed = self.calculate_allowed_label_sides_for_stock(ident);
+    for (var_ident, node_id) in var_to_node {
+        if let Some(uid) = state.uid_manager.get_uid(var_ident)
+            && let Some(&pos) = state.positions.get(&uid)
+        {
+            initial_layout.insert(node_id.clone(), pos);
+            center_x += pos.x;
+            center_y += pos.y;
+            count += 1;
+            continue;
+        }
+
+        if let Some(&cloud_uid) = state.cloud_ident_to_uid.get(var_ident) {
+            if let Some(&pos) = cloud_uid_to_pos.get(&cloud_uid) {
+                initial_layout.insert(node_id.clone(), pos);
+                continue;
+            }
+            if let Some(flow_ident) = state.cloud_ident_to_flow_ident.get(var_ident)
+                && let Some(flow_uid) = state.uid_manager.get_uid(flow_ident)
+                && let Some(&pos) = state.positions.get(&flow_uid)
+            {
+                initial_layout.insert(node_id.clone(), pos);
+                continue;
+            }
+        }
+    }
+
+    // Average the accumulated positions with the start position (which was
+    // used as the initial accumulator value) to bias the center toward the
+    // configured origin when few nodes are positioned.
+    if count > 0 {
+        center_x /= (count + 1) as f64;
+        center_y /= (count + 1) as f64;
+    }
+
+    let mut aux_index = 0;
+    for node_id in var_to_node.values() {
+        if initial_layout.contains_key(node_id) {
+            continue;
+        }
+        let angle = aux_index as f64 * 2.0 * PI / 8.0;
+        let radius = 100.0;
+        initial_layout.insert(
+            node_id.clone(),
+            Position::new(
+                center_x + radius * angle.cos(),
+                center_y + radius * angle.sin(),
+            ),
+        );
+        aux_index += 1;
+    }
+
+    // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
+    // are overridden for auxiliary layout. Other SFDP parameters stay at
+    // their defaults (notably p=-1.0 and step size=0.1) to avoid runaway
+    // repulsion that can fling disconnected chains far apart.
+    let sfdp_config = SfdpConfig {
+        k: 75.0,
+        max_iterations: 5000,
+        convergence_threshold: 0.001,
+        initial_step_size: 0.1,
+        cooling_factor: 0.9995,
+        c: 3.0,
+        ..SfdpConfig::default()
+    };
+
+    let node_to_ident: HashMap<String, String> = var_to_node
+        .iter()
+        .map(|(ident, node_id)| (node_id.clone(), ident.clone()))
+        .collect();
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let aux_node_ids: HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            if let datamodel::Variable::Aux(aux) = var {
+                let canonical = canonicalize(&aux.ident);
+                var_to_node.get(canonical.as_ref()).cloned()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
+        let mut segments = Vec::new();
+
+        for edge in constrained_graph.edges() {
+            let (Some(&from_pos), Some(&to_pos)) = (
+                candidate_layout.get(&edge.from),
+                candidate_layout.get(&edge.to),
+            ) else {
+                continue;
+            };
+
+            if let (Some(from_ident), Some(to_ident)) =
+                (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
+                && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
+            {
+                continue;
+            }
+
+            segments.push(LineSegment {
+                start: from_pos,
+                end: to_pos,
+                from_node: edge.from.clone(),
+                to_node: edge.to.clone(),
+            });
+        }
+
+        for (flow_ident, tmpl) in &state.flow_templates {
+            if tmpl.offsets.len() < 2 {
+                continue;
+            }
+            let Some(node_id) = var_to_node.get(flow_ident) else {
+                continue;
+            };
+            let Some(&center) = candidate_layout.get(node_id) else {
+                continue;
+            };
+
+            let points: Vec<Position> = tmpl
+                .offsets
+                .iter()
+                .map(|offset| Position::new(center.x + offset.x, center.y + offset.y))
+                .collect();
+
+            for i in 0..points.len() - 1 {
+                segments.push(LineSegment {
+                    start: points[i],
+                    end: points[i + 1],
+                    from_node: format!("{}#{}", flow_ident, i),
+                    to_node: format!("{}#{}", flow_ident, i + 1),
+                });
+            }
+        }
+
+        segments
+    };
+
+    let mut adjacency: annealing::AdjacencyMap<String> = HashMap::new();
+    for edge in constrained_graph.edges() {
+        adjacency
+            .entry(edge.from.clone())
+            .or_default()
+            .push((edge.to.clone(), edge.weight));
+        adjacency
+            .entry(edge.to.clone())
+            .or_default()
+            .push((edge.from.clone(), edge.weight));
+    }
+
+    let max_delta_aux = config.annealing_max_delta_aux;
+    let max_delta_chain = config.annealing_max_delta_chain;
+    let annealing_config = config.clone();
+    let annealing_seed = config.annealing_random_seed;
+
+    let mut annealing_round: usize = 0;
+    let mut last_annealing_iter: usize = 0;
+    let mut best_crossings: usize = usize::MAX;
+    let mut best_layout: Option<Layout<String>> = None;
+
+    let final_layout = compute_layout_from_initial_with_callback(
+        &constrained_graph,
+        &sfdp_config,
+        &initial_layout,
+        annealing_seed,
+        &mut |iter, layout| {
+            if !should_trigger_annealing(
+                iter,
+                annealing_config.annealing_interval,
+                last_annealing_iter,
+                annealing_round,
+                annealing_config.annealing_max_rounds,
+            ) {
+                return None;
+            }
+
+            let result = run_annealing_with_filter(
+                layout,
+                build_segments,
+                &annealing_config,
+                annealing_seed.wrapping_add(annealing_round as u64),
+                |node_id: &String| aux_node_ids.contains(node_id),
+                |node_id: &String| {
+                    if aux_node_ids.contains(node_id) {
+                        max_delta_aux
+                    } else {
+                        max_delta_chain
+                    }
+                },
+                &adjacency,
+            );
+
+            last_annealing_iter = iter;
+            annealing_round += 1;
+
+            if result.crossings < best_crossings {
+                best_crossings = result.crossings;
+                best_layout = Some(result.layout.clone());
+                Some(result.layout)
+            } else {
+                None
+            }
+        },
+    );
+
+    // If SFDP drifted after a good annealing round, the final layout
+    // may be worse than the best we found. Compare and keep the better one.
+    if let Some(saved) = best_layout {
+        let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
+        if final_crossings > best_crossings {
+            return Ok(saved);
+        }
+    }
+
+    Ok(final_layout)
+}
+
+/// Update all element coordinates from SFDP results.
+fn apply_layout_positions(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    layout: &Layout<String>,
+    var_to_node: &HashMap<String, String>,
+) -> Result<(), String> {
+    let layout_by_ident: HashMap<String, Position> = var_to_node
+        .iter()
+        .filter_map(|(ident, node_id)| layout.get(node_id).map(|&pos| (ident.clone(), pos)))
+        .collect();
+
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            let ident = canonicalize(var.get_ident()).into_owned();
+            state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+        })
+        .collect();
+
+    let mut flow_deltas: HashMap<i32, Position> = HashMap::new();
+
+    for elem in &mut state.elements {
+        match elem {
+            ViewElement::Stock(stock) => {
+                if let Some(ident) = uid_to_ident.get(&stock.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    stock.x = pos.x;
+                    stock.y = pos.y;
+                    state.positions.insert(stock.uid, pos);
+                }
+            }
+            ViewElement::Flow(flow) => {
+                if let Some(ident) = uid_to_ident.get(&flow.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    let dx = pos.x - flow.x;
+                    let dy = pos.y - flow.y;
+                    if dx != 0.0 || dy != 0.0 {
+                        for pt in &mut flow.points {
+                            pt.x += dx;
+                            pt.y += dy;
+                        }
+                    }
+                    flow.x = pos.x;
+                    flow.y = pos.y;
+                    state.positions.insert(flow.uid, pos);
+                    flow_deltas.insert(flow.uid, Position::new(dx, dy));
+                }
+            }
+            ViewElement::Aux(aux) => {
+                if let Some(ident) = uid_to_ident.get(&aux.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    aux.x = pos.x;
+                    aux.y = pos.y;
+                    state.positions.insert(aux.uid, pos);
+                }
+            }
+            ViewElement::Module(module) => {
+                if let Some(ident) = uid_to_ident.get(&module.uid)
+                    && let Some(&pos) = layout_by_ident.get(ident)
+                {
+                    module.x = pos.x;
+                    module.y = pos.y;
+                    state.positions.insert(module.uid, pos);
+                }
+            }
+            ViewElement::Cloud(cloud) => {
+                let cloud_ident = make_cloud_node_ident(cloud.uid);
+                if let Some(&pos) = layout_by_ident.get(&cloud_ident) {
+                    cloud.x = pos.x;
+                    cloud.y = pos.y;
+                } else if let Some(&delta) = flow_deltas.get(&cloud.flow_uid) {
+                    cloud.x += delta.x;
+                    cloud.y += delta.y;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Create auxiliary view elements for variables not yet in the elements list.
+fn create_missing_auxiliary_elements(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    layout: &Layout<String>,
+    var_to_node: &HashMap<String, String>,
+) -> Result<(), String> {
+    let existing_uids: HashSet<i32> = state.elements.iter().map(|e| e.get_uid()).collect();
+
+    for var in &model.variables {
+        if let datamodel::Variable::Aux(aux) = var {
+            let canonical = canonicalize(&aux.ident);
+            let uid = state.uid_manager.alloc(&canonical);
+            if existing_uids.contains(&uid) {
+                continue;
+            }
+
+            let pos = var_to_node
+                .get(canonical.as_ref())
+                .and_then(|node_id| layout.get(node_id))
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "create_missing_auxiliary_elements: no layout position for aux '{}'",
+                        canonical.as_ref()
+                    )
+                })?;
+
+            let name = state.display_name(&canonical);
+            let formatted = format_label_with_line_breaks(&name);
+            let elem = ViewElement::Aux(view_element::Aux {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            });
+            state.elements.push(elem);
+            state.positions.insert(uid, pos);
+        }
+    }
+    Ok(())
+}
+
+/// Create module view elements for variables not yet in the elements list.
+fn create_missing_module_elements(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    layout: &Layout<String>,
+    var_to_node: &HashMap<String, String>,
+) -> Result<(), String> {
+    let existing_uids: HashSet<i32> = state.elements.iter().map(|e| e.get_uid()).collect();
+
+    for var in &model.variables {
+        if let datamodel::Variable::Module(m) = var {
+            let canonical = canonicalize(&m.ident);
+            let uid = state.uid_manager.alloc(&canonical);
+            if existing_uids.contains(&uid) {
+                continue;
+            }
+
+            let pos = var_to_node
+                .get(canonical.as_ref())
+                .and_then(|node_id| layout.get(node_id))
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "create_missing_module_elements: no layout position for module '{}'",
+                        canonical.as_ref()
+                    )
+                })?;
+
+            let name = state.display_name(&canonical);
+            let formatted = format_label_with_line_breaks(&name);
+            let elem = ViewElement::Module(view_element::Module {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+            });
+            state.elements.push(elem);
+            state.positions.insert(uid, pos);
+        }
+    }
+    Ok(())
+}
+
+/// Position auxiliaries using SFDP with rigid chain groups (steps 1-6 of
+/// the auxiliary placement pipeline).
+fn place_auxiliaries(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
+) -> Result<(), String> {
+    refresh_flow_templates(state, model);
+
+    let (full_graph, var_to_node) = build_full_graph(state, model, metadata)?;
+
+    if full_graph.node_count() == 0 {
+        return Ok(());
+    }
+
+    let layout = run_sfdp_with_rigid_chains(
+        state,
+        config,
+        model,
+        metadata,
+        full_graph,
+        chains_data,
+        &var_to_node,
+    )?;
+
+    apply_layout_positions(state, model, &layout, &var_to_node)?;
+
+    create_missing_auxiliary_elements(state, model, &layout, &var_to_node)?;
+
+    create_missing_module_elements(state, model, &layout, &var_to_node)?;
+
+    Ok(())
+}
+
+/// Create link view elements for all non-structural dependency edges.
+fn build_connectors(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) -> Result<(), String> {
+    let mut link_set: HashSet<String> = HashSet::new();
+
+    let model_var_idents: HashSet<String> = model
+        .variables
+        .iter()
+        .map(|v| canonicalize(v.get_ident()).into_owned())
+        .collect();
+
+    let stock_inflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_inflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+    let stock_outflows: HashMap<String, HashSet<String>> = metadata
+        .stock_to_outflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    let dep_entries: Vec<(String, Vec<String>)> = metadata
+        .dep_graph
+        .iter()
+        .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        .collect();
+
+    for (dependent_ident, dependencies) in &dep_entries {
+        for dependency_ident in dependencies {
+            // Metadata stores var -> dependencies, but view connectors are
+            // dependency -> dependent.
+            let from_ident = dependency_ident.as_str();
+            let to_ident = dependent_ident.as_str();
+
+            if is_structural_flow_stock(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                continue;
+            }
+
+            let link_key = format!("{}->{}", from_ident, to_ident);
+            if !link_set.insert(link_key) {
+                continue;
+            }
+
+            let from_uid = match state.uid_manager.get_uid(from_ident) {
+                Some(uid) => uid,
+                None => {
+                    if model_var_idents.contains(from_ident) {
+                        return Err(format!(
+                            "create_connectors: missing UID for model variable '{}'",
+                            from_ident
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let to_uid = match state.uid_manager.get_uid(to_ident) {
+                Some(uid) => uid,
+                None => {
+                    if model_var_idents.contains(to_ident) {
+                        return Err(format!(
+                            "create_connectors: missing UID for model variable '{}'",
+                            to_ident
+                        ));
+                    }
+                    continue;
+                }
+            };
+
+            if from_uid == 0 || to_uid == 0 {
+                return Err(format!(
+                    "create_connectors: invalid UID 0 in edge {} -> {}",
+                    from_ident, to_ident
+                ));
+            }
+
+            let link_uid = state.uid_manager.alloc("");
+            let mut shape = LinkShape::Straight;
+
+            if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                let arc_angle = if let (Some(&s_pos), Some(&f_pos)) =
+                    (state.positions.get(&from_uid), state.positions.get(&to_uid))
+                {
+                    calc_stock_flow_arc_angle(s_pos, f_pos)
+                } else {
+                    -45.0
+                };
+                shape = LinkShape::Arc(arc_angle);
+            }
+
+            let link = ViewElement::Link(view_element::Link {
+                uid: link_uid,
+                from_uid,
+                to_uid,
+                shape,
+                polarity: None,
+            });
+            state.elements.push(link);
+        }
+    }
+
+    Ok(())
+}
+
+/// Determine which sides are available for label placement on a stock,
+/// excluding sides where flows are attached.
+fn calculate_allowed_label_sides_for_stock(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    stock_ident: &str,
+) -> Vec<LabelSide> {
+    let stock_uid = match state.uid_manager.get_uid(stock_ident) {
+        Some(uid) => uid,
+        None => {
+            return vec![
+                LabelSide::Top,
+                LabelSide::Bottom,
+                LabelSide::Left,
+                LabelSide::Right,
+            ];
+        }
+    };
+    let stock_pos = match state.positions.get(&stock_uid) {
+        Some(&pos) => pos,
+        None => {
+            return vec![
+                LabelSide::Top,
+                LabelSide::Bottom,
+                LabelSide::Left,
+                LabelSide::Right,
+            ];
+        }
+    };
+
+    let mut blocked = [false; 4]; // top, bottom, left, right
+
+    let all_flows: Vec<String> = metadata
+        .stock_to_inflows
+        .get(stock_ident)
+        .into_iter()
+        .chain(metadata.stock_to_outflows.get(stock_ident))
+        .flat_map(|v| v.iter())
+        .cloned()
+        .collect();
+
+    for flow_ident in &all_flows {
+        if let Some(flow_uid) = state.uid_manager.get_uid(flow_ident)
+            && let Some(&flow_pos) = state.positions.get(&flow_uid)
+        {
+            let dx = flow_pos.x - stock_pos.x;
+            let dy = flow_pos.y - stock_pos.y;
+            if dx.abs() >= dy.abs() {
+                if dx >= 0.0 {
+                    blocked[3] = true; // right
+                } else {
+                    blocked[2] = true; // left
+                }
+            } else if dy >= 0.0 {
+                blocked[1] = true; // bottom
+            } else {
+                blocked[0] = true; // top
+            }
+        }
+    }
+
+    let sides = [
+        LabelSide::Top,
+        LabelSide::Bottom,
+        LabelSide::Left,
+        LabelSide::Right,
+    ];
+    let allowed: Vec<LabelSide> = sides
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !blocked[*i])
+        .map(|(_, &s)| s)
+        .collect();
+
+    if allowed.is_empty() {
+        vec![
+            LabelSide::Top,
+            LabelSide::Bottom,
+            LabelSide::Left,
+            LabelSide::Right,
+        ]
+    } else {
+        allowed
+    }
+}
+
+/// Apply optimal label placement based on connector angles.
+fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: &ComputedMetadata) {
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            let ident = canonicalize(var.get_ident()).into_owned();
+            state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+        })
+        .collect();
+
+    let ident_positions: HashMap<String, Position> = state
+        .positions
+        .iter()
+        .filter_map(|(uid, pos)| uid_to_ident.get(uid).map(|ident| (ident.clone(), *pos)))
+        .collect();
+
+    let uses = &metadata.dep_graph;
+    let used_by = &metadata.reverse_dep_graph;
+
+    let updates: Vec<(usize, LabelSide)> = state
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, elem)| match elem {
+            ViewElement::Stock(stock) => {
+                let ident = uid_to_ident.get(&stock.uid)?;
+                let allowed = calculate_allowed_label_sides_for_stock(state, metadata, ident);
+                let side = calculate_restricted_label_side(
+                    ident,
+                    &ident_positions,
+                    uses,
+                    used_by,
+                    &allowed,
+                );
+                Some((i, side))
+            }
+            ViewElement::Flow(flow) => {
+                let ident = uid_to_ident.get(&flow.uid)?;
+                if flow.points.len() >= 2 {
+                    let orientation = compute_flow_orientation(&flow.points);
+                    let allowed = match orientation {
+                        FlowOrientation::Horizontal => {
+                            vec![LabelSide::Top, LabelSide::Bottom]
+                        }
+                        FlowOrientation::Vertical => {
+                            vec![LabelSide::Left, LabelSide::Right]
+                        }
+                    };
                     let side = calculate_restricted_label_side(
                         ident,
                         &ident_positions,
@@ -1476,424 +2681,476 @@ impl<'a> LayoutEngine<'a> {
                         &allowed,
                     );
                     Some((i, side))
-                }
-                ViewElement::Flow(flow) => {
-                    let ident = uid_to_ident.get(&flow.uid)?;
-                    if flow.points.len() >= 2 {
-                        let orientation = compute_flow_orientation(&flow.points);
-                        let allowed = match orientation {
-                            FlowOrientation::Horizontal => {
-                                vec![LabelSide::Top, LabelSide::Bottom]
-                            }
-                            FlowOrientation::Vertical => {
-                                vec![LabelSide::Left, LabelSide::Right]
-                            }
-                        };
-                        let side = calculate_restricted_label_side(
-                            ident,
-                            &ident_positions,
-                            uses,
-                            used_by,
-                            &allowed,
-                        );
-                        Some((i, side))
-                    } else {
-                        None
-                    }
-                }
-                ViewElement::Aux(aux) => {
-                    let ident = uid_to_ident.get(&aux.uid)?;
-                    let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
-                    Some((i, side))
-                }
-                ViewElement::Module(module) => {
-                    // Modules use the same unconstrained placement as auxiliaries
-                    let ident = uid_to_ident.get(&module.uid)?;
-                    let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
-                    Some((i, side))
-                }
-                _ => None,
-            })
-            .collect();
-
-        for (i, side) in updates {
-            match &mut self.elements[i] {
-                ViewElement::Stock(s) => s.label_side = side,
-                ViewElement::Flow(f) => f.label_side = side,
-                ViewElement::Aux(a) => a.label_side = side,
-                ViewElement::Module(m) => m.label_side = side,
-                _ => {}
-            }
-        }
-    }
-
-    /// Determine which sides are available for label placement on a stock,
-    /// excluding sides where flows are attached.
-    fn calculate_allowed_label_sides_for_stock(&self, stock_ident: &str) -> Vec<LabelSide> {
-        let stock_uid = match self.uid_manager.get_uid(stock_ident) {
-            Some(uid) => uid,
-            None => {
-                return vec![
-                    LabelSide::Top,
-                    LabelSide::Bottom,
-                    LabelSide::Left,
-                    LabelSide::Right,
-                ];
-            }
-        };
-        let stock_pos = match self.positions.get(&stock_uid) {
-            Some(&pos) => pos,
-            None => {
-                return vec![
-                    LabelSide::Top,
-                    LabelSide::Bottom,
-                    LabelSide::Left,
-                    LabelSide::Right,
-                ];
-            }
-        };
-
-        let mut blocked = [false; 4]; // top, bottom, left, right
-
-        let all_flows: Vec<String> = self
-            .metadata
-            .stock_to_inflows
-            .get(stock_ident)
-            .into_iter()
-            .chain(self.metadata.stock_to_outflows.get(stock_ident))
-            .flat_map(|v| v.iter())
-            .cloned()
-            .collect();
-
-        for flow_ident in &all_flows {
-            if let Some(flow_uid) = self.uid_manager.get_uid(flow_ident)
-                && let Some(&flow_pos) = self.positions.get(&flow_uid)
-            {
-                let dx = flow_pos.x - stock_pos.x;
-                let dy = flow_pos.y - stock_pos.y;
-                if dx.abs() >= dy.abs() {
-                    if dx >= 0.0 {
-                        blocked[3] = true; // right
-                    } else {
-                        blocked[2] = true; // left
-                    }
-                } else if dy >= 0.0 {
-                    blocked[1] = true; // bottom
                 } else {
-                    blocked[0] = true; // top
+                    None
                 }
             }
+            ViewElement::Aux(aux) => {
+                let ident = uid_to_ident.get(&aux.uid)?;
+                let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
+                Some((i, side))
+            }
+            ViewElement::Module(module) => {
+                let ident = uid_to_ident.get(&module.uid)?;
+                let side = calculate_optimal_label_side(ident, &ident_positions, uses, used_by);
+                Some((i, side))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for (i, side) in updates {
+        match &mut state.elements[i] {
+            ViewElement::Stock(s) => s.label_side = side,
+            ViewElement::Flow(f) => f.label_side = side,
+            ViewElement::Aux(a) => a.label_side = side,
+            ViewElement::Module(m) => m.label_side = side,
+            _ => {}
         }
+    }
+}
 
-        let sides = [
-            LabelSide::Top,
-            LabelSide::Bottom,
-            LabelSide::Left,
-            LabelSide::Right,
-        ];
-        let allowed: Vec<LabelSide> = sides
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !blocked[*i])
-            .map(|(_, &s)| s)
-            .collect();
+/// Apply arc curvature to connectors involved in feedback loops.
+fn apply_loop_curvature(
+    state: &mut LayoutState,
+    config: &LayoutConfig,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+) {
+    if metadata.feedback_loops.is_empty() {
+        return;
+    }
 
-        if allowed.is_empty() {
-            vec![
-                LabelSide::Top,
-                LabelSide::Bottom,
-                LabelSide::Left,
-                LabelSide::Right,
-            ]
-        } else {
-            allowed
+    let uid_to_ident: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|var| {
+            let ident = canonicalize(var.get_ident()).into_owned();
+            state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+        })
+        .collect();
+
+    let mut link_map: HashMap<(String, String), usize> = HashMap::new();
+    for (i, elem) in state.elements.iter().enumerate() {
+        if let ViewElement::Link(link) = elem {
+            let from_ident = uid_to_ident.get(&link.from_uid).cloned();
+            let to_ident = uid_to_ident.get(&link.to_uid).cloned();
+            if let (Some(from), Some(to)) = (from_ident, to_ident) {
+                link_map.insert((from, to), i);
+            }
         }
     }
 
-    /// Apply arc curvature to connectors involved in feedback loops.
-    fn apply_feedback_loop_curvature(&mut self) {
-        if self.metadata.feedback_loops.is_empty() {
-            return;
+    let loops = &metadata.feedback_loops;
+    for i in (0..loops.len()).rev() {
+        let loop_info = &loops[i];
+        let chain = loop_info.causal_chain();
+        if chain.len() < 2 {
+            continue;
         }
 
-        // Build link map: (from_ident, to_ident) -> element index
-        let uid_to_ident: HashMap<i32, String> = self
-            .model
-            .variables
-            .iter()
-            .filter_map(|var| {
-                let ident = canonicalize(var.get_ident()).into_owned();
-                self.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
-            })
-            .collect();
-
-        let mut link_map: HashMap<(String, String), usize> = HashMap::new();
-        for (i, elem) in self.elements.iter().enumerate() {
-            if let ViewElement::Link(link) = elem {
-                let from_ident = uid_to_ident.get(&link.from_uid).cloned();
-                let to_ident = uid_to_ident.get(&link.to_uid).cloned();
-                if let (Some(from), Some(to)) = (from_ident, to_ident) {
-                    link_map.insert((from, to), i);
-                }
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut count = 0;
+        for var in chain {
+            if let Some(uid) = state.uid_manager.get_uid(var)
+                && let Some(&pos) = state.positions.get(&uid)
+            {
+                sum_x += pos.x;
+                sum_y += pos.y;
+                count += 1;
             }
         }
+        if count == 0 {
+            continue;
+        }
+        let loop_center = Position::new(sum_x / count as f64, sum_y / count as f64);
 
-        // Process loops in reverse order (least to most important)
-        let loops = &self.metadata.feedback_loops;
-        for i in (0..loops.len()).rev() {
-            let loop_info = &loops[i];
-            let chain = loop_info.causal_chain();
-            if chain.len() < 2 {
+        for j in 0..chain.len() - 1 {
+            let from = &chain[j];
+            let to = &chain[j + 1];
+
+            let Some(&elem_idx) = link_map.get(&(from.clone(), to.clone())) else {
+                continue;
+            };
+
+            if let ViewElement::Link(link) = &state.elements[elem_idx]
+                && matches!(link.shape, LinkShape::Arc(_))
+            {
                 continue;
             }
 
-            // Compute loop center
-            let mut sum_x = 0.0;
-            let mut sum_y = 0.0;
-            let mut count = 0;
-            for var in chain {
-                if let Some(uid) = self.uid_manager.get_uid(var)
-                    && let Some(&pos) = self.positions.get(&uid)
-                {
-                    sum_x += pos.x;
-                    sum_y += pos.y;
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                continue;
-            }
-            let loop_center = Position::new(sum_x / count as f64, sum_y / count as f64);
-
-            // Apply curvature to edges in the loop
-            for j in 0..chain.len() - 1 {
-                let from = &chain[j];
-                let to = &chain[j + 1];
-
-                let Some(&elem_idx) = link_map.get(&(from.clone(), to.clone())) else {
-                    continue;
-                };
-
-                if let ViewElement::Link(link) = &self.elements[elem_idx] {
-                    // Don't override existing arcs (e.g. structural stock-flow connections)
-                    if matches!(link.shape, LinkShape::Arc(_)) {
-                        continue;
-                    }
-                }
-
-                let from_uid = self.uid_manager.get_uid(from);
-                let to_uid = self.uid_manager.get_uid(to);
-                if let (Some(f_uid), Some(t_uid)) = (from_uid, to_uid)
-                    && let (Some(&from_pos), Some(&to_pos)) =
-                        (self.positions.get(&f_uid), self.positions.get(&t_uid))
-                {
-                    let arc_angle = calculate_loop_arc_angle(
-                        from_pos,
-                        to_pos,
-                        loop_center,
-                        self.config.loop_curvature_factor,
-                    );
-                    if let ViewElement::Link(link) = &mut self.elements[elem_idx] {
-                        link.shape = LinkShape::Arc(arc_angle);
-                    }
+            let from_uid = state.uid_manager.get_uid(from);
+            let to_uid = state.uid_manager.get_uid(to);
+            if let (Some(f_uid), Some(t_uid)) = (from_uid, to_uid)
+                && let (Some(&from_pos), Some(&to_pos)) =
+                    (state.positions.get(&f_uid), state.positions.get(&t_uid))
+            {
+                let arc_angle = calculate_loop_arc_angle(
+                    from_pos,
+                    to_pos,
+                    loop_center,
+                    config.loop_curvature_factor,
+                );
+                if let ViewElement::Link(link) = &mut state.elements[elem_idx] {
+                    link.shape = LinkShape::Arc(arc_angle);
                 }
             }
         }
     }
+}
 
-    /// Recalculate bounds from all current element positions, including label extents.
-    fn recalculate_bounds(&mut self) {
-        let mut bounds = Bounds::new();
+/// Ensure every stock/flow/aux/module variable in the model has a
+/// corresponding rendered view element.
+fn validate_view_completeness(state: &LayoutState, model: &datamodel::Model) -> Result<(), String> {
+    let mut expected_stocks = BTreeSet::new();
+    let mut expected_flows = BTreeSet::new();
+    let mut expected_auxes = BTreeSet::new();
+    let mut expected_modules = BTreeSet::new();
 
-        let update = |bounds: &mut Bounds, cx: f64, cy: f64, w: f64, h: f64| {
-            let hw = w / 2.0;
-            let hh = h / 2.0;
-            bounds.update(cx - hw, cy - hh, cx + hw, cy + hh);
-        };
-
-        for elem in &self.elements {
-            match elem {
-                ViewElement::Stock(s) => {
-                    update(
-                        &mut bounds,
-                        s.x,
-                        s.y,
-                        self.config.stock_width,
-                        self.config.stock_height,
-                    );
-                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
-                        &s.name,
-                        s.x,
-                        s.y,
-                        s.label_side,
-                        self.config.stock_width,
-                        self.config.stock_height,
-                    );
-                    bounds.update(lx0, ly0, lx1, ly1);
-                }
-                ViewElement::Flow(f) => {
-                    update(
-                        &mut bounds,
-                        f.x,
-                        f.y,
-                        self.config.flow_width,
-                        self.config.flow_height,
-                    );
-                    for pt in &f.points {
-                        bounds.update(pt.x, pt.y, pt.x, pt.y);
-                    }
-                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
-                        &f.name,
-                        f.x,
-                        f.y,
-                        f.label_side,
-                        self.config.flow_width,
-                        self.config.flow_height,
-                    );
-                    bounds.update(lx0, ly0, lx1, ly1);
-                }
-                ViewElement::Aux(a) => {
-                    update(
-                        &mut bounds,
-                        a.x,
-                        a.y,
-                        self.config.aux_width,
-                        self.config.aux_height,
-                    );
-                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
-                        &a.name,
-                        a.x,
-                        a.y,
-                        a.label_side,
-                        self.config.aux_width,
-                        self.config.aux_height,
-                    );
-                    bounds.update(lx0, ly0, lx1, ly1);
-                }
-                ViewElement::Module(m) => {
-                    update(
-                        &mut bounds,
-                        m.x,
-                        m.y,
-                        self.config.module_width,
-                        self.config.module_height,
-                    );
-                    let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
-                        &m.name,
-                        m.x,
-                        m.y,
-                        m.label_side,
-                        self.config.module_width,
-                        self.config.module_height,
-                    );
-                    bounds.update(lx0, ly0, lx1, ly1);
-                }
-                ViewElement::Cloud(c) => {
-                    update(
-                        &mut bounds,
-                        c.x,
-                        c.y,
-                        self.config.cloud_width,
-                        self.config.cloud_height,
-                    );
-                }
-                _ => {}
+    for var in &model.variables {
+        match var {
+            datamodel::Variable::Stock(s) => {
+                expected_stocks.insert(canonicalize(&s.ident).into_owned());
+            }
+            datamodel::Variable::Flow(f) => {
+                expected_flows.insert(canonicalize(&f.ident).into_owned());
+            }
+            datamodel::Variable::Aux(a) => {
+                expected_auxes.insert(canonicalize(&a.ident).into_owned());
+            }
+            datamodel::Variable::Module(m) => {
+                expected_modules.insert(canonicalize(&m.ident).into_owned());
             }
         }
-
-        self.bounds = bounds;
     }
 
-    fn update_bounds_for_element(&mut self, cx: f64, cy: f64, width: f64, height: f64) {
-        let hw = width / 2.0;
-        let hh = height / 2.0;
-        self.bounds.update(cx - hw, cy - hh, cx + hw, cy + hh);
-    }
+    let mut found_stocks = BTreeSet::new();
+    let mut found_flows = BTreeSet::new();
+    let mut found_auxes = BTreeSet::new();
+    let mut found_modules = BTreeSet::new();
 
-    /// Get or allocate a UID for a variable by its canonical ident.
-    fn get_or_alloc_uid(&mut self, ident: &str) -> i32 {
-        self.uid_manager.alloc(ident)
-    }
-
-    /// Get the display name for a variable, preferring the original case.
-    fn display_name(&self, canonical_ident: &str) -> String {
-        self.display_names
-            .get(canonical_ident)
-            .cloned()
-            .unwrap_or_else(|| canonical_ident.to_string())
-    }
-
-    /// Ensure every stock/flow/aux/module variable in the model has a
-    /// corresponding rendered view element.
-    fn validate_view_completeness(&self) -> Result<(), String> {
-        let mut expected_stocks = BTreeSet::new();
-        let mut expected_flows = BTreeSet::new();
-        let mut expected_auxes = BTreeSet::new();
-        let mut expected_modules = BTreeSet::new();
-
-        for var in &self.model.variables {
-            match var {
-                datamodel::Variable::Stock(s) => {
-                    expected_stocks.insert(canonicalize(&s.ident).into_owned());
-                }
-                datamodel::Variable::Flow(f) => {
-                    expected_flows.insert(canonicalize(&f.ident).into_owned());
-                }
-                datamodel::Variable::Aux(a) => {
-                    expected_auxes.insert(canonicalize(&a.ident).into_owned());
-                }
-                datamodel::Variable::Module(m) => {
-                    expected_modules.insert(canonicalize(&m.ident).into_owned());
-                }
+    for elem in &state.elements {
+        match elem {
+            ViewElement::Stock(s) => {
+                found_stocks.insert(canonicalize(&s.name).into_owned());
             }
-        }
-
-        let mut found_stocks = BTreeSet::new();
-        let mut found_flows = BTreeSet::new();
-        let mut found_auxes = BTreeSet::new();
-        let mut found_modules = BTreeSet::new();
-
-        for elem in &self.elements {
-            match elem {
-                ViewElement::Stock(s) => {
-                    found_stocks.insert(canonicalize(&s.name).into_owned());
-                }
-                ViewElement::Flow(f) => {
-                    found_flows.insert(canonicalize(&f.name).into_owned());
-                }
-                ViewElement::Aux(a) => {
-                    found_auxes.insert(canonicalize(&a.name).into_owned());
-                }
-                ViewElement::Module(m) => {
-                    found_modules.insert(canonicalize(&m.name).into_owned());
-                }
-                _ => {}
+            ViewElement::Flow(f) => {
+                found_flows.insert(canonicalize(&f.name).into_owned());
             }
+            ViewElement::Aux(a) => {
+                found_auxes.insert(canonicalize(&a.name).into_owned());
+            }
+            ViewElement::Module(m) => {
+                found_modules.insert(canonicalize(&m.name).into_owned());
+            }
+            _ => {}
         }
-
-        let mut missing = Vec::new();
-        for ident in expected_stocks.difference(&found_stocks) {
-            missing.push(format!("stock '{}'", ident));
-        }
-        for ident in expected_flows.difference(&found_flows) {
-            missing.push(format!("flow '{}'", ident));
-        }
-        for ident in expected_auxes.difference(&found_auxes) {
-            missing.push(format!("aux '{}'", ident));
-        }
-        for ident in expected_modules.difference(&found_modules) {
-            missing.push(format!("module '{}'", ident));
-        }
-
-        if missing.is_empty() {
-            return Ok(());
-        }
-        missing.sort();
-        Err(format!(
-            "layout incomplete: missing view elements for {}",
-            missing.join(", ")
-        ))
     }
+
+    let mut missing = Vec::new();
+    for ident in expected_stocks.difference(&found_stocks) {
+        missing.push(format!("stock '{}'", ident));
+    }
+    for ident in expected_flows.difference(&found_flows) {
+        missing.push(format!("flow '{}'", ident));
+    }
+    for ident in expected_auxes.difference(&found_auxes) {
+        missing.push(format!("aux '{}'", ident));
+    }
+    for ident in expected_modules.difference(&found_modules) {
+        missing.push(format!("module '{}'", ident));
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort();
+    Err(format!(
+        "layout incomplete: missing view elements for {}",
+        missing.join(", ")
+    ))
+}
+
+/// Compute the bounding box of all layout elements, including label extents.
+fn compute_bounds(elements: &[ViewElement], config: &LayoutConfig) -> (f64, f64, f64, f64) {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    let update = |min_x: &mut f64,
+                  min_y: &mut f64,
+                  max_x: &mut f64,
+                  max_y: &mut f64,
+                  cx: f64,
+                  cy: f64,
+                  w: f64,
+                  h: f64| {
+        let hw = w / 2.0;
+        let hh = h / 2.0;
+        if cx - hw < *min_x {
+            *min_x = cx - hw;
+        }
+        if cy - hh < *min_y {
+            *min_y = cy - hh;
+        }
+        if cx + hw > *max_x {
+            *max_x = cx + hw;
+        }
+        if cy + hh > *max_y {
+            *max_y = cy + hh;
+        }
+    };
+
+    let update_rect = |min_x: &mut f64,
+                       min_y: &mut f64,
+                       max_x: &mut f64,
+                       max_y: &mut f64,
+                       x0: f64,
+                       y0: f64,
+                       x1: f64,
+                       y1: f64| {
+        if x0 < *min_x {
+            *min_x = x0;
+        }
+        if y0 < *min_y {
+            *min_y = y0;
+        }
+        if x1 > *max_x {
+            *max_x = x1;
+        }
+        if y1 > *max_y {
+            *max_y = y1;
+        }
+    };
+
+    for elem in elements {
+        match elem {
+            ViewElement::Stock(s) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    s.x,
+                    s.y,
+                    config.stock_width,
+                    config.stock_height,
+                );
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &s.name,
+                    s.x,
+                    s.y,
+                    s.label_side,
+                    config.stock_width,
+                    config.stock_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Flow(f) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    f.x,
+                    f.y,
+                    config.flow_width,
+                    config.flow_height,
+                );
+                for pt in &f.points {
+                    update_rect(
+                        &mut min_x, &mut min_y, &mut max_x, &mut max_y, pt.x, pt.y, pt.x, pt.y,
+                    );
+                }
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &f.name,
+                    f.x,
+                    f.y,
+                    f.label_side,
+                    config.flow_width,
+                    config.flow_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Aux(a) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    a.x,
+                    a.y,
+                    config.aux_width,
+                    config.aux_height,
+                );
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &a.name,
+                    a.x,
+                    a.y,
+                    a.label_side,
+                    config.aux_width,
+                    config.aux_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Module(m) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    m.x,
+                    m.y,
+                    config.module_width,
+                    config.module_height,
+                );
+                let (lx0, ly0, lx1, ly1) = estimate_label_bounds(
+                    &m.name,
+                    m.x,
+                    m.y,
+                    m.label_side,
+                    config.module_width,
+                    config.module_height,
+                );
+                update_rect(
+                    &mut min_x, &mut min_y, &mut max_x, &mut max_y, lx0, ly0, lx1, ly1,
+                );
+            }
+            ViewElement::Cloud(c) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    c.x,
+                    c.y,
+                    config.cloud_width,
+                    config.cloud_height,
+                );
+            }
+            ViewElement::Alias(a) => {
+                update(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    a.x,
+                    a.y,
+                    config.aux_width,
+                    config.aux_height,
+                );
+            }
+            ViewElement::Group(g) => {
+                update_rect(
+                    &mut min_x,
+                    &mut min_y,
+                    &mut max_x,
+                    &mut max_y,
+                    g.x,
+                    g.y,
+                    g.x + g.width,
+                    g.y + g.height,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (min_x, min_y, max_x, max_y)
+}
+
+/// Compose all layout blocks into a complete stock-flow diagram.
+pub fn fresh_layout(
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    config: &LayoutConfig,
+) -> Result<datamodel::StockFlow, String> {
+    let chains = &metadata.chains;
+    if chains.is_empty() && model.variables.is_empty() {
+        return Ok(datamodel::StockFlow {
+            name: None,
+            elements: Vec::new(),
+            view_box: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
+        });
+    }
+
+    let mut state = LayoutState::new(model);
+
+    // Phase 1: Compute chain positions using SFDP
+    let chain_positions = compute_chain_positions(chains, metadata, config);
+
+    // Phase 2: Layout each chain at its position
+    let chains_data: Vec<_> = chains
+        .iter()
+        .map(|c| (c.stocks.clone(), c.flows.clone(), c.all_vars.clone()))
+        .collect();
+    for (i, (stocks, flows, _all_vars)) in chains_data.iter().enumerate() {
+        let position = chain_positions
+            .get(&i)
+            .copied()
+            .unwrap_or(Position::new(config.start_x, config.start_y));
+        layout_chain(&mut state, config, metadata, stocks, flows, position)?;
+    }
+
+    // Phase 3: Position auxiliaries and create connectors
+    place_auxiliaries(&mut state, config, model, metadata, &chains_data)?;
+    build_connectors(&mut state, model, metadata)?;
+
+    // Phase 4: Apply optimal label placement
+    optimize_labels(&mut state, model, metadata);
+
+    // Phase 5: Normalize coordinates
+    normalize_coordinates(&mut state.elements, DIAGRAM_ORIGIN_MARGIN);
+
+    // Phase 6: Apply feedback loop curvature
+    apply_loop_curvature(&mut state, config, model, metadata);
+
+    validate_view_completeness(&state, model)?;
+
+    // Phase 7: Compute ViewBox from final element positions
+    let (bmin_x, _bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
+    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: bmax_x + DIAGRAM_ORIGIN_MARGIN,
+            height: bmax_y + DIAGRAM_ORIGIN_MARGIN,
+        }
+    } else {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }
+    };
+
+    Ok(datamodel::StockFlow {
+        name: None,
+        elements: state.elements,
+        view_box,
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    })
 }
 
 /// Check if a dependency edge is a structural flow->stock connection (already
@@ -2597,9 +3854,413 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
     annealing::count_crossings(&segments)
 }
 
+/// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
+/// metadata (name, zoom, font, sketch_compat) from `template`.
+///
+/// The view box is derived from the bounding box of `state.elements`; an
+/// empty or degenerate element set produces a zero-area default box.
+fn build_stock_flow_from_state(
+    state: LayoutState,
+    config: &LayoutConfig,
+    template: &datamodel::StockFlow,
+) -> datamodel::StockFlow {
+    let (bmin_x, bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
+    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
+        // Account for elements at negative coordinates (e.g. from imported
+        // or hand-edited views preserved by incremental layout).
+        let vb_x = (bmin_x - DIAGRAM_ORIGIN_MARGIN).min(0.0);
+        let vb_y = (bmin_y - DIAGRAM_ORIGIN_MARGIN).min(0.0);
+        Rect {
+            x: vb_x,
+            y: vb_y,
+            width: bmax_x - vb_x + DIAGRAM_ORIGIN_MARGIN,
+            height: bmax_y - vb_y + DIAGRAM_ORIGIN_MARGIN,
+        }
+    } else {
+        Rect::default()
+    };
+    datamodel::StockFlow {
+        name: template.name.clone(),
+        elements: state.elements,
+        view_box,
+        zoom: if template.zoom > 0.0 {
+            template.zoom
+        } else {
+            1.0
+        },
+        use_lettered_polarity: template.use_lettered_polarity,
+        font: template.font.clone(),
+        sketch_compat: template.sketch_compat.clone(),
+    }
+}
+
 /// Seeds for parallel layout generation. Each seed produces a different SFDP
 /// layout; the one with fewest connector crossings is selected.
 const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
+
+/// Apply a model patch incrementally to an existing diagram view,
+/// preserving existing element positions and only placing new or
+/// modified elements.
+///
+/// The `project` must already reflect the post-patch model state
+/// (i.e., `apply_patch` has been called). The `patch` is taken by
+/// reference so callers can inspect the operations; phase 6 adds
+/// `Clone` derives to enable this.
+///
+/// Composition:
+/// 1. Compute metadata for the post-patch model
+/// 2. Seed LayoutState from old view
+/// 3. Process deletions and renames from the patch
+/// 4. Identify new elements, compute initial positions
+/// 5. Create view elements and settle via pinned SFDP
+/// 6. Diff connectors/clouds, polish labels and loop curvature
+/// 7. Build StockFlow from final state
+pub fn incremental_layout(
+    old_view: &datamodel::StockFlow,
+    project: &datamodel::Project,
+    model_name: &str,
+    patch: &crate::patch::ModelPatch,
+    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+) -> Result<datamodel::StockFlow, String> {
+    if old_view.elements.is_empty() {
+        return generate_best_layout(project, model_name, db_state);
+    }
+
+    // View-only patches (UpsertView/DeleteView) don't affect model variables,
+    // so the diagram should be returned unchanged. Without this guard, the
+    // diff_connectors and optimize_labels passes would rewrite connectors and
+    // labels even though nothing structurally changed.
+    let has_variable_ops = patch.ops.iter().any(|op| {
+        !matches!(
+            op,
+            crate::patch::ModelOperation::UpsertView { .. }
+                | crate::patch::ModelOperation::DeleteView { .. }
+        )
+    });
+    if !has_variable_ops {
+        return Ok(old_view.clone());
+    }
+
+    let config = LayoutConfig::default();
+
+    let not_found = || format!("model '{}' not found in project", model_name);
+    let model = project.get_model(model_name).ok_or_else(not_found)?;
+    let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
+
+    // Step 2: Seed state from old view
+    let mut state = LayoutState::from_existing_view(old_view, model);
+
+    // Step 3: Process deletions and renames
+    for op in &patch.ops {
+        match op {
+            crate::patch::ModelOperation::DeleteVariable { ident } => {
+                state.apply_deletion(ident);
+            }
+            crate::patch::ModelOperation::RenameVariable { from, to } => {
+                let new_display = state
+                    .display_names
+                    .get(&canonicalize(to).into_owned())
+                    .cloned()
+                    .unwrap_or_else(|| to.clone());
+                state.apply_rename(from, to, &new_display);
+            }
+            _ => {}
+        }
+    }
+
+    // Between steps 3 and 4a: detect variables whose type changed (e.g., Aux -> Stock).
+    // When a caller issues UpsertStock for a variable that was previously an Aux, there
+    // is no DeleteVariable in the patch and the old Aux element is still in state.
+    // identify_new_elements only checks for UID presence, not element type, so the
+    // stale element would survive.  We detect type mismatches here and remove the
+    // old element so it is rebuilt with the correct type.
+    {
+        let kind_changed: Vec<String> = model
+            .variables
+            .iter()
+            .filter_map(|var| {
+                let canonical = canonicalize(var.get_ident()).into_owned();
+                let uid = state.uid_manager.get_uid(&canonical)?;
+                // Find the view element for this UID
+                let elem = state.elements.iter().find(|e| e.get_uid() == uid)?;
+                // Check for a type mismatch
+                let mismatch = !matches!(
+                    (var, elem),
+                    (datamodel::Variable::Stock(_), ViewElement::Stock(_))
+                        | (datamodel::Variable::Flow(_), ViewElement::Flow(_))
+                        | (datamodel::Variable::Aux(_), ViewElement::Aux(_))
+                        | (datamodel::Variable::Module(_), ViewElement::Module(_))
+                );
+                if mismatch { Some(canonical) } else { None }
+            })
+            .collect();
+        for ident in kind_changed {
+            // Save the display name before apply_deletion removes it from display_names,
+            // so the rebuilt element can recover the original casing (e.g. "Growth Rate"
+            // instead of "growth_rate").
+            let saved_display = state.display_names.get(&ident).cloned();
+            state.apply_deletion(&ident);
+            // Restore: use the saved original display name when available, otherwise
+            // fall back to the canonical ident so the entry is always present.
+            let display = saved_display.unwrap_or_else(|| ident.clone());
+            state.display_names.insert(ident, display);
+        }
+    }
+
+    // Between steps 3 and 4: detect flows whose stock connections changed.
+    // A flow element keeps its old attached_to_uid values when preserved in state,
+    // so a flow that moved from one stock to another would keep stale endpoints.
+    // Remove such flows (and their clouds) so identify_new_elements picks them
+    // up as new and they get rebuilt with correct endpoints.
+    //
+    // This also handles transitions between stock and cloud endpoints: if the
+    // model now expects a cloud source (from_stock == None) but the preserved
+    // flow's source point is still attached to a stock UID, the flow is stale.
+    {
+        let uid_to_ident: HashMap<i32, String> = model
+            .variables
+            .iter()
+            .filter_map(|var| {
+                let ident = canonicalize(var.get_ident()).into_owned();
+                state.uid_manager.get_uid(&ident).map(|uid| (uid, ident))
+            })
+            .collect();
+
+        // Build the set of cloud UIDs so we can validate cloud-endpoint assignments.
+        // When a cloud is expected (expected_from/to == None), the flow endpoint must
+        // be either unattached or attached to a cloud.  Checking against cloud_uids
+        // (rather than just "not in stock_uids") catches the case where a stock was
+        // kind-changed to an aux: the old UID is reused by the new non-stock element,
+        // so the flow must be rebuilt with a proper cloud endpoint.
+        let cloud_uids: HashSet<i32> = state
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Cloud(c) => Some(c.uid),
+                _ => None,
+            })
+            .collect();
+
+        let flows_to_reset: Vec<String> = state
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                let flow = match elem {
+                    ViewElement::Flow(f) => f,
+                    _ => return None,
+                };
+                if flow.points.len() < 2 {
+                    return None;
+                }
+                let flow_ident = uid_to_ident.get(&flow.uid)?;
+                let (expected_from, expected_to) = metadata.flow_to_stocks.get(flow_ident)?;
+
+                let expected_from_uid = expected_from
+                    .as_deref()
+                    .and_then(|s| state.uid_manager.get_uid(s));
+                let expected_to_uid = expected_to
+                    .as_deref()
+                    .and_then(|s| state.uid_manager.get_uid(s));
+
+                // Check the source endpoint (points[0]):
+                //   - None expected (cloud): endpoint must be unattached or attached to a cloud
+                //   - Some(uid) expected: the source must be attached to exactly that stock
+                let source_uid = flow.points[0].attached_to_uid;
+                let from_matches = match expected_from_uid {
+                    None => {
+                        source_uid.is_none() || source_uid.is_some_and(|u| cloud_uids.contains(&u))
+                    }
+                    Some(uid) => source_uid == Some(uid),
+                };
+
+                // Check the sink endpoint (points[last]):
+                //   - None expected (cloud): endpoint must be unattached or attached to a cloud
+                //   - Some(uid) expected: the sink must be attached to exactly that stock
+                let last = flow.points.len() - 1;
+                let sink_uid = flow.points[last].attached_to_uid;
+                let to_matches = match expected_to_uid {
+                    None => sink_uid.is_none() || sink_uid.is_some_and(|u| cloud_uids.contains(&u)),
+                    Some(uid) => sink_uid == Some(uid),
+                };
+
+                if from_matches && to_matches {
+                    None
+                } else {
+                    Some(flow_ident.clone())
+                }
+            })
+            .collect();
+
+        for flow_ident in flows_to_reset {
+            // apply_deletion removes the element from state.elements but leaves
+            // the UID in uid_manager. identify_new_elements will see a UID with
+            // no corresponding element and classify the flow as new, causing
+            // create_flow_view_element to rebuild it with correct endpoints.
+            let canonical = canonicalize(&flow_ident).into_owned();
+            // Save the display name before apply_deletion removes it so the
+            // rebuilt element recovers the original casing.
+            let saved_display = state.display_names.get(&canonical).cloned();
+            state.apply_deletion(&flow_ident);
+            let display = saved_display.unwrap_or_else(|| flow_ident.clone());
+            state.display_names.insert(canonical, display);
+        }
+    }
+
+    // Step 4: Identify new elements and compute initial positions
+    let new_elements = state.identify_new_elements(model);
+
+    if new_elements.is_empty() {
+        // No new elements: just diff connectors/clouds and rebuild
+        diff_connectors(&mut state, &metadata);
+        diff_clouds(&mut state, &metadata);
+        optimize_labels(&mut state, model, &metadata);
+        apply_loop_curvature(&mut state, &config, model, &metadata);
+        validate_view_completeness(&state, model)?;
+        return Ok(build_stock_flow_from_state(state, &config, old_view));
+    }
+
+    let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
+
+    // Step 5: Create view elements for new variables and insert their
+    // initial positions into state so settlement can find them.
+    for stock_ident in &new_elements.new_stocks {
+        if let Some(&pos) = initial_positions.get(stock_ident) {
+            let uid = state.get_or_alloc_uid(stock_ident);
+            let name = state.display_name(stock_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            state.elements.push(ViewElement::Stock(view_element::Stock {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }));
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    for flow_ident in &new_elements.new_flows {
+        if let Some(&pos) = initial_positions.get(flow_ident) {
+            let uid = state.get_or_alloc_uid(flow_ident);
+            create_flow_view_element(&mut state, &config, &metadata, flow_ident, uid, pos)?;
+        }
+    }
+
+    // create_flow_view_element calls build_clouds_for_flow which pushes Cloud elements into
+    // state.elements but does not add their positions to state.positions.  Record those
+    // positions now so that settle_new_elements can seed proper initial positions for cloud
+    // nodes in SFDP and later update them after settling.
+    for elem in &state.elements {
+        if let ViewElement::Cloud(c) = elem {
+            state
+                .positions
+                .entry(c.uid)
+                .or_insert_with(|| Position::new(c.x, c.y));
+        }
+    }
+
+    for aux_ident in &new_elements.new_auxes {
+        if let Some(&pos) = initial_positions.get(aux_ident) {
+            let uid = state.get_or_alloc_uid(aux_ident);
+            let name = state.display_name(aux_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            state.elements.push(ViewElement::Aux(view_element::Aux {
+                name: formatted,
+                uid,
+                x: pos.x,
+                y: pos.y,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }));
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    for module_ident in &new_elements.new_modules {
+        if let Some(&pos) = initial_positions.get(module_ident) {
+            let uid = state.get_or_alloc_uid(module_ident);
+            let name = state.display_name(module_ident);
+            let formatted = format_label_with_line_breaks(&name);
+            state
+                .elements
+                .push(ViewElement::Module(view_element::Module {
+                    name: formatted,
+                    uid,
+                    x: pos.x,
+                    y: pos.y,
+                    label_side: LabelSide::Bottom,
+                }));
+            state.positions.insert(uid, pos);
+        }
+    }
+
+    // Step 6: Settle new elements with existing elements pinned
+    let chains_data: Vec<_> = metadata
+        .chains
+        .iter()
+        .map(|c| (c.stocks.clone(), c.flows.clone(), c.all_vars.clone()))
+        .collect();
+    settle_new_elements(
+        &mut state,
+        &config,
+        model,
+        &metadata,
+        &new_elements,
+        &chains_data,
+    )?;
+
+    // Update view element coordinates from settled positions
+    for elem in &mut state.elements {
+        let uid = elem.get_uid();
+        if let Some(&pos) = state.positions.get(&uid) {
+            match elem {
+                ViewElement::Stock(s) => {
+                    s.x = pos.x;
+                    s.y = pos.y;
+                }
+                ViewElement::Flow(f) => {
+                    let dx = pos.x - f.x;
+                    let dy = pos.y - f.y;
+                    f.x = pos.x;
+                    f.y = pos.y;
+                    for pt in &mut f.points {
+                        pt.x += dx;
+                        pt.y += dy;
+                    }
+                }
+                ViewElement::Aux(a) => {
+                    a.x = pos.x;
+                    a.y = pos.y;
+                }
+                ViewElement::Module(m) => {
+                    m.x = pos.x;
+                    m.y = pos.y;
+                }
+                ViewElement::Cloud(c) => {
+                    c.x = pos.x;
+                    c.y = pos.y;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    resnap_flow_endpoints(&mut state, &config);
+
+    // Step 7: Diff connectors and clouds
+    diff_connectors(&mut state, &metadata);
+    diff_clouds(&mut state, &metadata);
+
+    // Step 8: Polish
+    optimize_labels(&mut state, model, &metadata);
+    apply_loop_curvature(&mut state, &config, model, &metadata);
+
+    validate_view_completeness(&state, model)?;
+
+    // Step 9: Build StockFlow
+    Ok(build_stock_flow_from_state(state, &config, old_view))
+}
 
 /// Generate a complete stock-flow diagram layout for a model using a single
 /// seed. This is the fast path; for higher-quality results use
@@ -2618,8 +4279,7 @@ pub fn generate_layout(
     let not_found = || format!("model '{}' not found in project", model_name);
     let model = project.get_model(model_name).ok_or_else(not_found)?;
     let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
-    let engine = LayoutEngine::new(config, model, metadata);
-    engine.generate_layout()
+    fresh_layout(model, &metadata, &config)
 }
 
 /// Generate layout with a specific configuration.
@@ -2633,8 +4293,7 @@ pub fn generate_layout_with_config(
     let not_found = || format!("model '{}' not found in project", model_name);
     let model = project.get_model(model_name).ok_or_else(not_found)?;
     let metadata = compute_metadata(project, model_name, db_state).ok_or_else(not_found)?;
-    let engine = LayoutEngine::new(config, model, metadata);
-    engine.generate_layout()
+    fresh_layout(model, &metadata, &config)
 }
 
 /// Generate multiple layouts with different seeds in parallel and pick the
@@ -2653,8 +4312,7 @@ pub fn generate_best_layout(
     let generate = |&seed: &u64| {
         let mut cfg = config.clone();
         cfg.annealing_random_seed = seed;
-        let engine = LayoutEngine::new(cfg, model, metadata.clone());
-        let view = engine.generate_layout()?;
+        let view = fresh_layout(model, &metadata, &cfg)?;
         let crossings = count_view_crossings(&view);
         Ok(LayoutResult {
             view,
@@ -2715,1759 +4373,5 @@ fn select_best_layout(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::datamodel;
-
-    fn test_project(model: datamodel::Model) -> datamodel::Project {
-        let name = model.name.clone();
-        datamodel::Project {
-            name: name.clone(),
-            sim_specs: datamodel::SimSpecs::default(),
-            dimensions: Vec::new(),
-            units: Vec::new(),
-            models: vec![model],
-            source: None,
-            ai_information: None,
-        }
-    }
-
-    /// Name used for test models -- matches the name in `simple_model()` and
-    /// inline test models so that `project.get_model(TEST_MODEL)` finds them.
-    const TEST_MODEL: &str = "test";
-
-    fn simple_model() -> datamodel::Model {
-        datamodel::Model {
-            name: "test".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["births".to_string()],
-                    outflows: vec!["deaths".to_string()],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "births".to_string(),
-                    equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "deaths".to_string(),
-                    equation: datamodel::Equation::Scalar("population * death_rate".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(3),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "birth_rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.03".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(4),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "death_rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.01".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(5),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn test_generate_layout_empty() {
-        let project = test_project(datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: Vec::new(),
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        });
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        assert!(result.elements.is_empty());
-        assert_eq!(result.zoom, 1.0);
-    }
-
-    #[test]
-    fn test_generate_layout_single_chain() {
-        let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        assert!(!result.elements.is_empty());
-        assert_eq!(result.zoom, 1.0);
-
-        // Should have stocks, flows, auxes, clouds, and links
-        let stock_count = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Stock(_)))
-            .count();
-        let flow_count = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Flow(_)))
-            .count();
-        let aux_count = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Aux(_)))
-            .count();
-
-        assert_eq!(stock_count, 1); // population
-        assert_eq!(flow_count, 2); // births, deaths
-        assert_eq!(aux_count, 2); // birth_rate, death_rate
-    }
-
-    #[test]
-    fn test_generate_layout_completeness() {
-        let project = test_project(simple_model());
-        let model = project.get_model(TEST_MODEL).unwrap();
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        // Every model variable should have a view element
-        let element_names: HashSet<String> = result
-            .elements
-            .iter()
-            .filter_map(|e| e.get_name().map(|n| canonicalize(n).into_owned()))
-            .collect();
-
-        for var in &model.variables {
-            let ident = canonicalize(var.get_ident()).into_owned();
-            assert!(
-                element_names.contains(&ident),
-                "missing view element for {}",
-                ident
-            );
-        }
-    }
-
-    #[test]
-    fn test_coordinates_positive() {
-        let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        for elem in &result.elements {
-            match elem {
-                ViewElement::Stock(s) => {
-                    assert!(s.x >= 0.0, "stock {} has negative x: {}", s.name, s.x);
-                    assert!(s.y >= 0.0, "stock {} has negative y: {}", s.name, s.y);
-                }
-                ViewElement::Flow(f) => {
-                    assert!(f.x >= 0.0, "flow {} has negative x: {}", f.name, f.x);
-                    assert!(f.y >= 0.0, "flow {} has negative y: {}", f.name, f.y);
-                }
-                ViewElement::Aux(a) => {
-                    assert!(a.x >= 0.0, "aux {} has negative x: {}", a.name, a.x);
-                    assert!(a.y >= 0.0, "aux {} has negative y: {}", a.name, a.y);
-                }
-                ViewElement::Cloud(c) => {
-                    assert!(c.x >= 0.0, "cloud {} has negative x: {}", c.uid, c.x);
-                    assert!(c.y >= 0.0, "cloud {} has negative y: {}", c.uid, c.y);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    #[test]
-    fn test_no_duplicate_uids() {
-        let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        let mut uids: HashSet<i32> = HashSet::new();
-        for elem in &result.elements {
-            let uid = elem.get_uid();
-            assert!(uids.insert(uid), "duplicate UID: {}", uid);
-        }
-    }
-
-    #[test]
-    fn test_viewbox_encompasses_elements() {
-        let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        let vb = &result.view_box;
-        assert!(vb.width > 0.0);
-        assert!(vb.height > 0.0);
-
-        for elem in &result.elements {
-            match elem {
-                ViewElement::Stock(s) => {
-                    assert!(
-                        s.x <= vb.x + vb.width,
-                        "stock x {} exceeds viewbox width {}",
-                        s.x,
-                        vb.width
-                    );
-                    assert!(
-                        s.y <= vb.y + vb.height,
-                        "stock y {} exceeds viewbox height {}",
-                        s.y,
-                        vb.height
-                    );
-                }
-                ViewElement::Flow(f) => {
-                    assert!(f.x <= vb.x + vb.width);
-                    assert!(f.y <= vb.y + vb.height);
-                }
-                ViewElement::Aux(a) => {
-                    assert!(a.x <= vb.x + vb.width);
-                    assert!(a.y <= vb.y + vb.height);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    #[test]
-    fn test_zoom_default() {
-        let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        assert_eq!(result.zoom, 1.0);
-    }
-
-    #[test]
-    fn test_flow_points_attached() {
-        let project = test_project(simple_model());
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        for elem in &result.elements {
-            if let ViewElement::Flow(flow) = elem {
-                assert!(
-                    flow.points.len() >= 2,
-                    "flow {} has too few points",
-                    flow.name
-                );
-                // At least one endpoint should be attached
-                let has_attachment = flow.points.iter().any(|p| p.attached_to_uid.is_some());
-                assert!(
-                    has_attachment,
-                    "flow {} has no attached endpoints",
-                    flow.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_compute_metadata_chains() {
-        let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        // Should detect one chain: population + births + deaths
-        assert_eq!(metadata.chains.len(), 1);
-        assert_eq!(metadata.chains[0].stocks.len(), 1);
-        assert!(
-            metadata.chains[0]
-                .stocks
-                .contains(&"population".to_string())
-        );
-        assert_eq!(metadata.chains[0].flows.len(), 2);
-    }
-
-    #[test]
-    fn test_compute_metadata_dep_graph() {
-        let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        // births depends on population and birth_rate
-        let births_deps = metadata.dep_graph.get("births").unwrap();
-        assert!(births_deps.contains("population"));
-        assert!(births_deps.contains("birth_rate"));
-    }
-
-    #[test]
-    fn test_compute_metadata_constants() {
-        let project = test_project(simple_model());
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        // birth_rate and death_rate are constants (scalar equations with no variable references)
-        assert!(metadata.is_constant("birth_rate"));
-        assert!(metadata.is_constant("death_rate"));
-    }
-
-    #[test]
-    fn test_detect_chains_multiple() {
-        let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
-        let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
-        let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-        let mut all_flows: BTreeSet<String> = BTreeSet::new();
-
-        // Chain 1: A -> f1 -> B
-        stock_to_inflows.insert("b".into(), vec!["f1".into()]);
-        stock_to_outflows.insert("a".into(), vec!["f1".into()]);
-        flow_to_stocks.insert("f1".into(), (Some("a".into()), Some("b".into())));
-        all_flows.insert("f1".into());
-
-        // Chain 2: C (isolated stock)
-        stock_to_inflows.insert("c".into(), vec![]);
-        stock_to_outflows.insert("c".into(), vec![]);
-
-        let chains = detect_chains(
-            &stock_to_inflows,
-            &stock_to_outflows,
-            &flow_to_stocks,
-            &all_flows,
-        );
-        assert_eq!(chains.len(), 2);
-    }
-
-    #[test]
-    fn test_is_structural_stock_flow_matches_dep_graph_direction() {
-        // dep_graph stores stock -> flow (stock depends on its inflows/outflows).
-        // is_structural_stock_flow(from=stock, to=flow) should return true.
-        let stock_inflows: HashMap<String, HashSet<String>> =
-            HashMap::from([("population".into(), HashSet::from(["births".into()]))]);
-        let stock_outflows: HashMap<String, HashSet<String>> =
-            HashMap::from([("population".into(), HashSet::from(["deaths".into()]))]);
-
-        assert!(is_structural_stock_flow(
-            "population",
-            "births",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-        assert!(is_structural_stock_flow(
-            "population",
-            "deaths",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-        // Reversed direction should NOT match
-        assert!(!is_structural_stock_flow(
-            "births",
-            "population",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-        // Unrelated pair should not match
-        assert!(!is_structural_stock_flow(
-            "birth_rate",
-            "births",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-    }
-
-    #[test]
-    fn test_is_structural_flow_stock_matches_connector_direction() {
-        // Connectors render as dependency -> dependent. For structural
-        // stock-flow deps, the connector goes from flow -> stock.
-        // is_structural_flow_stock(from=flow, to=stock) should return true.
-        let stock_inflows: HashMap<String, HashSet<String>> =
-            HashMap::from([("population".into(), HashSet::from(["births".into()]))]);
-        let stock_outflows: HashMap<String, HashSet<String>> =
-            HashMap::from([("population".into(), HashSet::from(["deaths".into()]))]);
-
-        assert!(is_structural_flow_stock(
-            "births",
-            "population",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-        assert!(is_structural_flow_stock(
-            "deaths",
-            "population",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-        // Reversed direction should NOT match
-        assert!(!is_structural_flow_stock(
-            "population",
-            "births",
-            &stock_inflows,
-            &stock_outflows,
-        ));
-    }
-
-    #[test]
-    fn test_contains_ident_word_boundary() {
-        assert!(contains_ident("a + b * c", "b"));
-        assert!(!contains_ident("abc", "b"));
-        assert!(contains_ident("birth_rate * population", "birth_rate"));
-        assert!(!contains_ident("high_birth_rate * x", "birth_rate"));
-    }
-
-    fn make_aux(ident: &str, equation: &str) -> datamodel::Variable {
-        datamodel::Variable::Aux(datamodel::Aux {
-            ident: ident.to_string(),
-            equation: datamodel::Equation::Scalar(equation.to_string()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            compat: datamodel::Compat {
-                visibility: datamodel::Visibility::Public,
-                ..datamodel::Compat::default()
-            },
-            ai_state: None,
-            uid: None,
-        })
-    }
-
-    #[test]
-    fn test_extract_equation_deps_simple() {
-        let var = make_aux("births", "population * birth_rate");
-        let idents: HashSet<String> = ["population", "birth_rate", "births", "death_rate"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let mut deps = extract_equation_deps(&var, &idents);
-        deps.sort();
-        assert_eq!(deps, vec!["birth_rate", "population"]);
-    }
-
-    #[test]
-    fn test_extract_equation_deps_excludes_self() {
-        let var = make_aux("x", "x + y");
-        let idents: HashSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
-        let deps = extract_equation_deps(&var, &idents);
-        assert_eq!(deps, vec!["y"]);
-    }
-
-    #[test]
-    fn test_extract_equation_deps_builtin_function() {
-        let var = make_aux("result", "MAX(a, b)");
-        let idents: HashSet<String> = ["a", "b", "result"].iter().map(|s| s.to_string()).collect();
-        let mut deps = extract_equation_deps(&var, &idents);
-        deps.sort();
-        assert_eq!(deps, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn test_extract_equation_deps_if_then_else() {
-        let var = make_aux("output", "IF THEN ELSE(flag > 0, alpha, beta)");
-        let idents: HashSet<String> = ["flag", "alpha", "beta", "output"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let mut deps = extract_equation_deps(&var, &idents);
-        deps.sort();
-        assert_eq!(deps, vec!["alpha", "beta", "flag"]);
-    }
-
-    #[test]
-    fn test_extract_equation_deps_no_equation() {
-        let var = datamodel::Variable::Stock(datamodel::Stock {
-            ident: "stock".to_string(),
-            equation: datamodel::Equation::Scalar(String::new()),
-            documentation: String::new(),
-            units: None,
-            inflows: vec![],
-            outflows: vec![],
-            compat: datamodel::Compat {
-                visibility: datamodel::Visibility::Public,
-                ..datamodel::Compat::default()
-            },
-            ai_state: None,
-            uid: None,
-        });
-        let idents: HashSet<String> = ["stock", "x"].iter().map(|s| s.to_string()).collect();
-        let deps = extract_equation_deps(&var, &idents);
-        assert!(deps.is_empty());
-    }
-
-    #[test]
-    fn test_extract_equation_deps_arrayed_uses_all_entries() {
-        let var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: "arr".to_string(),
-            equation: datamodel::Equation::Arrayed(
-                vec!["dim".to_string()],
-                vec![
-                    ("a".to_string(), "foo".to_string(), None, None),
-                    ("b".to_string(), "bar".to_string(), None, None),
-                ],
-                None,
-                false,
-            ),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            compat: datamodel::Compat {
-                visibility: datamodel::Visibility::Public,
-                ..datamodel::Compat::default()
-            },
-            ai_state: None,
-            uid: None,
-        });
-        let idents: HashSet<String> = ["arr", "foo", "bar"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let mut deps = extract_equation_deps(&var, &idents);
-        deps.sort();
-        assert_eq!(deps, vec!["bar", "foo"]);
-    }
-
-    #[test]
-    fn test_select_best_layout_fewest_crossings() {
-        let results = vec![
-            Ok(LayoutResult {
-                view: datamodel::StockFlow {
-                    name: None,
-                    elements: Vec::new(),
-                    view_box: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 100.0,
-                        height: 100.0,
-                    },
-                    zoom: 1.0,
-                    use_lettered_polarity: false,
-                    font: None,
-                    sketch_compat: None,
-                },
-                crossings: 5,
-                seed: 42,
-            }),
-            Ok(LayoutResult {
-                view: datamodel::StockFlow {
-                    name: None,
-                    elements: Vec::new(),
-                    view_box: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 100.0,
-                        height: 100.0,
-                    },
-                    zoom: 1.0,
-                    use_lettered_polarity: false,
-                    font: None,
-                    sketch_compat: None,
-                },
-                crossings: 2,
-                seed: 123,
-            }),
-        ];
-        let best = select_best_layout(results).unwrap();
-        // Should pick the one with 2 crossings
-        assert!(best.elements.is_empty());
-    }
-
-    #[test]
-    fn test_select_best_layout_lowest_seed_on_tie() {
-        let results = vec![
-            Ok(LayoutResult {
-                view: datamodel::StockFlow {
-                    name: None,
-                    elements: vec![ViewElement::Aux(view_element::Aux {
-                        name: "from_seed_123".to_string(),
-                        uid: 1,
-                        x: 0.0,
-                        y: 0.0,
-                        label_side: LabelSide::Bottom,
-                        compat: None,
-                    })],
-                    view_box: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 100.0,
-                        height: 100.0,
-                    },
-                    zoom: 1.0,
-                    use_lettered_polarity: false,
-                    font: None,
-                    sketch_compat: None,
-                },
-                crossings: 3,
-                seed: 123,
-            }),
-            Ok(LayoutResult {
-                view: datamodel::StockFlow {
-                    name: None,
-                    elements: vec![ViewElement::Aux(view_element::Aux {
-                        name: "from_seed_42".to_string(),
-                        uid: 2,
-                        x: 0.0,
-                        y: 0.0,
-                        label_side: LabelSide::Bottom,
-                        compat: None,
-                    })],
-                    view_box: Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 100.0,
-                        height: 100.0,
-                    },
-                    zoom: 1.0,
-                    use_lettered_polarity: false,
-                    font: None,
-                    sketch_compat: None,
-                },
-                crossings: 3,
-                seed: 42,
-            }),
-        ];
-        let best = select_best_layout(results).unwrap();
-        // Should pick seed 42 (lower seed wins on tie)
-        assert_eq!(best.elements.len(), 1);
-        if let ViewElement::Aux(aux) = &best.elements[0] {
-            assert_eq!(aux.name, "from_seed_42");
-        } else {
-            unreachable!("expected Aux element");
-        }
-    }
-
-    #[test]
-    fn test_generate_layout_aux_only() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.5".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "factor".to_string(),
-                    equation: datamodel::Equation::Scalar("rate * 2".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        assert_eq!(
-            result
-                .elements
-                .iter()
-                .filter(|e| matches!(e, ViewElement::Aux(_)))
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn test_generate_layout_single_aux() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
-                ident: "x".to_string(),
-                equation: datamodel::Equation::Scalar("42".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                compat: datamodel::Compat {
-                    visibility: datamodel::Visibility::Public,
-                    ..datamodel::Compat::default()
-                },
-                ai_state: None,
-                uid: Some(1),
-            })],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        assert_eq!(result.elements.len(), 1);
-    }
-
-    #[test]
-    fn test_generate_layout_disconnected_stocks() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock_a".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec![],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock_b".to_string(),
-                    equation: datamodel::Equation::Scalar("200".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec![],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        let stocks: Vec<_> = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Stock(_)))
-            .collect();
-        assert_eq!(stocks.len(), 2);
-    }
-
-    #[test]
-    fn test_generate_layout_disconnected_chains_do_not_explode_apart() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock_a".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec![],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock_b".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec![],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock_c".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec![],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(3),
-                }),
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock_d".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec![],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(4),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        let stock_positions: Vec<(f64, f64)> = result
-            .elements
-            .iter()
-            .filter_map(|e| {
-                if let ViewElement::Stock(s) = e {
-                    Some((s.x, s.y))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        assert_eq!(stock_positions.len(), 4);
-
-        let min_x = stock_positions
-            .iter()
-            .map(|(x, _)| *x)
-            .fold(f64::INFINITY, f64::min);
-        let max_x = stock_positions
-            .iter()
-            .map(|(x, _)| *x)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let min_y = stock_positions
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f64::INFINITY, f64::min);
-        let max_y = stock_positions
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f64::NEG_INFINITY, f64::max);
-
-        // Disconnected chains should remain in a reasonable neighborhood, not
-        // be flung thousands of units apart by force configuration.
-        assert!(
-            max_x - min_x < 10_000.0,
-            "x span too large: {}",
-            max_x - min_x
-        );
-        assert!(
-            max_y - min_y < 10_000.0,
-            "y span too large: {}",
-            max_y - min_y
-        );
-    }
-
-    #[test]
-    fn test_connector_direction_dependency_to_dependent() {
-        let project = test_project(simple_model());
-        let model = project.get_model(TEST_MODEL).unwrap();
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-
-        let uid_to_ident: HashMap<i32, String> = model
-            .variables
-            .iter()
-            .filter_map(|var| match var {
-                datamodel::Variable::Stock(s) => {
-                    s.uid.map(|uid| (uid, canonicalize(&s.ident).into_owned()))
-                }
-                datamodel::Variable::Flow(f) => {
-                    f.uid.map(|uid| (uid, canonicalize(&f.ident).into_owned()))
-                }
-                datamodel::Variable::Aux(a) => {
-                    a.uid.map(|uid| (uid, canonicalize(&a.ident).into_owned()))
-                }
-                datamodel::Variable::Module(_) => None,
-            })
-            .collect();
-
-        let link_pairs: HashSet<(String, String)> = result
-            .elements
-            .iter()
-            .filter_map(|elem| {
-                if let ViewElement::Link(link) = elem {
-                    let from = uid_to_ident.get(&link.from_uid)?.clone();
-                    let to = uid_to_ident.get(&link.to_uid)?.clone();
-                    Some((from, to))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        assert!(
-            link_pairs.contains(&("birth_rate".to_string(), "births".to_string())),
-            "expected dependency link birth_rate -> births"
-        );
-        assert!(
-            !link_pairs.contains(&("births".to_string(), "birth_rate".to_string())),
-            "did not expect reversed dependency link births -> birth_rate"
-        );
-    }
-
-    #[test]
-    fn test_compute_metadata_includes_isolated_flows_when_stocks_exist() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec!["connected_flow".to_string()],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "connected_flow".to_string(),
-                    equation: datamodel::Equation::Scalar("10".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "isolated_flow".to_string(),
-                    equation: datamodel::Equation::Scalar("5".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(3),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        assert!(
-            metadata
-                .chains
-                .iter()
-                .any(|chain| chain.flows.contains(&"isolated_flow".to_string())),
-            "expected isolated_flow to be represented in some chain"
-        );
-    }
-
-    #[test]
-    fn test_generate_layout_includes_isolated_flows_when_stocks_exist() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "stock".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec![],
-                    outflows: vec!["connected_flow".to_string()],
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "connected_flow".to_string(),
-                    equation: datamodel::Equation::Scalar("10".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "isolated_flow".to_string(),
-                    equation: datamodel::Equation::Scalar("5".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(3),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        let flow_count = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Flow(_)))
-            .count();
-        assert_eq!(flow_count, 2, "expected both flows to be laid out");
-    }
-
-    #[test]
-    fn test_generate_layout_includes_module_elements_and_connectors() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Module(datamodel::Module {
-                    ident: "m".to_string(),
-                    model_name: "submodel".to_string(),
-                    documentation: String::new(),
-                    units: None,
-                    references: Vec::new(),
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x + m".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(3),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None).unwrap();
-        let element_uids: HashSet<i32> = result.elements.iter().map(|e| e.get_uid()).collect();
-
-        // All link endpoints should reference rendered elements
-        for elem in &result.elements {
-            if let ViewElement::Link(link) = elem {
-                assert!(
-                    element_uids.contains(&link.from_uid),
-                    "link from_uid {} should reference a rendered element",
-                    link.from_uid
-                );
-                assert!(
-                    element_uids.contains(&link.to_uid),
-                    "link to_uid {} should reference a rendered element",
-                    link.to_uid
-                );
-            }
-        }
-
-        // Module should produce a ViewElement::Module
-        let module_count = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Module(_)))
-            .count();
-        assert_eq!(module_count, 1, "module 'm' should be rendered");
-
-        // Auxiliaries should still be present
-        let aux_count = result
-            .elements
-            .iter()
-            .filter(|e| matches!(e, ViewElement::Aux(_)))
-            .count();
-        assert_eq!(aux_count, 2, "both auxiliaries should be rendered");
-
-        // Module should have finite coordinates from SFDP
-        for elem in &result.elements {
-            if let ViewElement::Module(m) = elem {
-                assert!(
-                    m.x.is_finite() && m.y.is_finite(),
-                    "module '{}' should have finite coordinates",
-                    m.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_count_view_crossings_shared_endpoint_bidirectional_links() {
-        let view = datamodel::StockFlow {
-            name: None,
-            elements: vec![
-                ViewElement::Aux(view_element::Aux {
-                    name: "a".to_string(),
-                    uid: 1,
-                    x: 0.0,
-                    y: 0.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                }),
-                ViewElement::Aux(view_element::Aux {
-                    name: "b".to_string(),
-                    uid: 2,
-                    x: 10.0,
-                    y: 10.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                }),
-                ViewElement::Aux(view_element::Aux {
-                    name: "c".to_string(),
-                    uid: 3,
-                    x: 10.0,
-                    y: -10.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                }),
-                ViewElement::Link(view_element::Link {
-                    uid: 4,
-                    from_uid: 1,
-                    to_uid: 2,
-                    shape: LinkShape::Straight,
-                    polarity: None,
-                }),
-                ViewElement::Link(view_element::Link {
-                    uid: 5,
-                    from_uid: 3,
-                    to_uid: 1,
-                    shape: LinkShape::Straight,
-                    polarity: None,
-                }),
-            ],
-            view_box: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-            zoom: 1.0,
-            use_lettered_polarity: false,
-            font: None,
-            sketch_compat: None,
-        };
-
-        assert_eq!(count_view_crossings(&view), 0);
-    }
-
-    #[test]
-    fn test_compute_metadata_populates_feedback_loops_from_model_metadata() {
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("y".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(1),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..datamodel::Compat::default()
-                    },
-                    ai_state: None,
-                    uid: Some(2),
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: vec![datamodel::LoopMetadata {
-                uids: vec![1, 2],
-                deleted: false,
-                name: "R1".to_string(),
-                description: String::new(),
-            }],
-            groups: Vec::new(),
-        };
-
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-        assert_eq!(metadata.feedback_loops.len(), 1);
-        assert_eq!(metadata.feedback_loops[0].name, "R1");
-        assert_eq!(
-            metadata.feedback_loops[0].causal_chain(),
-            &["x".to_string(), "y".to_string(), "x".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_chain_importance_formula() {
-        let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
-        let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
-        let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-        let mut all_flows: BTreeSet<String> = BTreeSet::new();
-
-        // Chain: s1 -> f1 -> s2 -> f2 -> (none), f3 -> s2
-        // 2 stocks + 3 flows = 2*10 + 3*5 = 35
-        stock_to_outflows.insert("s1".into(), vec!["f1".into()]);
-        stock_to_inflows.insert("s2".into(), vec!["f1".into(), "f3".into()]);
-        stock_to_outflows.insert("s2".into(), vec!["f2".into()]);
-        stock_to_inflows.insert("s1".into(), vec![]);
-        flow_to_stocks.insert("f1".into(), (Some("s1".into()), Some("s2".into())));
-        flow_to_stocks.insert("f2".into(), (Some("s2".into()), None));
-        flow_to_stocks.insert("f3".into(), (None, Some("s2".into())));
-        all_flows.extend(["f1".into(), "f2".into(), "f3".into()]);
-
-        let chains = detect_chains(
-            &stock_to_inflows,
-            &stock_to_outflows,
-            &flow_to_stocks,
-            &all_flows,
-        );
-        assert_eq!(chains.len(), 1);
-        assert!((chains[0].importance - 35.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_chains_sorted_descending() {
-        let mut stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
-        let mut stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
-        let mut flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-        let mut all_flows: BTreeSet<String> = BTreeSet::new();
-
-        // Chain 1: 1 stock + 1 flow = 15
-        stock_to_outflows.insert("a".into(), vec!["fa".into()]);
-        stock_to_inflows.insert("a".into(), vec![]);
-        flow_to_stocks.insert("fa".into(), (Some("a".into()), None));
-        all_flows.insert("fa".into());
-
-        // Chain 2: 2 stocks + 1 flow = 25
-        stock_to_outflows.insert("b".into(), vec!["fb".into()]);
-        stock_to_inflows.insert("b".into(), vec![]);
-        stock_to_inflows.insert("c".into(), vec!["fb".into()]);
-        stock_to_outflows.insert("c".into(), vec![]);
-        flow_to_stocks.insert("fb".into(), (Some("b".into()), Some("c".into())));
-        all_flows.insert("fb".into());
-
-        let chains = detect_chains(
-            &stock_to_inflows,
-            &stock_to_outflows,
-            &flow_to_stocks,
-            &all_flows,
-        );
-        assert_eq!(chains.len(), 2);
-        assert!(
-            chains[0].importance >= chains[1].importance,
-            "chains should be sorted descending by importance: {} vs {}",
-            chains[0].importance,
-            chains[1].importance
-        );
-        assert!((chains[0].importance - 25.0).abs() < f64::EPSILON);
-        assert!((chains[1].importance - 15.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_isolated_flow_importance_is_5() {
-        let stock_to_inflows: HashMap<String, Vec<String>> = HashMap::new();
-        let stock_to_outflows: HashMap<String, Vec<String>> = HashMap::new();
-        let flow_to_stocks: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-        let mut all_flows: BTreeSet<String> = BTreeSet::new();
-        all_flows.insert("lonely_flow".into());
-
-        let chains = detect_chains(
-            &stock_to_inflows,
-            &stock_to_outflows,
-            &flow_to_stocks,
-            &all_flows,
-        );
-        assert_eq!(chains.len(), 1);
-        assert!((chains[0].importance - 5.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_ast_deps_exclude_builtins() {
-        // A variable referencing TIME (a builtin) should not produce a connector
-        // to TIME since TIME is not a model variable.
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(1),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "output".to_string(),
-                    equation: datamodel::Equation::Scalar("rate * TIME".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        let output_deps = metadata.dep_graph.get("output").unwrap();
-        assert!(output_deps.contains("rate"), "output should depend on rate");
-        assert!(
-            !output_deps.contains("time"),
-            "output should NOT depend on builtin TIME"
-        );
-    }
-
-    #[test]
-    fn test_ast_deps_no_false_positives() {
-        // String heuristic would falsely match "birth" inside "birthday".
-        // AST-based extraction should not.
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "birth".to_string(),
-                    equation: datamodel::Equation::Scalar("10".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(1),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "birthday".to_string(),
-                    equation: datamodel::Equation::Scalar("365".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "output".to_string(),
-                    equation: datamodel::Equation::Scalar("birthday + 1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(3),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        let output_deps = metadata.dep_graph.get("output").unwrap();
-        assert!(
-            output_deps.contains("birthday"),
-            "output should depend on birthday"
-        );
-        assert!(
-            !output_deps.contains("birth"),
-            "output should NOT falsely depend on birth (substring match)"
-        );
-    }
-
-    #[test]
-    fn test_deps_fallback_on_compile_error() {
-        // A model with a module referencing a nonexistent submodel should
-        // gracefully fall back to string heuristic for dep extraction.
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(1),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Module(datamodel::Module {
-                    ident: "m".to_string(),
-                    model_name: "nonexistent_model".to_string(),
-                    documentation: String::new(),
-                    units: None,
-                    references: Vec::new(),
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x + 1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(3),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let result = generate_layout(&project, TEST_MODEL, None);
-        assert!(
-            result.is_ok(),
-            "layout should succeed despite compile error, via fallback"
-        );
-    }
-
-    #[test]
-    fn test_ltm_fallback_on_sim_error() {
-        // A model with loop_metadata but that can't be simulated should
-        // fall back to persisted loop_metadata UIDs for feedback loops.
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("y".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(1),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: vec![datamodel::LoopMetadata {
-                uids: vec![1, 2],
-                deleted: false,
-                name: "R1".to_string(),
-                description: String::new(),
-            }],
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        // Should have fallen back to persisted metadata since this minimal
-        // model doesn't have sim_specs and can't simulate.
-        assert_eq!(metadata.feedback_loops.len(), 1);
-        assert_eq!(metadata.feedback_loops[0].name, "R1");
-    }
-
-    #[test]
-    fn test_compute_metadata_returns_none_for_unknown_model() {
-        let project = test_project(simple_model());
-        assert!(compute_metadata(&project, "nonexistent", None).is_none());
-    }
-
-    #[test]
-    fn test_compute_metadata_falls_back_for_invalid_equation() {
-        // A variable with an unparseable equation should still get
-        // string-heuristic dependencies rather than being treated as a
-        // constant.
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["births".to_string()],
-                    outflows: vec![],
-                    ai_state: None,
-                    uid: Some(1),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "births".to_string(),
-                    equation: datamodel::Equation::Scalar(
-                        "population *** totally_broken_syntax".to_string(),
-                    ),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        let births_deps = metadata.dep_graph.get("births").unwrap();
-        assert!(
-            births_deps.contains("population"),
-            "births should depend on population via string-heuristic fallback, got: {:?}",
-            births_deps,
-        );
-        assert!(
-            !metadata.constants.contains("births"),
-            "births should not be classified as a constant",
-        );
-
-        // population should also depend on births via structural inflows
-        let pop_deps = metadata.dep_graph.get("population").unwrap();
-        assert!(
-            pop_deps.contains("births"),
-            "population should depend on births via structural inflows, got: {:?}",
-            pop_deps,
-        );
-    }
-
-    #[test]
-    fn test_compute_metadata_excludes_non_model_deps() {
-        // Equation text that mentions an identifier not in the model
-        // (simulating a module output reference like "m·out" that
-        // resolve_non_private_dependencies might pass through).
-        // The dep graph should only contain identifiers for actual
-        // rendered model variables.
-        let model = datamodel::Model {
-            name: TEST_MODEL.to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "x".to_string(),
-                    equation: datamodel::Equation::Scalar("phantom + 1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(1),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "y".to_string(),
-                    equation: datamodel::Equation::Scalar("x * 2".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: Some(2),
-                    compat: datamodel::Compat {
-                        visibility: datamodel::Visibility::Public,
-                        ..Default::default()
-                    },
-                }),
-            ],
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
-
-        // "phantom" is not a model variable so should not appear in the dep graph
-        let all_graph_nodes: BTreeSet<&String> = metadata
-            .dep_graph
-            .keys()
-            .chain(metadata.dep_graph.values().flat_map(|deps| deps.iter()))
-            .collect();
-        assert!(
-            !all_graph_nodes.contains(&"phantom".to_string()),
-            "dep graph should not contain non-model identifiers, got: {:?}",
-            all_graph_nodes,
-        );
-
-        // y should still depend on x (a real model variable)
-        let y_deps = metadata.dep_graph.get("y").unwrap();
-        assert!(
-            y_deps.contains("x"),
-            "y should depend on x, got: {:?}",
-            y_deps,
-        );
-
-        // x should be a constant since its only dep (phantom) was filtered
-        assert!(
-            metadata.constants.contains("x"),
-            "x should be a constant after filtering non-model deps",
-        );
-    }
-
-    #[test]
-    fn test_resolve_model_name_returns_actual_name_for_main_alias() {
-        let model = datamodel::Model {
-            name: String::new(),
-            sim_specs: None,
-            variables: Vec::new(),
-            views: Vec::new(),
-            loop_metadata: Vec::new(),
-            groups: Vec::new(),
-        };
-        let project = test_project(model);
-        // "main" should resolve to the empty string (the actual model name)
-        assert_eq!(resolve_model_name(&project, "main"), "");
-    }
-
-    #[test]
-    fn test_resolve_model_name_passthrough_for_named_model() {
-        let project = test_project(simple_model());
-        assert_eq!(resolve_model_name(&project, TEST_MODEL), TEST_MODEL);
-    }
-
-    #[test]
-    fn test_resolve_model_name_passthrough_for_unknown_model() {
-        let project = test_project(simple_model());
-        assert_eq!(resolve_model_name(&project, "nonexistent"), "nonexistent");
-    }
-
-    #[test]
-    fn test_compute_metadata_with_main_alias() {
-        let mut model = simple_model();
-        model.name = String::new();
-        let project = test_project(model);
-        let metadata = compute_metadata(&project, "main", None);
-        assert!(
-            metadata.is_some(),
-            "compute_metadata should work with 'main' alias for unnamed models"
-        );
-        let metadata = metadata.unwrap();
-        assert!(!metadata.dep_graph.is_empty());
-    }
-}
+#[path = "layout_tests.rs"]
+mod tests;

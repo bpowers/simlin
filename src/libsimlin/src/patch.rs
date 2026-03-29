@@ -83,7 +83,7 @@ enum JsonProjectOperation {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct JsonProjectPatch {
+pub(crate) struct JsonProjectPatch {
     #[serde(default)]
     project_ops: Vec<JsonProjectOperation>,
     #[serde(default)]
@@ -137,7 +137,7 @@ enum JsonModelOperation {
 
 // ── conversion helpers ─────────────────────────────────────────────────
 
-fn convert_json_project_patch(
+pub(crate) fn convert_json_project_patch(
     patch: JsonProjectPatch,
 ) -> std::result::Result<engine::ProjectPatch, FfiError> {
     let mut project_ops = Vec::with_capacity(patch.project_ops.len());

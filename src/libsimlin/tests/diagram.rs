@@ -9,7 +9,7 @@ use std::ptr;
 
 use simlin::*;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
+use simlin_engine::{self as engine, datamodel};
 
 use common::open_project_from_datamodel;
 
@@ -30,7 +30,7 @@ fn test_diagram_sync_sir_model() {
 
         let model_name = CString::new("main").unwrap();
         err = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(err.is_null(), "diagram_sync should succeed for SIR model");
 
         // Verify the model now has a view with elements
@@ -66,7 +66,7 @@ fn test_diagram_sync_test_project() {
     unsafe {
         let model_name = CString::new("main").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(err.is_null(), "diagram_sync should succeed");
 
         let datamodel_locked = (*proj).datamodel.lock().unwrap();
@@ -104,7 +104,7 @@ fn test_diagram_sync_preserves_zoom() {
         // First, generate a layout
         let model_name = CString::new("main").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(err.is_null());
 
         // Manually set zoom to 2.0
@@ -118,7 +118,7 @@ fn test_diagram_sync_preserves_zoom() {
 
         // Generate layout again -- zoom should be preserved
         err = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(err.is_null());
 
         let datamodel_locked = (*proj).datamodel.lock().unwrap();
@@ -153,10 +153,10 @@ fn test_diagram_sync_idempotent() {
         let mut err: *mut SimlinError = ptr::null_mut();
 
         // Call twice
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(err.is_null());
         err = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(err.is_null());
 
         let datamodel_locked = (*proj).datamodel.lock().unwrap();
@@ -173,7 +173,7 @@ fn test_diagram_sync_null_project() {
     unsafe {
         let model_name = CString::new("main").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(ptr::null_mut(), model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(ptr::null_mut(), model_name.as_ptr(), ptr::null(), &mut err);
         assert!(!err.is_null(), "null project should produce an error");
         simlin_error_free(err);
     }
@@ -190,7 +190,7 @@ fn test_diagram_sync_null_model_name() {
 
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(proj, ptr::null(), &mut err);
+        simlin_project_diagram_sync(proj, ptr::null(), ptr::null(), &mut err);
         assert!(!err.is_null(), "null model name should produce an error");
         simlin_error_free(err);
 
@@ -210,7 +210,7 @@ fn test_diagram_sync_nonexistent_model() {
     unsafe {
         let model_name = CString::new("no_such_model").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(
             !err.is_null(),
             "nonexistent model name should produce an error"
@@ -233,9 +233,353 @@ fn test_diagram_sync_empty_model_name() {
     unsafe {
         let model_name = CString::new("").unwrap();
         let mut err: *mut SimlinError = ptr::null_mut();
-        simlin_project_diagram_sync(proj, model_name.as_ptr(), &mut err);
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
         assert!(!err.is_null(), "empty model name should produce an error");
         simlin_error_free(err);
+
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_ac7_2_incremental_layout_via_patch_json() {
+    let datamodel = TestProject::new("ac7_2_incr_layout")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.02", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        assert!(err.is_null(), "initial diagram_sync should succeed");
+
+        let initial_positions: Vec<(String, f64, f64)> = {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            assert_eq!(model.views.len(), 1);
+            match &model.views[0] {
+                engine::datamodel::View::StockFlow(sf) => {
+                    assert!(!sf.elements.is_empty());
+                    sf.elements
+                        .iter()
+                        .filter_map(|e| {
+                            let name = e.get_name()?.to_string();
+                            let (x, y) = match e {
+                                engine::datamodel::ViewElement::Aux(a) => (a.x, a.y),
+                                engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                                engine::datamodel::ViewElement::Flow(f) => (f.x, f.y),
+                                _ => return None,
+                            };
+                            Some((name, x, y))
+                        })
+                        .collect()
+                }
+            }
+        };
+
+        assert!(initial_positions.len() >= 3);
+
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "extra", "equation": "42" } }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        err = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        assert!(err.is_null(), "patch should succeed");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        let patch_cstr = CString::new(patch_json).unwrap();
+        err = ptr::null_mut();
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), patch_cstr.as_ptr(), &mut err);
+        assert!(err.is_null(), "incremental diagram_sync should succeed");
+
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            assert_eq!(model.views.len(), 1);
+            match &model.views[0] {
+                engine::datamodel::View::StockFlow(sf) => {
+                    let has_extra = sf
+                        .elements
+                        .iter()
+                        .any(|e| e.get_name().is_some_and(|n| n == "extra"));
+                    assert!(has_extra, "newly added 'extra' must appear in the view");
+
+                    for (name, orig_x, orig_y) in &initial_positions {
+                        let found = sf
+                            .elements
+                            .iter()
+                            .find(|e| e.get_name().is_some_and(|n| n == name));
+                        let elem = found.unwrap_or_else(|| {
+                            panic!("element '{name}' must still be in the view")
+                        });
+                        let (x, y) = match elem {
+                            engine::datamodel::ViewElement::Aux(a) => (a.x, a.y),
+                            engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                            engine::datamodel::ViewElement::Flow(f) => (f.x, f.y),
+                            _ => panic!("unexpected element type for '{name}'"),
+                        };
+                        assert!(
+                            (x - orig_x).abs() < 1.0 && (y - orig_y).abs() < 1.0,
+                            "'{name}' position should be preserved: \
+                             expected ({orig_x},{orig_y}), got ({x},{y})"
+                        );
+                    }
+                }
+            }
+        }
+
+        simlin_project_unref(proj);
+    }
+}
+
+/// When a project has a model with name "" (common for single-model XMILE imports),
+/// the FFI caller passes "main" and get_model handles the alias. The patch filter
+/// must also honor this alias so that a patch with model name "" is matched when
+/// model_name_str is "main".
+#[test]
+fn test_diagram_sync_main_alias_empty_model_name_patch() {
+    let project = datamodel::Project {
+        name: "alias_test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![datamodel::Model {
+            name: String::new(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: Vec::new(),
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: None,
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: datamodel::Equation::Scalar("10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: None,
+                }),
+            ],
+            views: Vec::new(),
+            loop_metadata: Vec::new(),
+            groups: Vec::new(),
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let proj = open_project_from_datamodel(&project);
+
+    unsafe {
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        // Generate initial layout
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        assert!(err.is_null(), "initial diagram_sync should succeed");
+
+        // Move an element to a distinctive position that a full layout would
+        // never produce. If incremental layout is taken, this position is preserved.
+        // If full layout runs instead, it will be overwritten.
+        const MARKER_X: f64 = 9999.0;
+        const MARKER_Y: f64 = 8888.0;
+        {
+            let mut dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model_mut("main").unwrap();
+            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+                for elem in &mut sf.elements {
+                    if let engine::datamodel::ViewElement::Stock(s) = elem {
+                        if s.name == "level" {
+                            s.x = MARKER_X;
+                            s.y = MARKER_Y;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply patch with model name "" (matching actual stored name, not the alias)
+        let patch_json = r#"{
+            "models": [{
+                "name": "",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "extra", "equation": "42" } }
+                }]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        err = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        assert!(err.is_null(), "patch should succeed");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // Call diagram_sync with "main" and the patch (which uses "")
+        let patch_cstr = CString::new(patch_json).unwrap();
+        err = ptr::null_mut();
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), patch_cstr.as_ptr(), &mut err);
+        assert!(err.is_null(), "incremental diagram_sync should succeed");
+
+        // Verify incremental path was taken: marker position must be preserved
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            match &model.views[0] {
+                engine::datamodel::View::StockFlow(sf) => {
+                    let has_extra = sf
+                        .elements
+                        .iter()
+                        .any(|e| e.get_name().is_some_and(|n| n == "extra"));
+                    assert!(
+                        has_extra,
+                        "newly added 'extra' must appear in the view after incremental layout"
+                    );
+
+                    let level = sf
+                        .elements
+                        .iter()
+                        .find(|e| e.get_name().is_some_and(|n| n == "level"))
+                        .expect("'level' must still be in the view");
+                    let (x, y) = match level {
+                        engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                        _ => panic!("'level' should be a Stock"),
+                    };
+                    assert!(
+                        (x - MARKER_X).abs() < 1.0 && (y - MARKER_Y).abs() < 1.0,
+                        "'level' marker position should be preserved by incremental path: \
+                         expected ({MARKER_X},{MARKER_Y}), got ({x},{y})"
+                    );
+                }
+            }
+        }
+
+        simlin_project_unref(proj);
+    }
+}
+
+/// When patch_json is provided but contains no ops for the target model, the
+/// existing layout must be preserved unchanged. Previously this fell through
+/// to generate_best_layout, wiping hand-placed coordinates.
+#[test]
+fn test_diagram_sync_preserves_layout_when_patch_has_no_ops_for_model() {
+    let test_project = TestProject::new("preserve_test")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "100", &["inflow"], &[], None)
+        .flow("inflow", "10", None);
+
+    let datamodel = test_project.build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let model_name = CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        // Generate initial layout
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), ptr::null(), &mut err);
+        assert!(err.is_null(), "initial diagram_sync should succeed");
+
+        // Move an element to a distinctive position
+        const MARKER_X: f64 = 7777.0;
+        const MARKER_Y: f64 = 6666.0;
+        {
+            let mut dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model_mut("main").unwrap();
+            if let Some(engine::datamodel::View::StockFlow(sf)) = model.views.first_mut() {
+                for elem in &mut sf.elements {
+                    if let engine::datamodel::ViewElement::Stock(s) = elem {
+                        if s.name == "level" {
+                            s.x = MARKER_X;
+                            s.y = MARKER_Y;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Call diagram_sync with a patch that targets a DIFFERENT model
+        let patch_json = r#"{
+            "models": [{
+                "name": "other_model",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "x", "equation": "1" } }
+                }]
+            }]
+        }"#;
+        let patch_cstr = CString::new(patch_json).unwrap();
+        err = ptr::null_mut();
+        simlin_project_diagram_sync(proj, model_name.as_ptr(), patch_cstr.as_ptr(), &mut err);
+        assert!(
+            err.is_null(),
+            "diagram_sync with non-targeting patch should succeed"
+        );
+
+        // Verify marker position is preserved (layout was NOT regenerated)
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            match &model.views[0] {
+                engine::datamodel::View::StockFlow(sf) => {
+                    let level = sf
+                        .elements
+                        .iter()
+                        .find(|e| e.get_name().is_some_and(|n| n == "level"))
+                        .expect("'level' must still be in the view");
+                    let (x, y) = match level {
+                        engine::datamodel::ViewElement::Stock(s) => (s.x, s.y),
+                        _ => panic!("'level' should be a Stock"),
+                    };
+                    assert!(
+                        (x - MARKER_X).abs() < 0.01 && (y - MARKER_Y).abs() < 0.01,
+                        "marker position should be preserved when patch has no ops for model: \
+                         expected ({MARKER_X},{MARKER_Y}), got ({x},{y})"
+                    );
+                }
+            }
+        }
 
         simlin_project_unref(proj);
     }

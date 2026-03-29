@@ -291,6 +291,11 @@ const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr
 // Generate the best automatic layout for the named model and replace its
 // views in-place.
 //
+// When `patch_json` is non-NULL, deserializes it as a JSON project patch
+// and uses incremental layout (preserving existing element positions) if
+// the model already has a non-empty view.  When NULL, always generates a
+// full layout from scratch.
+//
 // Preserves the existing zoom level if the model already has a view with
 // zoom > 0. Works on all targets including WASM (uses a serial fallback
 // when rayon is unavailable).
@@ -298,9 +303,11 @@ const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
 // - `model_name` must be a valid null-terminated UTF-8 string
+// - `patch_json` may be null; when non-null must be a valid null-terminated UTF-8 JSON string
 // - `out_error` may be null
 void simlin_project_diagram_sync(SimlinProject *project,
                                  const char *model_name,
+                                 const char *patch_json,
                                  SimlinError **out_error);
 
 uint8_t *simlin_malloc(uintptr_t size);

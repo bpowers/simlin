@@ -204,11 +204,12 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
 
     let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
+    let model_patch = patch.models.iter().find(|m| m.name == model_name).cloned();
     simlin_engine::apply_patch(&mut project, patch)
         .map_err(|e| anyhow::anyhow!("patch application failed: {e:?}"))?;
 
     if !dry_run && has_variable_ops {
-        sync_diagram(&mut project, &model_name);
+        sync_diagram(&mut project, &model_name, model_patch.as_ref());
     }
 
     let ext = path
@@ -262,19 +263,39 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
 }
 
 /// Regenerate the diagram layout for the named model, replacing its views
-/// in-place.  Preserves the existing zoom level when the model already has
-/// a view.  Layout failures are silently ignored -- a missing diagram is
-/// non-fatal and the model data is still correct.
-fn sync_diagram(project: &mut simlin_engine::datamodel::Project, model_name: &str) {
-    let existing_zoom = project
+/// in-place.  When a model patch is provided and the model already has a
+/// non-empty view, uses incremental layout to preserve existing element
+/// positions.  Falls back to full layout generation otherwise.
+///
+/// Preserves the existing zoom level when the model already has a view.
+/// Layout failures are silently ignored -- a missing diagram is non-fatal
+/// and the model data is still correct.
+fn sync_diagram(
+    project: &mut simlin_engine::datamodel::Project,
+    model_name: &str,
+    model_patch: Option<&simlin_engine::ModelPatch>,
+) {
+    let old_view = project
         .get_model(model_name)
         .and_then(|m| m.views.first())
         .map(|v| match v {
-            simlin_engine::datamodel::View::StockFlow(sf) => sf.zoom,
-        })
-        .filter(|&z| z > 0.0);
+            simlin_engine::datamodel::View::StockFlow(sf) => sf,
+        });
 
-    let mut layout = match simlin_engine::layout::generate_best_layout(project, model_name, None) {
+    let existing_zoom = old_view.map(|sf| sf.zoom).filter(|&z| z > 0.0);
+
+    let new_view = if let (Some(old_sf), Some(patch)) = (old_view, model_patch) {
+        if !old_sf.elements.is_empty() {
+            let old_sf = old_sf.clone();
+            simlin_engine::layout::incremental_layout(&old_sf, project, model_name, patch, None)
+        } else {
+            simlin_engine::layout::generate_best_layout(project, model_name, None)
+        }
+    } else {
+        simlin_engine::layout::generate_best_layout(project, model_name, None)
+    };
+
+    let mut layout = match new_view {
         Ok(l) => l,
         Err(_) => return,
     };
@@ -1054,6 +1075,116 @@ mod tests {
             .map(|v| v.len())
             .unwrap_or(0);
         assert_eq!(views, 0, "dry-run must not write regenerated views to disk");
+    }
+
+    // ---- incremental layout through MCP path ----
+
+    #[test]
+    fn ac7_1_incremental_layout_preserves_existing_positions() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Start with a project that already has a stock, flow, and a
+        // hand-placed layout.  The known x/y positions let us verify that
+        // incremental layout preserved them rather than regenerating from
+        // scratch.
+        let project_with_layout = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "variables": [
+                    {
+                        "type": "stock",
+                        "name": "population",
+                        "equation": "100",
+                        "inflows": ["births"],
+                        "outflows": []
+                    },
+                    {
+                        "type": "flow",
+                        "name": "births",
+                        "equation": "population * 0.1"
+                    }
+                ],
+                "views": [{
+                    "kind": "stock_flow",
+                    "elements": [
+                        {
+                            "uid": 1,
+                            "type": "stock",
+                            "name": "population",
+                            "x": 300.0,
+                            "y": 200.0,
+                            "labelSide": "bottom"
+                        },
+                        {
+                            "uid": 2,
+                            "type": "flow",
+                            "name": "births",
+                            "x": 200.0,
+                            "y": 200.0,
+                            "labelSide": "bottom",
+                            "points": [
+                                {"x": 100.0, "y": 200.0},
+                                {"x": 300.0, "y": 200.0}
+                            ]
+                        }
+                    ]
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "model.simlin.json", &project_with_layout);
+
+        // Add a new auxiliary -- this triggers sync_diagram with a
+        // ModelPatch, exercising the incremental layout path.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [
+                { "upsertAuxiliary": { "name": "growth_rate", "equation": "0.05" } }
+            ]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let views = saved["models"][0]["views"]
+            .as_array()
+            .expect("views must be an array");
+        assert!(!views.is_empty(), "must have views after edit");
+
+        let elements = views[0]["elements"]
+            .as_array()
+            .expect("view must have elements");
+
+        // The original stock and flow must still be present.
+        let has_population = elements.iter().any(|e| e["name"] == "population");
+        let has_births = elements.iter().any(|e| e["name"] == "births");
+        // View element names use newlines where variable idents use underscores
+        let has_growth_rate = elements.iter().any(|e| e["name"] == "growth\nrate");
+        assert!(has_population, "population stock must be in the view");
+        assert!(has_births, "births flow must be in the view");
+        assert!(
+            has_growth_rate,
+            "newly added growth_rate must appear in the view; elements: {elements:?}"
+        );
+
+        // Verify that the existing elements kept their original positions.
+        // Incremental layout preserves existing placement; a full regeneration
+        // would assign different coordinates.
+        let pop_elem = elements.iter().find(|e| e["name"] == "population").unwrap();
+        let pop_x = pop_elem["x"].as_f64().unwrap();
+        let pop_y = pop_elem["y"].as_f64().unwrap();
+        assert!(
+            (pop_x - 300.0).abs() < 1.0 && (pop_y - 200.0).abs() < 1.0,
+            "population position should be preserved at (300,200), got ({pop_x},{pop_y})"
+        );
     }
 
     // ---- model name resolution falls back to first model when no "main" ----

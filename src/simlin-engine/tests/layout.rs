@@ -9,6 +9,7 @@ use std::io::BufReader;
 use simlin_engine::common::canonicalize;
 use simlin_engine::datamodel::ViewElement;
 use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
+use simlin_engine::layout::LayoutState;
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::{generate_best_layout, generate_layout, generate_layout_with_config};
 use simlin_engine::open_xmile;
@@ -766,6 +767,197 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
     );
 }
 
+#[test]
+fn test_from_existing_view_sir_round_trip() {
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+    let generated_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+
+    let state = LayoutState::from_existing_view(&generated_view, model);
+
+    // Element count must match
+    assert_eq!(
+        state.elements.len(),
+        generated_view.elements.len(),
+        "from_existing_view should preserve all elements"
+    );
+
+    // Every element UID and position must match
+    for (orig, seeded) in generated_view.elements.iter().zip(state.elements.iter()) {
+        assert_eq!(orig.get_uid(), seeded.get_uid(), "UIDs must match");
+
+        // Check positions for elements with coordinates
+        let orig_pos = get_element_position(orig);
+        let seeded_pos = get_element_position(seeded);
+        assert_eq!(
+            orig_pos,
+            seeded_pos,
+            "positions must match for uid={}",
+            orig.get_uid()
+        );
+    }
+
+    // Positions map must contain entries for all elements with coordinates
+    for elem in &generated_view.elements {
+        if let Some((x, y)) = get_element_position(elem) {
+            let pos = state.positions.get(&elem.get_uid());
+            assert!(
+                pos.is_some(),
+                "positions map should contain uid={}",
+                elem.get_uid()
+            );
+            let pos = pos.unwrap();
+            assert!(
+                (pos.x - x).abs() < f64::EPSILON && (pos.y - y).abs() < f64::EPSILON,
+                "position mismatch for uid={}: ({}, {}) vs ({}, {})",
+                elem.get_uid(),
+                pos.x,
+                pos.y,
+                x,
+                y
+            );
+        }
+    }
+}
+
+#[test]
+fn test_from_existing_view_teacup_round_trip() {
+    let project = load_project("test/test-models/samples/teacup/teacup.stmx");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+    let generated_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+
+    let state = LayoutState::from_existing_view(&generated_view, model);
+
+    assert_eq!(
+        state.elements.len(),
+        generated_view.elements.len(),
+        "from_existing_view should preserve all elements"
+    );
+
+    for (orig, seeded) in generated_view.elements.iter().zip(state.elements.iter()) {
+        assert_eq!(orig.get_uid(), seeded.get_uid(), "UIDs must match");
+    }
+
+    // Positions map must contain entries for all elements with coordinates
+    for elem in &generated_view.elements {
+        if let Some((x, y)) = get_element_position(elem) {
+            let pos = state.positions.get(&elem.get_uid());
+            assert!(
+                pos.is_some(),
+                "positions map should contain uid={}",
+                elem.get_uid()
+            );
+            let pos = pos.unwrap();
+            assert!(
+                (pos.x - x).abs() < f64::EPSILON && (pos.y - y).abs() < f64::EPSILON,
+                "position mismatch for uid={}",
+                elem.get_uid()
+            );
+        }
+    }
+}
+
+/// Extract (x, y) position from a view element, if it has coordinates.
+fn get_element_position(elem: &ViewElement) -> Option<(f64, f64)> {
+    match elem {
+        ViewElement::Aux(a) => Some((a.x, a.y)),
+        ViewElement::Stock(s) => Some((s.x, s.y)),
+        ViewElement::Flow(f) => Some((f.x, f.y)),
+        ViewElement::Module(m) => Some((m.x, m.y)),
+        ViewElement::Cloud(c) => Some((c.x, c.y)),
+        ViewElement::Alias(a) => Some((a.x, a.y)),
+        ViewElement::Group(g) => Some((g.x, g.y)),
+        ViewElement::Link(_) => None,
+    }
+}
+
+#[test]
+fn test_from_existing_view_flow_templates() {
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+    let generated_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+
+    let state = LayoutState::from_existing_view(&generated_view, model);
+
+    // SIR has 2 flows, so flow_templates should be non-empty
+    assert!(
+        !state.flow_templates.is_empty(),
+        "flow_templates should be non-empty for a model with flows"
+    );
+
+    // Collect flow elements from the generated view for comparison
+    let flow_elems: Vec<_> = generated_view
+        .elements
+        .iter()
+        .filter_map(|e| {
+            if let ViewElement::Flow(f) = e {
+                Some(f)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        state.flow_templates.len(),
+        flow_elems.iter().filter(|f| f.points.len() >= 2).count(),
+        "should have a template for each flow with >= 2 points"
+    );
+
+    // Verify each flow template has correct offsets relative to valve center
+    for flow_elem in &flow_elems {
+        if flow_elem.points.len() < 2 {
+            continue;
+        }
+
+        let flow_ident = canonicalize(&flow_elem.name).into_owned();
+        let template = state.flow_templates.get(&flow_ident);
+        assert!(
+            template.is_some(),
+            "flow_templates should contain entry for '{}'",
+            flow_ident
+        );
+        let template = template.unwrap();
+
+        assert_eq!(
+            template.offsets.len(),
+            flow_elem.points.len(),
+            "template offset count should match flow point count for '{}'",
+            flow_ident
+        );
+
+        // Each offset should be the flow point position minus the valve center
+        for (i, (offset, pt)) in template
+            .offsets
+            .iter()
+            .zip(flow_elem.points.iter())
+            .enumerate()
+        {
+            let expected_dx = pt.x - flow_elem.x;
+            let expected_dy = pt.y - flow_elem.y;
+            assert!(
+                (offset.x - expected_dx).abs() < f64::EPSILON,
+                "offset[{}].x for '{}': expected {}, got {}",
+                i,
+                flow_ident,
+                expected_dx,
+                offset.x
+            );
+            assert!(
+                (offset.y - expected_dy).abs() < f64::EPSILON,
+                "offset[{}].y for '{}': expected {}, got {}",
+                i,
+                flow_ident,
+                expected_dy,
+                offset.y
+            );
+        }
+    }
+}
+
 /// Verify that a systems-format model with modules produces a complete,
 /// renderable diagram with ViewElement::Module for each Variable::Module.
 #[test]
@@ -826,4 +1018,439 @@ fn test_systems_format_layout_with_modules() {
 
     // Use the shared verify_layout helper which now includes Module coverage
     verify_layout(&view, model, "systems_hiring");
+}
+
+/// Helper: extract element position by canonical ident from a StockFlow view.
+fn find_element_position(
+    view: &simlin_engine::datamodel::StockFlow,
+    canonical_ident: &str,
+) -> Option<(f64, f64)> {
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Stock(s) if normalize(&s.name) == canonical_ident => {
+                return Some((s.x, s.y));
+            }
+            ViewElement::Flow(f) if normalize(&f.name) == canonical_ident => {
+                return Some((f.x, f.y));
+            }
+            ViewElement::Aux(a) if normalize(&a.name) == canonical_ident => {
+                return Some((a.x, a.y));
+            }
+            ViewElement::Module(m) if normalize(&m.name) == canonical_ident => {
+                return Some((m.x, m.y));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Collect all variable element positions from a view as a map of
+/// canonical ident -> (x, y).
+fn collect_element_positions(
+    view: &simlin_engine::datamodel::StockFlow,
+) -> std::collections::HashMap<String, (f64, f64)> {
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    let mut positions = std::collections::HashMap::new();
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Stock(s) => {
+                positions.insert(normalize(&s.name), (s.x, s.y));
+            }
+            ViewElement::Flow(f) => {
+                positions.insert(normalize(&f.name), (f.x, f.y));
+            }
+            ViewElement::Aux(a) => {
+                positions.insert(normalize(&a.name), (a.x, a.y));
+            }
+            ViewElement::Module(m) => {
+                positions.insert(normalize(&m.name), (m.x, m.y));
+            }
+            _ => {}
+        }
+    }
+    positions
+}
+
+#[test]
+fn test_incremental_add_aux() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    // Load SIR model and generate initial layout
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let old_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("initial layout should succeed");
+    let original_positions = collect_element_positions(&old_view);
+
+    // Build patched project: add vaccination_rate aux that depends on susceptible
+    let mut patched_project = project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "vaccination_rate".to_string(),
+            equation: datamodel::Equation::Scalar("susceptible * 0.01".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        }));
+
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
+            ident: "vaccination_rate".to_string(),
+            equation: datamodel::Equation::Scalar("susceptible * 0.01".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        })],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    // AC1.2: All original element positions should be preserved
+    let new_positions = collect_element_positions(&new_view);
+    for (ident, &(orig_x, orig_y)) in &original_positions {
+        let (new_x, new_y) = new_positions
+            .get(ident)
+            .unwrap_or_else(|| panic!("original element '{}' should still exist", ident));
+        assert!(
+            (orig_x - new_x).abs() < 0.01 && (orig_y - new_y).abs() < 0.01,
+            "element '{}' moved from ({}, {}) to ({}, {})",
+            ident,
+            orig_x,
+            orig_y,
+            new_x,
+            new_y,
+        );
+    }
+
+    // AC4.1: vaccination_rate should have a view element
+    let vr_pos = find_element_position(&new_view, "vaccination_rate")
+        .expect("vaccination_rate should have a view element");
+    assert!(
+        vr_pos.0.is_finite() && vr_pos.1.is_finite(),
+        "vaccination_rate should have finite coordinates"
+    );
+
+    // AC4.1: vaccination_rate should be near susceptible (its dependency)
+    let susc_pos = new_positions
+        .get("susceptible")
+        .expect("susceptible should exist");
+    let distance = ((vr_pos.0 - susc_pos.0).powi(2) + (vr_pos.1 - susc_pos.1).powi(2)).sqrt();
+    assert!(
+        distance < 500.0,
+        "vaccination_rate should be within 500px of susceptible, got {}",
+        distance,
+    );
+
+    // Basic integrity: all UIDs should be unique
+    let mut uids = HashSet::new();
+    for elem in &new_view.elements {
+        let uid = elem.get_uid();
+        assert!(uids.insert(uid), "duplicate UID {} found", uid);
+    }
+}
+
+/// Helper: collect all Link elements as (from_uid, to_uid) pairs.
+fn collect_links(view: &simlin_engine::datamodel::StockFlow) -> HashSet<(i32, i32)> {
+    view.elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Link(l) => Some((l.from_uid, l.to_uid)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Helper: find the UID of a named view element.
+fn find_element_uid(
+    view: &simlin_engine::datamodel::StockFlow,
+    canonical_ident: &str,
+) -> Option<i32> {
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Stock(s) if normalize(&s.name) == canonical_ident => return Some(s.uid),
+            ViewElement::Flow(f) if normalize(&f.name) == canonical_ident => return Some(f.uid),
+            ViewElement::Aux(a) if normalize(&a.name) == canonical_ident => return Some(a.uid),
+            ViewElement::Module(m) if normalize(&m.name) == canonical_ident => return Some(m.uid),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn test_incremental_combined_ops() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    // SIR model variables:
+    //   stocks: susceptible, infectious, recovered
+    //   flows: succumbing, recovering
+    //   auxes: total_population, duration, contact_infectivity
+    //
+    // Dependency edges (non-structural):
+    //   total_population -> susceptible (init)
+    //   contact_infectivity -> succumbing
+    //   susceptible -> succumbing, infectious -> succumbing
+    //   total_population -> succumbing
+    //   duration -> recovering, infectious -> recovering
+    //
+    // Patch:
+    //   1. Delete contact_infectivity
+    //   2. Rename total_population -> total_pop
+    //   3. Add immunity_rate = 1/duration, change recovering = infectious * immunity_rate
+    //      This inserts immunity_rate between duration and recovering:
+    //      old: duration -> recovering
+    //      new: duration -> immunity_rate -> recovering
+
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let old_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("initial layout should succeed");
+    let original_positions = collect_element_positions(&old_view);
+
+    // Snapshot the position of total_population before rename
+    let tp_position = original_positions
+        .get("total_population")
+        .expect("total_population should exist");
+
+    // Build post-patch model manually
+    let mut patched_project = project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+
+    // Delete contact_infectivity
+    model
+        .variables
+        .retain(|v| canonicalize(v.get_ident()).as_ref() != "contact_infectivity");
+
+    // Rename total_population -> total_pop
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "total_population"
+            && let datamodel::Variable::Aux(a) = var
+        {
+            a.ident = "total_pop".to_string();
+        }
+    }
+
+    // Update succumbing equation to remove contact_infectivity reference
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "succumbing"
+            && let datamodel::Variable::Flow(f) = var
+        {
+            f.equation =
+                datamodel::Equation::Scalar("susceptible*infectious/total_pop".to_string());
+        }
+    }
+
+    // Update susceptible init to reference total_pop
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "susceptible"
+            && let datamodel::Variable::Stock(s) = var
+        {
+            s.equation = datamodel::Equation::Scalar("total_pop".to_string());
+        }
+    }
+
+    // Change recovering equation to use immunity_rate instead of duration
+    for var in &mut model.variables {
+        if canonicalize(var.get_ident()).as_ref() == "recovering"
+            && let datamodel::Variable::Flow(f) = var
+        {
+            f.equation = datamodel::Equation::Scalar("infectious * immunity_rate".to_string());
+        }
+    }
+
+    // Add immunity_rate aux
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "immunity_rate".to_string(),
+            equation: datamodel::Equation::Scalar("1 / duration".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        }));
+
+    // Build the patch
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![
+            ModelOperation::DeleteVariable {
+                ident: "contact_infectivity".to_string(),
+            },
+            ModelOperation::RenameVariable {
+                from: "total_population".to_string(),
+                to: "total_pop".to_string(),
+            },
+            ModelOperation::UpsertAux(datamodel::Aux {
+                ident: "immunity_rate".to_string(),
+                equation: datamodel::Equation::Scalar("1 / duration".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Default::default(),
+            }),
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
+        .expect("incremental layout with combined ops should succeed");
+    let new_positions = collect_element_positions(&new_view);
+
+    // Deleted variable should have no view element
+    assert!(
+        find_element_position(&new_view, "contact_infectivity").is_none(),
+        "contact_infectivity should not have a view element after deletion"
+    );
+
+    // Renamed variable should exist with new name and same position
+    let tp_new_pos = find_element_position(&new_view, "total_pop")
+        .expect("total_pop should have a view element after rename");
+    assert!(
+        (tp_position.0 - tp_new_pos.0).abs() < 0.01 && (tp_position.1 - tp_new_pos.1).abs() < 0.01,
+        "total_pop should have the same position as total_population: ({}, {}) vs ({}, {})",
+        tp_position.0,
+        tp_position.1,
+        tp_new_pos.0,
+        tp_new_pos.1,
+    );
+
+    // New variable should have a view element
+    let ir_pos = find_element_position(&new_view, "immunity_rate")
+        .expect("immunity_rate should have a view element");
+    assert!(
+        ir_pos.0.is_finite() && ir_pos.1.is_finite(),
+        "immunity_rate should have finite coordinates"
+    );
+
+    // All other original elements (excluding deleted/renamed) should preserve position
+    for (ident, &(orig_x, orig_y)) in &original_positions {
+        if ident == "contact_infectivity" || ident == "total_population" {
+            continue;
+        }
+        let (new_x, new_y) = new_positions
+            .get(ident)
+            .unwrap_or_else(|| panic!("element '{}' should still exist", ident));
+        assert!(
+            (orig_x - new_x).abs() < 0.01 && (orig_y - new_y).abs() < 0.01,
+            "element '{}' moved from ({}, {}) to ({}, {})",
+            ident,
+            orig_x,
+            orig_y,
+            new_x,
+            new_y,
+        );
+    }
+
+    // AC5.5: Verify connector updates for the intermediate auxiliary.
+    // In the original model: duration -> recovering (direct link)
+    // In the patched model: duration -> immunity_rate -> recovering
+    let duration_uid = find_element_uid(&new_view, "duration").expect("duration should have a UID");
+    let recovering_uid =
+        find_element_uid(&new_view, "recovering").expect("recovering should have a UID");
+    let immunity_rate_uid =
+        find_element_uid(&new_view, "immunity_rate").expect("immunity_rate should have a UID");
+
+    let links = collect_links(&new_view);
+
+    // Old direct link should be gone
+    assert!(
+        !links.contains(&(duration_uid, recovering_uid)),
+        "direct link duration -> recovering should be removed"
+    );
+
+    // New links through the intermediate should exist
+    assert!(
+        links.contains(&(duration_uid, immunity_rate_uid)),
+        "link duration -> immunity_rate should exist"
+    );
+    assert!(
+        links.contains(&(immunity_rate_uid, recovering_uid)),
+        "link immunity_rate -> recovering should exist"
+    );
+
+    // No dangling link references: every link's from_uid and to_uid
+    // should reference an element that exists in the view.
+    let all_uids: HashSet<i32> = new_view.elements.iter().map(|e| e.get_uid()).collect();
+    for elem in &new_view.elements {
+        if let ViewElement::Link(l) = elem {
+            assert!(
+                all_uids.contains(&l.from_uid),
+                "link from_uid {} references non-existent element",
+                l.from_uid,
+            );
+            assert!(
+                all_uids.contains(&l.to_uid),
+                "link to_uid {} references non-existent element",
+                l.to_uid,
+            );
+        }
+    }
+
+    // All UIDs should be unique
+    let mut uid_set = HashSet::new();
+    for elem in &new_view.elements {
+        let uid = elem.get_uid();
+        assert!(uid_set.insert(uid), "duplicate UID {} found", uid);
+    }
+}
+
+#[test]
+fn test_incremental_fallback_to_full_layout() {
+    use simlin_engine::ModelPatch;
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let model = project.get_model(MAIN_MODEL).expect("model should exist");
+
+    let empty_view = datamodel::StockFlow {
+        name: None,
+        elements: Vec::new(),
+        view_box: datamodel::Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    };
+
+    let empty_patch = ModelPatch {
+        name: String::new(),
+        ops: Vec::new(),
+    };
+
+    let incremental_result =
+        incremental_layout(&empty_view, &project, MAIN_MODEL, &empty_patch, None)
+            .expect("incremental layout with empty view should succeed");
+
+    let full_result = generate_best_layout(&project, MAIN_MODEL, None)
+        .expect("generate_best_layout should succeed");
+
+    // Both should produce views covering all model variables
+    verify_layout(&incremental_result, model, "incremental fallback");
+    verify_layout(&full_result, model, "full layout");
+
+    assert_eq!(
+        incremental_result.elements.len(),
+        full_result.elements.len(),
+        "fallback should produce the same number of elements as full layout"
+    );
 }

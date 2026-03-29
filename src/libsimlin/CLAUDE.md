@@ -55,7 +55,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 ### Layout
 
 - **`src/layout.rs`** - Automatic diagram layout:
-  - `simlin_project_diagram_sync()` - Generate best layout for a model, replacing its views in-place. Preserves existing zoom. Works on all targets including WASM. Requires the project to be synced to the salsa db first (returns an error otherwise).
+  - `simlin_project_diagram_sync(project, model_name, patch_json, out_error)` - Generate layout for a model, replacing its views in-place. When `patch_json` is non-null and the model already has a non-empty view, uses incremental layout (preserving existing element positions); otherwise generates a full layout from scratch. Preserves existing zoom. Works on all targets including WASM. Requires the project to be synced to the salsa db first (returns an error otherwise).
 
 ### Patching
 
