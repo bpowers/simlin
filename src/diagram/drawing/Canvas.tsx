@@ -39,7 +39,7 @@ import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { isCloudOnSourceSide, isCloudOnSinkSide } from './cloud-utils';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
-import { Connector, ConnectorProps, getVisualCenter } from './Connector';
+import { Connector, ConnectorProps, computeLinkCreationArc, getVisualCenter } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
@@ -535,6 +535,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     let to = this.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
     const toUid = to.uid;
     let isSticky = false;
+    const isCreatingLink = isMovingArrow && isSelected && this.state.inCreation?.type === 'link';
     if (isMovingArrow && isSelected && this.selectionCenterOffset) {
       const validTarget = this.cachedElements.find((e: ViewElement) => {
         if (e.type !== 'aux' && e.type !== 'flow') {
@@ -556,11 +557,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           y: off.y - delta.y - canvasOffset.y,
           isZeroRadius: true,
         };
+        if (isCreatingLink) {
+          element = { ...element, arc: undefined };
+        }
       }
     }
     // When dragging a link arrow (isMovingArrow), adjust arc based on the dynamic to position.
-    // For other movement cases, the arc is already adjusted by applyGroupMovement.
-    if (isMovingArrow) {
+    // During creation, the arc comes from arcPoint via Connector rendering instead.
+    if (isMovingArrow && !isCreatingLink) {
       const oldTo = getOrThrow(this.elements, toUid);
       const oldFrom = getOrThrow(this.elements, from.uid);
       const oldToVisual = getVisualCenter(oldTo);
@@ -582,7 +586,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isDashed: to.type === 'stock',
       onSelection: this.handleEditConnector,
     };
-    if (isSelected && !isSticky) {
+    if (isSelected && (isCreatingLink ? isSticky : !isSticky)) {
       props.arcPoint = this.getArcPoint();
     }
     // this.elementBounds = this.elementBounds.push(Connector.bounds(props));
@@ -952,7 +956,15 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             return isValid || false;
           });
           if (element.type === 'link' && validTarget) {
-            this.props.onAttachLink(element, defined(validTarget.ident));
+            let linkToAttach = element;
+            if (this.state.inCreation) {
+              const creationArcPoint = this.getArcPoint();
+              const linkFrom = this.getElementByUid(element.fromUid);
+              if (creationArcPoint) {
+                linkToAttach = { ...linkToAttach, arc: computeLinkCreationArc(linkFrom, validTarget, creationArcPoint) };
+              }
+            }
+            this.props.onAttachLink(linkToAttach, defined(validTarget.ident));
           } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
             if (this.state.moveDelta.x === 0 && this.state.moveDelta.y === 0 && this.state.inCreation) {

@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { updateArcAngle, radToDeg } from '../arc-utils';
+import { updateArcAngle, radToDeg, degToRad } from '../arc-utils';
 
 describe('arc-utils', () => {
   describe('updateArcAngle', () => {
@@ -71,6 +71,27 @@ describe('arc-utils', () => {
 
     it('should handle small radian values', () => {
       expect(radToDeg(0.01)).toBeCloseTo(0.5729577951308232);
+    });
+  });
+
+  describe('degToRad', () => {
+    it('should convert common degree values to radians', () => {
+      expect(degToRad(0)).toBe(0);
+      expect(degToRad(180)).toBeCloseTo(Math.PI);
+      expect(degToRad(90)).toBeCloseTo(Math.PI / 2);
+      expect(degToRad(45)).toBeCloseTo(Math.PI / 4);
+      expect(degToRad(360)).toBeCloseTo(2 * Math.PI);
+    });
+
+    it('should handle negative degree values', () => {
+      expect(degToRad(-180)).toBeCloseTo(-Math.PI);
+      expect(degToRad(-90)).toBeCloseTo(-Math.PI / 2);
+    });
+
+    it('should be inverse of radToDeg', () => {
+      for (const deg of [0, 30, 45, 90, 135, 180, 270, 360]) {
+        expect(radToDeg(degToRad(deg))).toBeCloseTo(deg);
+      }
     });
   });
 });

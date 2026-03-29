@@ -14,6 +14,7 @@ import {
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
 import { ArrowheadRadius, AuxRadius, StockWidth, StockHeight, ModuleWidth, ModuleHeight, StraightLineMax } from './default';
+import { degToRad, radToDeg } from '../arc-utils';
 import styles from './Connector.module.css';
 
 export const ArrayedOffset = 3;
@@ -46,13 +47,6 @@ const tan = Math.tan;
 const PI = Math.PI;
 const sqrt = Math.sqrt;
 
-const degToRad = (d: number): number => {
-  return (d / 180) * PI;
-};
-
-const radToDeg = (r: number): number => {
-  return (r * 180) / PI;
-};
 
 export function rayRectIntersection(cx: number, cy: number, hw: number, hh: number, θ: number): Point {
   const cosT = cos(θ);
@@ -120,16 +114,13 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
   const toVisual = getVisualCenter(to);
 
   if (arcPoint && !(toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y)) {
-    // special case moving
-    // if (toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y) {
-    //   if (element.angle) {
-    //     return degToRad(xmileToCanvasAngle(element.angle));
-    //   } else {
-    //     // its a straight line
-    //     return atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-    //   }
-    // }
-    const circ = circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
+    let circ;
+    try {
+      circ = circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
+    } catch {
+      // collinear points (cursor on the from-to line) — treat as straight
+      return atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+    }
     const fromθ = Math.atan2(fromVisual.cy - circ.y, fromVisual.cx - circ.x);
     const toθ = atan2(toVisual.cy - circ.y, toVisual.cx - circ.x);
     let spanθ = toθ - fromθ;
@@ -162,6 +153,31 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
     console.log(`connector from ${element.fromUid || ''} doesn't have x, y, or angle`);
     return NaN;
   }
+}
+
+/**
+ * Computes the arc angle for a link being created, based on where the cursor
+ * is relative to the source and target elements.  Returns undefined (straight
+ * line) when the cursor is collinear or within StraightLineMax of the direct
+ * source-to-target line.
+ */
+export function computeLinkCreationArc(
+  from: ViewElement,
+  to: ViewElement,
+  arcPoint: Point,
+): number | undefined {
+  const fromVisual = getVisualCenter(from);
+  const toVisual = getVisualCenter(to);
+  const midθ = atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
+
+  // element.arc is irrelevant here — arcPoint takes precedence in takeoffθ
+  const dummyLink = { arc: 0, fromUid: 0, toUid: 0 } as LinkViewElement;
+  const takeoff = takeoffθ({ element: dummyLink, from, to, arcPoint });
+
+  if (isNaN(takeoff) || Math.abs(midθ - takeoff) < degToRad(StraightLineMax)) {
+    return undefined;
+  }
+  return radToDeg(takeoff);
 }
 
 export function intersectElementArc(element: ViewElement, circ: Circle, inv: boolean): Point {
@@ -348,7 +364,11 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     const toVisual = getVisualCenter(to);
 
     if (arcPoint && !(toVisual.cx === arcPoint.x && toVisual.cy === arcPoint.y)) {
-      return circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
+      try {
+        return circleFromPoints({ x: fromVisual.cx, y: fromVisual.cy }, { x: toVisual.cx, y: toVisual.cy }, arcPoint);
+      } catch {
+        return undefined;
+      }
     }
 
     // Find cx, cy from 'takeoff angle', and center of

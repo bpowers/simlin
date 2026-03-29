@@ -26,3 +26,10 @@ export function updateArcAngle(arc: number | undefined, angleDiff: number): numb
 export function radToDeg(radians: number): number {
   return (radians * 180) / Math.PI;
 }
+
+/**
+ * Converts degrees to radians.
+ */
+export function degToRad(degrees: number): number {
+  return (degrees / 180) * Math.PI;
+}

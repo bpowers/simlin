@@ -1081,21 +1081,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     let nextUid = view.nextUid;
     if (link.uid === inCreationUid) {
-      const from = getUid(link.fromUid);
       const to = getName(newTarget);
-
-      const fromVisual = getVisualCenter(from);
-      const toVisual = getVisualCenter(to);
-      const oldTheta = Math.atan2(0 - fromVisual.cy, 0 - fromVisual.cx);
-      const newTheta = Math.atan2(toVisual.cy - fromVisual.cy, toVisual.cx - fromVisual.cx);
-      const diffTheta = oldTheta - newTheta;
-      const angle = updateArcAngle(link.arc, radToDeg(diffTheta));
-
       const newLink: LinkViewElement = {
         ...link,
         uid: nextUid++,
         toUid: to.uid,
-        arc: angle,
       };
       elements = [...elements, newLink];
       selection = new Set([newLink.uid]);

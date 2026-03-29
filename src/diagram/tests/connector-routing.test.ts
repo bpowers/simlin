@@ -20,8 +20,10 @@ import {
   rayRectIntersection,
   circleRectIntersections,
   ArrayedOffset,
+  takeoffθ,
+  computeLinkCreationArc,
 } from '../drawing/Connector';
-import { AuxRadius, StockWidth, StockHeight } from '../drawing/default';
+import { AuxRadius, StockWidth, StockHeight, StraightLineMax } from '../drawing/default';
 import { square, Circle, Point } from '../drawing/common';
 
 function makeAux(uid: number, x: number, y: number, isArrayed: boolean = false): AuxViewElement {
@@ -614,6 +616,145 @@ describe('Connector routing', () => {
       const endInv = intersectElementArc(stock, circ, true);
       const dist = Math.sqrt(square(endNoInv.x - endInv.x) + square(endNoInv.y - endInv.y));
       expect(dist).toBeGreaterThan(1);
+    });
+  });
+
+  describe('takeoffθ collinear handling', () => {
+    it('should not throw for collinear points', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const link = makeLink(3, 1, 2);
+      // arcPoint directly on the line between from and to
+      const arcPoint = { x: 200, y: 100 };
+
+      expect(() =>
+        takeoffθ({ element: link, from, to, arcPoint }),
+      ).not.toThrow();
+    });
+
+    it('should return straight-line angle for collinear points', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const link = makeLink(3, 1, 2);
+      // arcPoint on the line between from and to
+      const arcPoint = { x: 200, y: 100 };
+
+      const result = takeoffθ({ element: link, from, to, arcPoint });
+      const straightAngle = Math.atan2(100 - 100, 300 - 100); // 0
+      expect(result).toBeCloseTo(straightAngle);
+    });
+
+    it('should return straight-line angle for diagonal collinear points', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 300);
+      const link = makeLink(3, 1, 2);
+      // arcPoint on the diagonal line
+      const arcPoint = { x: 200, y: 200 };
+
+      const result = takeoffθ({ element: link, from, to, arcPoint });
+      const straightAngle = Math.atan2(300 - 100, 300 - 100); // PI/4
+      expect(result).toBeCloseTo(straightAngle);
+    });
+
+    it('should return curved angle when arcPoint is offset from line', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const link = makeLink(3, 1, 2);
+      // arcPoint significantly above the line
+      const arcPoint = { x: 200, y: 50 };
+
+      const result = takeoffθ({ element: link, from, to, arcPoint });
+      const straightAngle = Math.atan2(100 - 100, 300 - 100); // 0
+      expect(Math.abs(result - straightAngle)).toBeGreaterThan(0.1);
+    });
+  });
+
+  describe('isStraightLine', () => {
+    it('should return true when arc is undefined and no arcPoint', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const link: LinkViewElement = { ...makeLink(3, 1, 2), arc: undefined };
+      const props = {
+        isSelected: false,
+        from,
+        element: link,
+        to,
+        onSelection: () => {},
+      };
+      expect(Connector.isStraightLine(props)).toBe(true);
+    });
+
+    it('should return true when arcPoint is collinear with from and to', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const link: LinkViewElement = { ...makeLink(3, 1, 2), arc: 0 };
+      const props = {
+        isSelected: false,
+        from,
+        element: link,
+        to,
+        onSelection: () => {},
+        arcPoint: { x: 200, y: 100 },
+      };
+      expect(Connector.isStraightLine(props)).toBe(true);
+    });
+
+    it('should return false when arcPoint is far from the line', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const link: LinkViewElement = { ...makeLink(3, 1, 2), arc: 0 };
+      const props = {
+        isSelected: false,
+        from,
+        element: link,
+        to,
+        onSelection: () => {},
+        arcPoint: { x: 200, y: 0 },
+      };
+      expect(Connector.isStraightLine(props)).toBe(false);
+    });
+  });
+
+  describe('computeLinkCreationArc', () => {
+    it('should return undefined for collinear cursor position', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      // cursor directly on the line
+      const arcPoint = { x: 200, y: 100 };
+
+      expect(computeLinkCreationArc(from, to, arcPoint)).toBeUndefined();
+    });
+
+    it('should return undefined when cursor is nearly straight', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      // cursor very slightly off line (within StraightLineMax threshold)
+      const arcPoint = { x: 200, y: 99 };
+
+      expect(computeLinkCreationArc(from, to, arcPoint)).toBeUndefined();
+    });
+
+    it('should return non-zero arc when cursor is significantly offset', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      // cursor far above the line
+      const arcPoint = { x: 200, y: 0 };
+
+      const arc = computeLinkCreationArc(from, to, arcPoint);
+      expect(arc).toBeDefined();
+      expect(arc).not.toBe(0);
+    });
+
+    it('should return different arcs for cursor below vs above', () => {
+      const from = makeAux(1, 100, 100);
+      const to = makeAux(2, 300, 100);
+      const above = computeLinkCreationArc(from, to, { x: 200, y: 0 });
+      const below = computeLinkCreationArc(from, to, { x: 200, y: 200 });
+
+      expect(above).toBeDefined();
+      expect(below).toBeDefined();
+      // Arcs should have different takeoff angles
+      expect(above).not.toBeCloseTo(below!);
     });
   });
 });
