@@ -187,13 +187,28 @@ pub fn tool() -> TypedTool<EditModelInput> {
              with loop dominance analysis after applying changes. \
              Upsert replaces the full variable definition; omitted optional fields \
              default to empty. Use ReadModel first to get current state, then \
-             include all fields you want to preserve.",
+             include all fields you want to preserve. \
+             Note: Vensim .mdl files are read-only -- use ReadModel to inspect them, \
+             then CreateModel to start a new .simlin.json file you can edit.",
         handler: handle_edit_model,
     }
 }
 
 fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value> {
     let path = std::path::Path::new(&input.project_path);
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "mdl" {
+        anyhow::bail!(
+            "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
+             then CreateModel to start a new .simlin.json file you can edit."
+        );
+    }
+
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
@@ -1184,6 +1199,51 @@ mod tests {
         assert!(
             (pop_x - 300.0).abs() < 1.0 && (pop_y - 200.0).abs() < 1.0,
             "population position should be preserved at (300,200), got ({pop_x},{pop_y})"
+        );
+    }
+
+    // ---- .mdl files are read-only ----
+
+    #[test]
+    fn mdl_files_are_rejected() {
+        let mdl_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
+        );
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": mdl_path,
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_var", "equation": "1" }
+            }]
+        }));
+
+        assert!(result.is_err(), "EditModel must reject .mdl files");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(".mdl"),
+            "error message should mention .mdl format: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn mdl_files_rejected_even_for_dry_run() {
+        let mdl_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
+        );
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": mdl_path,
+            "dryRun": true,
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_var", "equation": "1" }
+            }]
+        }));
+
+        assert!(
+            result.is_err(),
+            "EditModel must reject .mdl files even on dry-run"
         );
     }
 
