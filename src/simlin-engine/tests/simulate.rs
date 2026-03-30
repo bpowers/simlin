@@ -320,8 +320,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
 }
 
 /// Interpreter-only simulation test - runs the interpreter and compares
-/// results against expected output, but skips the VM (for models that use
-/// array builtins like SUM which aren't yet supported in bytecode).
+/// results against expected output, but skips the VM.
 #[allow(dead_code)]
 fn simulate_path_interpreter_only(xmile_path: &str) {
     eprintln!("model (interpreter-only): {xmile_path}");
@@ -407,8 +406,7 @@ fn simulate_mdl_path(mdl_path: &str) {
     }
 }
 
-/// Interpreter-only simulation test for MDL files (for models that use
-/// array builtins like SUM which aren't yet supported in bytecode).
+/// Interpreter-only simulation test for MDL files.
 #[allow(dead_code)]
 fn simulate_mdl_path_interpreter_only(mdl_path: &str) {
     eprintln!("model (vensim mdl, interpreter-only): {mdl_path}");
@@ -739,7 +737,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // --- XMILE-path limitations (xmutil conversion issues) ---
     //
-    // Tested via simulates_allocate_xmile (interpreter-only; VM lacks ALLOCATE AVAILABLE)
+    // Tested via simulates_allocate_xmile
     // "test/sdeverywhere/models/allocate/allocate.xmile",
     //
     // xmutil converts DELAY FIXED into delay1 approximation which produces NaN.
