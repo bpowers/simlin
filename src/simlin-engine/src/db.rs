@@ -5591,7 +5591,7 @@ fn enumerate_module_instances_inner(
 
     // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
     // feedback loop instrumentation). These are only present when LTM is
-    // enabled and exist only in the root model.
+    // enabled. Models without feedback loops produce empty lists.
     if project.ltm_enabled(db) {
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);

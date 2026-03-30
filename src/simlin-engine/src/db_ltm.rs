@@ -20,9 +20,9 @@ use super::{
     Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, SourceModel, SourceProject,
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
-    model_implicit_var_info, model_ltm_all_link_synthetic_variables, model_ltm_synthetic_variables,
-    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
-    project_datamodel_dims, project_units_context, variable_dimensions, variable_size,
+    model_implicit_var_info, model_module_ident_context, model_module_map,
+    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
+    variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -613,11 +613,7 @@ pub(super) fn compile_ltm_equation_fragment(
                         .unwrap_or(1);
 
                     // Parse the parent LTM equation to get implicit var references
-                    let parent_ltm_vars = if project.ltm_discovery_mode(db) {
-                        model_ltm_all_link_synthetic_variables(db, model, project)
-                    } else {
-                        model_ltm_synthetic_variables(db, model, project)
-                    };
+                    let parent_ltm_vars = model_ltm_variables(db, model, project);
                     let parent_ltm = parent_ltm_vars
                         .vars
                         .iter()
