@@ -486,19 +486,20 @@ fn hero_culture_loop_sign_continuity() {
     let json_project = json::Project::from_reader(reader).unwrap();
     let datamodel_project: simlin_engine::datamodel::Project = json_project.into();
 
-    let project = Project::from(datamodel_project);
-    let ltm_project = project.with_ltm().unwrap();
+    // VM path for simulation
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
 
+    // Project::from for structural loop detection only
+    let project = Project::from(datamodel_project);
     let main_ident: Ident<Canonical> = Ident::new("main");
-    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
+    let loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
     assert!(
         !loops.is_empty(),
         "expected feedback loops from LTM analysis"
     );
-
-    let ltm_project = Rc::new(ltm_project);
-    let sim = Simulation::new(&ltm_project, "main").unwrap();
-    let results = sim.run_to_end().unwrap();
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -819,20 +820,19 @@ fn test_independent_subsystems_partitioned_relative_scores() {
     //
     // Each loop's relative score should be +/-1.0 for all non-zero timesteps,
     // because each loop is the ONLY loop in its partition.
-    let project = TestProject::new("indep_subsystems")
+    let datamodel_project = TestProject::new("indep_subsystems")
         .with_sim_time(0.0, 10.0, 0.25)
         .stock("stock_a", "50", &["flow_a"], &[], None)
         .aux("gap_a", "100 - stock_a", None)
         .flow("flow_a", "gap_a / 5", None)
         .stock("stock_b", "10", &["flow_b"], &[], None)
         .flow("flow_b", "stock_b * 0.1", None)
-        .compile()
-        .expect("should compile");
+        .build_datamodel();
 
-    let ltm_project = project.with_ltm().expect("LTM augmentation should succeed");
-    let ltm_rc = Arc::new(ltm_project);
-    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
-    let results = sim.run_to_end().expect("should simulate");
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
 
     // Find relative loop score variables
     let rel_vars: Vec<_> = results
@@ -882,7 +882,7 @@ fn test_independent_subsystems_partitioned_relative_scores() {
 #[test]
 fn test_coupled_two_stock_single_partition() {
     // Predator-prey: both stocks mutually reachable through flows
-    let project = TestProject::new("coupled_pred_prey")
+    let datamodel_project = TestProject::new("coupled_pred_prey")
         .with_sim_time(0.0, 20.0, 0.25)
         .stock("prey", "100", &["prey_births"], &["prey_deaths"], None)
         .flow("prey_births", "prey * 0.1", None)
@@ -890,9 +890,10 @@ fn test_coupled_two_stock_single_partition() {
         .stock("predators", "10", &["pred_births"], &["pred_deaths"], None)
         .flow("pred_births", "predators * prey * 0.001", None)
         .flow("pred_deaths", "predators * 0.05", None)
-        .compile()
-        .expect("should compile");
+        .build_datamodel();
 
+    // Structural partition analysis via Project::from
+    let project = Project::from(datamodel_project.clone());
     let main_ident: Ident<Canonical> = Ident::new("main");
     let graph = ltm::CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
     let partitions = graph.compute_cycle_partitions();
@@ -906,11 +907,11 @@ fn test_coupled_two_stock_single_partition() {
     );
     assert_eq!(partitions.partitions[0].len(), 2);
 
-    // Verify simulation runs with LTM
-    let ltm_project = project.with_ltm().expect("LTM should succeed");
-    let ltm_rc = Arc::new(ltm_project);
-    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
-    let results = sim.run_to_end().expect("should simulate");
+    // VM path for LTM simulation
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
 
     // Verify relative loop scores exist
     let rel_vars: Vec<_> = results
@@ -958,16 +959,19 @@ fn test_discovery_independent_subsystems() {
 
 #[test]
 fn test_arms_race_single_partition() {
+    use simlin_engine::db::{SimlinDb, model_cycle_partitions, sync_from_datamodel_incremental};
     use std::fs::File;
     use std::io::BufReader;
 
     let f = File::open("../../test/arms_race_3party/arms_race.stmx").unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-    let project = Project::from(datamodel_project);
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let graph = ltm::CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
-    let partitions = graph.compute_cycle_partitions();
+
+    // Use salsa-based cycle partition analysis
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let source_model = sync.models["main"].source_model;
+    let partitions = model_cycle_partitions(&db, source_model, sync.project);
 
     // All 3 stocks should be in a single partition (mutually reachable)
     assert_eq!(
