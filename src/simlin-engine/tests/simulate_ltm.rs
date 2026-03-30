@@ -258,23 +258,23 @@ fn simulates_population_ltm() {
 // --- Discovery mode integration tests ---
 
 /// Run discovery mode on a model file and return discovered loops.
+/// Simulation uses the VM path (compile_ltm_discovery_incremental);
+/// Project::from is retained only for causal graph structural analysis.
 fn discover_loops_from_path(model_path: &str) -> Vec<ltm_finding::FoundLoop> {
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
 
+    // VM discovery path for simulation
+    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Project::from for causal graph structural analysis only
     let project = Project::from(datamodel_project);
-    let discovery_project = project
-        .with_ltm_all_links()
-        .expect("with_ltm_all_links should succeed");
 
-    let discovery_project_rc = Rc::new(discovery_project);
-
-    let sim = Simulation::new(&discovery_project_rc, "main").unwrap();
-    let results = sim.run_to_end().unwrap();
-
-    ltm_finding::discover_loops(&results, &discovery_project_rc)
-        .expect("discover_loops should succeed")
+    ltm_finding::discover_loops(&results, &project).expect("discover_loops should succeed")
 }
 
 #[test]
