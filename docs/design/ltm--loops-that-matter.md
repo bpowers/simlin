@@ -281,7 +281,7 @@ stock's contribution.
 
 ### Module Links
 
-The `link_score_equation_text` tracked function in `db_ltm.rs` handles three
+The `link_score_equation_text` tracked function in `db.rs` handles three
 module link cases:
 
 - **Variable-to-module-input** (`!from_is_module && to_is_module`): Uses composite
@@ -503,9 +503,8 @@ After all timesteps are processed:
 ### Array Variables
 
 The LTM compilation path skips models containing array (subscripted) variables.
-Extending LTM to
-arrays would require element-wise link score computation and a strategy for
-reporting aggregate scores.
+Extending LTM to arrays would require element-wise link score computation and a
+strategy for reporting aggregate scores.
 
 ### Euler Integration Only
 
