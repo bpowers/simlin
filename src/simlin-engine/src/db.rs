@@ -4971,26 +4971,17 @@ pub fn assemble_module(
     // variables because PREVIOUS reads from the previous timestep's
     // committed values. They can be appended to the end of the flows
     // runlist.
-    //
-    // LTM variables only exist in the root model -- stdlib sub-models
-    // never have LTM instrumentation.
     let mut ltm_flow_names: Vec<String> = Vec::new();
-    if is_root && project.ltm_enabled(db) {
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, model, project)
-        } else {
-            model_ltm_synthetic_variables(db, model, project)
-        };
+    if project.ltm_enabled(db) {
+        let ltm_vars = model_ltm_variables(db, model, project);
 
         for ltm_var in &ltm_vars.vars {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
             // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId)
-            let fragment_result = if ltm_var.name.contains("\u{205A}link_score\u{205A}")
-                || ltm_var.name.contains("\u{205A}ilink\u{205A}")
-            {
+            let fragment_result = if ltm_var.name.contains("\u{205A}link_score\u{205A}") {
                 // Extract from/to from the link score name
-                // Format: $:ltm:link_score:from->to or $:ltm:ilink:from->to
+                // Format: $:ltm:link_score:from->to
                 let arrow_pos = ltm_var.name.find('\u{2192}');
                 if let Some(arrow) = arrow_pos {
                     // Find the last separator before the arrow to locate the
@@ -5124,7 +5115,7 @@ pub fn assemble_module(
     // Append LTM implicit var fragments to the relevant runlists.
     // Some implicit vars participate in initials and/or stocks even
     // though they are not part of the original model.
-    if is_root && project.ltm_enabled(db) {
+    if project.ltm_enabled(db) {
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
         let mut ltm_im_names: Vec<&String> = ltm_implicit.keys().collect();
         ltm_im_names.sort_unstable();
