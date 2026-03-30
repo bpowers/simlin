@@ -3479,38 +3479,45 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[main_model, smooth_model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[main_model, smooth_model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
-        // Should find a loop that passes through the module
         assert!(
-            !model_loops.is_empty(),
+            !detected.loops.is_empty(),
             "Should detect at least one loop through the module"
         );
 
-        // The loop should include both the parent stock and the module-internal stock
-        let has_inventory = model_loops
+        // The salsa path treats modules as black-box nodes in the parent
+        // graph, so the loop includes the module node and the parent stock
+        // but not the module-internal stock name.
+        let has_inventory = detected
+            .loops
             .iter()
-            .any(|l| l.stocks.iter().any(|s| s.as_str() == "inventory"));
+            .any(|l| l.variables.contains(&"inventory".to_string()));
         assert!(
             has_inventory,
-            "Should find a loop containing the parent stock 'inventory'"
+            "Should find a loop containing the parent stock 'inventory'. Found: {:?}",
+            detected
+                .loops
+                .iter()
+                .map(|l| &l.variables)
+                .collect::<Vec<_>>()
         );
 
-        let has_internal_stock = model_loops.iter().any(|l| {
-            l.stocks
-                .iter()
-                .any(|s| s.as_str() == "smooth_inventory_gap\u{00B7}smoothed")
-        });
+        let has_module_node = detected
+            .loops
+            .iter()
+            .any(|l| l.variables.contains(&"smooth_inventory_gap".to_string()));
         assert!(
-            has_internal_stock,
-            "Loop through module should include module-internal stock \
-             'smooth_inventory_gap\u{00B7}smoothed'. Found stocks: {:?}",
-            model_loops
+            has_module_node,
+            "Loop should include the module node 'smooth_inventory_gap'. Found: {:?}",
+            detected
+                .loops
                 .iter()
-                .flat_map(|l| l.stocks.iter().map(|s| s.as_str()))
+                .map(|l| &l.variables)
                 .collect::<Vec<_>>()
         );
     }
@@ -3554,34 +3561,36 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[main_model, module_a_model, module_b_model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[main_model, module_a_model, module_b_model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
-        // The loop should be found (Johnson's finds it through module nodes)
         assert!(
-            !model_loops.is_empty(),
+            !detected.loops.is_empty(),
             "Should detect a loop through two modules with intermediate variables"
         );
 
-        // Collect all stocks from all found loops
-        let all_stocks: HashSet<&str> = model_loops
+        // The salsa path treats modules as black-box nodes: loop variables
+        // include the module names and the parent stock, not sub-model internals.
+        let all_vars: HashSet<&str> = detected
+            .loops
             .iter()
-            .flat_map(|l| l.stocks.iter().map(|s| s.as_str()))
+            .flat_map(|l| l.variables.iter().map(|s| s.as_str()))
             .collect();
 
         assert!(
-            all_stocks.contains("tank"),
-            "Should include parent stock 'tank'. Found: {all_stocks:?}"
+            all_vars.contains("tank"),
+            "Should include parent stock 'tank'. Found: {all_vars:?}"
         );
         assert!(
-            all_stocks.contains("module_a\u{00B7}buffer_a"),
-            "Should include module_a internal stock. Found: {all_stocks:?}"
+            all_vars.contains("module_a"),
+            "Should include module_a node. Found: {all_vars:?}"
         );
         assert!(
-            all_stocks.contains("module_b\u{00B7}buffer_b"),
-            "Should include module_b internal stock. Found: {all_stocks:?}"
+            all_vars.contains("module_b"),
+            "Should include module_b node. Found: {all_vars:?}"
         );
     }
 
@@ -3617,7 +3626,7 @@ mod tests {
         };
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(
+        let datamodel_project = x_project(
             sim_specs,
             &[
                 main_model,
@@ -3626,35 +3635,39 @@ mod tests {
                 make_module("module_c", "buf_c"),
             ],
         );
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
         assert!(
-            !model_loops.is_empty(),
+            !detected.loops.is_empty(),
             "Should detect a loop through three modules"
         );
 
-        let all_stocks: HashSet<&str> = model_loops
+        // The salsa path treats modules as black-box nodes: loop variables
+        // include the module names and the parent stock.
+        let all_vars: HashSet<&str> = detected
+            .loops
             .iter()
-            .flat_map(|l| l.stocks.iter().map(|s| s.as_str()))
+            .flat_map(|l| l.variables.iter().map(|s| s.as_str()))
             .collect();
 
         assert!(
-            all_stocks.contains("level"),
-            "Should include parent stock. Found: {all_stocks:?}"
+            all_vars.contains("level"),
+            "Should include parent stock. Found: {all_vars:?}"
         );
         assert!(
-            all_stocks.contains("module_a\u{00B7}buf_a"),
-            "Should include module_a stock. Found: {all_stocks:?}"
+            all_vars.contains("module_a"),
+            "Should include module_a node. Found: {all_vars:?}"
         );
         assert!(
-            all_stocks.contains("module_b\u{00B7}buf_b"),
-            "Should include module_b stock. Found: {all_stocks:?}"
+            all_vars.contains("module_b"),
+            "Should include module_b node. Found: {all_vars:?}"
         );
         assert!(
-            all_stocks.contains("module_c\u{00B7}buf_c"),
-            "Should include module_c stock. Found: {all_stocks:?}"
+            all_vars.contains("module_c"),
+            "Should include module_c node. Found: {all_vars:?}"
         );
     }
 
@@ -3690,20 +3703,22 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[main_model, smooth_model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[main_model, smooth_model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
         // No feedback loop exists in the parent model (no path from result back
         // to input_signal). The module's INTERNAL feedback loop should NOT be
         // reported at the parent level.
         assert!(
-            model_loops.is_empty(),
+            detected.loops.is_empty(),
             "Internal module loops should not appear in parent. Found: {:?}",
-            model_loops
+            detected
+                .loops
                 .iter()
-                .map(|l| l.format_path())
+                .map(|l| &l.variables)
                 .collect::<Vec<_>>()
         );
     }
