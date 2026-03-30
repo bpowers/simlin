@@ -5596,11 +5596,7 @@ fn enumerate_module_instances_inner(
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
 
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, *source_model, project)
-        } else {
-            model_ltm_synthetic_variables(db, *source_model, project)
-        };
+        let ltm_vars = model_ltm_variables(db, *source_model, project);
 
         for ltm_var in &ltm_vars.vars {
             let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
