@@ -125,3 +125,73 @@ fn test_model_ltm_variables_discovery_mode() {
         "discovery mode should not have loop scores"
     );
 }
+
+/// Verify that model_ltm_variables sorts vars in dependency order:
+/// link_scores first, then paths, then composites. This ensures the
+/// VM evaluates them in the correct order since LTM vars are appended
+/// to the flows runlist sequentially.
+#[test]
+fn test_model_ltm_variables_sort_order_respects_dependencies() {
+    let db = SimlinDb::default();
+
+    let stdlib_model = x_model(
+        "main",
+        vec![x_aux("x", "10", None), x_aux("s", "SMTH1(x, 5)", None)],
+    );
+
+    let project = datamodel::Project {
+        name: "sort_order_test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![stdlib_model],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["stdlib\u{205A}smth1"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let mut last_category = 0u8;
+    for var in &ltm.vars {
+        let cat = if var.name.contains("\u{205A}composite\u{205A}") {
+            3
+        } else if var.name.contains("\u{205A}path\u{205A}") {
+            2
+        } else if var.name.contains("\u{205A}loop_score\u{205A}")
+            || var.name.contains("\u{205A}rel_loop_score\u{205A}")
+        {
+            1
+        } else {
+            0
+        };
+        assert!(
+            cat >= last_category,
+            "LTM vars must be sorted in dependency order \
+             (link_score < loop_score < path < composite), \
+             but '{}' (category {}) follows category {}",
+            var.name,
+            cat,
+            last_category
+        );
+        last_category = cat;
+    }
+
+    // Verify that all three categories are present
+    assert!(
+        ltm.vars.iter().any(|v| v.name.contains("link_score")),
+        "should have link_score vars"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}path\u{205A}")),
+        "should have path vars"
+    );
+    assert!(
+        ltm.vars.iter().any(|v| v.name.contains("composite")),
+        "should have composite vars"
+    );
+}

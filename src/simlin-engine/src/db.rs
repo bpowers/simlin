@@ -1735,6 +1735,27 @@ pub struct LtmVariablesResult {
 /// when a variable's equation changes, salsa only re-evaluates link score
 /// equations for links whose endpoints are affected. Links involving
 /// unmodified variables return their cached equation text.
+/// Black-box delta-ratio formula for module links where we cannot do
+/// ceteris-paribus analysis. Produces SIGN(delta_to / delta_from);
+/// the ABS(ratio) magnitude term is algebraically 1 when both deltas
+/// are non-zero, so this is effectively a polarity-only score.
+fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -> String {
+    let from_q = crate::ltm_augment::quote_ident(from_ident);
+    let to_q = crate::ltm_augment::quote_ident(to_ident);
+    format!(
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
+                 (({from_q} - PREVIOUS({from_q})) = 0) \
+              then 0 \
+         else ABS((({to_q} - PREVIOUS({to_q}))) / \
+                  ({to_q} - PREVIOUS({to_q}))) * \
+              (if ({from_q} - PREVIOUS({from_q})) = 0 \
+               then 0 \
+               else SIGN((({to_q} - PREVIOUS({to_q}))) / \
+                         ({from_q} - PREVIOUS({from_q}))))"
+    )
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn link_score_equation_text<'db>(
     db: &'db dyn Db,
@@ -1776,38 +1797,10 @@ pub fn link_score_equation_text<'db>(
                         port = input.dst.as_str(),
                     )
                 } else {
-                    // No matching input wiring found; fall back to black-box delta-ratio.
-                    let from_q = crate::ltm_augment::quote_ident(from_ident.as_str());
-                    let to_q = crate::ltm_augment::quote_ident(to_ident.as_str());
-                    format!(
-                        "if (TIME = INITIAL_TIME) then 0 \
-                         else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
-                                 (({from_q} - PREVIOUS({from_q})) = 0) \
-                              then 0 \
-                         else ABS((({to_q} - PREVIOUS({to_q}))) / \
-                                  ({to_q} - PREVIOUS({to_q}))) * \
-                              (if ({from_q} - PREVIOUS({from_q})) = 0 \
-                               then 0 \
-                               else SIGN((({to_q} - PREVIOUS({to_q}))) / \
-                                         ({from_q} - PREVIOUS({from_q}))))"
-                    )
+                    black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
                 }
             } else {
-                // to_var is not a Module variant; use black-box delta-ratio.
-                let from_q = crate::ltm_augment::quote_ident(from_ident.as_str());
-                let to_q = crate::ltm_augment::quote_ident(to_ident.as_str());
-                format!(
-                    "if (TIME = INITIAL_TIME) then 0 \
-                     else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
-                             (({from_q} - PREVIOUS({from_q})) = 0) \
-                          then 0 \
-                     else ABS((({to_q} - PREVIOUS({to_q}))) / \
-                              ({to_q} - PREVIOUS({to_q}))) * \
-                          (if ({from_q} - PREVIOUS({from_q})) = 0 \
-                           then 0 \
-                           else SIGN((({to_q} - PREVIOUS({to_q}))) / \
-                                     ({from_q} - PREVIOUS({from_q}))))"
-                )
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
             }
         } else if from_is_module && !to_is_module {
             let mut all_vars = HashMap::new();
@@ -1823,20 +1816,7 @@ pub fn link_score_equation_text<'db>(
             )
         } else {
             // module -> module: black-box delta-ratio
-            let from_q = crate::ltm_augment::quote_ident(from_ident.as_str());
-            let to_q = crate::ltm_augment::quote_ident(to_ident.as_str());
-            format!(
-                "if (TIME = INITIAL_TIME) then 0 \
-                 else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
-                         (({from_q} - PREVIOUS({from_q})) = 0) \
-                      then 0 \
-                 else ABS((({to_q} - PREVIOUS({to_q}))) / \
-                          ({to_q} - PREVIOUS({to_q}))) * \
-                      (if ({from_q} - PREVIOUS({from_q})) = 0 \
-                       then 0 \
-                       else SIGN((({to_q} - PREVIOUS({to_q}))) / \
-                                 ({from_q} - PREVIOUS({from_q}))))"
-            )
+            black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
         };
 
         return Some(LtmSyntheticVar {

@@ -1773,7 +1773,28 @@ pub fn model_ltm_variables(
         });
     }
 
-    vars.sort_by(|a, b| a.name.cmp(&b.name));
+    // Sort by evaluation-order category (link_score before path before
+    // composite) so the VM's sequential flow evaluation respects the
+    // dependency chain: composites reference paths which reference link
+    // scores. Within each category, sort lexically for determinism.
+    vars.sort_by(|a, b| {
+        fn category(name: &str) -> u8 {
+            if name.contains("\u{205A}composite\u{205A}") {
+                3
+            } else if name.contains("\u{205A}path\u{205A}") {
+                2
+            } else if name.contains("\u{205A}loop_score\u{205A}")
+                || name.contains("\u{205A}rel_loop_score\u{205A}")
+            {
+                1
+            } else {
+                0 // link_score and anything else
+            }
+        }
+        category(&a.name)
+            .cmp(&category(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     LtmVariablesResult { vars }
 }
 
