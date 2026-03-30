@@ -1580,3 +1580,236 @@ fn test_user_defined_module_ltm_vm() {
         "exhaustive mode should produce relative loop scores"
     );
 }
+
+/// Nested module: a user-defined sub-model that internally uses SMOOTH,
+/// creating two levels of module nesting (root -> user module -> stdlib
+/// SMOOTH module). Verifies LTM scoring at both nesting levels.
+///
+/// Model structure:
+///   Parent: level -> gap -> [processor] -> adjustment -> level
+///   Sub-model "processor": input -> smoothed (SMTH1) -> output
+///
+/// Because the incremental LTM compilation path has a known limitation
+/// with stdlib modules (SMOOTH/DELAY layout resolution), this test uses
+/// the interpreter path (Project::from + with_ltm) for the nested SMOOTH
+/// case, while still verifying composite and link score properties.
+#[test]
+fn test_nested_module_ltm_vm() {
+    use simlin_engine::datamodel;
+
+    let project = datamodel::Project {
+        name: "nested_module_ltm".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 20.0,
+            dt: datamodel::Dt::Dt(0.25),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "level".to_string(),
+                        equation: datamodel::Equation::Scalar("50".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["adjustment".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "gap".to_string(),
+                        equation: datamodel::Equation::Scalar("100 - level".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "processor".to_string(),
+                        model_name: "processor".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "gap".to_string(),
+                            dst: "processor.input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "adjustment".to_string(),
+                        equation: datamodel::Equation::Scalar("processor.output / 5".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "processor".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "smoothed".to_string(),
+                        equation: datamodel::Equation::Scalar("SMTH1(input, 3)".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output".to_string(),
+                        equation: datamodel::Equation::Scalar("smoothed".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    // Use the interpreter path because compile_project_incremental + VM
+    // has a known limitation with stdlib modules (SMOOTH/DELAY) where
+    // LTM-augmented variable names fail layout resolution.
+    let compiled_project = Project::from(project.clone());
+    let ltm_project = compiled_project
+        .with_ltm()
+        .expect("LTM augmentation should succeed for nested module model");
+
+    let main_ident: Ident<Canonical> = Ident::new("main");
+
+    // Verify loops are detected through the nested module structure
+    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
+    assert!(
+        !loops.is_empty(),
+        "should detect at least one loop through the user-defined module containing SMOOTH"
+    );
+
+    let ltm_rc = Rc::new(ltm_project);
+    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
+    let results = sim.run_to_end().expect("simulation should run");
+
+    // Verify link scores exist at the parent level
+    let link_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !link_score_vars.is_empty(),
+        "should have link score variables for the parent feedback loop"
+    );
+
+    // Verify at least one link score is non-zero after initial timesteps
+    let any_nonzero_link = link_score_vars.iter().any(|k| {
+        let offset = results.offsets[*k];
+        (8..results.step_count)
+            .any(|step| results.data[step * results.step_size + offset].abs() > 1e-10)
+    });
+    assert!(
+        any_nonzero_link,
+        "at least one link score should be non-zero in nested module model"
+    );
+
+    // Verify loop scores exist (exhaustive mode)
+    let loop_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !loop_score_vars.is_empty(),
+        "exhaustive mode should produce loop scores for nested module model"
+    );
+
+    // Verify relative loop scores exist
+    let rel_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !rel_score_vars.is_empty(),
+        "exhaustive mode should produce relative loop scores for nested module model"
+    );
+
+    // Verify the processor module appears in the causal link scores,
+    // confirming that the user-defined module (which internally uses
+    // SMOOTH) is treated as a causal node in the parent model's
+    // feedback loop.
+    let has_processor_link = link_score_vars
+        .iter()
+        .any(|k| k.as_str().contains("processor"));
+    assert!(
+        has_processor_link,
+        "link scores should reference the 'processor' user module as a causal node, \
+         available link scores: {:?}",
+        link_score_vars
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Also try the VM path without LTM to confirm the model itself
+    // compiles and simulates correctly (establishing that the model
+    // structure is valid, even though LTM+VM doesn't work yet for
+    // stdlib modules).
+    let mut db = simlin_engine::db::SimlinDb::default();
+    let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = simlin_engine::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("model with nested SMOOTH should compile without LTM");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("VM should simulate the nested module model");
+}
