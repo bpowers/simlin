@@ -322,11 +322,10 @@ integer-offset opcodes.
 
 ### LTM Synthetic Variable Injection
 
-`inject_ltm_vars()` patches the `datamodel::Project` by appending synthetic
-variables to each model's variable list. The patched datamodel is then compiled
-through the normal pipeline via `Project::from()`. The new design follows the
-same pattern: LTM tracked functions produce synthetic `SourceVariable` inputs
-that enter the same compilation pipeline.
+LTM tracked functions (primarily `model_ltm_variables` in `db_ltm.rs`) produce
+synthetic variable definitions that enter the same compilation pipeline as
+regular variables. Each model (root, stdlib, user-defined) receives identical
+LTM treatment through the salsa tracked function graph.
 
 ### Error Storage
 
