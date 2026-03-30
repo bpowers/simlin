@@ -7,24 +7,22 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::{Canonical, Ident};
-use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
-use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use crate::vm::{CompiledSimulation, Vm};
-use std::collections::HashMap;
-
-#[cfg(any(test, feature = "testing"))]
-use crate::common::ErrorCode;
-#[cfg(any(test, feature = "testing"))]
-use crate::common::UnitError;
+use crate::common::{Canonical, ErrorCode, Ident, UnitError};
 #[cfg(any(test, feature = "testing"))]
 use crate::compiler::Module;
+use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
+use crate::db::{
+    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    compile_project_incremental, sync_from_datamodel_incremental,
+};
 #[cfg(any(test, feature = "testing"))]
 use crate::interpreter::Simulation;
 #[cfg(any(test, feature = "testing"))]
 use crate::project::Project as CompiledProject;
+use crate::vm::{CompiledSimulation, Vm};
 #[cfg(any(test, feature = "testing"))]
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 #[cfg(any(test, feature = "testing"))]
 use std::sync::Arc;
 
@@ -828,6 +826,85 @@ impl TestProject {
                 (actual_val - expected_val).abs() < 1e-6,
                 "Incremental VM value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
             );
+        }
+    }
+
+    // ── Diagnostic helpers (incremental path) ─────────────────────────
+
+    /// Sync the datamodel into a salsa DB and collect all diagnostics.
+    fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
+        let datamodel = self.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        collect_all_diagnostics(&db, &sync.to_sync_result())
+    }
+
+    /// Assert that incremental compilation produces the expected error code.
+    pub fn assert_compile_error_vm(&self, expected_error: ErrorCode) {
+        let diagnostics = self.diagnostics_incremental();
+
+        let has_error = diagnostics.iter().any(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && match &d.error {
+                    DiagnosticError::Equation(eq_err) => eq_err.code == expected_error,
+                    DiagnosticError::Model(err) => err.code == expected_error,
+                    _ => false,
+                }
+        });
+
+        if !has_error {
+            if diagnostics.is_empty() {
+                panic!(
+                    "Expected compilation error {expected_error:?}, but no diagnostics were emitted"
+                );
+            } else {
+                let diag_summary: Vec<_> = diagnostics
+                    .iter()
+                    .map(|d| format!("{}: {:?} ({:?})", d.model, d.error, d.severity))
+                    .collect();
+                panic!(
+                    "Expected compilation error {expected_error:?}, but got:\n{}",
+                    diag_summary.join("\n")
+                );
+            }
+        }
+    }
+
+    /// Assert that incremental compilation produces a unit mismatch diagnostic.
+    pub fn assert_unit_error_vm(&self) {
+        let diagnostics = self.diagnostics_incremental();
+
+        let has_unit_mismatch = diagnostics.iter().any(|d| {
+            if let DiagnosticError::Unit(unit_err) = &d.error {
+                let code = match unit_err {
+                    UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                    UnitError::ConsistencyError(code, _, _) => *code,
+                    UnitError::InferenceError { code, .. } => *code,
+                };
+                code == ErrorCode::UnitMismatch
+            } else {
+                false
+            }
+        });
+
+        if !has_unit_mismatch {
+            let unit_diags: Vec<_> = diagnostics
+                .iter()
+                .filter(|d| matches!(&d.error, DiagnosticError::Unit(_)))
+                .map(|d| {
+                    format!(
+                        "{}.{}: {:?}",
+                        d.model,
+                        d.variable.as_deref().unwrap_or("?"),
+                        d.error
+                    )
+                })
+                .collect();
+            if unit_diags.is_empty() {
+                panic!("Expected unit mismatch warning, but no unit diagnostics were found");
+            } else {
+                panic!("Expected UnitMismatch, but got:\n{}", unit_diags.join("\n"));
+            }
         }
     }
 }
