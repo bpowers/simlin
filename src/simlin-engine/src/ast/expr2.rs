@@ -4,9 +4,7 @@
 
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
-#[cfg(any(test, feature = "testing"))]
-use crate::builtins::{BuiltinContents, walk_builtin_expr};
-use crate::builtins::{BuiltinFn, Loc};
+use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{Canonical, CanonicalDimensionName, EquationResult, Ident};
 use crate::dimensions::Dimension;
 use crate::eqn_err;
@@ -110,7 +108,6 @@ impl IndexExpr2 {
         }
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             IndexExpr2::Wildcard(_) => None,
@@ -972,7 +969,6 @@ impl Expr2 {
         }
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Expr2::Const(_s, _n, _loc) => None,
