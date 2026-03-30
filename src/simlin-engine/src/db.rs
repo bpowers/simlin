@@ -5794,19 +5794,13 @@ fn calc_flattened_offsets_incremental(
     }
 
     // Include LTM variables (loop scores, relative loop scores, and their
-    // implicit helper/module vars) when LTM is enabled and this is the
-    // root model. These occupy slots after the implicit variables,
-    // matching compute_layout's Section 3 ordering.
-    if is_root && project.ltm_enabled(db) {
-        let layout = compute_layout(db, *source_model, project, true);
+    // implicit helper/module vars) when LTM is enabled. Models without
+    // feedback loops get empty LTM var lists. These occupy slots after the
+    // implicit variables, matching compute_layout's Section 3 ordering.
+    if project.ltm_enabled(db) {
+        let layout = compute_layout(db, *source_model, project, is_root);
 
-        // Enumerate all LTM variable names from the synthetic variables list
-        // and their implicit helper/module variables.
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, *source_model, project)
-        } else {
-            model_ltm_synthetic_variables(db, *source_model, project)
-        };
+        let ltm_vars = model_ltm_variables(db, *source_model, project);
 
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
