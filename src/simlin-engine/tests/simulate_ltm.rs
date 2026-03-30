@@ -6,13 +6,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
-use std::rc::Rc;
 use std::result::Result as StdResult;
 
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::db::{set_project_ltm_discovery_mode, set_project_ltm_enabled};
-use simlin_engine::interpreter::Simulation;
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm, ltm_finding};
 
@@ -570,23 +568,15 @@ fn hero_culture_loop_sign_continuity() {
 
 // --- Module composite link score integration tests ---
 //
-// Tests involving stdlib modules (SMOOTH/DELAY) use the interpreter path
-// (Project::from + with_ltm/with_ltm_all_links) because the salsa/VM
-// path has a known layout resolution limitation with LTM-augmented
-// implicit module variable names. Structural analysis (loop detection)
-// uses salsa-based model_detected_loops where possible.
+// Tests involving stdlib modules (SMOOTH/DELAY) use the salsa/VM path
+// (compile_project_incremental with ltm_enabled/ltm_discovery_mode).
 
 use simlin_engine::test_common::TestProject;
-use std::sync::Arc;
 
 /// Regression: SMTH1 with an explicit initial_value argument (3rd arg) must
 /// not cause LTM augmentation to reference a non-existent composite variable.
 /// The initial_value port is only used for stock initialization and has no
 /// runtime causal path to the output, so no composite is generated for it.
-///
-/// Uses the interpreter path because compile_ltm_discovery_incremental +
-/// VM does not yet support stdlib modules (SMOOTH/DELAY layout resolution
-/// limitation).
 #[test]
 fn test_smooth_with_initial_value_ltm() {
     let datamodel_project = TestProject::new("smooth_init_val")
@@ -597,14 +587,9 @@ fn test_smooth_with_initial_value_ltm() {
         .flow("adj", "SMTH1(gap, 5, init_val)", None)
         .build_datamodel();
 
-    let compiled_project = Project::from(datamodel_project);
-    let ltm_project = compiled_project
-        .with_ltm_all_links()
-        .expect("LTM augmentation should succeed even with initial_value port wired");
-
-    let ltm_rc = Arc::new(ltm_project);
-    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
-    let _results = sim.run_to_end().expect("should simulate");
+    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
 }
 
 #[test]
@@ -637,19 +622,11 @@ fn test_smooth_goal_seeking_ltm() {
         "Should detect at least one loop through SMOOTH"
     );
 
-    // Simulation with LTM scores: the compile_ltm_incremental + VM path
-    // does not yet support stdlib modules (SMOOTH/DELAY) because
-    // LTM-augmented variable names fail layout resolution for implicit
-    // module instances. Use the interpreter path until the layout
-    // resolution is fixed.
-    let compiled_project = Project::from(datamodel_project);
-    let ltm_project = compiled_project
-        .with_ltm()
-        .expect("LTM augmentation should succeed");
-
-    let ltm_project_rc = Arc::new(ltm_project);
-    let sim = Simulation::new(&ltm_project_rc, "main").expect("should create simulation");
-    let results = sim.run_to_end().expect("interpreter simulation should run");
+    // Simulation via VM with LTM enabled
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("VM simulation should run");
+    let results = vm.into_results();
 
     // Verify non-zero loop scores exist
     let loop_score_vars: Vec<_> = results
@@ -666,10 +643,6 @@ fn test_smooth_goal_seeking_ltm() {
 #[test]
 fn test_smooth_model_discovery_mode() {
     // Same model as test_smooth_goal_seeking_ltm, but in discovery mode.
-    //
-    // Uses the interpreter path because compile_ltm_discovery_incremental +
-    // VM does not yet support stdlib modules (SMOOTH/DELAY layout resolution
-    // limitation).
     let datamodel_project = TestProject::new("smooth_discovery")
         .with_sim_time(0.0, 20.0, 0.25)
         .aux("goal", "100", None)
@@ -680,14 +653,14 @@ fn test_smooth_model_discovery_mode() {
         .flow("adjustment", "gap / adjustment_time", None)
         .build_datamodel();
 
-    let compiled_project = Project::from(datamodel_project);
-    let discovery_project = compiled_project
-        .with_ltm_all_links()
-        .expect("with_ltm_all_links should succeed");
-    let discovery_rc = Arc::new(discovery_project);
+    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
+    let project_dm = datamodel_project.clone();
+    let project_for_discovery = Project::from(project_dm);
+    let discovery_rc = std::sync::Arc::new(project_for_discovery);
 
-    let sim = Simulation::new(&discovery_rc, "main").unwrap();
-    let results = sim.run_to_end().unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
 
     let found = ltm_finding::discover_loops(&results, &discovery_rc)
         .expect("discover_loops should succeed");
@@ -708,10 +681,6 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
     // (e.g., "module·$⁚ltm⁚link_score⁚..."). The discovery parser's
     // strip_prefix("$⁚ltm⁚link_score⁚") naturally excludes these
     // because interpunct-prefixed names don't start with that prefix.
-    //
-    // Uses the interpreter path because compile_ltm_discovery_incremental +
-    // VM does not yet support stdlib modules (SMOOTH/DELAY layout resolution
-    // limitation).
     let datamodel_project = TestProject::new("submodel_link_exclusion")
         .with_sim_time(0.0, 10.0, 1.0)
         .stock("level", "50", &["adj"], &[], None)
@@ -719,14 +688,13 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
         .flow("adj", "SMTH1(gap, 5)", None)
         .build_datamodel();
 
-    let compiled_project = Project::from(datamodel_project);
-    let discovery_project = compiled_project
-        .with_ltm_all_links()
-        .expect("should succeed");
-    let discovery_rc = Arc::new(discovery_project);
+    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
+    let project_for_discovery = Project::from(datamodel_project.clone());
+    let discovery_rc = std::sync::Arc::new(project_for_discovery);
 
-    let sim = Simulation::new(&discovery_rc, "main").unwrap();
-    let results = sim.run_to_end().unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
 
     // Root-level link scores should exist and start with the standard prefix
     let root_link_scores: Vec<_> = results
@@ -816,15 +784,11 @@ fn test_multiple_smooth_instances() {
         detected.loops.len()
     );
 
-    // Simulation with LTM scores: uses the interpreter path because
-    // compile_ltm_incremental + VM does not yet support stdlib modules
-    // (SMOOTH/DELAY layout resolution limitation).
-    let compiled_project = Project::from(datamodel_project);
-    let ltm_project = compiled_project.with_ltm().expect("LTM should succeed");
-
-    let ltm_rc = Arc::new(ltm_project);
-    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
-    let results = sim.run_to_end().expect("should simulate");
+    // Simulation via VM with LTM enabled
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
 
     // Verify we have loop score variables for each independent loop
     let loop_scores: Vec<_> = results
@@ -1069,9 +1033,6 @@ fn test_module_output_multi_input_link_score_magnitude() {
     //
     // The SMTH1 output and other_input both contribute ~50% to combined.
     //
-    // Uses the interpreter path because compile_ltm_discovery_incremental +
-    // VM does not yet support stdlib modules (SMOOTH/DELAY layout resolution
-    // limitation).
     let datamodel_project = TestProject::new("module_multi_input")
         .with_sim_time(0.0, 20.0, 0.25)
         .stock("level", "50", &["adjustment"], &[], None)
@@ -1084,14 +1045,10 @@ fn test_module_output_multi_input_link_score_magnitude() {
         .flow("adjustment", "100 - combined", None)
         .build_datamodel();
 
-    let compiled_project = Project::from(datamodel_project);
-    let ltm_project = compiled_project
-        .with_ltm_all_links()
-        .expect("LTM augmentation should succeed");
-    let ltm_rc = Arc::new(ltm_project);
-
-    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
-    let results = sim.run_to_end().expect("simulation should run");
+    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
 
     // Find the link score for the smth1 module -> combined
     let module_link_offset = results
@@ -1133,11 +1090,7 @@ fn test_module_output_multi_input_link_score_magnitude() {
 // --- VM integration tests for LTM scoring ---
 //
 // These tests exercise the salsa/VM path (compile_ltm_incremental and
-// compile_ltm_discovery_incremental) for models WITHOUT stdlib modules.
-// Models with SMOOTH/DELAY remain on the interpreter path (above) due
-// to a known layout resolution limitation: LTM-augmented variable names
-// for implicit stdlib module instances are not yet found during
-// symbolic -> concrete resolution in the salsa compilation pipeline.
+// compile_ltm_discovery_incremental) for models without stdlib modules.
 
 /// Balancing feedback loop (stock -> aux -> flow -> stock) via the full
 /// VM pipeline in exhaustive mode. Verifies non-zero link scores and
@@ -1658,11 +1611,6 @@ fn test_user_defined_module_ltm_vm() {
 /// Model structure:
 ///   Parent: level -> gap -> [processor] -> adjustment -> level
 ///   Sub-model "processor": input -> smoothed (SMTH1) -> output
-///
-/// Because the incremental LTM compilation path has a known limitation
-/// with stdlib modules (SMOOTH/DELAY layout resolution), this test uses
-/// the interpreter path (Project::from + with_ltm) for the nested SMOOTH
-/// case, while still verifying composite and link score properties.
 #[test]
 fn test_nested_module_ltm_vm() {
     use simlin_engine::datamodel;
@@ -1780,26 +1728,11 @@ fn test_nested_module_ltm_vm() {
         ai_information: None,
     };
 
-    // Use the interpreter path because compile_project_incremental + VM
-    // has a known limitation with stdlib modules (SMOOTH/DELAY) where
-    // LTM-augmented variable names fail layout resolution.
-    let compiled_project = Project::from(project.clone());
-    let ltm_project = compiled_project
-        .with_ltm()
-        .expect("LTM augmentation should succeed for nested module model");
-
-    let main_ident: Ident<Canonical> = Ident::new("main");
-
-    // Verify loops are detected through the nested module structure
-    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
-    assert!(
-        !loops.is_empty(),
-        "should detect at least one loop through the user-defined module containing SMOOTH"
-    );
-
-    let ltm_rc = Rc::new(ltm_project);
-    let sim = Simulation::new(&ltm_rc, "main").expect("should create simulation");
-    let results = sim.run_to_end().expect("simulation should run");
+    // Compile and simulate with LTM via the salsa/VM path.
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("simulation should run");
+    let results = vm.into_results();
 
     // Verify link scores exist at the parent level
     let link_score_vars: Vec<_> = results
@@ -1870,16 +1803,4 @@ fn test_nested_module_ltm_vm() {
             .map(|k| k.as_str())
             .collect::<Vec<_>>()
     );
-
-    // Also try the VM path without LTM to confirm the model itself
-    // compiles and simulates correctly (establishing that the model
-    // structure is valid, even though LTM+VM doesn't work yet for
-    // stdlib modules).
-    let mut db = simlin_engine::db::SimlinDb::default();
-    let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = simlin_engine::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("model with nested SMOOTH should compile without LTM");
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end()
-        .expect("VM should simulate the nested module model");
 }
