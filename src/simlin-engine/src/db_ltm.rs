@@ -1629,87 +1629,17 @@ pub fn model_ltm_variables(
 
     let mut vars = Vec::new();
 
-    // Part 1: Link scores.
-    // Sub-models and discovery mode need scores for ALL edges (pathways
-    // reference arbitrary edges). Exhaustive root models only need
-    // scores for edges that participate in loops.
-    if has_input_ports || is_discovery {
-        for (from, tos) in &edges_result.edges {
-            for to in tos {
-                let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                    vars.push(lsv.clone());
-                }
-            }
-        }
-    } else {
+    // Pre-compute loops for exhaustive mode. Both the link-score
+    // strategy (loop edges only) and loop/relative score generation
+    // share this data, so compute once and reuse.
+    let loops: Option<Vec<Loop>> = if !is_discovery {
         let circuits_result = model_loop_circuits(db, model, project);
         if circuits_result.circuits.is_empty() {
-            return LtmVariablesResult { vars: vec![] };
-        }
-
-        let variables = reconstruct_model_variables(db, model, project);
-        let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-            .edges
-            .iter()
-            .map(|(from, tos)| {
-                (
-                    Ident::new(from),
-                    tos.iter().map(|t| Ident::new(t)).collect(),
-                )
-            })
-            .collect();
-        let stocks: HashSet<Ident<Canonical>> =
-            edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-        let graph = crate::ltm::CausalGraph {
-            edges,
-            stocks,
-            variables: variables.clone(),
-            module_graphs: HashMap::new(),
-        };
-
-        let mut loops: Vec<Loop> = circuits_result
-            .circuits
-            .iter()
-            .map(|circuit_strs| {
-                let circuit: Vec<Ident<Canonical>> =
-                    circuit_strs.iter().map(|s| Ident::new(s)).collect();
-                let links = graph.circuit_to_links(&circuit);
-                let parent_stocks = graph.find_stocks_in_loop(&circuit);
-                let polarity = graph.calculate_polarity(&links);
-                Loop {
-                    id: String::new(),
-                    links,
-                    stocks: parent_stocks,
-                    polarity,
-                }
-            })
-            .collect();
-
-        assign_loop_ids(&mut loops);
-
-        let mut seen_links: HashSet<(String, String)> = HashSet::new();
-        for loop_item in &loops {
-            for link in &loop_item.links {
-                let key = (link.from.to_string(), link.to.to_string());
-                if seen_links.insert(key) {
-                    let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
-                    if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                        vars.push(lsv.clone());
-                    }
-                }
+            if !has_input_ports {
+                return LtmVariablesResult { vars: vec![] };
             }
-        }
-    }
-
-    // Part 2: Loop scores and relative loop scores (exhaustive mode only).
-    // Generated for any model with feedback loops, regardless of whether
-    // it also has input ports. A model can be both a reusable sub-model
-    // AND have internal loops that need scoring.
-    if !is_discovery {
-        let circuits_result = model_loop_circuits(db, model, project);
-        if !circuits_result.circuits.is_empty() {
+            None
+        } else {
             let variables = reconstruct_model_variables(db, model, project);
             let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
                 .edges
@@ -1731,7 +1661,7 @@ pub fn model_ltm_variables(
                 module_graphs: HashMap::new(),
             };
 
-            let mut loops: Vec<Loop> = circuits_result
+            let mut detected: Vec<Loop> = circuits_result
                 .circuits
                 .iter()
                 .map(|circuit_strs| {
@@ -1749,33 +1679,71 @@ pub fn model_ltm_variables(
                 })
                 .collect();
 
-            assign_loop_ids(&mut loops);
+            assign_loop_ids(&mut detected);
+            Some(detected)
+        }
+    } else {
+        None
+    };
 
-            let partitions_result = model_cycle_partitions(db, model, project);
-            let partitions = CyclePartitions {
-                partitions: partitions_result
-                    .partitions
-                    .iter()
-                    .map(|p| p.iter().map(|s| Ident::new(s)).collect())
-                    .collect(),
-                stock_partition: partitions_result
-                    .stock_partition
-                    .iter()
-                    .map(|(k, v)| (Ident::new(k), *v))
-                    .collect(),
-            };
-
-            let loop_vars = crate::ltm_augment::generate_loop_score_variables(&loops, &partitions);
-            for (name, var) in loop_vars {
-                let equation = match var.get_equation() {
-                    Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
-                    _ => String::new(),
-                };
-                vars.push(LtmSyntheticVar {
-                    name: name.to_string(),
-                    equation,
-                });
+    // Part 1: Link scores.
+    // Sub-models and discovery mode need scores for ALL edges (pathways
+    // reference arbitrary edges). Exhaustive root models only need
+    // scores for edges that participate in loops.
+    if has_input_ports || is_discovery {
+        for (from, tos) in &edges_result.edges {
+            for to in tos {
+                let link_id = LtmLinkId::new(db, from.clone(), to.clone());
+                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                    vars.push(lsv.clone());
+                }
             }
+        }
+    } else if let Some(ref detected_loops) = loops {
+        let mut seen_links: HashSet<(String, String)> = HashSet::new();
+        for loop_item in detected_loops {
+            for link in &loop_item.links {
+                let key = (link.from.to_string(), link.to.to_string());
+                if seen_links.insert(key) {
+                    let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
+                    if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                        vars.push(lsv.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Part 2: Loop scores and relative loop scores (exhaustive mode only).
+    // Generated for any model with feedback loops, regardless of whether
+    // it also has input ports. A model can be both a reusable sub-model
+    // AND have internal loops that need scoring.
+    if let Some(ref detected_loops) = loops {
+        let partitions_result = model_cycle_partitions(db, model, project);
+        let partitions = CyclePartitions {
+            partitions: partitions_result
+                .partitions
+                .iter()
+                .map(|p| p.iter().map(|s| Ident::new(s)).collect())
+                .collect(),
+            stock_partition: partitions_result
+                .stock_partition
+                .iter()
+                .map(|(k, v)| (Ident::new(k), *v))
+                .collect(),
+        };
+
+        let loop_vars =
+            crate::ltm_augment::generate_loop_score_variables(detected_loops, &partitions);
+        for (name, var) in loop_vars {
+            let equation = match var.get_equation() {
+                Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
+                _ => String::new(),
+            };
+            vars.push(LtmSyntheticVar {
+                name: name.to_string(),
+                equation,
+            });
         }
     }
 
