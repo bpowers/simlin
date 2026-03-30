@@ -9,10 +9,13 @@ use std::io::BufReader;
 use std::result::Result as StdResult;
 
 use simlin_engine::common::{Canonical, Ident};
-use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use simlin_engine::db::{set_project_ltm_discovery_mode, set_project_ltm_enabled};
+use simlin_engine::db::{
+    DetectedLoop, DetectedLoopPolarity, SimlinDb, compile_project_incremental,
+    model_cycle_partitions, model_detected_loops, set_project_ltm_discovery_mode,
+    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
+};
 use simlin_engine::xmile;
-use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm, ltm_finding};
+use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding};
 
 const LTM_TOLERANCE: f64 = 0.05;
 
@@ -94,7 +97,7 @@ fn load_ltm_results(file_path: &str) -> StdResult<LtmResults, Box<dyn Error>> {
     Ok(LtmResults { loop_scores })
 }
 
-fn ensure_ltm_results(expected: &LtmResults, actual_results: &Results, loops: &[ltm::Loop]) {
+fn ensure_ltm_results(expected: &LtmResults, actual_results: &Results, loops: &[DetectedLoop]) {
     let mut errors = Vec::new();
 
     for (loop_id, expected_scores) in &expected.loop_scores {
@@ -175,12 +178,12 @@ fn ensure_ltm_results(expected: &LtmResults, actual_results: &Results, loops: &[
                 eprintln!(
                     "  Polarity: {}",
                     match loop_obj.polarity {
-                        ltm::LoopPolarity::Reinforcing => "Reinforcing (R)",
-                        ltm::LoopPolarity::Balancing => "Balancing (B)",
-                        ltm::LoopPolarity::Undetermined => "Undetermined (U)",
+                        DetectedLoopPolarity::Reinforcing => "Reinforcing (R)",
+                        DetectedLoopPolarity::Balancing => "Balancing (B)",
+                        DetectedLoopPolarity::Undetermined => "Undetermined (U)",
                     }
                 );
-                eprintln!("  Path: {}", loop_obj.format_path());
+                eprintln!("  Path: {}", loop_obj.variables.join(" -> "));
             }
             eprintln!(
                 "  {} time points with errors (tolerance: {:.1}%)",
@@ -226,10 +229,12 @@ fn simulate_ltm_path(model_path: &str) {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // Project::from for structural loop detection (error reporting in ensure_ltm_results)
-    let project = Project::from(datamodel_project);
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
+    // Structural loop detection via salsa-tracked functions
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = sync.models["main"].source;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    let loops = detected.loops;
 
     let xmile_name = std::path::Path::new(model_path).file_name().unwrap();
     let dir_path = &model_path[0..(model_path.len() - xmile_name.len())];
@@ -250,7 +255,7 @@ fn simulates_population_ltm() {
 
 /// Run discovery mode on a model file and return discovered loops.
 /// Simulation uses the VM path (compile_ltm_discovery_incremental);
-/// Project::from is retained only for causal graph structural analysis.
+/// Project::from_datamodel (salsa-backed) is used for causal graph structural analysis.
 fn discover_loops_from_path(model_path: &str) -> Vec<ltm_finding::FoundLoop> {
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
@@ -262,7 +267,7 @@ fn discover_loops_from_path(model_path: &str) -> Vec<ltm_finding::FoundLoop> {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // Project::from for causal graph structural analysis only
+    // Project for causal graph structural analysis (from_datamodel uses salsa internally)
     let project = Project::from(datamodel_project);
 
     ltm_finding::discover_loops(&results, &project).expect("discover_loops should succeed")
@@ -301,15 +306,16 @@ fn discovery_cross_validates_with_exhaustive() {
     // Discovery should find all loops that have significant contribution.
     let model_path = "../../test/logistic_growth_ltm/logistic_growth.stmx";
 
-    // Exhaustive mode
+    // Exhaustive mode via salsa-tracked structural analysis
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-    let project = Project::from(datamodel_project);
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let exhaustive_loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = sync.models["main"].source;
+    let exhaustive_loops = model_detected_loops(&db, source_model, sync.project);
 
-    let exhaustive_loop_count = exhaustive_loops.len();
+    let exhaustive_loop_count = exhaustive_loops.loops.len();
 
     // Discovery mode
     let found = discover_loops_from_path(model_path);
@@ -325,12 +331,8 @@ fn discovery_cross_validates_with_exhaustive() {
 
     // Verify that the discovered loops match the exhaustive loops by checking
     // that every exhaustive loop's node set appears in the discovery results
-    for exhaustive_loop in &exhaustive_loops {
-        let mut exhaustive_nodes: Vec<String> = exhaustive_loop
-            .links
-            .iter()
-            .map(|l| l.from.as_str().to_string())
-            .collect();
+    for exhaustive_loop in &exhaustive_loops.loops {
+        let mut exhaustive_nodes: Vec<String> = exhaustive_loop.variables.clone();
         exhaustive_nodes.sort();
 
         let found_match = found.iter().any(|f| {
@@ -347,7 +349,7 @@ fn discovery_cross_validates_with_exhaustive() {
         assert!(
             found_match,
             "Exhaustive loop {} not found in discovery results",
-            exhaustive_loop.format_path()
+            exhaustive_loop.variables.join(" -> ")
         );
     }
 }
@@ -356,14 +358,15 @@ fn discovery_cross_validates_with_exhaustive() {
 fn discovery_arms_race_3party() {
     let model_path = "../../test/arms_race_3party/arms_race.stmx";
 
-    // Exhaustive mode to establish ground truth
+    // Exhaustive mode via salsa-tracked structural analysis
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-    let project = Project::from(datamodel_project);
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let exhaustive_loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
-    let exhaustive_count = exhaustive_loops.len();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = sync.models["main"].source;
+    let exhaustive_loops = model_detected_loops(&db, source_model, sync.project);
+    let exhaustive_count = exhaustive_loops.loops.len();
 
     // The three-party arms race has 7 unique feedback loops: 3 self-adjustment
     // (balancing), 3 pairwise (reinforcing), and 1 three-way (reinforcing).
@@ -398,12 +401,8 @@ fn discovery_arms_race_3party() {
             .collect();
         found_nodes.sort();
 
-        let in_exhaustive = exhaustive_loops.iter().any(|exh| {
-            let mut exh_nodes: Vec<String> = exh
-                .links
-                .iter()
-                .map(|l| l.from.as_str().to_string())
-                .collect();
+        let in_exhaustive = exhaustive_loops.loops.iter().any(|exh| {
+            let mut exh_nodes: Vec<String> = exh.variables.clone();
             exh_nodes.sort();
             exh_nodes == found_nodes
         });
@@ -419,13 +418,14 @@ fn discovery_arms_race_3party() {
 fn discovery_decoupled_stocks() {
     let model_path = "../../test/decoupled_stocks/decoupled.stmx";
 
-    // Cross-validate with exhaustive to establish ground truth
+    // Cross-validate with exhaustive via salsa-tracked structural analysis
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-    let project = Project::from(datamodel_project);
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let exhaustive_loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = sync.models["main"].source;
+    let exhaustive_loops = model_detected_loops(&db, source_model, sync.project);
     // Discovery mode -- the decoupled stocks model has time-varying loop
     // activity where different loops activate at different timesteps,
     // demonstrating why per-timestep discovery is necessary.
@@ -452,12 +452,8 @@ fn discovery_decoupled_stocks() {
             .collect();
         found_nodes.sort();
 
-        let in_exhaustive = exhaustive_loops.iter().any(|exh| {
-            let mut exh_nodes: Vec<String> = exh
-                .links
-                .iter()
-                .map(|l| l.from.as_str().to_string())
-                .collect();
+        let in_exhaustive = exhaustive_loops.loops.iter().any(|exh| {
+            let mut exh_nodes: Vec<String> = exh.variables.clone();
             exh_nodes.sort();
             exh_nodes == found_nodes
         });
@@ -490,18 +486,19 @@ fn hero_culture_loop_sign_continuity() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // Project::from for structural loop detection only
-    let project = Project::from(datamodel_project);
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
+    // Structural loop detection via salsa-tracked functions
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = sync.models["main"].source;
+    let detected = model_detected_loops(&db, source_model, sync.project);
     assert!(
-        !loops.is_empty(),
+        !detected.loops.is_empty(),
         "expected feedback loops from LTM analysis"
     );
 
     let mut failures: Vec<String> = Vec::new();
 
-    for loop_item in &loops {
+    for loop_item in &detected.loops {
         let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", loop_item.id);
         let var_ident =
             Ident::<Canonical>::from_str_unchecked(&Ident::new(&var_name).to_source_repr());
@@ -547,7 +544,7 @@ fn hero_culture_loop_sign_continuity() {
                      ({:.6} -> {:.6}, ratio={:.3}); \
                      this looks like a sign computation bug, not a genuine polarity transition",
                     loop_item.id,
-                    loop_item.format_path(),
+                    loop_item.variables.join(" -> "),
                     curr_t,
                     prev_val,
                     curr_val,
@@ -607,7 +604,6 @@ fn test_smooth_goal_seeking_ltm() {
     //   adjustment = gap / adjustment_time
     //   gap = goal - SMTH1(level, smoothing_time)
     //   goal = 100, adjustment_time = 5, smoothing_time = 3
-    use simlin_engine::db::model_detected_loops;
 
     let datamodel_project = TestProject::new("smooth_goal_ltm")
         .with_sim_time(0.0, 20.0, 0.25)
@@ -664,15 +660,13 @@ fn test_smooth_model_discovery_mode() {
         .build_datamodel();
 
     let compiled = compile_ltm_discovery_incremental(&datamodel_project);
-    let project_dm = datamodel_project.clone();
-    let project_for_discovery = Project::from(project_dm);
-    let discovery_rc = std::sync::Arc::new(project_for_discovery);
+    let project_for_discovery = Project::from(datamodel_project.clone());
 
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let found = ltm_finding::discover_loops(&results, &discovery_rc)
+    let found = ltm_finding::discover_loops(&results, &project_for_discovery)
         .expect("discover_loops should succeed");
 
     assert!(
@@ -700,7 +694,6 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
 
     let compiled = compile_ltm_discovery_incremental(&datamodel_project);
     let project_for_discovery = Project::from(datamodel_project.clone());
-    let discovery_rc = std::sync::Arc::new(project_for_discovery);
 
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
@@ -744,7 +737,7 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
     }
 
     // Run discover_loops and verify only root-level links are found
-    let found = ltm_finding::discover_loops(&results, &discovery_rc)
+    let found = ltm_finding::discover_loops(&results, &project_for_discovery)
         .expect("discover_loops should succeed");
 
     // Discovered loops should only reference root-level variables (no interpunct)
@@ -768,7 +761,6 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
 fn test_multiple_smooth_instances() {
     // Two SMOOTH instances in different feedback paths.
     // Each should get its own internal composite scores.
-    use simlin_engine::db::model_detected_loops;
 
     let datamodel_project = TestProject::new("multi_smooth")
         .with_sim_time(0.0, 10.0, 0.5)
@@ -821,7 +813,6 @@ fn test_internal_smooth_loop_not_in_parent() {
     // Uses salsa-based model_detected_loops for structural analysis (no
     // simulation needed). This is the preferred path for structural loop
     // queries.
-    use simlin_engine::db::model_detected_loops;
 
     let datamodel_project = TestProject::new("internal_loop_suppression")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -935,11 +926,11 @@ fn test_coupled_two_stock_single_partition() {
         .flow("pred_deaths", "predators * 0.05", None)
         .build_datamodel();
 
-    // Structural partition analysis via Project::from
-    let project = Project::from(datamodel_project.clone());
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let graph = ltm::CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
-    let partitions = graph.compute_cycle_partitions();
+    // Structural partition analysis via salsa-tracked functions
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = sync.models["main"].source;
+    let partitions = model_cycle_partitions(&db, source_model, sync.project);
 
     // Both stocks should be in the same partition
     assert_eq!(
@@ -987,7 +978,7 @@ fn test_discovery_independent_subsystems() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // Project::from for causal graph structural analysis only
+    // Project for causal graph structural analysis (from_datamodel uses salsa internally)
     let project = Project::from(datamodel_project);
 
     let found =
@@ -1002,10 +993,6 @@ fn test_discovery_independent_subsystems() {
 
 #[test]
 fn test_arms_race_single_partition() {
-    use simlin_engine::db::{SimlinDb, model_cycle_partitions, sync_from_datamodel_incremental};
-    use std::fs::File;
-    use std::io::BufReader;
-
     let f = File::open("../../test/arms_race_3party/arms_race.stmx").unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
@@ -1204,8 +1191,7 @@ fn test_feedback_loop_discovery_vm() {
         "discovery mode should have link score variables"
     );
 
-    // Use the interpreter Project path to run discover_loops on the VM results,
-    // since discover_loops needs a compiled Project for the causal graph.
+    // Build Project for discover_loops (from_datamodel uses salsa internally)
     let compiled_project = Project::from(project);
     let found = ltm_finding::discover_loops(&results, &compiled_project)
         .expect("discover_loops should succeed");
