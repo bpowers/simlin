@@ -1760,15 +1760,55 @@ pub fn link_score_equation_text<'db>(
     let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
     let to_is_module = to_var.is_module();
 
-    // Implicit module variables (from SMOOTH/DELAY expansion) cannot be
-    // meaningfully referenced in LTM ceteris-paribus equations: they
-    // occupy multiple layout slots and PREVIOUS of a module·output
-    // requires compilation context that the per-fragment mini-context
-    // cannot provide. Skip link scores involving these modules; the
-    // loops they participate in will still have scores for the
-    // non-module links in the circuit.
+    // Module-involved links: three cases depending on which end is a module.
+    // 1. input -> module: composite reference to module's internal score
+    // 2. module -> downstream: standard ceteris-paribus on downstream equation
+    // 3. module -> module: black-box delta-ratio equation
     if from_is_module || to_is_module {
-        return None;
+        let equation = if !from_is_module && to_is_module {
+            if let crate::variable::Variable::Module { inputs, .. } = &to_var {
+                if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
+                    crate::ltm_augment::generate_module_input_link_score_equation(
+                        &to_ident, &input.dst,
+                    )
+                } else {
+                    crate::ltm_augment::generate_module_link_score_equation(
+                        &from_ident,
+                        &to_ident,
+                        &HashMap::new(),
+                    )
+                }
+            } else {
+                crate::ltm_augment::generate_module_link_score_equation(
+                    &from_ident,
+                    &to_ident,
+                    &HashMap::new(),
+                )
+            }
+        } else if from_is_module && !to_is_module {
+            let mut all_vars = HashMap::new();
+            if let Some(ref fv) = from_var {
+                all_vars.insert(from_ident.clone(), fv.clone());
+            }
+            all_vars.insert(to_ident.clone(), to_var.clone());
+            crate::ltm_augment::generate_link_score_equation_for_link(
+                &from_ident,
+                &to_ident,
+                &to_var,
+                &all_vars,
+            )
+        } else {
+            crate::ltm_augment::generate_module_link_score_equation(
+                &from_ident,
+                &to_ident,
+                &HashMap::new(),
+            )
+        };
+
+        return Some(LtmSyntheticVar {
+            name: var_name,
+            equation,
+        });
     }
 
     // Standard ceteris-paribus formula for non-module links
