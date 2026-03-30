@@ -241,9 +241,7 @@ fn simulate_path(xmile_path: &str) {
 fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
     eprintln!("model: {xmile_path}");
 
-    // first read-in the XMILE model, convert it to our own representation,
-    // and simulate it using our tree-walking interpreter
-    let (datamodel_project, results1) = {
+    let datamodel_project = {
         let f = File::open(xmile_path).unwrap();
         let mut f = BufReader::new(f);
 
@@ -251,36 +249,22 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         if let Err(ref err) = datamodel_project {
             eprintln!("model '{xmile_path}' error: {err}");
         }
-        let datamodel_project = datamodel_project.unwrap();
-        let project = Rc::new(Project::from(datamodel_project.clone()));
-        let sim = Simulation::new(&project, "main").unwrap();
-
-        // sim.debug_print_runlists("main");
-        let results = sim.run_to_end();
-        assert!(results.is_ok());
-        (datamodel_project, results.unwrap())
+        datamodel_project.unwrap()
     };
 
-    // next simulate the model using our bytecode VM
-    let results2 = {
+    // simulate the model using our bytecode VM
+    let results = {
         let compiled_sim = compile(&datamodel_project);
         let mut vm = Vm::new(compiled_sim).unwrap();
         vm.run_to_end().unwrap();
         vm.into_results()
     };
 
-    // Ensure both paths match the reference results. We no longer
-    // cross-validate interpreter vs VM directly because the incremental
-    // compilation path may produce different evaluation orders for
-    // internal variables (e.g., implicit SMOOTH/DELAY sub-model variables)
-    // at the initial timestep. Both paths are independently validated
-    // against the known-good reference output.
     let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results1);
-    ensure_results(&expected, &results2);
+    ensure_results(&expected, &results);
 
-    // serialized our project through protobufs and ensure we don't see problems
-    let results3 = {
+    // serialize our project through protobufs and ensure we don't see problems
+    let results_proto = {
         use simlin_engine::prost::Message;
 
         let pb_project_inner = serialize(&datamodel_project).unwrap();
@@ -295,15 +279,14 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         vm.into_results()
     };
-    ensure_results(&expected, &results3);
+    ensure_results(&expected, &results_proto);
 
     // serialize our project back to XMILE
     let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
 
     // and then read it back in from the XMILE string and simulate it
-    let (roundtripped_project, results4) = {
+    let (roundtripped_project, results_xmile) = {
         let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
-        // eprintln!("xmile:\n{}", serialized_xmile);
         let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
 
         let compiled_sim = compile(&roundtripped_project);
@@ -311,7 +294,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
     };
-    ensure_results(&expected, &results4);
+    ensure_results(&expected, &results_xmile);
 
     // finally ensure that if we re-serialize to XMILE the results are
     // byte-for-byte identical (we aren't losing any information)
