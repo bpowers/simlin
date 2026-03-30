@@ -157,11 +157,7 @@ pub fn model_ltm_implicit_var_info(
         return HashMap::new();
     }
 
-    let ltm_vars = if project.ltm_discovery_mode(db) {
-        model_ltm_all_link_synthetic_variables(db, model, project)
-    } else {
-        model_ltm_synthetic_variables(db, model, project)
-    };
+    let ltm_vars = model_ltm_variables(db, model, project);
 
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
