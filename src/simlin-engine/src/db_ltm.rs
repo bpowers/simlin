@@ -1600,6 +1600,191 @@ pub(super) fn compile_ltm_implicit_var_fragment(
     })
 }
 
+/// Unified LTM variable generation for any model (root or sub-model).
+///
+/// Auto-detects sub-model behavior by checking for input ports with causal
+/// pathways to output. Sub-models and discovery mode generate link scores
+/// for ALL edges; exhaustive mode on root models generates link scores only
+/// for edges in detected loops, plus loop/relative loop scores.
+///
+/// Pathway and composite scores are generated for models with input ports.
+/// Module-containing loops are no longer filtered out because
+/// `link_score_equation_text` now handles module links via composite refs.
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> super::LtmVariablesResult {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{CyclePartitions, Loop, assign_loop_ids};
+    use std::collections::HashSet;
+
+    use super::{
+        LtmLinkId, LtmSyntheticVar, LtmVariablesResult, generate_max_abs_chain_str,
+        model_causal_edges, model_cycle_partitions, model_loop_circuits,
+        module_input_pathways_from_edges, reconstruct_model_variables,
+    };
+
+    let edges_result = model_causal_edges(db, model, project);
+    if edges_result.stocks.is_empty() {
+        return LtmVariablesResult { vars: vec![] };
+    }
+
+    let is_discovery = project.ltm_discovery_mode(db);
+    let pathways = module_input_pathways_from_edges(edges_result);
+    let has_input_ports = !pathways.is_empty();
+
+    let mut vars = Vec::new();
+
+    if has_input_ports || is_discovery {
+        // Sub-models or discovery mode: link scores for ALL edges
+        for (from, tos) in &edges_result.edges {
+            for to in tos {
+                let link_id = LtmLinkId::new(db, from.clone(), to.clone());
+                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                    vars.push(lsv.clone());
+                }
+            }
+        }
+    } else {
+        // Exhaustive mode, root model: link scores for loop edges only
+        let circuits_result = model_loop_circuits(db, model, project);
+        if circuits_result.circuits.is_empty() {
+            return LtmVariablesResult { vars: vec![] };
+        }
+
+        let variables = reconstruct_model_variables(db, model, project);
+        let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
+            .edges
+            .iter()
+            .map(|(from, tos)| {
+                (
+                    Ident::new(from),
+                    tos.iter().map(|t| Ident::new(t)).collect(),
+                )
+            })
+            .collect();
+        let stocks: HashSet<Ident<Canonical>> =
+            edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+        let graph = crate::ltm::CausalGraph {
+            edges,
+            stocks,
+            variables: variables.clone(),
+            module_graphs: HashMap::new(),
+        };
+
+        let mut loops: Vec<Loop> = circuits_result
+            .circuits
+            .iter()
+            .map(|circuit_strs| {
+                let circuit: Vec<Ident<Canonical>> =
+                    circuit_strs.iter().map(|s| Ident::new(s)).collect();
+                let links = graph.circuit_to_links(&circuit);
+                let parent_stocks = graph.find_stocks_in_loop(&circuit);
+                let polarity = graph.calculate_polarity(&links);
+                Loop {
+                    id: String::new(),
+                    links,
+                    stocks: parent_stocks,
+                    polarity,
+                }
+            })
+            .collect();
+
+        assign_loop_ids(&mut loops);
+
+        let mut seen_links: HashSet<(String, String)> = HashSet::new();
+        for loop_item in &loops {
+            for link in &loop_item.links {
+                let key = (link.from.to_string(), link.to.to_string());
+                if seen_links.insert(key) {
+                    let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
+                    if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                        vars.push(lsv.clone());
+                    }
+                }
+            }
+        }
+
+        // Loop scores and relative loop scores (exhaustive mode only)
+        let partitions_result = model_cycle_partitions(db, model, project);
+        let partitions = CyclePartitions {
+            partitions: partitions_result
+                .partitions
+                .iter()
+                .map(|p| p.iter().map(|s| Ident::new(s)).collect())
+                .collect(),
+            stock_partition: partitions_result
+                .stock_partition
+                .iter()
+                .map(|(k, v)| (Ident::new(k), *v))
+                .collect(),
+        };
+
+        let loop_vars = crate::ltm_augment::generate_loop_score_variables(&loops, &partitions);
+        for (name, var) in loop_vars {
+            let equation = match var.get_equation() {
+                Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
+                _ => String::new(),
+            };
+            vars.push(LtmSyntheticVar {
+                name: name.to_string(),
+                equation,
+            });
+        }
+    }
+
+    // Pathway and composite scores for models with input ports
+    for (input_port, port_pathways) in &pathways {
+        let mut pathway_names = Vec::new();
+        for (idx, pathway_links) in port_pathways.iter().enumerate() {
+            let path_var_name = format!(
+                "$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{}",
+                input_port.as_str(),
+                idx
+            );
+
+            let link_score_refs: Vec<String> = pathway_links
+                .iter()
+                .map(|link| {
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}\"",
+                        link.from.as_str(),
+                        link.to.as_str()
+                    )
+                })
+                .collect();
+
+            let equation = if link_score_refs.is_empty() {
+                "0".to_string()
+            } else {
+                link_score_refs.join(" * ")
+            };
+
+            pathway_names.push(path_var_name.clone());
+            vars.push(LtmSyntheticVar {
+                name: path_var_name,
+                equation,
+            });
+        }
+
+        let composite_name = format!(
+            "$\u{205A}ltm\u{205A}composite\u{205A}{}",
+            input_port.as_str()
+        );
+        let equation = generate_max_abs_chain_str(&pathway_names);
+        vars.push(LtmSyntheticVar {
+            name: composite_name,
+            equation,
+        });
+    }
+
+    vars.sort_by(|a, b| a.name.cmp(&b.name));
+    LtmVariablesResult { vars }
+}
+
 #[cfg(test)]
 #[path = "db_ltm_tests.rs"]
 mod db_ltm_tests;

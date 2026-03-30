@@ -5931,6 +5931,9 @@ mod db_dimension_invalidation_tests;
 #[path = "db_fragment_cache_tests.rs"]
 mod db_fragment_cache_tests;
 #[cfg(test)]
+#[path = "db_ltm_unified_tests.rs"]
+mod db_ltm_unified_tests;
+#[cfg(test)]
 #[path = "db_prev_init_tests.rs"]
 mod db_prev_init_tests;
 #[cfg(test)]
