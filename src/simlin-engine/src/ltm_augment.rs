@@ -352,8 +352,7 @@ fn quote_ident(ident: &str) -> String {
 }
 
 /// Generate link score equation for links involving modules (black box treatment)
-#[cfg(any(test, feature = "testing"))]
-fn generate_module_link_score_equation(
+pub(crate) fn generate_module_link_score_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
     _variables: &HashMap<Ident<Canonical>, Variable>,
@@ -785,8 +784,7 @@ fn generate_max_abs_chain(pathway_names: &[String]) -> String {
 /// Generate a composite link score equation for a parent model link where
 /// the target is a dynamic module. References the module's internal
 /// composite score via interpunct notation.
-#[cfg(any(test, feature = "testing"))]
-fn generate_module_input_link_score_equation(
+pub(crate) fn generate_module_input_link_score_equation(
     module_ident: &Ident<Canonical>,
     input_port: &Ident<Canonical>,
 ) -> String {
