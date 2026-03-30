@@ -151,6 +151,8 @@ jobs:
 
       - name: Publish @simlin/mcp-linux-x64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-linux-x64
+        env:
+          NODE_AUTH_TOKEN: ''
         run: |
           VERSION=$(jq -r .version package.json)
           if npm view "@simlin/mcp-linux-x64@$VERSION" version > /dev/null 2>&1; then
@@ -161,6 +163,8 @@ jobs:
 
       - name: Publish @simlin/mcp-linux-arm64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-linux-arm64
+        env:
+          NODE_AUTH_TOKEN: ''
         run: |
           VERSION=$(jq -r .version package.json)
           if npm view "@simlin/mcp-linux-arm64@$VERSION" version > /dev/null 2>&1; then
@@ -171,6 +175,8 @@ jobs:
 
       - name: Publish @simlin/mcp-win32-x64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-win32-x64
+        env:
+          NODE_AUTH_TOKEN: ''
         run: |
           VERSION=$(jq -r .version package.json)
           if npm view "@simlin/mcp-win32-x64@$VERSION" version > /dev/null 2>&1; then
@@ -181,6 +187,8 @@ jobs:
 
       - name: Publish @simlin/mcp-darwin-arm64
         working-directory: src/simlin-mcp/npm/@simlin/mcp-darwin-arm64
+        env:
+          NODE_AUTH_TOKEN: ''
         run: |
           VERSION=$(jq -r .version package.json)
           if npm view "@simlin/mcp-darwin-arm64@$VERSION" version > /dev/null 2>&1; then
@@ -223,6 +231,8 @@ jobs:
 
       - name: Publish @simlin/mcp
         working-directory: src/simlin-mcp
+        env:
+          NODE_AUTH_TOKEN: ''
         run: |
           VERSION=$(jq -r .version package.json)
           if npm view "@simlin/mcp@$VERSION" version > /dev/null 2>&1; then

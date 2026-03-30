@@ -146,7 +146,9 @@ fn ac5_2_only_publish_jobs_have_id_token_write() {
     );
 }
 
-// AC5.3: no long-lived npm tokens in the workflow
+// AC5.3: no long-lived npm tokens in the workflow.
+// NODE_AUTH_TOKEN: '' is allowed (clears any value injected by actions/setup-node
+// so the npm CLI falls through to OIDC), but actual secret references are not.
 #[test]
 fn ac5_3_no_npm_token_in_workflow() {
     let text = load_workflow_text();
@@ -155,12 +157,18 @@ fn ac5_3_no_npm_token_in_workflow() {
         "workflow must not reference NPM_TOKEN"
     );
     assert!(
-        !text.contains("NODE_AUTH_TOKEN"),
-        "workflow must not reference NODE_AUTH_TOKEN"
-    );
-    assert!(
         !text.contains("secrets.NPM"),
         "workflow must not reference secrets.NPM"
+    );
+    assert!(
+        !text.contains("secrets.NODE"),
+        "workflow must not reference secrets.NODE"
+    );
+    let cleared = text.matches("NODE_AUTH_TOKEN").count();
+    let empty_overrides = text.matches("NODE_AUTH_TOKEN: ''").count();
+    assert_eq!(
+        cleared, empty_overrides,
+        "every NODE_AUTH_TOKEN reference must be an empty-string override"
     );
 }
 
