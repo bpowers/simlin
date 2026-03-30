@@ -302,32 +302,6 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
     assert_eq!(&serialized_xmile, &serialized_xmile2);
 }
 
-/// Interpreter-only simulation test - runs the interpreter and compares
-/// results against expected output, but skips the VM.
-#[allow(dead_code)]
-fn simulate_path_interpreter_only(xmile_path: &str) {
-    eprintln!("model (interpreter-only): {xmile_path}");
-
-    let f = File::open(xmile_path).unwrap();
-    let mut f = BufReader::new(f);
-
-    let datamodel_project = xmile::project_from_reader(&mut f);
-    if let Err(ref err) = datamodel_project {
-        eprintln!("model '{xmile_path}' error: {err}");
-    }
-    let datamodel_project = datamodel_project.unwrap();
-    let project = Rc::new(Project::from(datamodel_project));
-    let sim = Simulation::new(&project, "main").unwrap();
-
-    let results = sim.run_to_end();
-    assert!(results.is_ok(), "interpreter run failed: {:?}", results);
-    let results = results.unwrap();
-
-    // compare against expected results
-    let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results);
-}
-
 fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
     let mdl_name = std::path::Path::new(mdl_path).file_name().unwrap();
     let dir_path = &mdl_path[0..(mdl_path.len() - mdl_name.len())];
@@ -371,30 +345,6 @@ fn simulate_mdl_path(mdl_path: &str) {
     let expected = load_expected_results_for_mdl(mdl_path)
         .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
     ensure_results(&expected, &results);
-}
-
-/// Interpreter-only simulation test for MDL files.
-#[allow(dead_code)]
-fn simulate_mdl_path_interpreter_only(mdl_path: &str) {
-    eprintln!("model (vensim mdl, interpreter-only): {mdl_path}");
-
-    let contents = std::fs::read_to_string(mdl_path)
-        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
-
-    let datamodel_project =
-        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
-    let project = Rc::new(Project::from(datamodel_project));
-
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results);
-    }
 }
 
 /// Simulate a Vensim MDL file that references external data files.
