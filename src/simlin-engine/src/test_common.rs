@@ -907,6 +907,26 @@ impl TestProject {
             }
         }
     }
+
+    /// Assert that a scalar variable's final-timestep value matches the expected value.
+    /// Parallels the gated `assert_scalar_result` but uses the VM execution path.
+    pub fn assert_vm_scalar_result(&self, var_name: &str, expected: f64) {
+        let results = self.run_vm().expect("VM should run successfully");
+
+        let series = results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("variable '{var_name}' not found in VM results"));
+
+        let actual = *series
+            .last()
+            .unwrap_or_else(|| panic!("variable '{var_name}' has empty timeseries"));
+
+        let diff = (actual - expected).abs();
+        assert!(
+            diff < 1e-6,
+            "variable '{var_name}': expected {expected}, got {actual} (diff: {diff})"
+        );
+    }
 }
 
 /// Extract variable timeseries from simulation results, including
