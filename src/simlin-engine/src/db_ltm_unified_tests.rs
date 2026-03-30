@@ -4,65 +4,7 @@
 
 use super::*;
 use crate::datamodel;
-use crate::testutils::{x_aux, x_model};
-
-fn feedback_loop_project() -> datamodel::Project {
-    datamodel::Project {
-        name: "feedback".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["births".to_string()],
-                    outflows: vec![],
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "births".to_string(),
-                    equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "birth_rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-            ],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }],
-        source: None,
-        ai_information: None,
-    }
-}
+use crate::testutils::{feedback_loop_project, x_aux, x_model};
 
 #[test]
 fn test_model_ltm_variables_generates_scores() {
