@@ -1398,13 +1398,13 @@ fn test_passthrough_module_ltm_vm() {
 ///
 /// Model structure:
 ///   Parent: level -> gap -> [growth_model] -> adjustment -> level
-///   Sub-model "growth": input_signal -> growth_flow -> internal_level -> output_rate
+///   Sub-model "growth": input_signal -> growth_flow -> internal_level -> output
 ///
 /// The parent feeds `gap` to the sub-model's `input_signal`, and uses
-/// `growth_model.output_rate` in the adjustment flow. The sub-model has
-/// its own internal stock (`internal_level`) that integrates the input
-/// signal and produces an output rate, creating a causal path through the
-/// module that participates in the parent-level feedback loop.
+/// `growth_model.output` in the adjustment flow. The sub-model's output is
+/// named `output` (not `output_rate`) so the LTM pathway analyzer can find
+/// the causal path from `input_signal` to `output` and generate a composite
+/// score for the input port.
 #[test]
 fn test_user_defined_module_ltm_vm() {
     use simlin_engine::datamodel;
@@ -1462,9 +1462,7 @@ fn test_user_defined_module_ltm_vm() {
                     }),
                     datamodel::Variable::Flow(datamodel::Flow {
                         ident: "adjustment".to_string(),
-                        equation: datamodel::Equation::Scalar(
-                            "growth_model.output_rate".to_string(),
-                        ),
+                        equation: datamodel::Equation::Scalar("growth_model.output".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -1515,8 +1513,11 @@ fn test_user_defined_module_ltm_vm() {
                         uid: None,
                         compat: datamodel::Compat::default(),
                     }),
+                    // Named "output" (not "output_rate") so the LTM pathway analyzer
+                    // can find the causal path from input_signal to output and
+                    // generate a composite score for the input_signal port.
                     datamodel::Variable::Aux(datamodel::Aux {
-                        ident: "output_rate".to_string(),
+                        ident: "output".to_string(),
                         equation: datamodel::Equation::Scalar("internal_level * 0.1".to_string()),
                         documentation: String::new(),
                         units: None,
@@ -1601,6 +1602,47 @@ fn test_user_defined_module_ltm_vm() {
     assert!(
         has_module_link,
         "link scores should reference the user-defined module as a causal node"
+    );
+
+    // Verify composite score variables exist for the sub-model's input port.
+    // The "growth" sub-model has "input_signal" as its input port and "output"
+    // as its output. The LTM pathway analyzer finds the causal path
+    // input_signal -> growth_flow -> internal_level -> output and generates
+    // a composite score for the input_signal port. In the parent's results the
+    // composite is namespaced by the module instance name (growth_model.).
+    let composite_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            let s = k.as_str();
+            s.starts_with("growth_model.") && s.contains("composite")
+        })
+        .collect();
+    assert!(
+        !composite_vars.is_empty(),
+        "sub-model composite score variables should exist namespaced by the module \
+         instance name (growth_model.*composite*), available keys: {:?}",
+        results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().starts_with("growth_model."))
+            .map(|k| k.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Verify composite for the input_signal port specifically
+    let has_input_signal_composite = composite_vars.iter().any(|k| {
+        let s = k.as_str();
+        s.contains("input_signal")
+    });
+    assert!(
+        has_input_signal_composite,
+        "composite score for the input_signal port should exist in results, \
+         found composite vars: {:?}",
+        composite_vars
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect::<Vec<_>>()
     );
 
     // Verify loop and relative loop scores exist (exhaustive mode)
@@ -1828,6 +1870,83 @@ fn test_nested_module_ltm_vm() {
         link_score_vars
             .iter()
             .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // AC4.2: Composite scores for the user module's nested SMOOTH instance
+    // exist and are namespaced under the module instance name.
+    //
+    // The "processor" model uses SMTH1 internally. The stdlib SMOOTH sub-model
+    // has input ports ("input", "delay_time") and an internal stock, so the LTM
+    // pipeline generates composite scores for those ports. These composites appear
+    // in results namespaced by the full chain: processor.<smth1_instance>.
+    let nested_composite_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            let s = k.as_str();
+            s.starts_with("processor.") && s.contains("composite")
+        })
+        .collect();
+    assert!(
+        !nested_composite_vars.is_empty(),
+        "composite scores should exist for the SMOOTH instance nested inside 'processor', \
+         namespaced under processor.*, available processor.* keys: {:?}",
+        results
+            .offsets
+            .keys()
+            .filter(|k| k.as_str().starts_with("processor."))
+            .map(|k| k.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // AC4.3: Chained nesting notation is present in composite score keys.
+    // The composite vars for the SMOOTH inside processor use multi-segment
+    // keys like "processor.$⁚smoothed⁚0⁚smth1.$⁚ltm⁚composite⁚input",
+    // confirming that nested module namespacing works correctly.
+    let has_chained_composite = nested_composite_vars.iter().any(|k| {
+        let s = k.as_str();
+        // More than one "$" in the key means multiple levels of nesting are encoded
+        s.matches('$').count() >= 2
+    });
+    assert!(
+        has_chained_composite,
+        "composite keys should reflect chained nesting (multiple '$' segments), \
+         found composite vars: {:?}",
+        nested_composite_vars
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // AC4.3: Non-zero link scores exist at the nested (SMOOTH-internal) level.
+    // The SMOOTH sub-model has link scores for its own causal edges (e.g.,
+    // input→flow, flow→output). These should be non-zero after the initial steps.
+    let nested_link_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            let s = k.as_str();
+            s.starts_with("processor.") && s.contains("link_score") && !s.contains("arg0")
+        })
+        .collect();
+    assert!(
+        !nested_link_score_vars.is_empty(),
+        "link score variables should exist inside the SMOOTH nested in 'processor'"
+    );
+
+    let any_nonzero_nested_link = nested_link_score_vars.iter().any(|k| {
+        let offset = results.offsets[*k];
+        (8..results.step_count)
+            .any(|step| results.data[step * results.step_size + offset].abs() > 1e-10)
+    });
+    assert!(
+        any_nonzero_nested_link,
+        "at least one nested link score (inside processor's SMOOTH) should be non-zero, \
+         nested link score vars: {:?}",
+        nested_link_score_vars
+            .iter()
+            .map(|k| k.as_str().to_string())
             .collect::<Vec<_>>()
     );
 }

@@ -114,36 +114,12 @@ fn build_partial_equation(
 
 /// Quote an identifier for use in an equation string.
 /// Identifiers with special characters (like $, ⁚) need double quotes.
-fn quote_ident(ident: &str) -> String {
+pub(crate) fn quote_ident(ident: &str) -> String {
     if ident.chars().all(|c| c.is_alphanumeric() || c == '_') {
         ident.to_string()
     } else {
         format!("\"{ident}\"")
     }
-}
-
-/// Generate link score equation for links involving modules (black box treatment)
-pub(crate) fn generate_module_link_score_equation(
-    from: &Ident<Canonical>,
-    to: &Ident<Canonical>,
-    _variables: &HashMap<Ident<Canonical>, Variable>,
-) -> String {
-    let from_q = quote_ident(from.as_str());
-    let to_q = quote_ident(to.as_str());
-
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_q} - PREVIOUS({from_q})) = 0) \
-                then 0 \
-                else ABS((({to_q} - PREVIOUS({to_q}))) / ({to_q} - PREVIOUS({to_q}))) * \
-                (if \
-                    ({from_q} - PREVIOUS({from_q})) = 0 \
-                    then 0 \
-                    else SIGN((({to_q} - PREVIOUS({to_q}))) / ({from_q} - PREVIOUS({from_q}))))"
-    )
 }
 
 /// Generate loop score variables for all loops.
@@ -455,20 +431,6 @@ fn generate_relative_loop_score_equation(loop_id: &str, same_group_ids: &[&str])
 
     // Relative score formula using SAFEDIV for division by zero protection
     format!("SAFEDIV({loop_score_var}, ({sum_expr}), 0)")
-}
-
-/// Generate a composite link score equation for a parent model link where
-/// the target is a dynamic module. References the module's internal
-/// composite score via interpunct notation.
-pub(crate) fn generate_module_input_link_score_equation(
-    module_ident: &Ident<Canonical>,
-    input_port: &Ident<Canonical>,
-) -> String {
-    format!(
-        "\"{module}\u{00B7}$⁚ltm⁚composite⁚{port}\"",
-        module = module_ident.as_str(),
-        port = input_port.as_str(),
-    )
 }
 
 /// Create an auxiliary variable with the given equation

@@ -1768,21 +1768,45 @@ pub fn link_score_equation_text<'db>(
         let equation = if !from_is_module && to_is_module {
             if let crate::variable::Variable::Module { inputs, .. } = &to_var {
                 if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
-                    crate::ltm_augment::generate_module_input_link_score_equation(
-                        &to_ident, &input.dst,
+                    // The link score for (non-module -> module) is the composite score
+                    // of the input port inside the sub-model, referenced via interpunct.
+                    format!(
+                        "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
+                        module = to_ident.as_str(),
+                        port = input.dst.as_str(),
                     )
                 } else {
-                    crate::ltm_augment::generate_module_link_score_equation(
-                        &from_ident,
-                        &to_ident,
-                        &HashMap::new(),
+                    // No matching input wiring found; fall back to black-box delta-ratio.
+                    let from_q = crate::ltm_augment::quote_ident(from_ident.as_str());
+                    let to_q = crate::ltm_augment::quote_ident(to_ident.as_str());
+                    format!(
+                        "if (TIME = INITIAL_TIME) then 0 \
+                         else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
+                                 (({from_q} - PREVIOUS({from_q})) = 0) \
+                              then 0 \
+                         else ABS((({to_q} - PREVIOUS({to_q}))) / \
+                                  ({to_q} - PREVIOUS({to_q}))) * \
+                              (if ({from_q} - PREVIOUS({from_q})) = 0 \
+                               then 0 \
+                               else SIGN((({to_q} - PREVIOUS({to_q}))) / \
+                                         ({from_q} - PREVIOUS({from_q}))))"
                     )
                 }
             } else {
-                crate::ltm_augment::generate_module_link_score_equation(
-                    &from_ident,
-                    &to_ident,
-                    &HashMap::new(),
+                // to_var is not a Module variant; use black-box delta-ratio.
+                let from_q = crate::ltm_augment::quote_ident(from_ident.as_str());
+                let to_q = crate::ltm_augment::quote_ident(to_ident.as_str());
+                format!(
+                    "if (TIME = INITIAL_TIME) then 0 \
+                     else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
+                             (({from_q} - PREVIOUS({from_q})) = 0) \
+                          then 0 \
+                     else ABS((({to_q} - PREVIOUS({to_q}))) / \
+                              ({to_q} - PREVIOUS({to_q}))) * \
+                          (if ({from_q} - PREVIOUS({from_q})) = 0 \
+                           then 0 \
+                           else SIGN((({to_q} - PREVIOUS({to_q}))) / \
+                                     ({from_q} - PREVIOUS({from_q}))))"
                 )
             }
         } else if from_is_module && !to_is_module {
@@ -1798,10 +1822,20 @@ pub fn link_score_equation_text<'db>(
                 &all_vars,
             )
         } else {
-            crate::ltm_augment::generate_module_link_score_equation(
-                &from_ident,
-                &to_ident,
-                &HashMap::new(),
+            // module -> module: black-box delta-ratio
+            let from_q = crate::ltm_augment::quote_ident(from_ident.as_str());
+            let to_q = crate::ltm_augment::quote_ident(to_ident.as_str());
+            format!(
+                "if (TIME = INITIAL_TIME) then 0 \
+                 else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
+                         (({from_q} - PREVIOUS({from_q})) = 0) \
+                      then 0 \
+                 else ABS((({to_q} - PREVIOUS({to_q}))) / \
+                          ({to_q} - PREVIOUS({to_q}))) * \
+                      (if ({from_q} - PREVIOUS({from_q})) = 0 \
+                       then 0 \
+                       else SIGN((({to_q} - PREVIOUS({to_q}))) / \
+                                 ({from_q} - PREVIOUS({from_q}))))"
             )
         };
 
