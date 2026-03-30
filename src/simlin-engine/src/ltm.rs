@@ -1436,8 +1436,8 @@ fn analyze_graphical_function_polarity(table: &crate::variable::Table) -> LinkPo
 mod tests {
     use super::*;
     use crate::db::{
-        DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_detected_loops,
-        sync_from_datamodel,
+        DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
+        model_detected_loops, sync_from_datamodel,
     };
     use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
     use std::collections::{HashMap, HashSet};
@@ -2177,137 +2177,95 @@ mod tests {
 
     #[test]
     fn test_fishbanks_loops() {
-        use crate::project::Project;
         use crate::prost::Message;
         use std::fs;
 
-        // Load the fishbanks.protobin file - path is relative to workspace root
         let proto_bytes = fs::read("../../test/fishbanks.protobin")
             .expect("Failed to read fishbanks.protobin file");
-
-        // Decode the protobuf into project_io::Project
         let project_io = crate::project_io::Project::decode(&proto_bytes[..])
             .expect("Failed to decode fishbanks.protobin");
-
-        // Convert to datamodel::Project then to project::Project
         let datamodel_project = crate::serde::deserialize(project_io);
-        let project = Project::from(datamodel_project);
 
-        // Find the main model (fishbanks models typically have a single main model)
-        let main_model_name = project
-            .models
-            .keys()
-            .find(|name| project.models.get(*name).is_some_and(|m| !m.implicit))
-            .expect("Should have a non-implicit model");
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
 
-        let main_model = project
-            .models
-            .get(main_model_name)
-            .expect("Should be able to get main model");
+        let model_name = crate::canonicalize(&datamodel_project.models[0].name);
+        let model = result.models[model_name.as_ref()].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
-        // Build the causal graph and find loops
-        let graph = CausalGraph::from_model(main_model, &project)
-            .expect("Should be able to build causal graph");
-        let loops = graph.find_loops();
-
-        // Assert we have exactly 3 feedback loops
         assert_eq!(
-            loops.len(),
+            detected.loops.len(),
             3,
             "Fishbanks model should have exactly 3 feedback loops, found: {}",
-            loops.len()
+            detected.loops.len()
         );
 
-        // Find the r1 loop (the one with catch and harvest_rate)
-        let r1_loop = loops
+        // Find the loop containing harvest_rate and fish_stock
+        let harvest_loop = detected
+            .loops
             .iter()
             .find(|l| {
-                l.links.iter().any(|link| {
-                    link.from.as_str() == "harvest_rate" && link.to.as_str() == "fish_stock"
-                })
+                l.variables.contains(&"harvest_rate".to_string())
+                    && l.variables.contains(&"fish_stock".to_string())
             })
-            .expect("Should find loop containing harvest_rate -> fish_stock");
+            .expect("Should find loop containing harvest_rate and fish_stock");
 
-        // Find the specific link: harvest_rate -> fish_stock
-        let harvest_to_stock_link = r1_loop
-            .links
-            .iter()
-            .find(|link| link.from.as_str() == "harvest_rate" && link.to.as_str() == "fish_stock")
-            .expect("Should find harvest_rate -> fish_stock link");
-
-        // Assert that harvest_rate -> fish_stock has negative polarity (it's an outflow)
+        // The loop containing harvest_rate should be Undetermined because some
+        // links have unknown polarity (conservative: if ANY link is unknown,
+        // the whole loop is Undetermined)
         assert_eq!(
-            harvest_to_stock_link.polarity,
-            LinkPolarity::Negative,
-            "harvest_rate -> fish_stock should have negative polarity (outflow decreases stock)"
+            harvest_loop.polarity,
+            DetectedLoopPolarity::Undetermined,
+            "Loop containing harvest_rate should be Undetermined (has unknown-polarity links)"
         );
 
-        // The loop containing harvest_rate -> fish_stock should be Undetermined
-        // because some links have unknown polarity (conservative classification:
-        // if ANY link is unknown, the loop is Undetermined)
+        // Verify per-link polarity separately: harvest_rate -> fish_stock is
+        // negative (outflow decreases stock)
+        let polarities = compute_link_polarities(&db, model, result.project);
+        let harvest_to_stock = polarities
+            .get(&("harvest_rate".to_string(), "fish_stock".to_string()))
+            .expect("Should have harvest_rate -> fish_stock link");
         assert_eq!(
-            r1_loop.polarity,
-            LoopPolarity::Undetermined,
-            "Loop containing harvest_rate should be Undetermined (has unknown-polarity links)"
+            *harvest_to_stock,
+            LinkPolarity::Negative,
+            "harvest_rate -> fish_stock should have negative polarity (outflow decreases stock)"
         );
     }
 
     #[test]
     fn test_logistic_growth_loops() {
-        use crate::project::Project;
         use crate::prost::Message;
         use std::fs;
 
-        // Load the logistic-growth.protobin file - path is relative to workspace root
         let proto_bytes = fs::read("../../test/logistic-growth.protobin")
             .expect("Failed to read logistic-growth.protobin file");
-
-        // Decode the protobuf into project_io::Project
         let project_io = crate::project_io::Project::decode(&proto_bytes[..])
             .expect("Failed to decode logistic-growth.protobin");
-
-        // Convert to datamodel::Project then to project::Project
         let datamodel_project = crate::serde::deserialize(project_io);
-        let project = Project::from(datamodel_project);
 
-        // Find the main model
-        let main_model_name = project
-            .models
-            .keys()
-            .find(|name| project.models.get(*name).is_some_and(|m| !m.implicit))
-            .expect("Should have a non-implicit model");
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
 
-        let main_model = project
-            .models
-            .get(main_model_name)
-            .expect("Should be able to get main model");
+        let model_name = crate::canonicalize(&datamodel_project.models[0].name);
+        let model = result.models[model_name.as_ref()].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
-        // Build the causal graph and find loops
-        let graph = CausalGraph::from_model(main_model, &project)
-            .expect("Should be able to build causal graph");
-        let loops = graph.find_loops();
-
-        // Logistic growth should have exactly 2 loops:
-        // 1. One undetermined loop (simple growth - has unknown-polarity link
-        //    because population -> net_birth_rate multiplication involves
-        //    fractional_growth_rate which isn't a constant)
-        // 2. One balancing loop (carrying capacity constraint - all links
-        //    have known polarity)
         assert_eq!(
-            loops.len(),
+            detected.loops.len(),
             2,
             "Logistic growth model should have exactly 2 feedback loops, found: {}",
-            loops.len()
+            detected.loops.len()
         );
 
-        // Count balancing and undetermined loops
-        let balancing_count = loops
+        let balancing_count = detected
+            .loops
             .iter()
-            .filter(|l| l.polarity == LoopPolarity::Balancing)
+            .filter(|l| l.polarity == DetectedLoopPolarity::Balancing)
             .count();
-        let undetermined_count = loops
+        let undetermined_count = detected
+            .loops
             .iter()
-            .filter(|l| l.polarity == LoopPolarity::Undetermined)
+            .filter(|l| l.polarity == DetectedLoopPolarity::Undetermined)
             .count();
 
         assert_eq!(
@@ -2315,31 +2273,25 @@ mod tests {
             "Logistic growth model should have exactly 1 balancing loop, found: {}",
             balancing_count
         );
-
         assert_eq!(
             undetermined_count, 1,
             "Logistic growth model should have exactly 1 undetermined loop, found: {}",
             undetermined_count
         );
 
-        // Check if the carrying capacity loop is correctly identified as balancing
-        // This loop involves fractional_growth_rate which depends on fraction_of_carrying_capacity_used
-        let carrying_capacity_loop = loops.iter().find(|l| {
-            l.links.iter().any(|link| {
-                link.from.as_str() == "fraction_of_carrying_capacity_used"
-                    && link.to.as_str() == "fractional_growth_rate"
-            }) || l.links.iter().any(|link| {
-                link.from.as_str() == "fractional_growth_rate"
-                    && link.to.as_str() == "net_birth_rate"
-            })
+        // The carrying capacity loop involves fractional_growth_rate and
+        // fraction_of_carrying_capacity_used; it should be balancing
+        let carrying_capacity_loop = detected.loops.iter().find(|l| {
+            l.variables
+                .contains(&"fraction_of_carrying_capacity_used".to_string())
+                && l.variables.contains(&"fractional_growth_rate".to_string())
         });
 
         if let Some(loop_item) = carrying_capacity_loop {
             assert_eq!(
                 loop_item.polarity,
-                LoopPolarity::Balancing,
-                "The carrying capacity loop should be balancing, not reinforcing. Path: {}",
-                loop_item.format_path()
+                DetectedLoopPolarity::Balancing,
+                "The carrying capacity loop should be balancing"
             );
         } else {
             panic!("Could not find the carrying capacity loop in the model");
@@ -3238,16 +3190,16 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
 
-        let partitions = graph.compute_cycle_partitions();
+        let partitions = model_cycle_partitions(&db, model, result.project);
         assert_eq!(partitions.partitions.len(), 1);
         assert_eq!(partitions.partitions[0].len(), 1);
-        assert_eq!(partitions.partitions[0][0].as_str(), "stock");
-        assert_eq!(partitions.stock_partition[&Ident::new("stock")], 0);
+        assert_eq!(partitions.partitions[0][0], "stock");
+        assert_eq!(partitions.stock_partition["stock"], 0);
     }
 
     #[test]
@@ -3263,19 +3215,18 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
 
-        let partitions = graph.compute_cycle_partitions();
+        let partitions = model_cycle_partitions(&db, model, result.project);
         assert_eq!(partitions.partitions.len(), 2);
-        // Sorted by first element: alpha < beta
-        assert_eq!(partitions.partitions[0], vec![Ident::new("alpha")]);
-        assert_eq!(partitions.partitions[1], vec![Ident::new("beta")]);
+        assert_eq!(partitions.partitions[0], vec!["alpha"]);
+        assert_eq!(partitions.partitions[1], vec!["beta"]);
         assert_ne!(
-            partitions.stock_partition[&Ident::new("alpha")],
-            partitions.stock_partition[&Ident::new("beta")]
+            partitions.stock_partition["alpha"],
+            partitions.stock_partition["beta"]
         );
     }
 
@@ -3295,23 +3246,23 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
 
-        let partitions = graph.compute_cycle_partitions();
+        let partitions = model_cycle_partitions(&db, model, result.project);
         assert_eq!(
             partitions.partitions.len(),
             1,
             "Mutually-reachable stocks should be in one partition"
         );
         assert_eq!(partitions.partitions[0].len(), 2);
-        assert_eq!(partitions.partitions[0][0].as_str(), "predators");
-        assert_eq!(partitions.partitions[0][1].as_str(), "prey");
+        assert_eq!(partitions.partitions[0][0], "predators");
+        assert_eq!(partitions.partitions[0][1], "prey");
         assert_eq!(
-            partitions.stock_partition[&Ident::new("prey")],
-            partitions.stock_partition[&Ident::new("predators")]
+            partitions.stock_partition["prey"],
+            partitions.stock_partition["predators"]
         );
     }
 
@@ -3331,21 +3282,20 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
 
-        let partitions = graph.compute_cycle_partitions();
+        let partitions = model_cycle_partitions(&db, model, result.project);
         assert_eq!(partitions.partitions.len(), 2);
-        // {stock_a, stock_b} and {stock_c}
         let coupled = &partitions.partitions[0];
         let independent = &partitions.partitions[1];
         assert_eq!(coupled.len(), 2);
-        assert_eq!(coupled[0].as_str(), "stock_a");
-        assert_eq!(coupled[1].as_str(), "stock_b");
+        assert_eq!(coupled[0], "stock_a");
+        assert_eq!(coupled[1], "stock_b");
         assert_eq!(independent.len(), 1);
-        assert_eq!(independent[0].as_str(), "stock_c");
+        assert_eq!(independent[0], "stock_c");
     }
 
     #[test]
@@ -3364,21 +3314,21 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
 
-        let partitions = graph.compute_cycle_partitions();
+        let partitions = model_cycle_partitions(&db, model, result.project);
         assert_eq!(
             partitions.partitions.len(),
             1,
             "3-stock chain should form one SCC"
         );
         assert_eq!(partitions.partitions[0].len(), 3);
-        assert_eq!(partitions.partitions[0][0].as_str(), "stock_a");
-        assert_eq!(partitions.partitions[0][1].as_str(), "stock_b");
-        assert_eq!(partitions.partitions[0][2].as_str(), "stock_c");
+        assert_eq!(partitions.partitions[0][0], "stock_a");
+        assert_eq!(partitions.partitions[0][1], "stock_b");
+        assert_eq!(partitions.partitions[0][2], "stock_c");
     }
 
     #[test]
@@ -3390,25 +3340,25 @@ mod tests {
                 x_stock("stock_a", "50", &["flow_a"], &[], None),
                 x_flow("flow_a", "stock_a * 0.1", None),
                 x_stock("stock_b", "30", &["flow_b"], &[], None),
-                x_flow("flow_b", "stock_a * 0.2", None), // b depends on a, but a doesn't depend on b
+                x_flow("flow_b", "stock_a * 0.2", None),
             ],
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
 
-        let partitions = graph.compute_cycle_partitions();
+        let partitions = model_cycle_partitions(&db, model, result.project);
         assert_eq!(
             partitions.partitions.len(),
             2,
             "One-way path should yield two separate partitions"
         );
         assert_ne!(
-            partitions.stock_partition[&Ident::new("stock_a")],
-            partitions.stock_partition[&Ident::new("stock_b")]
+            partitions.stock_partition["stock_a"],
+            partitions.stock_partition["stock_b"]
         );
     }
 
@@ -3427,19 +3377,21 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs.clone(), std::slice::from_ref(&model));
+        let db1 = SimlinDb::default();
+        let result1 = sync_from_datamodel(&db1, &datamodel_project);
+        let model1 = result1.models["main"].source;
+        let p1 = model_cycle_partitions(&db1, model1, result1.project);
 
-        let p1 = graph.compute_cycle_partitions();
-        let p2 = graph.compute_cycle_partitions();
+        let datamodel_project2 = x_project(sim_specs, std::slice::from_ref(&model));
+        let db2 = SimlinDb::default();
+        let result2 = sync_from_datamodel(&db2, &datamodel_project2);
+        let model2 = result2.models["main"].source;
+        let p2 = model_cycle_partitions(&db2, model2, result2.project);
 
         assert_eq!(p1.partitions.len(), p2.partitions.len());
         for (a, b) in p1.partitions.iter().zip(p2.partitions.iter()) {
-            let a_names: Vec<&str> = a.iter().map(|i| i.as_str()).collect();
-            let b_names: Vec<&str> = b.iter().map(|i| i.as_str()).collect();
-            assert_eq!(a_names, b_names);
+            assert_eq!(a, b);
         }
     }
 
@@ -3456,38 +3408,34 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let graph = CausalGraph::from_model(&project.models[&main_ident], &project).unwrap();
-        let partitions = graph.compute_cycle_partitions();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let partitions = model_cycle_partitions(&db, model, result.project);
 
-        let loop_a = Loop {
-            id: "r1".to_string(),
-            links: vec![],
-            stocks: vec![Ident::new("stock_a")],
-            polarity: LoopPolarity::Reinforcing,
-        };
-        let loop_b = Loop {
-            id: "r2".to_string(),
-            links: vec![],
-            stocks: vec![Ident::new("stock_b")],
-            polarity: LoopPolarity::Reinforcing,
-        };
-        let loop_no_stocks = Loop {
-            id: "u1".to_string(),
-            links: vec![],
-            stocks: vec![],
-            polarity: LoopPolarity::Undetermined,
-        };
-
-        assert!(partitions.partition_for_loop(&loop_a).is_some());
-        assert!(partitions.partition_for_loop(&loop_b).is_some());
+        // stock_a and stock_b should each map to a partition
+        assert!(partitions.stock_partition.contains_key("stock_a"));
+        assert!(partitions.stock_partition.contains_key("stock_b"));
         assert_ne!(
-            partitions.partition_for_loop(&loop_a),
-            partitions.partition_for_loop(&loop_b)
+            partitions.stock_partition["stock_a"],
+            partitions.stock_partition["stock_b"]
         );
-        assert!(partitions.partition_for_loop(&loop_no_stocks).is_none());
+
+        // Verify that detected loops reference stocks that map to partitions
+        let detected = model_detected_loops(&db, model, result.project);
+        assert_eq!(detected.loops.len(), 2);
+        for detected_loop in &detected.loops {
+            let has_partition = detected_loop
+                .variables
+                .iter()
+                .any(|v| partitions.stock_partition.contains_key(v.as_str()));
+            assert!(
+                has_partition,
+                "Loop {} should have at least one stock in the partition map",
+                detected_loop.id
+            );
+        }
     }
 
     #[test]
