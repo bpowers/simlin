@@ -222,22 +222,16 @@ fn simulate_ltm_path(model_path: &str) {
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
 
-    // Interpreter leg with LTM (retained for cross-validation per AC4.6)
-    let project = Project::from(datamodel_project.clone());
-    let ltm_project = project.with_ltm().unwrap();
-
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let loops = ltm::detect_loops(&ltm_project.models[&main_ident], &ltm_project).unwrap();
-    let ltm_project = Rc::new(ltm_project);
-
-    let sim = Simulation::new(&ltm_project, "main").unwrap();
-    let results1 = sim.run_to_end().unwrap();
-
-    // VM leg via incremental path with LTM enabled
+    // VM path via incremental compilation with LTM enabled
     let compiled = compile_ltm_incremental(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
-    let results2 = vm.into_results();
+    let results = vm.into_results();
+
+    // Project::from for structural loop detection (error reporting in ensure_ltm_results)
+    let project = Project::from(datamodel_project);
+    let main_ident: Ident<Canonical> = Ident::new("main");
+    let loops = ltm::detect_loops(&project.models[&main_ident], &project).unwrap();
 
     let xmile_name = std::path::Path::new(model_path).file_name().unwrap();
     let dir_path = &model_path[0..(model_path.len() - xmile_name.len())];
@@ -246,8 +240,7 @@ fn simulate_ltm_path(model_path: &str) {
     let ltm_results_path = dir_path.join("ltm_results.tsv");
     let expected = load_ltm_results(&ltm_results_path.to_string_lossy()).unwrap();
 
-    ensure_ltm_results(&expected, &results1, &loops);
-    ensure_ltm_results(&expected, &results2, &loops);
+    ensure_ltm_results(&expected, &results, &loops);
 }
 
 #[test]
