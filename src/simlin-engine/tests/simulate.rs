@@ -350,8 +350,8 @@ fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
     None
 }
 
-/// Simulate a Vensim MDL file via the native parser, running both interpreter
-/// and VM and comparing against expected output.
+/// Simulate a Vensim MDL file via the native parser, running the VM
+/// and comparing against expected output.
 fn simulate_mdl_path(mdl_path: &str) {
     eprintln!("model (vensim mdl): {mdl_path}");
 
@@ -361,32 +361,16 @@ fn simulate_mdl_path(mdl_path: &str) {
     let datamodel_project =
         open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-    let results1 = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    // VM leg via incremental path
     let compiled = compile_vm(&datamodel_project);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results2 = vm.into_results();
+    let results = vm.into_results();
 
-    // Validate both paths independently against expected output rather
-    // than cross-validating interpreter vs VM, since the incremental
-    // compilation path may produce different evaluation orders for
-    // internal variables.
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results1);
-        ensure_results(&expected, &results2);
-    } else {
-        ensure_results(&results1, &results2);
-    }
+    let expected = load_expected_results_for_mdl(mdl_path)
+        .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
+    ensure_results(&expected, &results);
 }
 
 /// Interpreter-only simulation test for MDL files.
@@ -431,28 +415,16 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     let datamodel_project = open_vensim_with_data(&contents, Some(&provider))
         .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-    let results1 = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    // VM leg via incremental path
     let compiled = compile_vm(&datamodel_project);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results2 = vm.into_results();
+    let results = vm.into_results();
 
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results1);
-        ensure_results(&expected, &results2);
-    } else {
-        ensure_results(&results1, &results2);
-    }
+    let expected = load_expected_results_for_mdl(mdl_path)
+        .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
+    ensure_results(&expected, &results);
 }
 
 #[test]
