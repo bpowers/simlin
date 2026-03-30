@@ -322,6 +322,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
 /// Interpreter-only simulation test - runs the interpreter and compares
 /// results against expected output, but skips the VM (for models that use
 /// array builtins like SUM which aren't yet supported in bytecode).
+#[allow(dead_code)]
 fn simulate_path_interpreter_only(xmile_path: &str) {
     eprintln!("model (interpreter-only): {xmile_path}");
 
@@ -588,19 +589,6 @@ fn simulates_except2() {
 #[test]
 fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
-}
-
-#[test]
-fn simulates_sum_interpreter_only() {
-    simulate_path_interpreter_only("../../test/sdeverywhere/models/sum/sum.xmile");
-}
-
-// Ignored: xmutil drops EXCEPT semantics and subscript mappings when converting
-// MDL to XMILE.
-#[test]
-#[ignore]
-fn simulates_except_xmile_interpreter_only() {
-    simulate_path_interpreter_only("../../test/sdeverywhere/models/except/except.xmile");
 }
 
 /// End-to-end test for EXCEPT through the MDL->simulation pipeline.
