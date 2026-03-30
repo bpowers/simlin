@@ -14,23 +14,23 @@ The implementation is split across three modules in `src/simlin-engine/src/`:
 | `ltm_augment.rs` | Synthetic variable generation: link score, loop score, and relative loop score equations |
 | `ltm_finding.rs` | Strongest-path loop discovery algorithm for models too large for exhaustive enumeration |
 
-The entry points are two methods on `Project` (in `project.rs`):
+The production entry point is the `model_ltm_variables` tracked function in
+`db_ltm.rs`, invoked as part of `compile_project_incremental`. LTM compilation
+is controlled by two flags on `SourceProject`:
 
-- **`with_ltm()`** -- Exhaustive mode. Detects all loops, generates synthetic
-  variables for link scores, loop scores, and relative loop scores. Suitable for
-  models with fewer than ~1000 loops.
+- **`ltm_enabled`** -- When true, LTM synthetic variables are generated for every
+  model (root and sub-models) during incremental compilation.
 
-- **`with_ltm_all_links()`** -- Discovery mode. Generates link score variables for
-  every causal connection (not just those in loops). After simulation, the caller
-  runs `discover_loops()` from `ltm_finding.rs` to identify important loops from
-  the simulation results.
+- **`ltm_discovery_mode`** -- Controls which edges get link scores. When false
+  (exhaustive mode), link scores are generated only for edges participating in
+  detected loops, plus loop score and relative loop score variables. When true
+  (discovery mode), link scores are generated for all causal edges.
 
-Both methods call `abort_if_arrayed()` first (LTM currently does not support
-array/subscripted variables) and return a new `Project` augmented with synthetic
-variables. The original project is consumed (moved) rather than mutated.
-Augmented models are injected via `inject_ltm_vars()`, which patches both
-user-model and stdlib-model datamodel representations so that `base_from()`
-picks up the augmented versions instead of the stock generated code.
+Every model -- root, stdlib, and user-defined -- receives identical LTM treatment
+via `model_ltm_variables`. The function auto-detects sub-model behavior by
+checking for input ports with causal pathways to the output, and generates
+pathway and composite scores for such models. LTM currently does not support
+array/subscripted variables.
 
 ## Key Data Structures
 
@@ -82,10 +82,10 @@ and average absolute score for ranking.
 
 ## Two Modes of Operation
 
-### Exhaustive Mode (`with_ltm`)
+### Exhaustive Mode (`ltm_discovery_mode = false`)
 
-1. `CausalGraph::from_model()` builds the causal graph
-2. `CausalGraph::find_loops()` uses Johnson's algorithm to enumerate all
+1. `model_causal_edges` (salsa tracked, `db_analysis.rs`) builds the causal graph
+2. `model_loop_circuits` uses Johnson's algorithm to enumerate all
    elementary circuits via DFS (`find_circuits_from` / `dfs_circuits`)
 3. Module nodes appear as regular vertices in the parent graph; loops through
    modules are found naturally by the same algorithm
@@ -96,16 +96,16 @@ and average absolute score for ranking.
    instance name, e.g. `smooth·smoothed`)
 5. Loops are deduplicated by sorted node set (`deduplicate_loops`)
 6. Deterministic IDs are assigned by sorting loops by their content key
-   (`assign_deterministic_loop_ids`)
-7. `generate_ltm_variables()` (`ltm_augment.rs`) creates synthetic variables for
-   all links participating in any loop, plus loop score and relative loop score
+   (`assign_loop_ids`)
+7. `model_ltm_variables` generates synthetic variables for all links
+   participating in any loop, plus loop score and relative loop score
    variables (with partition-scoped denominators)
 
-### Discovery Mode (`with_ltm_all_links` + `discover_loops`)
+### Discovery Mode (`ltm_discovery_mode = true` + `discover_loops`)
 
-1. `generate_ltm_variables_all_links()` (`ltm_augment.rs`) calls
-   `CausalGraph::all_links()` to get every causal edge, then generates link score
-   variables for all of them. Loop score variables are NOT generated at this stage.
+1. `model_ltm_variables` with `ltm_discovery_mode = true` generates link score
+   variables for all causal edges (not just those in loops). Loop score variables
+   are NOT generated at this stage.
 2. The augmented project is simulated normally (interpreter or VM).
 3. Post-simulation, `discover_loops()` (`ltm_finding.rs`) runs the strongest-path
    algorithm at each saved timestep:
@@ -198,7 +198,6 @@ as a separator:
 | Variable | Pattern |
 |----------|---------|
 | Link score | `$⁚ltm⁚link_score⁚{from}→{to}` |
-| Internal link score | `$⁚ltm⁚ilink⁚{from}→{to}` |
 | Pathway score | `$⁚ltm⁚path⁚{port}⁚{index}` |
 | Composite score | `$⁚ltm⁚composite⁚{port}` |
 | Loop score | `$⁚ltm⁚loop_score⁚{loop_id}` |
@@ -214,8 +213,10 @@ correct parsing by the lexer.
 The `discover_loops` function in `ltm_finding.rs` parses these names from
 `results.offsets` by matching the prefix `$⁚ltm⁚link_score⁚` and splitting
 the remainder on `→` (U+2192 RIGHTWARDS ARROW) to extract the `from` and `to`
-variable names. The `ilink` prefix for internal module link scores ensures
-discovery mode's parser does not accidentally ingest module-internal scores.
+variable names. Sub-model link scores use the same `$⁚ltm⁚link_score⁚` prefix
+but are namespaced by interpunct resolution (`module·$⁚ltm⁚link_score⁚...`),
+so the discovery parser's prefix match on the root model's flat result offsets
+naturally excludes them.
 
 ## Link Score Equations
 
@@ -280,17 +281,19 @@ stock's contribution.
 
 ### Module Links
 
-The implementation handles three module link cases in `generate_link_score_variables()`:
+The `link_score_equation_text` tracked function in `db_ltm.rs` handles three
+module link cases:
 
 - **Variable-to-module-input** (`!from_is_module && to_is_module`): Uses composite
   link score reference when the module has internal causal pathways (determined by
-  `compute_composite_ports()`). The link score variable references the module's
-  internal composite via interpunct notation (e.g., `module·$⁚ltm⁚composite⁚port`).
-  Falls back to the black-box transfer-function formula
-  (`generate_module_link_score_equation`) for modules without causal pathways.
+  `module_input_pathways_from_edges`). The link score variable references the
+  module's internal composite via interpunct notation (e.g.,
+  `module·$⁚ltm⁚composite⁚port`). Falls back to the black-box transfer-function
+  formula (`generate_module_link_score_equation`) for modules without causal
+  pathways.
 
 - **Module-output-to-variable** (`from_is_module && !to_is_module`): Uses the
-  standard ceteris-paribus formula (`generate_link_score_equation`). The
+  standard ceteris-paribus formula (`generate_link_score_equation_for_link`). The
   `build_partial_equation` function is module-ref-aware: `normalize_module_ref()`
   strips interpunct suffixes so that module output references (e.g.,
   `$⁚s⁚0⁚smth1·output`) are correctly excluded from `PREVIOUS()` wrapping while
@@ -318,15 +321,15 @@ Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
 - **Passthrough** -- no internal stocks; treated as black box with a transfer
   score formula.
 
-### Composite Port Pre-computation
+### Unified Module LTM Treatment
 
-Before generating link score variables, `compute_composite_ports()` in
-`ltm_augment.rs` scans all implicit (stdlib) models classified as `DynamicModule`,
-builds their internal causal graphs, enumerates pathways from each input port to
-the output, and records which ports have valid causal pathways. This
-`CompositePortMap` is then used during link score generation to determine whether
-a variable-to-module link should use the composite reference or fall back to the
-black-box formula.
+Every model (root, stdlib, user-defined) receives identical LTM treatment via
+the `model_ltm_variables` tracked function. The function auto-detects sub-model
+behavior by checking for input ports with causal pathways to the output
+(`module_input_pathways_from_edges`). For models with valid input-to-output
+pathways, pathway and composite score variables are generated. The composite
+score is the "LTM interface" of a module -- the parent model's link score for
+`input -> module` references `module·$⁚ltm⁚composite⁚port`.
 
 ### How Composite Link Scores Work
 
@@ -336,16 +339,16 @@ black-box formula.
    participates correctly in loop detection.
 
 2. **Internal instrumentation**: For each DynamicModule model,
-   `generate_module_internal_ltm_variables()` in `ltm_augment.rs` generates:
-   - Internal link score variables with the `$⁚ltm⁚ilink⁚` prefix for all
+   `model_ltm_variables` generates:
+   - Internal link score variables with the `$⁚ltm⁚link_score⁚` prefix for all
      causal links within the module
    - Pathway score variables (`$⁚ltm⁚path⁚{port}⁚{index}`) for each pathway,
      computed as the product of constituent internal link scores
    - Composite score variables (`$⁚ltm⁚composite⁚{port}`) that select the
      pathway with the largest absolute magnitude at each timestep
 
-   These are added to the stdlib model's datamodel representation via
-   `inject_ltm_vars()` in `project.rs`.
+   These are compiled and included as part of the incremental compilation
+   pipeline via the salsa tracked function graph.
 
 3. **Pathway enumeration**: `enumerate_module_pathways()` in `ltm.rs` finds all
    simple paths from each input port to the output variable within the module's
@@ -499,8 +502,8 @@ After all timesteps are processed:
 
 ### Array Variables
 
-Both `with_ltm()` and `with_ltm_all_links()` call `abort_if_arrayed()` and return
-an error if the model contains array (subscripted) variables. Extending LTM to
+The LTM compilation path skips models containing array (subscripted) variables.
+Extending LTM to
 arrays would require element-wise link score computation and a strategy for
 reporting aggregate scores.
 
@@ -529,7 +532,7 @@ computational interval" strategy.
 2. **No composite network fallback**: The papers describe a two-tier strategy
    where models with fewer than ~1000 loops use exhaustive enumeration on a
    composite (max-score) network. The implementation keeps the two modes entirely
-   separate: `with_ltm()` for exhaustive and `with_ltm_all_links()` + `discover_loops()`
+   separate: `ltm_enabled` for exhaustive and `ltm_discovery_mode` + `discover_loops()`
    for discovery. There is no automatic switching based on loop count.
 
 3. **Module handling**: The papers describe composite link scores for macros
@@ -583,7 +586,7 @@ computational interval" strategy.
   for builtin function preservation, simple substitution, no-deps-to-wrap, and
   IF-THEN-ELSE, loop score and relative loop score equations (including
   single-loop SAFEDIV behavior and single-balancing-loop negative scores),
-  generated variable structure, end-to-end simulation with LTM
+  generated variable structure
 
 - **`ltm_finding.rs`**: SearchGraph construction and edge sorting, trivial loop,
   Figure 7 from the paper (demonstrating per-stock reset recovery), per-stock
@@ -593,12 +596,28 @@ computational interval" strategy.
   rank-and-filter (truncation, contribution filtering, ordering preservation,
   briefly dominant loop retention, partition-aware filtering)
 
+### Salsa Pipeline Tests
+
+- **`db_ltm_tests.rs`**: LTM equation text generation via salsa tracked
+  functions, link score caching behavior
+
+- **`db_ltm_unified_tests.rs`**: `model_ltm_variables` for simple models,
+  stdlib modules (SMOOTH), passthrough modules, and discovery mode
+
+- **`db_ltm_module_tests.rs`**: Module-specific LTM tests: SMOOTH models
+  compile with LTM, composite scores are generated for stdlib modules,
+  user-defined modules with feedback receive LTM treatment
+
+- **`db_tests.rs`** (LTM subset): Salsa LTM caching, discovery vs exhaustive
+  variable counts, incremental invalidation, layout slot allocation with LTM
+
 ### Integration Tests (`tests/simulate_ltm.rs`)
+
+All integration tests use `compile_project_incremental` + VM:
 
 - **`simulates_population_ltm`**: Runs the logistic growth model with exhaustive
   LTM, validates relative loop scores against golden data from reference SD
-  software (`test/logistic_growth_ltm/ltm_results.tsv`), runs on both interpreter
-  and VM
+  software (`test/logistic_growth_ltm/ltm_results.tsv`)
 
 - **`discovery_logistic_growth_finds_both_loops`**: Verifies discovery mode finds
   both loops in the logistic growth model
