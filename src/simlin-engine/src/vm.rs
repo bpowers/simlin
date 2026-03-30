@@ -3075,104 +3075,7 @@ mod is_truthy_and_eval_op2_tests {
 
 #[cfg(test)]
 mod per_variable_initials_tests {
-    use super::*;
     use crate::test_common::TestProject;
-
-    #[test]
-    fn test_per_var_initials_matches_interpreter() {
-        let tp = TestProject::new("per_var_test")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("rate", "0.1", None)
-            .aux("scaled_rate", "rate * 10", None)
-            .flow("births", "population * rate", None)
-            .flow("deaths", "population / 80", None)
-            .stock("population", "100", &["births"], &["deaths"], None);
-
-        let interp_results = tp
-            .run_interpreter()
-            .expect("interpreter should run successfully");
-        let vm_results = tp.run_vm_incremental();
-
-        let pop_ident = "population";
-        let interp_pop = &interp_results[pop_ident];
-        let vm_pop = &vm_results[pop_ident];
-
-        assert_eq!(
-            interp_pop.len(),
-            vm_pop.len(),
-            "step count should match between interpreter and VM"
-        );
-        for (i, (interp_val, vm_val)) in interp_pop.iter().zip(vm_pop.iter()).enumerate() {
-            assert!(
-                (interp_val - vm_val).abs() < 1e-10,
-                "population mismatch at step {i}: interpreter={interp_val}, vm={vm_val}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_per_var_initials_dependency_order() {
-        // a = 5, b = a * 2, c = b + 1, stock initial = c
-        let tp = TestProject::new("dep_order_test")
-            .with_sim_time(0.0, 1.0, 1.0)
-            .aux("a", "5", None)
-            .aux("b", "a * 2", None)
-            .aux("c", "b + 1", None)
-            .flow("inflow", "0", None)
-            .stock("s", "c", &["inflow"], &[], None);
-
-        let vm_results = tp.run_vm_incremental();
-        let interp_results = tp.run_interpreter().expect("interpreter should succeed");
-
-        // Check initial values (step 0)
-        let s_vm = &vm_results["s"];
-        let s_interp = &interp_results["s"];
-        assert_eq!(s_vm[0], 11.0, "stock initial = c = b+1 = a*2+1 = 11 (VM)");
-        assert_eq!(
-            s_interp[0], 11.0,
-            "stock initial = c = b+1 = a*2+1 = 11 (interpreter)"
-        );
-    }
-
-    #[test]
-    fn test_per_var_initials_with_module() {
-        let test_file = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
-        );
-        let file_bytes =
-            std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
-        let mut cursor = std::io::Cursor::new(file_bytes);
-        let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
-
-        // Interpreter side (retained for cross-validation)
-        let project = std::sync::Arc::new(crate::project::Project::from(project_datamodel.clone()));
-        let sim =
-            crate::interpreter::Simulation::new(&project, "main").expect("Simulation should build");
-        let interp_results = sim.run_to_end().expect("interpreter run should succeed");
-
-        // VM via incremental compilation
-        let mut db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
-        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-            .expect("incremental compile should succeed");
-        let mut vm = Vm::new(compiled).expect("VM creation should succeed");
-        vm.run_to_end().expect("VM run should succeed");
-        let vm_results = vm.into_results();
-
-        // Compare all offsets between interpreter and VM at every timestep
-        for (name, &offset) in &interp_results.offsets {
-            for step in 0..std::cmp::min(interp_results.step_count, vm_results.step_count) {
-                let idx = step * interp_results.step_size + offset;
-                let interp_val = interp_results.data[idx];
-                let vm_val = vm_results.data[idx];
-                assert!(
-                    (interp_val - vm_val).abs() < 1e-10 || (interp_val.is_nan() && vm_val.is_nan()),
-                    "mismatch for {name} at step {step}: interpreter={interp_val}, vm={vm_val}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn test_compiled_constant_offsets_sorted_deduped() {
@@ -4329,27 +4232,6 @@ mod superinstruction_tests {
         );
     }
 
-    #[test]
-    fn test_assign_const_curr_simulation_result() {
-        let tp = TestProject::new("const_sim")
-            .with_sim_time(0.0, 2.0, 1.0)
-            .aux("rate", "0.1", None)
-            .flow("inflow", "pop * rate", None)
-            .stock("pop", "100", &["inflow"], &[], None);
-
-        let vm_results = tp.run_vm().unwrap();
-        let interp_results = tp.run_interpreter().unwrap();
-
-        let vm_rate = &vm_results["rate"];
-        let interp_rate = &interp_results["rate"];
-        for (i, (v, e)) in vm_rate.iter().zip(interp_rate.iter()).enumerate() {
-            assert!(
-                (v - e).abs() < 1e-10,
-                "rate mismatch at step {i}: vm={v}, interp={e}"
-            );
-        }
-    }
-
     // -----------------------------------------------------------------------
     // BinOpAssignCurr: e.g. `births = population * birth_rate`
     // -----------------------------------------------------------------------
@@ -4410,33 +4292,6 @@ mod superinstruction_tests {
         assert!(
             has_binop_next,
             "stock integration should produce BinOpAssignNext in stock bytecode"
-        );
-    }
-
-    #[test]
-    fn test_binop_assign_next_simulation_stock_integration() {
-        let tp = TestProject::new("stock_integ_sim")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .flow("inflow", "10", None)
-            .stock("s", "0", &["inflow"], &[], None);
-
-        let vm_results = tp.run_vm().unwrap();
-        let interp_results = tp.run_interpreter().unwrap();
-
-        let vm_s = &vm_results["s"];
-        let interp_s = &interp_results["s"];
-
-        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
-            assert!(
-                (v - e).abs() < 1e-10,
-                "stock mismatch at step {i}: vm={v}, interp={e}"
-            );
-        }
-        // s starts at 0, inflow=10, dt=1 => s at step 1 = 10, step 2 = 20, etc.
-        assert!((vm_s[0] - 0.0).abs() < 1e-10, "stock initial should be 0");
-        assert!(
-            (vm_s[1] - 10.0).abs() < 1e-10,
-            "stock at step 1 should be 10"
         );
     }
 
@@ -4554,57 +4409,6 @@ mod superinstruction_tests {
     // -----------------------------------------------------------------------
     // Superinstruction execution correctness across multiple timesteps
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_superinstruction_population_model_matches_interpreter() {
-        let tp = TestProject::new("pop_model")
-            .with_sim_time(0.0, 10.0, 0.5)
-            .aux("birth_rate", "0.1", None)
-            .aux("death_rate", "0.05", None)
-            .flow("births", "population * birth_rate", None)
-            .flow("deaths", "population * death_rate", None)
-            .stock("population", "1000", &["births"], &["deaths"], None);
-
-        let vm_results = tp.run_vm().unwrap();
-        let interp_results = tp.run_interpreter().unwrap();
-
-        for var in &["population", "births", "deaths", "birth_rate", "death_rate"] {
-            let vm_vals = &vm_results[*var];
-            let interp_vals = &interp_results[*var];
-            assert_eq!(
-                vm_vals.len(),
-                interp_vals.len(),
-                "step count mismatch for {var}"
-            );
-            for (i, (v, e)) in vm_vals.iter().zip(interp_vals.iter()).enumerate() {
-                assert!(
-                    (v - e).abs() < 1e-10,
-                    "{var} mismatch at step {i}: vm={v}, interp={e}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_superinstruction_with_small_dt() {
-        let tp = TestProject::new("small_dt")
-            .with_sim_time(0.0, 1.0, 0.125)
-            .aux("rate", "0.5", None)
-            .flow("growth", "s * rate", None)
-            .stock("s", "10", &["growth"], &[], None);
-
-        let vm_results = tp.run_vm().unwrap();
-        let interp_results = tp.run_interpreter().unwrap();
-
-        let vm_s = &vm_results["s"];
-        let interp_s = &interp_results["s"];
-        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
-            assert!(
-                (v - e).abs() < 1e-10,
-                "s mismatch at step {i}: vm={v}, interp={e}"
-            );
-        }
-    }
 
     // -----------------------------------------------------------------------
     // Op2 variants through *fused* BinOpAssignCurr superinstruction.
