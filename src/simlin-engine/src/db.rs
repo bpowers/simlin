@@ -5874,6 +5874,17 @@ pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enable
     }
 }
 
+/// Set the `ltm_discovery_mode` flag on a `SourceProject` salsa input.
+///
+/// When true, LTM generates link scores for every causal edge rather
+/// than only edges participating in detected feedback loops.
+pub fn set_project_ltm_discovery_mode(db: &mut SimlinDb, project: SourceProject, enabled: bool) {
+    use salsa::Setter;
+    if project.ltm_discovery_mode(db) != enabled {
+        project.set_ltm_discovery_mode(db).to(enabled);
+    }
+}
+
 /// Compile a project incrementally using salsa tracked functions.
 ///
 /// This is the production compilation entry point. Returns the assembled

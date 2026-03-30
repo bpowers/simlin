@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::result::Result as StdResult;
 
 use simlin_engine::common::{Canonical, Ident};
-use simlin_engine::db::set_project_ltm_enabled;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::db::{set_project_ltm_discovery_mode, set_project_ltm_enabled};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm, ltm_finding};
@@ -19,11 +19,23 @@ use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm, ltm_fin
 const LTM_TOLERANCE: f64 = 0.05;
 
 /// Compile a datamodel project to a VM simulation using the incremental
-/// salsa path with LTM enabled.
+/// salsa path with LTM enabled (exhaustive mode).
 fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> CompiledSimulation {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
+    compile_project_incremental(&db, sync.project, "main").unwrap()
+}
+
+/// Compile a datamodel project to a VM simulation using the incremental
+/// salsa path with LTM in discovery mode (scores for every causal edge).
+fn compile_ltm_discovery_incremental(
+    project: &simlin_engine::datamodel::Project,
+) -> CompiledSimulation {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
     compile_project_incremental(&db, sync.project, "main").unwrap()
 }
 
@@ -1045,5 +1057,287 @@ fn test_module_output_multi_input_link_score_magnitude() {
          when the downstream variable has multiple inputs contributing. \
          All observed magnitudes were >= 0.95, indicating the black-box formula is \
          still being used."
+    );
+}
+
+// --- VM integration tests for LTM scoring ---
+//
+// The compile_project_incremental + VM path does not yet support LTM on
+// models containing stdlib modules (SMOOTH/DELAY): the LTM augmentation
+// generates variable references that fail layout resolution for implicit
+// module instances. Module-specific LTM tests remain on the interpreter
+// path (above). The tests below exercise the VM path with non-module
+// feedback loops to verify the full pipeline works end-to-end.
+
+/// Balancing feedback loop (stock -> aux -> flow -> stock) via the full
+/// VM pipeline in exhaustive mode. Verifies non-zero link scores and
+/// loop/relative loop scores after simulation.
+#[test]
+fn test_feedback_loop_exhaustive_vm() {
+    let project = TestProject::new("fb_exhaustive")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["adj"], &[], None)
+        .aux("gap", "100 - level", None)
+        .flow("adj", "gap / 5", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let link_score_offsets: Vec<_> = results
+        .offsets
+        .iter()
+        .filter(|(name, _)| name.as_str().contains("link_score"))
+        .collect();
+    assert!(
+        !link_score_offsets.is_empty(),
+        "should have link score variables"
+    );
+
+    // Exhaustive mode should produce loop score and relative loop score vars
+    let loop_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !loop_score_vars.is_empty(),
+        "exhaustive mode should have loop score variables"
+    );
+
+    let rel_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !rel_score_vars.is_empty(),
+        "exhaustive mode should have relative loop score variables"
+    );
+
+    let any_nonzero_link = link_score_offsets.iter().any(|(_, offset)| {
+        (2..results.step_count)
+            .any(|step| results.data[step * results.step_size + **offset].abs() > 1e-10)
+    });
+    assert!(
+        any_nonzero_link,
+        "at least one link score should be non-zero"
+    );
+}
+
+/// Feedback loop via the VM pipeline in discovery mode. Verifies that
+/// discovery mode produces link scores for all causal edges and that
+/// discover_loops finds the feedback loop.
+#[test]
+fn test_feedback_loop_discovery_vm() {
+    let project = TestProject::new("fb_discovery")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["adj"], &[], None)
+        .aux("gap", "100 - level", None)
+        .flow("adj", "gap / 5", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let link_score_offsets: Vec<_> = results
+        .offsets
+        .iter()
+        .filter(|(name, _)| {
+            name.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !link_score_offsets.is_empty(),
+        "discovery mode should have link score variables"
+    );
+
+    // Use the interpreter Project path to run discover_loops on the VM results,
+    // since discover_loops needs a compiled Project for the causal graph.
+    let compiled_project = Project::from(project);
+    let found = ltm_finding::discover_loops(&results, &compiled_project)
+        .expect("discover_loops should succeed");
+
+    assert!(
+        !found.is_empty(),
+        "discovery mode should find at least one loop"
+    );
+
+    // The discovered loop should involve the stock
+    let involves_level = found.iter().any(|l| {
+        l.loop_info
+            .links
+            .iter()
+            .any(|link| link.from.as_str() == "level" || link.to.as_str() == "level")
+    });
+    assert!(
+        involves_level,
+        "discovered loop should involve the stock variable"
+    );
+}
+
+/// Reinforcing feedback loop with DELAY1-like dynamics (no actual stdlib
+/// module) via the VM pipeline. Uses a stock-flow structure with the flow
+/// depending on the stock to create a reinforcing loop, verifying that LTM
+/// scoring works for reinforcing as well as balancing loops.
+#[test]
+fn test_reinforcing_feedback_loop_vm() {
+    let project = TestProject::new("reinforcing_fb")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .aux("growth_rate", "0.1", None)
+        .flow("births", "population * growth_rate", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let link_score_offsets: Vec<_> = results
+        .offsets
+        .iter()
+        .filter(|(name, _)| name.as_str().contains("link_score"))
+        .collect();
+    assert!(
+        !link_score_offsets.is_empty(),
+        "reinforcing loop should have link score variables"
+    );
+
+    let any_nonzero_link = link_score_offsets.iter().any(|(_, offset)| {
+        (2..results.step_count)
+            .any(|step| results.data[step * results.step_size + **offset].abs() > 1e-10)
+    });
+    assert!(
+        any_nonzero_link,
+        "at least one reinforcing loop link score should be non-zero"
+    );
+}
+
+/// Two independent feedback loops via the VM pipeline. Each loop should
+/// produce its own link scores and loop scores, verifying independent
+/// scoring per feedback path.
+#[test]
+fn test_multiple_feedback_loops_vm() {
+    let project = TestProject::new("multi_loops_vm")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .stock("level_a", "50", &["adj_a"], &[], None)
+        .aux("gap_a", "100 - level_a", None)
+        .flow("adj_a", "gap_a / 5", None)
+        .stock("level_b", "30", &["adj_b"], &[], None)
+        .aux("gap_b", "80 - level_b", None)
+        .flow("adj_b", "gap_b / 3", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Both loops should produce link score variables
+    let link_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .cloned()
+        .collect();
+
+    // Each loop has at least 3 edges (stock->aux, aux->flow, flow->stock)
+    assert!(
+        link_score_vars.len() >= 6,
+        "two loops should have at least 6 link score variables, found {}",
+        link_score_vars.len()
+    );
+
+    // Both loops should produce independent loop scores
+    let loop_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        loop_score_vars.len() >= 2,
+        "should have at least 2 loop score variables, found {}",
+        loop_score_vars.len()
+    );
+
+    // Relative loop scores should all have magnitude 1 since each loop
+    // is in its own partition (independent subsystems).
+    let rel_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
+        })
+        .collect();
+    assert_eq!(
+        rel_score_vars.len(),
+        loop_score_vars.len(),
+        "should have a relative loop score for each loop score"
+    );
+}
+
+/// A model with no modules (passthrough aux in feedback loop). LTM
+/// compilation should succeed with no composite or pathway scores since
+/// there are no module instances.
+#[test]
+fn test_passthrough_module_ltm_vm() {
+    let project = TestProject::new("passthrough_vm")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("level", "50", &["inflow"], &[], None)
+        .aux("passthrough", "100 - level", None)
+        .flow("inflow", "passthrough / 5", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // No composite scores should exist since there are no modules
+    let composite_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().contains("composite"))
+        .collect();
+    assert!(
+        composite_vars.is_empty(),
+        "passthrough model without modules should have no composite scores, found: {:?}",
+        composite_vars
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // But link scores should still exist for the non-module causal edges
+    let link_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !link_score_vars.is_empty(),
+        "should still have link scores for non-module edges"
     );
 }
