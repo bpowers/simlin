@@ -1435,6 +1435,7 @@ fn analyze_graphical_function_polarity(table: &crate::variable::Table) -> LinkPo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{DetectedLoopPolarity, SimlinDb, model_detected_loops, sync_from_datamodel};
     use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
     use std::collections::{HashMap, HashSet};
 
@@ -1451,25 +1452,21 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model = &project.models[&main_ident];
-        let model_loops = detect_loops(model, &project).unwrap();
-        assert_eq!(model_loops.len(), 1);
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
+        let loops = &detected.loops;
+        assert_eq!(loops.len(), 1);
 
-        let loop_item = &model_loops[0];
-        assert_eq!(loop_item.links.len(), 2);
-        assert_eq!(loop_item.stocks.len(), 1);
-        assert_eq!(loop_item.stocks[0].as_str(), "population");
-
-        // Check that the loop has a deterministic ID
+        let loop_item = &loops[0];
+        assert!(
+            loop_item.variables.contains(&"population".to_string()),
+            "Loop should contain population"
+        );
         assert_eq!(loop_item.id, "r1");
-
-        // Check that the path formatting works
-        let path = loop_item.format_path();
-        assert!(path.contains("population"));
-        assert!(path.contains("births"));
+        assert_eq!(loop_item.polarity, DetectedLoopPolarity::Reinforcing);
     }
 
     #[test]
@@ -1487,27 +1484,25 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs.clone(), std::slice::from_ref(&model));
-        let project1 = Project::from(project);
+        let datamodel_project1 = x_project(sim_specs.clone(), std::slice::from_ref(&model));
+        let db1 = SimlinDb::default();
+        let result1 = sync_from_datamodel(&db1, &datamodel_project1);
+        let model1 = result1.models["main"].source;
+        let detected1 = model_detected_loops(&db1, model1, result1.project);
 
-        // Create the same project again
-        let project = x_project(sim_specs, &[model]);
-        let project2 = Project::from(project);
+        let datamodel_project2 = x_project(sim_specs, &[model]);
+        let db2 = SimlinDb::default();
+        let result2 = sync_from_datamodel(&db2, &datamodel_project2);
+        let model2 = result2.models["main"].source;
+        let detected2 = model_detected_loops(&db2, model2, result2.project);
 
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let main_loops1 = detect_loops(&project1.models[&main_ident], &project1).unwrap();
-        let main_loops2 = detect_loops(&project2.models[&main_ident], &project2).unwrap();
+        assert_eq!(detected1.loops.len(), detected2.loops.len());
 
-        // Should have the same number of loops
-        assert_eq!(main_loops1.len(), main_loops2.len());
-
-        // Loop IDs should be identical
-        for (loop1, loop2) in main_loops1.iter().zip(main_loops2.iter()) {
+        for (loop1, loop2) in detected1.loops.iter().zip(detected2.loops.iter()) {
             assert_eq!(loop1.id, loop2.id, "Loop IDs should be deterministic");
             assert_eq!(
-                loop1.format_path(),
-                loop2.format_path(),
-                "Loop paths should be identical"
+                loop1.variables, loop2.variables,
+                "Loop variables should be identical"
             );
         }
     }
@@ -1524,11 +1519,12 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
-        assert_eq!(model_loops.len(), 0);
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
+        assert!(detected.loops.is_empty());
     }
 
     #[test]
@@ -1547,18 +1543,18 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
-        // Should find the balancing loop
-        assert!(!model_loops.is_empty());
+        assert!(!detected.loops.is_empty());
 
-        // Check that at least one loop is balancing
-        let has_balancing = model_loops
+        let has_balancing = detected
+            .loops
             .iter()
-            .any(|loop_item| loop_item.polarity == LoopPolarity::Balancing);
+            .any(|l| l.polarity == DetectedLoopPolarity::Balancing);
         assert!(has_balancing, "Should have detected a balancing loop");
     }
 
@@ -1595,23 +1591,23 @@ mod tests {
         let smooth_model = x_model(
             "smooth_inventory_gap",
             vec![
-                x_aux("input", "0", None), // Module input
+                x_aux("input", "0", None),
                 x_stock("smoothed", "0", &["change_in_smooth"], &[], None),
                 x_flow("change_in_smooth", "(input - smoothed) / smooth_time", None),
                 x_aux("smooth_time", "3", None),
-                x_aux("output", "smoothed", None), // Module output
+                x_aux("output", "smoothed", None),
             ],
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs, &[main_model, smooth_model]);
-        let project = Project::from(project);
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let datamodel_project = x_project(sim_specs, &[main_model, smooth_model]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
-        // With corrected module input format, we should find loops through the module
         assert!(
-            !model_loops.is_empty(),
+            !detected.loops.is_empty(),
             "Should find at least one loop through the module"
         );
     }
@@ -1631,13 +1627,13 @@ mod tests {
                     &[("initial_value", "processor_a\u{00B7}input")],
                     None,
                 ),
-                x_aux("intermediate", "processor_a", None), // Output from module A
+                x_aux("intermediate", "processor_a", None),
                 x_module(
                     "processor_b",
                     &[("intermediate", "processor_b\u{00B7}input")],
                     None,
                 ),
-                x_aux("feedback", "processor_b * 0.5", None), // Output from module B
+                x_aux("feedback", "processor_b * 0.5", None),
                 x_aux("combined", "initial_value + feedback", None),
             ],
         );
@@ -1660,19 +1656,19 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(
+        let datamodel_project = x_project(
             sim_specs,
             &[main_model, processor_a_model, processor_b_model],
         );
-        let project = Project::from(project);
-
-        let main_ident: Ident<Canonical> = Ident::new("main");
-        let model_loops = detect_loops(&project.models[&main_ident], &project).unwrap();
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &datamodel_project);
+        let model = result.models["main"].source;
+        let detected = model_detected_loops(&db, model, result.project);
 
         // This model has no feedback loop (initial_value is a constant, no
         // path from output back to input), so no loops should be found.
         assert!(
-            model_loops.is_empty(),
+            detected.loops.is_empty(),
             "Model without feedback should have no loops"
         );
     }
