@@ -3144,30 +3144,21 @@ mod per_variable_initials_tests {
             .flow("inflow", "0", None)
             .stock("s", "arr[A] + arr[B] + arr[C]", &["inflow"], &[], None);
 
-        let interp_results = tp.run_interpreter().expect("interpreter should succeed");
         let vm_results = tp.run_vm_incremental();
 
         // arr[A]=1, arr[B]=2, arr[C]=3, so s = 1+2+3 = 6
-        let s_interp = interp_results
-            .get("s")
-            .expect("s should exist in interpreter");
         let s_vm = vm_results.get("s").expect("s should exist in VM");
-        assert_eq!(s_interp[0], 6.0, "s initial = 6 in interpreter");
         assert_eq!(s_vm[0], 6.0, "s initial = 6 in VM");
 
-        // Verify individual array elements match (names are canonicalized to lowercase)
-        for element in &["arr[a]", "arr[b]", "arr[c]"] {
-            let interp_val = interp_results
-                .get(*element)
-                .unwrap_or_else(|| panic!("{element} should exist in interpreter results"));
+        let expected: &[(&str, f64)] = &[("arr[a]", 1.0), ("arr[b]", 2.0), ("arr[c]", 3.0)];
+        for &(element, expected_val) in expected {
             let vm_val = vm_results
-                .get(*element)
+                .get(element)
                 .unwrap_or_else(|| panic!("{element} should exist in VM results"));
             assert!(
-                (interp_val[0] - vm_val[0]).abs() < 1e-10,
-                "{element}: interpreter={}, vm={}",
-                interp_val[0],
-                vm_val[0]
+                (vm_val[0] - expected_val).abs() < 1e-10,
+                "{element}: expected={expected_val}, vm={}",
+                vm_val[0],
             );
         }
 
@@ -3313,21 +3304,19 @@ mod vm_reset_and_run_initials_tests {
     }
 
     #[test]
-    fn test_previous_in_initials_vm_matches_interpreter() {
+    fn test_previous_in_initials_vm() {
         let tp = TestProject::new("previous_in_initials")
             .with_sim_time(0.0, 2.0, 1.0)
             .aux("x", "5", None)
             .stock("s", "PREVIOUS(x)", &[], &[], None);
 
-        let interp = tp.run_interpreter().expect("interpreter should run");
         let vm = tp.run_vm().expect("vm should run");
-        let interp_s = interp.get("s").expect("interpreter missing s");
         let vm_s = vm.get("s").expect("vm missing s");
 
+        // PREVIOUS(x) returns 0 at the initial timestep (the default value)
         assert!(
-            (interp_s[0] - vm_s[0]).abs() < 1e-10,
-            "interpreter/vm mismatch for stock initial PREVIOUS(x): interp={}, vm={}",
-            interp_s[0],
+            (vm_s[0] - 0.0).abs() < 1e-10,
+            "stock initial PREVIOUS(x) should be 0.0 at t=0, got {}",
             vm_s[0]
         );
     }
@@ -4527,19 +4516,19 @@ mod superinstruction_tests {
             .flow("outflow", "5", None)
             .stock("s", "100", &[], &["outflow"], None);
         let vm_results = tp.run_vm().unwrap();
-        let interp_results = tp.run_interpreter().unwrap();
         let vm_s = &vm_results["s"];
-        let interp_s = &interp_results["s"];
-        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
-            assert!(
-                (v - e).abs() < 1e-10,
-                "s mismatch at step {i}: vm={v}, interp={e}"
-            );
-        }
         assert!((vm_s[0] - 100.0).abs() < 1e-10, "initial should be 100");
         assert!(
             (vm_s[1] - 95.0).abs() < 1e-10,
             "step 1 should be 95 (100 - 5)"
+        );
+        assert!(
+            (vm_s[2] - 90.0).abs() < 1e-10,
+            "step 2 should be 90 (95 - 5)"
+        );
+        assert!(
+            (vm_s[3] - 85.0).abs() < 1e-10,
+            "step 3 should be 85 (90 - 5)"
         );
     }
 
@@ -4649,22 +4638,29 @@ mod superinstruction_tests {
         );
 
         let vm_results = tp.run_vm().unwrap();
-        let interp_results = tp.run_interpreter().unwrap();
 
         // product = 2*3 = 6, sum = 2+3 = 5, inflow = 11
         // s starts at 0, gains 11 per step
         let vm_s = &vm_results["s"];
-        let interp_s = &interp_results["s"];
-        for (i, (v, e)) in vm_s.iter().zip(interp_s.iter()).enumerate() {
-            assert!(
-                (v - e).abs() < 1e-10,
-                "s mismatch at step {i}: vm={v}, interp={e}"
-            );
-        }
+        assert!(
+            (vm_s[0] - 0.0).abs() < 1e-10,
+            "s at step 0 should be 0, got {}",
+            vm_s[0]
+        );
         assert!(
             (vm_s[1] - 11.0).abs() < 1e-10,
             "s at step 1 should be 11, got {}",
             vm_s[1]
+        );
+        assert!(
+            (vm_s[2] - 22.0).abs() < 1e-10,
+            "s at step 2 should be 22, got {}",
+            vm_s[2]
+        );
+        assert!(
+            (vm_s[3] - 33.0).abs() < 1e-10,
+            "s at step 3 should be 33, got {}",
+            vm_s[3]
         );
     }
 }
@@ -4983,9 +4979,10 @@ mod vm_reset_run_to_and_constants_tests {
         assert!((steps[2][TIME_OFF] - 8.0).abs() < 1e-10);
     }
 
-    /// Same test but via the interpreter, to verify VM and interpreter agree.
+    /// Verify that non-divisible save_step produces the correct number of saved steps
+    /// via the HashMap-returning run_vm() path.
     #[test]
-    fn test_non_divisible_save_step_interpreter_agreement() {
+    fn test_non_divisible_save_step_vm() {
         let tp = TestProject::new_with_specs(
             "non_div_interp",
             datamodel::SimSpecs {
@@ -5001,15 +4998,13 @@ mod vm_reset_run_to_and_constants_tests {
         .stock("s", "0", &["inflow"], &[], None);
 
         let vm_results = tp.run_vm().expect("VM should succeed");
-        let interp_results = tp.run_interpreter().expect("Interpreter should succeed");
-
         let vm_time = vm_results.get("time").expect("time in VM results");
-        let interp_time = interp_results.get("time").expect("time in interp results");
 
+        // time 0..10, dt=1, save_step=4: saved at t=0, t=4, t=8 (3 steps)
         assert_eq!(
             vm_time.len(),
-            interp_time.len(),
-            "VM and interpreter must agree on step count for non-divisible save_step"
+            3,
+            "non-divisible save_step should produce 3 saved steps (t=0, t=4, t=8)"
         );
     }
 
