@@ -1736,9 +1736,9 @@ pub struct LtmVariablesResult {
 /// equations for links whose endpoints are affected. Links involving
 /// unmodified variables return their cached equation text.
 /// Black-box delta-ratio formula for module links where we cannot do
-/// ceteris-paribus analysis. Produces SIGN(delta_to / delta_from);
-/// the ABS(ratio) magnitude term is algebraically 1 when both deltas
-/// are non-zero, so this is effectively a polarity-only score.
+/// ceteris-paribus analysis. Computes `delta_to / delta_from` --
+/// the magnitude captures how much `to` changes per unit change in
+/// `from`, and the sign captures the polarity of influence.
 fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -> String {
     let from_q = crate::ltm_augment::quote_ident(from_ident);
     let to_q = crate::ltm_augment::quote_ident(to_ident);
@@ -1747,12 +1747,8 @@ fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -> String {
          else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
                  (({from_q} - PREVIOUS({from_q})) = 0) \
               then 0 \
-         else ABS((({to_q} - PREVIOUS({to_q}))) / \
-                  ({to_q} - PREVIOUS({to_q}))) * \
-              (if ({from_q} - PREVIOUS({from_q})) = 0 \
-               then 0 \
-               else SIGN((({to_q} - PREVIOUS({to_q}))) / \
-                         ({from_q} - PREVIOUS({from_q}))))"
+         else (({to_q} - PREVIOUS({to_q})) / \
+               ({from_q} - PREVIOUS({from_q})))"
     )
 }
 
@@ -4639,21 +4635,14 @@ pub fn assemble_module(
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
             // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId)
-            let fragment_result = if ltm_var.name.contains("\u{205A}link_score\u{205A}") {
-                // Extract from/to from the link score name
-                // Format: $:ltm:link_score:from->to
-                let arrow_pos = ltm_var.name.find('\u{2192}');
+            // The link_score prefix is always "$⁚ltm⁚link_score⁚" (fixed length).
+            const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
+            let fragment_result = if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
+                let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
+                let arrow_pos = suffix.find('\u{2192}');
                 if let Some(arrow) = arrow_pos {
-                    // Find the last separator before the arrow to locate the
-                    // end of the prefix (e.g. "$:ltm:link_score:").  Using
-                    // rfind on the full string would match separators inside
-                    // the `to` name that appear after the arrow.
-                    let prefix_end = ltm_var.name[..arrow]
-                        .rfind('\u{205A}')
-                        .map(|p| p + '\u{205A}'.len_utf8())
-                        .unwrap_or(0);
-                    let from_name = &ltm_var.name[prefix_end..arrow];
-                    let to_name = &ltm_var.name[arrow + '\u{2192}'.len_utf8()..];
+                    let from_name = &suffix[..arrow];
+                    let to_name = &suffix[arrow + '\u{2192}'.len_utf8()..];
                     let link_id = LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
                     compile_ltm_var_fragment(db, link_id, model, project)
                         .as_ref()

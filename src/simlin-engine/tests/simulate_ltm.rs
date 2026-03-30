@@ -574,13 +574,10 @@ fn hero_culture_loop_sign_continuity() {
 // The layout resolution bug that caused "variable 'smth1' not found in layout
 // during resolution" is fixed: LTM fragments whose SymVarRef names don't
 // appear in the model's layout are now silently dropped during assembly
-// (graceful degradation).  Most tests below are un-ignored; two remain
-// #[ignore] because their failures have different root causes:
+// (graceful degradation).  Most tests below are un-ignored; one remains
+// #[ignore] because its failure has a different root cause:
 //   - test_smooth_model_discovery_mode: discovery mode doesn't yet propagate
 //     loop scores through SMOOTH composite paths
-//   - test_module_output_multi_input_link_score_magnitude: the composite-ref
-//     formula still uses the black-box delta-ratio instead of a partial
-//     derivative, so multi-input downstream magnitudes are always ~1
 
 use simlin_engine::test_common::TestProject;
 
@@ -1033,9 +1030,13 @@ fn test_arms_race_single_partition() {
     );
 }
 
-// Still ignored: the composite-ref formula uses black-box delta-ratio so
-// multi-input downstream link magnitudes are always ~1 regardless of partial
-// contribution.
+// Ignored: the causal edge name for implicit module instances
+// (e.g., "$:combined:0:smth1") does not match the identifier used in the
+// downstream variable's equation AST. The ceteris-paribus analysis cannot
+// isolate the module's contribution because it cannot find the from_ident
+// in the dependency set, so it wraps all deps with PREVIOUS and produces
+// magnitude ~1. Fixing this requires the causal graph to use the same
+// variable names as the equation AST.
 #[test]
 #[ignore]
 fn test_module_output_multi_input_link_score_magnitude() {
