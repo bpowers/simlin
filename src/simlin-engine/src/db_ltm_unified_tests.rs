@@ -126,6 +126,51 @@ fn test_model_ltm_variables_discovery_mode() {
     );
 }
 
+/// Models with input ports that also have internal feedback loops should
+/// get both pathway/composite scores AND loop/relative loop scores.
+/// Regression test for a bug where has_input_ports caused loop score
+/// generation to be skipped entirely.
+#[test]
+fn test_model_ltm_variables_input_ports_with_loops_get_loop_scores() {
+    let db = SimlinDb::default();
+
+    let stdlib_model = x_model(
+        "main",
+        vec![x_aux("x", "10", None), x_aux("s", "SMTH1(x, 5)", None)],
+    );
+
+    let project = datamodel::Project {
+        name: "input_ports_loops_test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![stdlib_model],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["stdlib\u{205A}smth1"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let has_link_score = ltm.vars.iter().any(|v| v.name.contains("link_score"));
+    assert!(has_link_score, "should have link score variables");
+
+    let has_loop_score = ltm
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
+    assert!(
+        has_loop_score,
+        "sub-model with feedback loops should have loop scores even when it has input ports: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    let has_composite = ltm.vars.iter().any(|v| v.name.contains("composite"));
+    assert!(has_composite, "should have composite variables");
+}
+
 /// Verify that model_ltm_variables sorts vars in dependency order:
 /// link_scores first, then paths, then composites. This ensures the
 /// VM evaluates them in the correct order since LTM vars are appended
