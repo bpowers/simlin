@@ -369,7 +369,6 @@ fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
 
 /// Simulate a Vensim MDL file via the native parser, running both interpreter
 /// and VM and comparing against expected output.
-#[allow(dead_code)]
 fn simulate_mdl_path(mdl_path: &str) {
     eprintln!("model (vensim mdl): {mdl_path}");
 
@@ -409,6 +408,7 @@ fn simulate_mdl_path(mdl_path: &str) {
 
 /// Interpreter-only simulation test for MDL files (for models that use
 /// array builtins like SUM which aren't yet supported in bytecode).
+#[allow(dead_code)]
 fn simulate_mdl_path_interpreter_only(mdl_path: &str) {
     eprintln!("model (vensim mdl, interpreter-only): {mdl_path}");
 
@@ -577,12 +577,12 @@ fn simulates_except_xmile() {
 
 #[test]
 fn simulates_except() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except/except.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/except/except.mdl");
 }
 
 #[test]
 fn simulates_except2() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except2/except2.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/except2/except2.mdl");
 }
 
 #[test]
@@ -969,7 +969,7 @@ fn simulates_allocate_xmile() {
 
 #[test]
 fn simulates_longeqns_mdl() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
 }
 
 // Ignored: xmutil strips GET DATA BETWEEN TIMES calls in XMILE conversion,
