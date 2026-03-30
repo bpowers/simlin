@@ -3099,21 +3099,15 @@ pub fn compute_layout(
     // Section 3: LTM synthetic variables (only when ltm_enabled).
     // LTM vars are always scalar aux equations occupying 1 slot each.
     // When ltm_enabled is false, this section is skipped entirely (zero
-    // overhead). When the model has no feedback loops,
-    // model_ltm_synthetic_variables returns an empty list (also zero
+    // overhead). Models without feedback loops (e.g. passthrough modules)
+    // get an empty LTM var list from model_ltm_variables (also zero
     // overhead).
     //
-    // LTM variables only exist in the root model. Stdlib sub-models
-    // (previous, init, smth1, etc.) have no feedback loops of their own
-    // and must not enter LTM resolution, which would cause a salsa
-    // dependency cycle (compute_layout -> model_ltm_implicit_var_info
-    // -> compute_layout for the stdlib model).
-    if is_root && project.ltm_enabled(db) {
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, model, project)
-        } else {
-            model_ltm_synthetic_variables(db, model, project)
-        };
+    // No salsa dependency cycle: model_ltm_variables calls only analysis
+    // functions (model_causal_edges, model_loop_circuits) that don't
+    // depend on compute_layout.
+    if project.ltm_enabled(db) {
+        let ltm_vars = model_ltm_variables(db, model, project);
         let mut ltm_names: Vec<&str> = ltm_vars.vars.iter().map(|v| v.name.as_str()).collect();
         ltm_names.sort_unstable();
         for name in ltm_names {
