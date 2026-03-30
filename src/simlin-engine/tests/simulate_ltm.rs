@@ -1341,3 +1341,242 @@ fn test_passthrough_module_ltm_vm() {
         "should still have link scores for non-module edges"
     );
 }
+
+/// User-defined module with an internal stock, wired into a parent-level
+/// feedback loop. Verifies that LTM scoring works end-to-end through the
+/// compile_project_incremental + VM pipeline for user-defined modules.
+///
+/// Model structure:
+///   Parent: level -> gap -> [growth_model] -> adjustment -> level
+///   Sub-model "growth": input_signal -> growth_flow -> internal_level -> output_rate
+///
+/// The parent feeds `gap` to the sub-model's `input_signal`, and uses
+/// `growth_model.output_rate` in the adjustment flow. The sub-model has
+/// its own internal stock (`internal_level`) that integrates the input
+/// signal and produces an output rate, creating a causal path through the
+/// module that participates in the parent-level feedback loop.
+#[test]
+fn test_user_defined_module_ltm_vm() {
+    use simlin_engine::datamodel;
+
+    let project = datamodel::Project {
+        name: "user_module_ltm".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "level".to_string(),
+                        equation: datamodel::Equation::Scalar("50".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["adjustment".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "gap".to_string(),
+                        equation: datamodel::Equation::Scalar("100 - level".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "growth_model".to_string(),
+                        model_name: "growth".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "gap".to_string(),
+                            dst: "growth_model.input_signal".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "adjustment".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "growth_model.output_rate".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+            datamodel::Model {
+                name: "growth".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input_signal".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "internal_level".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["growth_flow".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "growth_flow".to_string(),
+                        equation: datamodel::Equation::Scalar("input_signal / 5".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "output_rate".to_string(),
+                        equation: datamodel::Equation::Scalar("internal_level * 0.1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Verify link scores exist for the parent model's feedback loop
+    let link_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !link_score_vars.is_empty(),
+        "should have link score variables for parent feedback loop"
+    );
+
+    // Verify at least one link score is non-zero after initial timesteps
+    let any_nonzero_link = link_score_vars.iter().any(|k| {
+        let offset = results.offsets[*k];
+        (2..results.step_count)
+            .any(|step| results.data[step * results.step_size + offset].abs() > 1e-10)
+    });
+    assert!(
+        any_nonzero_link,
+        "at least one link score should be non-zero in user-defined module model"
+    );
+
+    // Verify the sub-model's internal variables are present in results
+    // with the module instance prefix (growth_model.varname)
+    let submodel_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().starts_with("growth_model."))
+        .collect();
+    assert!(
+        !submodel_vars.is_empty(),
+        "sub-model variables should be present with module prefix in results, \
+         available keys: {:?}",
+        results
+            .offsets
+            .keys()
+            .map(|k| k.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Verify the sub-model's internal stock is accessible
+    let has_internal_stock = submodel_vars
+        .iter()
+        .any(|k| k.as_str() == "growth_model.internal_level");
+    assert!(
+        has_internal_stock,
+        "should be able to access the sub-model's internal stock via qualified name"
+    );
+
+    // Verify the module appears as a node in the causal graph link scores.
+    // User-defined modules with internal stocks participate as causal nodes.
+    let has_module_link = link_score_vars.iter().any(|k| {
+        let s = k.as_str();
+        s.contains("growth_model")
+    });
+    assert!(
+        has_module_link,
+        "link scores should reference the user-defined module as a causal node"
+    );
+
+    // Verify loop and relative loop scores exist (exhaustive mode)
+    let loop_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !loop_score_vars.is_empty(),
+        "exhaustive mode should produce loop scores for model with user-defined module"
+    );
+
+    let rel_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
+        })
+        .collect();
+    assert!(
+        !rel_score_vars.is_empty(),
+        "exhaustive mode should produce relative loop scores"
+    );
+}
