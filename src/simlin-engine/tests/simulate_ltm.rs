@@ -928,26 +928,26 @@ fn test_coupled_two_stock_single_partition() {
 fn test_discovery_independent_subsystems() {
     // Same two independent subsystems, but using discovery mode.
     // Both subsystem loops should be retained.
-    let project = TestProject::new("indep_discovery")
+    let datamodel_project = TestProject::new("indep_discovery")
         .with_sim_time(0.0, 10.0, 0.25)
         .stock("stock_a", "50", &["flow_a"], &[], None)
         .aux("gap_a", "100 - stock_a", None)
         .flow("flow_a", "gap_a / 5", None)
         .stock("stock_b", "10", &["flow_b"], &[], None)
         .flow("flow_b", "stock_b * 0.1", None)
-        .compile()
-        .expect("should compile");
+        .build_datamodel();
 
-    let discovery_project = project
-        .with_ltm_all_links()
-        .expect("with_ltm_all_links should succeed");
-    let discovery_rc = Arc::new(discovery_project);
+    // VM discovery path for simulation
+    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
 
-    let sim = Simulation::new(&discovery_rc, "main").unwrap();
-    let results = sim.run_to_end().unwrap();
+    // Project::from for causal graph structural analysis only
+    let project = Project::from(datamodel_project);
 
-    let found = ltm_finding::discover_loops(&results, &discovery_rc)
-        .expect("discover_loops should succeed");
+    let found =
+        ltm_finding::discover_loops(&results, &project).expect("discover_loops should succeed");
 
     assert!(
         found.len() >= 2,
