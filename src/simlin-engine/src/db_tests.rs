@@ -4747,11 +4747,11 @@ fn test_initial_sync_marks_stdlib_models() {
 // ── PREVIOUS/INIT opcode verification tests ──────────────────────────
 
 /// 1-arg PREVIOUS(x) compiles to the LoadPrev opcode. Verify that
-/// interpreter and VM produce identical results, and that PREVIOUS
-/// returns 0 at the first timestep (matching the old module behavior
-/// where initial_value defaults to 0).
+/// PREVIOUS returns 0 at the first timestep (matching the old module
+/// behavior where initial_value defaults to 0) and tracks the prior
+/// timestep value thereafter.
 #[test]
-fn test_previous_opcode_interpreter_vm_parity() {
+fn test_previous_opcode_vm() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("previous_parity")
@@ -4760,58 +4760,35 @@ fn test_previous_opcode_interpreter_vm_parity() {
         .flow("inflow", "10", None)
         .aux("prev_level", "PREVIOUS(level)", None);
 
-    let interp = tp
-        .run_interpreter()
-        .expect("interpreter should run successfully");
     let vm = tp.run_vm().expect("VM should run successfully");
 
-    let interp_vals = interp
-        .get("prev_level")
-        .expect("prev_level not in interpreter results");
     let vm_vals = vm.get("prev_level").expect("prev_level not in VM results");
-
-    assert_eq!(
-        interp_vals.len(),
-        vm_vals.len(),
-        "step count mismatch between interpreter ({}) and VM ({})",
-        interp_vals.len(),
-        vm_vals.len()
-    );
-
-    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "prev_level mismatch at step {step}: interpreter={iv}, vm={vv}"
-        );
-    }
 
     // LoadPrev reads from prev_values which is initialized to zeros,
     // so at t=0, PREVIOUS(level) returns 0 (not level's initial value).
-    let level_vals = interp
-        .get("level")
-        .expect("level not in interpreter results");
+    let level_vals = vm.get("level").expect("level not in VM results");
     assert!(
-        (interp_vals[0] - 0.0).abs() < 1e-10,
+        (vm_vals[0] - 0.0).abs() < 1e-10,
         "prev_level at t=0 should be 0 (prev_values initialized to zeros), got {}",
-        interp_vals[0]
+        vm_vals[0]
     );
     // At subsequent steps, prev_level[t] == level[t-1]
-    for step in 1..interp_vals.len() {
+    for step in 1..vm_vals.len() {
         assert!(
-            (interp_vals[step] - level_vals[step - 1]).abs() < 1e-10,
+            (vm_vals[step] - level_vals[step - 1]).abs() < 1e-10,
             "prev_level at step {step} should equal level at step {}: expected {}, got {}",
             step - 1,
             level_vals[step - 1],
-            interp_vals[step]
+            vm_vals[step]
         );
     }
 }
 
-/// INIT(x) compiles to the LoadInitial opcode. Verify that interpreter
-/// and VM produce identical results, and that INIT freezes the t=0
-/// value correctly even in an aux-only model (no stocks).
+/// INIT(x) compiles to the LoadInitial opcode. Verify that INIT
+/// freezes the t=0 value correctly even in an aux-only model (no
+/// stocks).
 #[test]
-fn test_init_opcode_interpreter_vm_parity() {
+fn test_init_opcode_vm() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("init_parity")
@@ -4819,32 +4796,13 @@ fn test_init_opcode_interpreter_vm_parity() {
         .aux("rate", "TIME", None)
         .aux("init_rate", "INIT(rate)", None);
 
-    let interp = tp
-        .run_interpreter()
-        .expect("interpreter should run successfully");
     let vm = tp.run_vm().expect("VM should run successfully");
 
-    let interp_vals = interp
-        .get("init_rate")
-        .expect("init_rate not in interpreter results");
     let vm_vals = vm.get("init_rate").expect("init_rate not in VM results");
-
-    assert_eq!(
-        interp_vals.len(),
-        vm_vals.len(),
-        "step count mismatch between interpreter and VM"
-    );
-
-    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "init_rate mismatch at step {step}: interpreter={iv}, vm={vv}"
-        );
-    }
 
     // INIT(rate) should freeze rate's t=0 value (rate=TIME, TIME starts
     // at 1.0) and return 1.0 at every timestep even as TIME advances.
-    for (step, val) in interp_vals.iter().enumerate() {
+    for (step, val) in vm_vals.iter().enumerate() {
         assert!(
             (val - 1.0).abs() < 1e-10,
             "init_rate should be 1.0 at every step, got {val} at step {step}"
@@ -4867,14 +4825,14 @@ fn test_previous_removed_from_stdlib_model_names() {
     );
 }
 
-/// AC5.4: PREVIOUS of a flow (not just a stock) works correctly. The flow
+/// PREVIOUS of a flow (not just a stock) works correctly. The flow
 /// is recomputed each timestep; PREVIOUS(flow) should return the prior
 /// timestep's computed flow value.
 ///
 /// Like stocks, the 1-arg PREVIOUS(flow) form returns its desugared
 /// fallback `0` at t=0.
 #[test]
-fn test_previous_of_flow_interpreter_vm_parity() {
+fn test_previous_of_flow_vm() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("previous_flow")
@@ -4883,42 +4841,27 @@ fn test_previous_of_flow_interpreter_vm_parity() {
         .flow("growth", "level * 0.1", None)
         .aux("prev_growth", "PREVIOUS(growth)", None);
 
-    let interp = tp
-        .run_interpreter()
-        .expect("interpreter should run successfully");
     let vm = tp.run_vm().expect("VM should run successfully");
 
-    let interp_vals = interp
-        .get("prev_growth")
-        .expect("prev_growth not in interpreter results");
     let vm_vals = vm
         .get("prev_growth")
         .expect("prev_growth not in VM results");
 
-    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "prev_growth mismatch at step {step}: interpreter={iv}, vm={vv}"
-        );
-    }
-
     // Unary PREVIOUS desugars to PREVIOUS(growth, 0). At t=0 it returns 0,
     // and at subsequent steps it returns growth's prior-timestep value.
-    let growth_vals = interp
-        .get("growth")
-        .expect("growth not in interpreter results");
+    let growth_vals = vm.get("growth").expect("growth not in VM results");
     assert!(
-        (interp_vals[0] - 0.0).abs() < 1e-10,
+        (vm_vals[0] - 0.0).abs() < 1e-10,
         "prev_growth at t=0 should be 0 (stdlib default), got {}",
-        interp_vals[0]
+        vm_vals[0]
     );
-    for step in 1..interp_vals.len() {
+    for step in 1..vm_vals.len() {
         assert!(
-            (interp_vals[step] - growth_vals[step - 1]).abs() < 1e-10,
+            (vm_vals[step] - growth_vals[step - 1]).abs() < 1e-10,
             "prev_growth at step {step} should equal growth at step {}: expected {}, got {}",
             step - 1,
             growth_vals[step - 1],
-            interp_vals[step]
+            vm_vals[step]
         );
     }
 }
@@ -4944,25 +4887,10 @@ fn test_arrayed_1arg_previous_loadprev_per_element() {
         .array_with_ranges("base_val[DimA]", vec![("a1", "10"), ("a2", "20")])
         .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA])");
 
-    // Verify compilation and simulation both succeed
     tp.assert_compiles_incremental();
-    tp.assert_sim_builds();
 
-    let interp = tp
-        .run_interpreter()
-        .expect("interpreter should run successfully");
     let vm = tp.run_vm().expect("VM should run successfully");
 
-    // Access per-element time series using bracket notation.
-    // The output map contains individual element entries (e.g. "prev_val[a1]")
-    // with the full time series alongside the combined "prev_val" entry with
-    // only the last timestep.
-    let interp_a1 = interp
-        .get("prev_val[a1]")
-        .expect("prev_val[a1] not in interpreter results");
-    let interp_a2 = interp
-        .get("prev_val[a2]")
-        .expect("prev_val[a2] not in interpreter results");
     let vm_a1 = vm
         .get("prev_val[a1]")
         .expect("prev_val[a1] not in VM results");
@@ -4970,44 +4898,30 @@ fn test_arrayed_1arg_previous_loadprev_per_element() {
         .get("prev_val[a2]")
         .expect("prev_val[a2] not in VM results");
 
-    // Interpreter and VM must agree on every step for each element.
-    for (step, (iv, vv)) in interp_a1.iter().zip(vm_a1.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "prev_val[a1] mismatch at step {step}: interpreter={iv}, vm={vv}"
-        );
-    }
-    for (step, (iv, vv)) in interp_a2.iter().zip(vm_a2.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "prev_val[a2] mismatch at step {step}: interpreter={iv}, vm={vv}"
-        );
-    }
-
     // At t=0, unary PREVIOUS uses its desugared fallback of 0.
     assert!(
-        (interp_a1[0] - 0.0).abs() < 1e-10,
+        (vm_a1[0] - 0.0).abs() < 1e-10,
         "prev_val[a1] at t=0 should be 0, got {}",
-        interp_a1[0]
+        vm_a1[0]
     );
     assert!(
-        (interp_a2[0] - 0.0).abs() < 1e-10,
+        (vm_a2[0] - 0.0).abs() < 1e-10,
         "prev_val[a2] at t=0 should be 0, got {}",
-        interp_a2[0]
+        vm_a2[0]
     );
 
     // At t=1+, each element returns its own prior value (10 and 20 respectively).
     // base_val is constant so prev_val converges to the constant value after step 1.
-    for step in 1..interp_a1.len() {
+    for step in 1..vm_a1.len() {
         assert!(
-            (interp_a1[step] - 10.0).abs() < 1e-10,
+            (vm_a1[step] - 10.0).abs() < 1e-10,
             "prev_val[a1] at step {step} should be 10, got {}",
-            interp_a1[step]
+            vm_a1[step]
         );
         assert!(
-            (interp_a2[step] - 20.0).abs() < 1e-10,
+            (vm_a2[step] - 20.0).abs() < 1e-10,
             "prev_val[a2] at step {step} should be 20, got {}",
-            interp_a2[step]
+            vm_a2[step]
         );
     }
 }
@@ -5032,13 +4946,10 @@ fn test_arrayed_2arg_previous_per_element() {
         .array_with_ranges("base_val[DimA]", vec![("a1", "10"), ("a2", "20")])
         .array_aux("prev_val[DimA]", "PREVIOUS(base_val[DimA], 99)");
 
-    // Verify compilation and simulation both succeed
     tp.assert_compiles_incremental();
-    tp.assert_sim_builds();
 
     let vm = tp.run_vm().expect("VM should run successfully");
 
-    // Access per-element time series using bracket notation.
     let vm_a1 = vm
         .get("prev_val[a1]")
         .expect("prev_val[a1] not in VM results");
@@ -5082,30 +4993,6 @@ fn test_arrayed_2arg_previous_per_element() {
             (vm_a2[step] - 20.0).abs() < 1e-10,
             "2-arg PREVIOUS[a2] at step {step} should be 20, got {}",
             vm_a2[step]
-        );
-    }
-
-    // Also verify that the interpreter agrees with the VM for each element.
-    let interp = tp
-        .run_interpreter()
-        .expect("interpreter should run successfully");
-    let interp_a1 = interp
-        .get("prev_val[a1]")
-        .expect("prev_val[a1] not in interpreter results");
-    let interp_a2 = interp
-        .get("prev_val[a2]")
-        .expect("prev_val[a2] not in interpreter results");
-
-    for (step, (iv, vv)) in interp_a1.iter().zip(vm_a1.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "prev_val[a1] interpreter/VM mismatch at step {step}: interp={iv}, vm={vv}"
-        );
-    }
-    for (step, (iv, vv)) in interp_a2.iter().zip(vm_a2.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "prev_val[a2] interpreter/VM mismatch at step {step}: interp={iv}, vm={vv}"
         );
     }
 }

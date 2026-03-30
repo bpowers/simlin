@@ -1678,7 +1678,7 @@ fn test_init_aux_only_array_subscript() {
 }
 
 #[test]
-fn test_init_expression_interpreter_vm_parity() {
+fn test_init_expression_vm() {
     use crate::test_common::TestProject;
 
     let tp = TestProject::new("init_expr_parity")
@@ -1686,34 +1686,15 @@ fn test_init_expression_interpreter_vm_parity() {
         .aux("growing", "TIME * 2", None)
         .aux("frozen_expr", "INIT(growing + 1)", None);
 
-    let interp = tp
-        .run_interpreter()
-        .expect("interpreter should run successfully");
     let vm = tp.run_vm().expect("VM should run successfully");
 
-    let interp_vals = interp
-        .get("frozen_expr")
-        .expect("frozen_expr not in interpreter results");
     let vm_vals = vm
         .get("frozen_expr")
         .expect("frozen_expr not in VM results");
 
-    assert_eq!(
-        interp_vals.len(),
-        vm_vals.len(),
-        "step count mismatch between interpreter and VM"
-    );
-
-    for (step, (iv, vv)) in interp_vals.iter().zip(vm_vals.iter()).enumerate() {
-        assert!(
-            (iv - vv).abs() < 1e-10,
-            "frozen_expr mismatch at step {step}: interpreter={iv}, vm={vv}"
-        );
-    }
-
     // TIME starts at 1.0, so growing+1 starts at 3.0 and INIT should
     // preserve that value for all timesteps.
-    for (step, val) in interp_vals.iter().enumerate() {
+    for (step, val) in vm_vals.iter().enumerate() {
         assert!(
             (val - 3.0).abs() < 1e-10,
             "frozen_expr should be 3.0 at every step, got {val} at step {step}"
