@@ -302,7 +302,7 @@ pub(super) fn compile_ltm_equation_fragment(
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
 
-    // LTM vars are always compiled in the root model context
+    // Mini-layout starts after the 4 implicit time vars (time, dt, initial_time, final_time)
     let mut mini_offset = crate::vm::IMPLICIT_VAR_COUNT;
 
     // Add implicit time/dt/initial_time/final_time variables
