@@ -10,7 +10,7 @@ use crate::dimensions::DimensionsContext;
 use crate::model::ModelStage1;
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use {crate::model::ScopeStage0, crate::units::Context, std::collections::BTreeSet};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -36,51 +36,17 @@ impl Project {
     }
 }
 
-/// Runs unit inference and unit checking for a model during
-/// `from_salsa` construction. Matches the behavior of the salsa
-/// `check_model_units` tracked function but stores results on the
-/// model struct instead of accumulating via the salsa accumulator.
-#[cfg(any(test, feature = "testing"))]
-fn run_default_model_checks(
-    models: &HashMap<Ident<Canonical>, &ModelStage1>,
-    units_ctx: &Context,
-    model: &mut ModelStage1,
-) {
-    let has_declared_units = model.variables.values().any(|var| var.units().is_some());
-
-    let inferred_units =
-        crate::units_infer::infer(models, units_ctx, model).unwrap_or_else(|err| {
-            if has_declared_units
-                && let crate::common::UnitError::InferenceError { code, .. } = &err
-                && *code == crate::common::ErrorCode::UnitMismatch
-            {
-                let mut warnings = model.unit_warnings.take().unwrap_or_default();
-                warnings.push(crate::common::Error {
-                    kind: crate::common::ErrorKind::Model,
-                    code: *code,
-                    details: Some(format!("{}", err)),
-                });
-                model.unit_warnings = Some(warnings);
-            }
-            Default::default()
-        });
-    model.check_units(units_ctx, &inferred_units)
-}
-
-/// Retained only for tests and the AST interpreter cross-validation path
-/// (AC4.6). Production compilation uses `compile_project_incremental`.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::from_datamodel(project_datamodel)
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl Project {
-    /// Convenience constructor: creates a local salsa DB, syncs the
-    /// datamodel, and builds the Project via `from_salsa` with default
-    /// unit inference/checking.
+    /// Convenience constructor for tests: creates a local salsa DB,
+    /// syncs the datamodel, and builds the Project via `from_salsa`.
     pub(crate) fn from_datamodel(project_datamodel: datamodel::Project) -> Self {
         let db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
@@ -88,7 +54,7 @@ impl Project {
             project_datamodel,
             &db,
             sync.project,
-            run_default_model_checks,
+            |_models, _units_ctx, _model| {},
         )
     }
 

@@ -14,13 +14,12 @@ use crate::dimensions::DimensionsContext;
 use crate::variable::{ModuleInput, Variable, identifier_set};
 use crate::{datamodel, eqn_err, model_err};
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use {
     crate::common::topo_sort,
-    crate::datamodel::{Dimension, UnitMap},
+    crate::datamodel::Dimension,
     crate::db::{self, SourceModel, SourceProject},
     crate::units::Context,
-    crate::units_check,
     crate::var_eqn_err,
     crate::variable::{parse_var, parse_var_with_module_context},
     crate::vm::StepPart,
@@ -32,7 +31,7 @@ use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_sto
 
 pub type ModuleInputSet = BTreeSet<Ident<Canonical>>;
 pub type DependencySet = BTreeSet<Ident<Canonical>>;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub type DependencyMap = HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>;
 
 pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
@@ -59,12 +58,11 @@ pub struct ModelStage1 {
     pub variables: HashMap<Ident<Canonical>, Variable>,
     /// Model-level errors are also accumulated via the salsa accumulator in
     /// `compile_var_fragment` and `check_model_units`. This field is retained
-    /// because `Module::new` (interpreter path) checks it for early-exit
-    /// validation and several test helpers inspect it directly.
+    /// because several test helpers inspect it directly.
     pub errors: Option<Vec<Error>>,
     /// Unit warnings are also accumulated via the salsa accumulator in
-    /// `check_model_units`. This field is retained for the monolithic
-    /// `Project::from` construction path used by tests.
+    /// `check_model_units`. This field is retained for the test-only
+    /// `Project::from_salsa` construction path.
     ///
     /// Contains unit-related issues that should be surfaced to users but
     /// should NOT block simulation. Unit mismatches are common in real-world
@@ -95,7 +93,7 @@ pub struct ModuleStage2 {
 }
 
 impl ModelStage1 {
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(crate) fn dt_deps(
         &self,
         inputs: &ModuleInputSet,
@@ -105,7 +103,7 @@ impl ModelStage1 {
             .and_then(|instances| instances.get(inputs).map(|module| &module.dt_dependencies))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(crate) fn initial_deps(
         &self,
         inputs: &ModuleInputSet,
@@ -124,7 +122,7 @@ impl ModelStage1 {
     ///
     /// Parallel logic exists in db.rs variable_direct_dependencies_impl for
     /// the salsa incremental path.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn init_referenced_vars(&self) -> HashSet<Ident<Canonical>> {
         self.variables
             .values()
@@ -135,7 +133,7 @@ impl ModelStage1 {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn module_deps(
     ctx: &DepContext,
     var: &Variable,
@@ -207,7 +205,7 @@ fn module_deps(
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn module_output_deps<'a>(
     ctx: &DepContext,
     model_name: &Ident<Canonical>,
@@ -255,7 +253,7 @@ fn module_output_deps<'a>(
     Ok(final_deps)
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident<Canonical>> {
     let is_stock = |ident: &Ident<Canonical>| -> bool {
         matches!(
@@ -300,7 +298,7 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident<Canonical>> {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 struct DepContext<'a> {
     is_initial: bool,
     model_name: &'a str, // this needs to be a str, not an Ident<Canonical> for lifetime reasons when recursing
@@ -314,7 +312,7 @@ struct DepContext<'a> {
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn all_deps<'a, Iter>(
     ctx: &DepContext,
     vars: Iter,
@@ -530,7 +528,7 @@ fn resolve_relative<'a>(
 }
 
 // the ident arg must be from a CanonicalIdent, but is a &str here for lifetime reasons around recursion.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Variable> {
     let model_name = ctx.model_name;
     let ident = if model_name == "main" && ident.starts_with('·') {
@@ -865,7 +863,7 @@ pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 #[allow(dead_code)]
 impl ModelStage0 {
     pub fn new(
@@ -1080,32 +1078,7 @@ impl ModelStage1 {
         }
     }
 
-    /// Only called from the test-gated `run_default_model_checks`; the
-    /// production path runs unit checking via salsa tracked functions.
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn check_units(
-        &mut self,
-        units_ctx: &Context,
-        inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
-    ) {
-        match units_check::check(units_ctx, inferred_units, self) {
-            Ok(Ok(())) => {}
-            Ok(Err(errors)) => {
-                for (ident, err) in errors.into_iter() {
-                    if let Some(var) = self.variables.get_mut(&ident) {
-                        var.push_unit_error(err);
-                    }
-                }
-            }
-            Err(err) => {
-                let mut errors = self.errors.take().unwrap_or_default();
-                errors.push(err);
-                self.errors = Some(errors);
-            }
-        };
-    }
-
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(crate) fn set_dependencies(
         &mut self,
         models: &HashMap<Ident<Canonical>, &ModelStage1>,
@@ -1260,10 +1233,9 @@ impl ModelStage1 {
         self.errors = maybe_errors;
     }
 
-    /// Returns unit errors collected via the legacy monolithic compilation path.
-    /// The salsa incremental path emits unit errors through `CompilationDiagnostic`
-    /// accumulators; prefer `db::collect_model_diagnostics` for new code. This method
-    /// is retained for the monolithic test path and for cross-validation.
+    /// Returns unit errors from variables in this model. The salsa incremental
+    /// path emits unit errors through `CompilationDiagnostic` accumulators;
+    /// prefer `db::collect_model_diagnostics` for new code.
     pub fn get_unit_errors(&self) -> HashMap<Ident<Canonical>, Vec<UnitError>> {
         self.variables
             .iter()
@@ -1271,10 +1243,9 @@ impl ModelStage1 {
             .collect()
     }
 
-    /// Returns equation errors collected via the legacy monolithic compilation path.
-    /// The salsa incremental path emits equation errors through `CompilationDiagnostic`
-    /// accumulators; prefer `db::collect_model_diagnostics` for new code. This method
-    /// is retained for the monolithic test path and for cross-validation.
+    /// Returns equation errors from variables in this model. The salsa
+    /// incremental path emits equation errors through `CompilationDiagnostic`
+    /// accumulators; prefer `db::collect_model_diagnostics` for new code.
     pub fn get_variable_errors(&self) -> HashMap<Ident<Canonical>, Vec<EquationError>> {
         self.variables
             .iter()
