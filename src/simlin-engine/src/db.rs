@@ -4693,8 +4693,19 @@ pub fn assemble_module(
             };
 
             if let Some(result) = fragment_result {
-                all_fragments.insert(ltm_var_canonical.clone(), result);
-                ltm_flow_names.push(ltm_var_canonical);
+                // Drop LTM fragments whose symbolic variable references can't
+                // be resolved in this model's layout.  This happens when
+                // sub-model LTM equations reference implicit stdlib module
+                // instance names (e.g. "smth1") that only exist in the root
+                // model's namespace under qualified names like
+                // "$:var_name:0:smth1".  Silently dropping these is correct:
+                // the root model generates its own LTM vars using the
+                // qualified names, so sub-model LTM vars for the same modules
+                // would be duplicates anyway.
+                if crate::compiler::symbolic::fragment_vars_in_layout(&result.fragment, layout) {
+                    all_fragments.insert(ltm_var_canonical.clone(), result);
+                    ltm_flow_names.push(ltm_var_canonical);
+                }
             }
         }
 
@@ -4725,7 +4736,13 @@ pub fn assemble_module(
                         &module_input_names,
                     );
                     if let Some(result) = im_fragment {
-                        all_fragments.insert(im_name.clone(), result);
+                        // Same layout check as for main LTM vars above.
+                        if crate::compiler::symbolic::fragment_vars_in_layout(
+                            &result.fragment,
+                            layout,
+                        ) {
+                            all_fragments.insert(im_name.clone(), result);
+                        }
                     }
                 }
             }

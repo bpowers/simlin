@@ -571,20 +571,16 @@ fn hero_culture_loop_sign_continuity() {
 // Tests involving stdlib modules (SMOOTH/DELAY) use the salsa/VM path
 // (compile_project_incremental with ltm_enabled/ltm_discovery_mode).
 //
-// KNOWN LIMITATION: The salsa/VM compilation path has an unresolved layout
-// resolution bug when assembling LTM synthetic variables that reference
-// implicit stdlib module instance names (e.g. the `smth1` instance created
-// by `SMTH1(level, 3)` or the synthetic link-score vars that reference its
-// internal slots).  The assembler fails with "variable 'smth1' not found in
-// layout during resolution" (or an analogous error for the synthetic
-// link-score name) because the module instance and its synthetic LTM
-// counterparts are not added to the assembly-time layout before the symbolic
-// bytecodes are resolved to concrete offsets.
-//
-// The six tests below are marked `#[ignore]` until the bug is fixed.  They
-// document the intended behaviour and serve as regression tests once the
-// layout resolution path correctly handles stdlib module instances that
-// appear inside LTM equations.
+// The layout resolution bug that caused "variable 'smth1' not found in layout
+// during resolution" is fixed: LTM fragments whose SymVarRef names don't
+// appear in the model's layout are now silently dropped during assembly
+// (graceful degradation).  Most tests below are un-ignored; two remain
+// #[ignore] because their failures have different root causes:
+//   - test_smooth_model_discovery_mode: discovery mode doesn't yet propagate
+//     loop scores through SMOOTH composite paths
+//   - test_module_output_multi_input_link_score_magnitude: the composite-ref
+//     formula still uses the black-box delta-ratio instead of a partial
+//     derivative, so multi-input downstream magnitudes are always ~1
 
 use simlin_engine::test_common::TestProject;
 
@@ -592,9 +588,7 @@ use simlin_engine::test_common::TestProject;
 /// not cause LTM augmentation to reference a non-existent composite variable.
 /// The initial_value port is only used for stock initialization and has no
 /// runtime causal path to the output, so no composite is generated for it.
-// Ignored: see the KNOWN LIMITATION note in the section header above.
 #[test]
-#[ignore]
 fn test_smooth_with_initial_value_ltm() {
     let datamodel_project = TestProject::new("smooth_init_val")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -609,9 +603,7 @@ fn test_smooth_with_initial_value_ltm() {
     vm.run_to_end().expect("should simulate");
 }
 
-// Ignored: see the KNOWN LIMITATION note in the section header above.
 #[test]
-#[ignore]
 fn test_smooth_goal_seeking_ltm() {
     // Goal-seeking model with SMOOTH in the feedback path:
     //   stock level = 50, inflow = adjustment
@@ -659,7 +651,7 @@ fn test_smooth_goal_seeking_ltm() {
     );
 }
 
-// Ignored: see the KNOWN LIMITATION note in the section header above.
+// Still ignored: discovery mode doesn't yet find loops through SMOOTH composite paths.
 #[test]
 #[ignore]
 fn test_smooth_model_discovery_mode() {
@@ -692,9 +684,7 @@ fn test_smooth_model_discovery_mode() {
     );
 }
 
-// Ignored: see the KNOWN LIMITATION note in the section header above.
 #[test]
-#[ignore]
 fn test_discovery_submodel_link_scores_excluded_from_search() {
     // Verify that sub-model link scores (interpunct-namespaced) are NOT
     // picked up by discovery mode's parse_link_offsets.
@@ -777,9 +767,7 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
     }
 }
 
-// Ignored: see the KNOWN LIMITATION note in the section header above.
 #[test]
-#[ignore]
 fn test_multiple_smooth_instances() {
     // Two SMOOTH instances in different feedback paths.
     // Each should get its own internal composite scores.
@@ -1045,7 +1033,9 @@ fn test_arms_race_single_partition() {
     );
 }
 
-// Ignored: see the KNOWN LIMITATION note in the section header above.
+// Still ignored: the composite-ref formula uses black-box delta-ratio so
+// multi-input downstream link magnitudes are always ~1 regardless of partial
+// contribution.
 #[test]
 #[ignore]
 fn test_module_output_multi_input_link_score_magnitude() {

@@ -760,6 +760,66 @@ pub(crate) fn symbolize_module(
 }
 
 // ============================================================================
+// Layout Validation
+// ============================================================================
+
+/// Collect all SymVarRef names referenced in a SymbolicByteCode.
+fn sym_var_refs_in_bytecode(sbc: &SymbolicByteCode) -> impl Iterator<Item = &str> {
+    sbc.code.iter().filter_map(|op| match op {
+        SymbolicOpcode::LoadVar { var }
+        | SymbolicOpcode::SymLoadPrev { var }
+        | SymbolicOpcode::SymLoadInitial { var }
+        | SymbolicOpcode::LoadSubscript { var }
+        | SymbolicOpcode::AssignCurr { var }
+        | SymbolicOpcode::AssignNext { var }
+        | SymbolicOpcode::AssignConstCurr { var, .. }
+        | SymbolicOpcode::BinOpAssignCurr { var, .. }
+        | SymbolicOpcode::BinOpAssignNext { var, .. }
+        | SymbolicOpcode::PushVarView { var, .. }
+        | SymbolicOpcode::PushVarViewDirect { var, .. } => Some(var.name.as_str()),
+        _ => None,
+    })
+}
+
+/// Returns true if all SymVarRef names in `fragment` are present in `layout`.
+///
+/// LTM synthetic fragments compiled for a sub-model may reference variable
+/// names that exist only in the root model's namespace (e.g. implicit stdlib
+/// module instance names like "smth1" instead of "$:var_name:0:smth1").
+/// Calling this before inserting an LTM fragment into `all_fragments` lets the
+/// assembler silently drop unresolvable fragments rather than failing the
+/// entire compilation.
+pub(crate) fn fragment_vars_in_layout(
+    fragment: &CompiledVarFragment,
+    layout: &VariableLayout,
+) -> bool {
+    let phases = [
+        fragment.initial_bytecodes.as_ref().map(|p| &p.symbolic),
+        fragment.flow_bytecodes.as_ref().map(|p| &p.symbolic),
+        fragment.stock_bytecodes.as_ref().map(|p| &p.symbolic),
+    ];
+    for maybe_bc in &phases {
+        let Some(bc) = maybe_bc else { continue };
+        if sym_var_refs_in_bytecode(bc).any(|name| layout.get(name).is_none()) {
+            return false;
+        }
+    }
+    // Also check SymbolicModuleDecl var references in each phase
+    let phase_decls = [
+        fragment.initial_bytecodes.as_ref().map(|p| &p.module_decls),
+        fragment.flow_bytecodes.as_ref().map(|p| &p.module_decls),
+        fragment.stock_bytecodes.as_ref().map(|p| &p.module_decls),
+    ];
+    for maybe_decls in &phase_decls {
+        let Some(decls) = maybe_decls else { continue };
+        if decls.iter().any(|d| layout.get(&d.var.name).is_none()) {
+            return false;
+        }
+    }
+    true
+}
+
+// ============================================================================
 // Resolve: Symbolic -> Concrete (Assembly)
 // ============================================================================
 
