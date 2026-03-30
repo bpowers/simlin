@@ -183,7 +183,7 @@ pub struct SourceProject {
     /// enabled. When true, `compute_layout` allocates slots and
     /// `assemble_module` compiles fragments for LTM variables.
     pub ltm_enabled: bool,
-    /// When true, use discovery mode (`model_ltm_all_link_synthetic_variables`)
+    /// When true, use discovery mode (`model_ltm_variables` with all links)
     /// which generates scores for every causal edge, not just edges in detected
     /// loops.
     pub ltm_discovery_mode: bool,
@@ -1735,6 +1735,23 @@ pub struct LtmVariablesResult {
 /// when a variable's equation changes, salsa only re-evaluates link score
 /// equations for links whose endpoints are affected. Links involving
 /// unmodified variables return their cached equation text.
+/// Black-box delta-ratio formula for module links where we cannot do
+/// ceteris-paribus analysis. Computes `delta_to / delta_from` --
+/// the magnitude captures how much `to` changes per unit change in
+/// `from`, and the sign captures the polarity of influence.
+fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -> String {
+    let from_q = crate::ltm_augment::quote_ident(from_ident);
+    let to_q = crate::ltm_augment::quote_ident(to_ident);
+    format!(
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
+                 (({from_q} - PREVIOUS({from_q})) = 0) \
+              then 0 \
+         else (({to_q} - PREVIOUS({to_q})) / \
+               ({from_q} - PREVIOUS({from_q})))"
+    )
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn link_score_equation_text<'db>(
     db: &'db dyn Db,
@@ -1760,15 +1777,48 @@ pub fn link_score_equation_text<'db>(
     let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
     let to_is_module = to_var.is_module();
 
-    // Implicit module variables (from SMOOTH/DELAY expansion) cannot be
-    // meaningfully referenced in LTM ceteris-paribus equations: they
-    // occupy multiple layout slots and PREVIOUS of a module·output
-    // requires compilation context that the per-fragment mini-context
-    // cannot provide. Skip link scores involving these modules; the
-    // loops they participate in will still have scores for the
-    // non-module links in the circuit.
+    // Module-involved links: three cases depending on which end is a module.
+    // 1. input -> module: composite reference to module's internal score
+    // 2. module -> downstream: standard ceteris-paribus on downstream equation
+    // 3. module -> module: black-box delta-ratio equation
     if from_is_module || to_is_module {
-        return None;
+        let equation = if !from_is_module && to_is_module {
+            if let crate::variable::Variable::Module { inputs, .. } = &to_var {
+                if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
+                    // The link score for (non-module -> module) is the composite score
+                    // of the input port inside the sub-model, referenced via interpunct.
+                    format!(
+                        "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
+                        module = to_ident.as_str(),
+                        port = input.dst.as_str(),
+                    )
+                } else {
+                    black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+                }
+            } else {
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+            }
+        } else if from_is_module && !to_is_module {
+            let mut all_vars = HashMap::new();
+            if let Some(ref fv) = from_var {
+                all_vars.insert(from_ident.clone(), fv.clone());
+            }
+            all_vars.insert(to_ident.clone(), to_var.clone());
+            crate::ltm_augment::generate_link_score_equation_for_link(
+                &from_ident,
+                &to_ident,
+                &to_var,
+                &all_vars,
+            )
+        } else {
+            // module -> module: black-box delta-ratio
+            black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+        };
+
+        return Some(LtmSyntheticVar {
+            name: var_name,
+            equation,
+        });
     }
 
     // Standard ceteris-paribus formula for non-module links
@@ -1791,9 +1841,8 @@ pub fn link_score_equation_text<'db>(
 }
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
-/// from each input port to "output".  Used by `get_stdlib_composite_ports`
-/// (test-only, needs port *names*) and `module_ltm_synthetic_variables`
-/// (uses the pathway structures for equation generation).
+/// from each input port to "output".  Used by `model_ltm_variables` in
+/// `db_ltm.rs` for pathway and composite score generation.
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
 ) -> HashMap<crate::common::Ident<crate::common::Canonical>, Vec<Vec<crate::ltm::Link>>> {
@@ -1801,359 +1850,6 @@ fn module_input_pathways_from_edges(
 
     let graph = causal_graph_from_edges(edges_result);
     graph.enumerate_module_pathways(&Ident::<Canonical>::new("output"))
-}
-
-/// Compute the internal link score equation text for a single causal link
-/// inside a stdlib dynamic module (e.g. SMOOTH, DELAY).
-///
-/// Uses `$⁚ltm⁚ilink⁚` prefix instead of `$⁚ltm⁚link_score⁚`.
-#[salsa::tracked(returns(ref))]
-pub fn module_ilink_equation_text<'db>(
-    db: &'db dyn Db,
-    link_id: LtmLinkId<'db>,
-    model: SourceModel,
-    project: SourceProject,
-) -> Option<LtmSyntheticVar> {
-    use crate::common::{Canonical, Ident};
-
-    let from_name = link_id.link_from(db);
-    let to_name = link_id.link_to(db);
-    let from_ident = Ident::<Canonical>::new(from_name);
-    let to_ident = Ident::<Canonical>::new(to_name);
-
-    let variables = reconstruct_model_variables(db, model, project);
-
-    let to_var = variables.get(&to_ident)?;
-
-    let var_name = format!(
-        "$\u{205A}ltm\u{205A}ilink\u{205A}{}\u{2192}{}",
-        from_name, to_name
-    );
-
-    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
-        &from_ident,
-        &to_ident,
-        to_var,
-        &variables,
-    );
-
-    Some(LtmSyntheticVar {
-        name: var_name,
-        equation,
-    })
-}
-
-/// Compute stdlib composite ports (cached in a process-wide OnceLock).
-/// These are static properties of stdlib models and never change.
-///
-/// On native targets, uses a separate thread for initialization because
-/// syncing creates a separate salsa db, which conflicts if we're
-/// inside a tracked function query on the caller's db.
-/// On wasm32, threads are unavailable so we initialize directly --
-/// the caller must ensure no salsa DB is currently attached.
-#[cfg(test)]
-fn get_stdlib_composite_ports() -> &'static crate::ltm_augment::CompositePortMap {
-    use std::sync::OnceLock;
-    static PORTS: OnceLock<crate::ltm_augment::CompositePortMap> = OnceLock::new();
-    PORTS.get_or_init(|| {
-        let compute = || {
-            use crate::common::{Canonical, Ident};
-
-            let models: Vec<_> = crate::stdlib::MODEL_NAMES
-                .iter()
-                .filter_map(|name| crate::stdlib::get(name))
-                .collect();
-            if models.is_empty() {
-                return HashMap::<Ident<Canonical>, std::collections::HashSet<Ident<Canonical>>>::new();
-            }
-
-            let dm_project = datamodel::Project {
-                name: "stdlib_composite".to_string(),
-                sim_specs: datamodel::SimSpecs::default(),
-                dimensions: vec![],
-                units: vec![],
-                models,
-                source: None,
-                ai_information: None,
-            };
-
-            let db = SimlinDb::default();
-            let sync = sync_from_datamodel(&db, &dm_project);
-            let mut ports = HashMap::new();
-            for (model_name, synced_model) in &sync.models {
-                let edges_result = model_causal_edges(&db, synced_model.source, sync.project);
-                if edges_result.stocks.is_empty() {
-                    continue;
-                }
-
-                let input_ports: std::collections::HashSet<_> =
-                    module_input_pathways_from_edges(edges_result)
-                        .into_keys()
-                        .collect();
-                if !input_ports.is_empty() {
-                    ports.insert(Ident::new(model_name), input_ports);
-                }
-            }
-            ports
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::spawn(compute)
-                .join()
-                .expect("stdlib composite ports thread panicked")
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            compute()
-        }
-    })
-}
-
-/// Generate LTM synthetic variables for a user model (exhaustive mode).
-///
-/// Reads cached loop circuits and cycle partitions (graph algorithms
-/// skipped when deps unchanged), then delegates per-link score generation
-/// to `link_score_equation_text` so that equation edits only regenerate
-/// scores for affected links.
-#[salsa::tracked(returns(ref))]
-pub fn model_ltm_synthetic_variables(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> LtmVariablesResult {
-    use crate::common::{Canonical, Ident};
-    use crate::ltm::{CyclePartitions, Loop, assign_loop_ids};
-    use std::collections::HashSet;
-
-    let circuits_result = model_loop_circuits(db, model, project);
-    if circuits_result.circuits.is_empty() {
-        return LtmVariablesResult { vars: vec![] };
-    }
-
-    let partitions_result = model_cycle_partitions(db, model, project);
-    let edges_result = model_causal_edges(db, model, project);
-
-    // Reconstruct Variable objects for polarity analysis
-    let variables = reconstruct_model_variables(db, model, project);
-
-    // Build CausalGraph with variables for polarity analysis
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-        .edges
-        .iter()
-        .map(|(from, tos)| {
-            (
-                Ident::new(from),
-                tos.iter().map(|t| Ident::new(t)).collect(),
-            )
-        })
-        .collect();
-    let stocks: HashSet<Ident<Canonical>> =
-        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-    let graph = crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables: variables.clone(),
-        module_graphs: HashMap::new(),
-    };
-
-    // Convert circuits to Loops with polarity
-    let mut loops: Vec<Loop> = circuits_result
-        .circuits
-        .iter()
-        .map(|circuit_strs| {
-            let circuit: Vec<Ident<Canonical>> =
-                circuit_strs.iter().map(|s| Ident::new(s)).collect();
-            let links = graph.circuit_to_links(&circuit);
-            let parent_stocks = graph.find_stocks_in_loop(&circuit);
-            let polarity = graph.calculate_polarity(&links);
-            Loop {
-                id: String::new(),
-                links,
-                stocks: parent_stocks,
-                polarity,
-            }
-        })
-        .collect();
-
-    assign_loop_ids(&mut loops);
-
-    // Filter out loops that contain implicit module variables (SMOOTH,
-    // DELAY, etc.). These modules occupy multiple layout slots and
-    // their link score equations cannot be compiled in the per-fragment
-    // mini-context. Loops without module nodes are scored normally.
-    let implicit_info = model_implicit_var_info(db, model, project);
-    let has_module_node = |loop_item: &Loop| {
-        loop_item.links.iter().any(|link| {
-            implicit_info
-                .get(link.from.as_str())
-                .is_some_and(|m| m.is_module)
-                || implicit_info
-                    .get(link.to.as_str())
-                    .is_some_and(|m| m.is_module)
-        })
-    };
-    loops.retain(|l| !has_module_node(l));
-
-    // Collect unique link endpoints from loops, then compute per-link equations
-    let mut seen_links: HashSet<(String, String)> = HashSet::new();
-    let mut vars = Vec::new();
-
-    for loop_item in &loops {
-        for link in &loop_item.links {
-            let key = (link.from.to_string(), link.to.to_string());
-            if seen_links.insert(key) {
-                let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
-                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                    vars.push(lsv.clone());
-                }
-            }
-        }
-    }
-
-    // Reconstruct CyclePartitions from cached result
-    let partitions = CyclePartitions {
-        partitions: partitions_result
-            .partitions
-            .iter()
-            .map(|p| p.iter().map(|s| Ident::new(s)).collect())
-            .collect(),
-        stock_partition: partitions_result
-            .stock_partition
-            .iter()
-            .map(|(k, v)| (Ident::new(k), *v))
-            .collect(),
-    };
-
-    // Loop scores and relative loop scores are pure functions of link
-    // score variable names (not equations), so they don't benefit from
-    // per-link caching and are generated in bulk.
-    let loop_vars = crate::ltm_augment::generate_loop_score_variables(&loops, &partitions);
-    for (name, var) in loop_vars {
-        let equation = match var.get_equation() {
-            Some(datamodel::Equation::Scalar(eq)) => eq.clone(),
-            _ => String::new(),
-        };
-        vars.push(LtmSyntheticVar {
-            name: name.to_string(),
-            equation,
-        });
-    }
-
-    // Sort for deterministic output
-    vars.sort_by(|a, b| a.name.cmp(&b.name));
-
-    LtmVariablesResult { vars }
-}
-
-/// Generate LTM link score variables for ALL causal links (discovery mode).
-///
-/// Unlike `model_ltm_synthetic_variables` which only generates variables
-/// for links in detected loops, this generates link scores for every
-/// causal edge. No loop or relative loop scores are generated.
-/// Delegates per-link computation to `link_score_equation_text`.
-#[salsa::tracked(returns(ref))]
-pub fn model_ltm_all_link_synthetic_variables(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> LtmVariablesResult {
-    let edges_result = model_causal_edges(db, model, project);
-
-    // Iterate all causal edges and compute per-link equations
-    let mut vars = Vec::new();
-    for (from, tos) in &edges_result.edges {
-        for to in tos {
-            let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-            if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                vars.push(lsv.clone());
-            }
-        }
-    }
-
-    vars.sort_by(|a, b| a.name.cmp(&b.name));
-    LtmVariablesResult { vars }
-}
-
-/// Generate internal LTM variables for a stdlib dynamic module.
-///
-/// Since stdlib models are static, this computes once and caches forever.
-/// Delegates per-link ilink computation to `module_ilink_equation_text`.
-#[salsa::tracked(returns(ref))]
-pub fn module_ltm_synthetic_variables(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> LtmVariablesResult {
-    // Check if this is a dynamic module (has stocks) via the edge result
-    let edges_result = model_causal_edges(db, model, project);
-    if edges_result.stocks.is_empty() {
-        return LtmVariablesResult { vars: vec![] };
-    }
-
-    // Generate internal link scores via per-link tracked function
-    let mut vars = Vec::new();
-    for (from, tos) in &edges_result.edges {
-        for to in tos {
-            let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-            if let Some(lsv) = module_ilink_equation_text(db, link_id, model, project) {
-                vars.push(lsv.clone());
-            }
-        }
-    }
-
-    // Enumerate pathways from input ports to output
-    let pathways = module_input_pathways_from_edges(edges_result);
-
-    for (input_port, port_pathways) in &pathways {
-        let mut pathway_names = Vec::new();
-        for (idx, pathway_links) in port_pathways.iter().enumerate() {
-            let path_var_name = format!(
-                "$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{}",
-                input_port.as_str(),
-                idx
-            );
-
-            let link_score_refs: Vec<String> = pathway_links
-                .iter()
-                .map(|link| {
-                    format!(
-                        "\"$\u{205A}ltm\u{205A}ilink\u{205A}{}\u{2192}{}\"",
-                        link.from.as_str(),
-                        link.to.as_str()
-                    )
-                })
-                .collect();
-
-            let equation = if link_score_refs.is_empty() {
-                "0".to_string()
-            } else {
-                link_score_refs.join(" * ")
-            };
-
-            pathway_names.push(path_var_name.clone());
-            vars.push(LtmSyntheticVar {
-                name: path_var_name,
-                equation,
-            });
-        }
-
-        // Generate composite score variable (max-magnitude pathway)
-        let composite_name = format!(
-            "$\u{205A}ltm\u{205A}composite\u{205A}{}",
-            input_port.as_str()
-        );
-        let equation = generate_max_abs_chain_str(&pathway_names);
-        vars.push(LtmSyntheticVar {
-            name: composite_name,
-            equation,
-        });
-    }
-
-    vars.sort_by(|a, b| a.name.cmp(&b.name));
-    LtmVariablesResult { vars }
 }
 
 /// Generate a nested max-abs selection equation from pathway variable names.
@@ -3059,21 +2755,15 @@ pub fn compute_layout(
     // Section 3: LTM synthetic variables (only when ltm_enabled).
     // LTM vars are always scalar aux equations occupying 1 slot each.
     // When ltm_enabled is false, this section is skipped entirely (zero
-    // overhead). When the model has no feedback loops,
-    // model_ltm_synthetic_variables returns an empty list (also zero
+    // overhead). Models without feedback loops (e.g. passthrough modules)
+    // get an empty LTM var list from model_ltm_variables (also zero
     // overhead).
     //
-    // LTM variables only exist in the root model. Stdlib sub-models
-    // (previous, init, smth1, etc.) have no feedback loops of their own
-    // and must not enter LTM resolution, which would cause a salsa
-    // dependency cycle (compute_layout -> model_ltm_implicit_var_info
-    // -> compute_layout for the stdlib model).
-    if is_root && project.ltm_enabled(db) {
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, model, project)
-        } else {
-            model_ltm_synthetic_variables(db, model, project)
-        };
+    // No salsa dependency cycle: model_ltm_variables calls only analysis
+    // functions (model_causal_edges, model_loop_circuits) that don't
+    // depend on compute_layout.
+    if project.ltm_enabled(db) {
+        let ltm_vars = model_ltm_variables(db, model, project);
         let mut ltm_names: Vec<&str> = ltm_vars.vars.iter().map(|v| v.name.as_str()).collect();
         ltm_names.sort_unstable();
         for name in ltm_names {
@@ -4937,38 +4627,22 @@ pub fn assemble_module(
     // variables because PREVIOUS reads from the previous timestep's
     // committed values. They can be appended to the end of the flows
     // runlist.
-    //
-    // LTM variables only exist in the root model -- stdlib sub-models
-    // never have LTM instrumentation.
     let mut ltm_flow_names: Vec<String> = Vec::new();
-    if is_root && project.ltm_enabled(db) {
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, model, project)
-        } else {
-            model_ltm_synthetic_variables(db, model, project)
-        };
+    if project.ltm_enabled(db) {
+        let ltm_vars = model_ltm_variables(db, model, project);
 
         for ltm_var in &ltm_vars.vars {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
             // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId)
-            let fragment_result = if ltm_var.name.contains("\u{205A}link_score\u{205A}")
-                || ltm_var.name.contains("\u{205A}ilink\u{205A}")
-            {
-                // Extract from/to from the link score name
-                // Format: $:ltm:link_score:from->to or $:ltm:ilink:from->to
-                let arrow_pos = ltm_var.name.find('\u{2192}');
+            // The link_score prefix is always "$⁚ltm⁚link_score⁚" (fixed length).
+            const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
+            let fragment_result = if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
+                let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
+                let arrow_pos = suffix.find('\u{2192}');
                 if let Some(arrow) = arrow_pos {
-                    // Find the last separator before the arrow to locate the
-                    // end of the prefix (e.g. "$:ltm:link_score:").  Using
-                    // rfind on the full string would match separators inside
-                    // the `to` name that appear after the arrow.
-                    let prefix_end = ltm_var.name[..arrow]
-                        .rfind('\u{205A}')
-                        .map(|p| p + '\u{205A}'.len_utf8())
-                        .unwrap_or(0);
-                    let from_name = &ltm_var.name[prefix_end..arrow];
-                    let to_name = &ltm_var.name[arrow + '\u{2192}'.len_utf8()..];
+                    let from_name = &suffix[..arrow];
+                    let to_name = &suffix[arrow + '\u{2192}'.len_utf8()..];
                     let link_id = LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
                     compile_ltm_var_fragment(db, link_id, model, project)
                         .as_ref()
@@ -4988,8 +4662,19 @@ pub fn assemble_module(
             };
 
             if let Some(result) = fragment_result {
-                all_fragments.insert(ltm_var_canonical.clone(), result);
-                ltm_flow_names.push(ltm_var_canonical);
+                // Drop LTM fragments whose symbolic variable references can't
+                // be resolved in this model's layout.  This happens when
+                // sub-model LTM equations reference implicit stdlib module
+                // instance names (e.g. "smth1") that only exist in the root
+                // model's namespace under qualified names like
+                // "$:var_name:0:smth1".  Silently dropping these is correct:
+                // the root model generates its own LTM vars using the
+                // qualified names, so sub-model LTM vars for the same modules
+                // would be duplicates anyway.
+                if crate::compiler::symbolic::fragment_vars_in_layout(&result.fragment, layout) {
+                    all_fragments.insert(ltm_var_canonical.clone(), result);
+                    ltm_flow_names.push(ltm_var_canonical);
+                }
             }
         }
 
@@ -5020,7 +4705,13 @@ pub fn assemble_module(
                         &module_input_names,
                     );
                     if let Some(result) = im_fragment {
-                        all_fragments.insert(im_name.clone(), result);
+                        // Same layout check as for main LTM vars above.
+                        if crate::compiler::symbolic::fragment_vars_in_layout(
+                            &result.fragment,
+                            layout,
+                        ) {
+                            all_fragments.insert(im_name.clone(), result);
+                        }
                     }
                 }
             }
@@ -5090,7 +4781,7 @@ pub fn assemble_module(
     // Append LTM implicit var fragments to the relevant runlists.
     // Some implicit vars participate in initials and/or stocks even
     // though they are not part of the original model.
-    if is_root && project.ltm_enabled(db) {
+    if project.ltm_enabled(db) {
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
         let mut ltm_im_names: Vec<&String> = ltm_implicit.keys().collect();
         ltm_im_names.sort_unstable();
@@ -5566,16 +5257,12 @@ fn enumerate_module_instances_inner(
 
     // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
     // feedback loop instrumentation). These are only present when LTM is
-    // enabled and exist only in the root model.
+    // enabled. Models without feedback loops produce empty lists.
     if project.ltm_enabled(db) {
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
 
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, *source_model, project)
-        } else {
-            model_ltm_synthetic_variables(db, *source_model, project)
-        };
+        let ltm_vars = model_ltm_variables(db, *source_model, project);
 
         for ltm_var in &ltm_vars.vars {
             let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
@@ -5769,19 +5456,13 @@ fn calc_flattened_offsets_incremental(
     }
 
     // Include LTM variables (loop scores, relative loop scores, and their
-    // implicit helper/module vars) when LTM is enabled and this is the
-    // root model. These occupy slots after the implicit variables,
-    // matching compute_layout's Section 3 ordering.
-    if is_root && project.ltm_enabled(db) {
-        let layout = compute_layout(db, *source_model, project, true);
+    // implicit helper/module vars) when LTM is enabled. Models without
+    // feedback loops get empty LTM var lists. These occupy slots after the
+    // implicit variables, matching compute_layout's Section 3 ordering.
+    if project.ltm_enabled(db) {
+        let layout = compute_layout(db, *source_model, project, is_root);
 
-        // Enumerate all LTM variable names from the synthetic variables list
-        // and their implicit helper/module variables.
-        let ltm_vars = if project.ltm_discovery_mode(db) {
-            model_ltm_all_link_synthetic_variables(db, *source_model, project)
-        } else {
-            model_ltm_synthetic_variables(db, *source_model, project)
-        };
+        let ltm_vars = model_ltm_variables(db, *source_model, project);
 
         let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
@@ -5859,6 +5540,17 @@ pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enable
     }
 }
 
+/// Set the `ltm_discovery_mode` flag on a `SourceProject` salsa input.
+///
+/// When true, LTM generates link scores for every causal edge rather
+/// than only edges participating in detected feedback loops.
+pub fn set_project_ltm_discovery_mode(db: &mut SimlinDb, project: SourceProject, enabled: bool) {
+    use salsa::Setter;
+    if project.ltm_discovery_mode(db) != enabled {
+        project.set_ltm_discovery_mode(db).to(enabled);
+    }
+}
+
 /// Compile a project incrementally using salsa tracked functions.
 ///
 /// This is the production compilation entry point. Returns the assembled
@@ -5891,11 +5583,14 @@ mod db_dimension_invalidation_tests;
 #[path = "db_fragment_cache_tests.rs"]
 mod db_fragment_cache_tests;
 #[cfg(test)]
+#[path = "db_ltm_module_tests.rs"]
+mod db_ltm_module_tests;
+#[cfg(test)]
+#[path = "db_ltm_unified_tests.rs"]
+mod db_ltm_unified_tests;
+#[cfg(test)]
 #[path = "db_prev_init_tests.rs"]
 mod db_prev_init_tests;
-#[cfg(test)]
-#[path = "db_stdlib_ports_tests.rs"]
-mod db_stdlib_ports_tests;
 #[cfg(test)]
 #[path = "db_tests.rs"]
 mod db_tests;

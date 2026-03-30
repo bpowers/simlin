@@ -1260,63 +1260,7 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
     );
 }
 
-fn feedback_loop_project() -> datamodel::Project {
-    datamodel::Project {
-        name: "feedback".to_string(),
-        sim_specs: datamodel::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: datamodel::SimMethod::Euler,
-            time_units: None,
-        },
-        dimensions: vec![],
-        units: vec![],
-        models: vec![datamodel::Model {
-            name: "main".to_string(),
-            sim_specs: None,
-            variables: vec![
-                datamodel::Variable::Stock(datamodel::Stock {
-                    ident: "population".to_string(),
-                    equation: datamodel::Equation::Scalar("100".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    inflows: vec!["births".to_string()],
-                    outflows: vec![],
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Flow(datamodel::Flow {
-                    ident: "births".to_string(),
-                    equation: datamodel::Equation::Scalar("population * birth_rate".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-                datamodel::Variable::Aux(datamodel::Aux {
-                    ident: "birth_rate".to_string(),
-                    equation: datamodel::Equation::Scalar("0.1".to_string()),
-                    documentation: String::new(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                }),
-            ],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-        }],
-        source: None,
-        ai_information: None,
-    }
-}
+use crate::testutils::feedback_loop_project;
 
 #[test]
 fn test_normalize_module_ref_str() {
@@ -1812,12 +1756,18 @@ fn test_model_cycle_partitions_single_stock() {
 
 #[test]
 fn test_model_ltm_synthetic_variables_generates_scores() {
-    let db = SimlinDb::default();
-    let project = feedback_loop_project();
-    let result = sync_from_datamodel(&db, &project);
-    let model = result.models["main"].source;
+    use super::model_ltm_variables;
+    use salsa::Setter;
 
-    let ltm = model_ltm_synthetic_variables(&db, model, result.project);
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
 
     // Should generate link scores and loop scores for the feedback loop
     assert!(!ltm.vars.is_empty(), "should generate LTM variables");
@@ -1840,12 +1790,19 @@ fn test_model_ltm_synthetic_variables_generates_scores() {
 
 #[test]
 fn test_model_ltm_all_link_synthetic_variables_discovery_mode() {
-    let db = SimlinDb::default();
-    let project = feedback_loop_project();
-    let result = sync_from_datamodel(&db, &project);
-    let model = result.models["main"].source;
+    use super::model_ltm_variables;
+    use salsa::Setter;
 
-    let ltm = model_ltm_all_link_synthetic_variables(&db, model, result.project);
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
 
     assert!(!ltm.vars.is_empty(), "should generate link score variables");
 
@@ -1862,13 +1819,19 @@ fn test_model_ltm_all_link_synthetic_variables_discovery_mode() {
 
 #[test]
 fn test_model_ltm_no_loops_empty() {
-    let db = SimlinDb::default();
+    use super::model_ltm_variables;
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
     // Simple project has just a constant -- no loops
     let project = simple_project();
-    let result = sync_from_datamodel(&db, &project);
-    let model = result.models["main"].source;
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let ltm = model_ltm_synthetic_variables(&db, model, result.project);
+    let ltm = model_ltm_variables(&db, model, source_project);
     assert!(ltm.vars.is_empty(), "no loops should produce no LTM vars");
 }
 
@@ -2110,7 +2073,8 @@ fn test_ltm_per_link_caching_model_level() {
     };
 
     // Prime the model-level LTM function
-    let ltm_before = model_ltm_synthetic_variables(&db, source_model, source_project);
+    source_project.set_ltm_enabled(&mut db).to(true);
+    let ltm_before = model_ltm_variables(&db, source_model, source_project);
     assert!(!ltm_before.vars.is_empty(), "should generate LTM variables");
 
     // Verify both loops have link scores
@@ -2131,7 +2095,7 @@ fn test_ltm_per_link_caching_model_level() {
         .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
 
     // Model-level result should still produce valid results
-    let ltm_after = model_ltm_synthetic_variables(&db, source_model, source_project);
+    let ltm_after = model_ltm_variables(&db, source_model, source_project);
     assert!(
         !ltm_after.vars.is_empty(),
         "should still generate LTM variables"
@@ -3545,40 +3509,48 @@ fn test_ac1_6_cross_model_isolation() {
     );
 }
 
-/// AC2.4: Stdlib composite scores for dynamic modules (SMOOTH, DELAY, etc.)
-/// compute once and are never recomputed. Calling module_ltm_synthetic_variables
-/// twice with unchanged inputs returns pointer-equal results.
+/// AC2.4: LTM variables for models with SMOOTH modules compute once and
+/// are cached. Calling model_ltm_variables twice with unchanged inputs
+/// returns pointer-equal results.
 #[test]
 fn test_ac2_4_stdlib_composite_scores_cached() {
-    let db = SimlinDb::default();
+    use super::model_ltm_variables;
+    use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+    use salsa::Setter;
 
-    let stdlib_model = crate::stdlib::get("smth1").expect("smth1 stdlib model should exist");
-
-    let stdlib_project = datamodel::Project {
-        name: "stdlib_test".to_string(),
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "smooth_cache_test".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
         dimensions: vec![],
         units: vec![],
-        models: vec![stdlib_model],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_stock("level", "50", &["adj"], &[], None),
+                x_aux("smoothed", "SMTH1(level, 3)", None),
+                x_aux("gap", "100 - smoothed", None),
+                x_flow("adj", "gap / 5", None),
+            ],
+        )],
         source: None,
         ai_information: None,
     };
-
-    let sync = sync_from_datamodel(&db, &stdlib_project);
-    let model_name = sync.models.keys().next().unwrap().clone();
-    let model = sync.models[&model_name].source;
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
 
     // First call: compute
-    let result1 =
-        module_ltm_synthetic_variables(&db, model, sync.project) as *const LtmVariablesResult;
+    let result1 = model_ltm_variables(&db, model, source_project) as *const LtmVariablesResult;
 
     // Second call: should be cached (pointer-equal)
-    let result2 =
-        module_ltm_synthetic_variables(&db, model, sync.project) as *const LtmVariablesResult;
+    let result2 = model_ltm_variables(&db, model, source_project) as *const LtmVariablesResult;
 
     assert_eq!(
         result1, result2,
-        "AC2.4: module_ltm_synthetic_variables should be cached on unchanged inputs"
+        "AC2.4: model_ltm_variables should be cached on unchanged inputs"
     );
 }
 
@@ -5235,7 +5207,7 @@ fn test_ltm_no_loops_zero_overhead() {
 
     // Verify LTM synthetic variables are empty for this model
     source_project.set_ltm_enabled(&mut db).to(true);
-    let ltm_var_count = model_ltm_synthetic_variables(&db, source_model, source_project)
+    let ltm_var_count = model_ltm_variables(&db, source_model, source_project)
         .vars
         .len();
     assert_eq!(
@@ -5364,10 +5336,11 @@ fn test_ltm_incremental_produces_synthetic_variables() {
 }
 
 /// AC1.6: Discovery mode compiles through the same incremental path.
-/// model_ltm_all_link_synthetic_variables produces score variables for
+/// model_ltm_variables in discovery mode produces score variables for
 /// ALL causal links, not just those in feedback loops.
 #[test]
 fn test_ltm_discovery_mode_all_links() {
+    use super::model_ltm_variables;
     use salsa::Setter;
 
     let mut db = SimlinDb::default();
@@ -5385,16 +5358,16 @@ fn test_ltm_discovery_mode_all_links() {
     // per-link + loop-level + relative loop scores, but only for links
     // in detected loops. Both should produce non-zero var counts for a
     // model with feedback.
-    let discovery_var_count =
-        model_ltm_all_link_synthetic_variables(&db, source_model, source_project)
-            .vars
-            .len();
+    let discovery_var_count = model_ltm_variables(&db, source_model, source_project)
+        .vars
+        .len();
     assert!(
         discovery_var_count > 0,
         "discovery mode should produce at least one link score variable"
     );
 
-    let normal_var_count = model_ltm_synthetic_variables(&db, source_model, source_project)
+    source_project.set_ltm_discovery_mode(&mut db).to(false);
+    let normal_var_count = model_ltm_variables(&db, source_model, source_project)
         .vars
         .len();
     assert!(
@@ -5403,6 +5376,7 @@ fn test_ltm_discovery_mode_all_links() {
     );
 
     // Compilation should succeed in discovery mode
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
     let compiled = compile_project_incremental(&db, source_project, "main")
         .expect("LTM discovery mode compilation should succeed");
 

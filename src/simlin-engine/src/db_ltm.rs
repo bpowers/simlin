@@ -20,9 +20,9 @@ use super::{
     Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, SourceModel, SourceProject,
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
     build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
-    model_implicit_var_info, model_ltm_all_link_synthetic_variables, model_ltm_synthetic_variables,
-    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
-    project_datamodel_dims, project_units_context, variable_dimensions, variable_size,
+    model_implicit_var_info, model_module_ident_context, model_module_map,
+    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
+    variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -157,11 +157,7 @@ pub fn model_ltm_implicit_var_info(
         return HashMap::new();
     }
 
-    let ltm_vars = if project.ltm_discovery_mode(db) {
-        model_ltm_all_link_synthetic_variables(db, model, project)
-    } else {
-        model_ltm_synthetic_variables(db, model, project)
-    };
+    let ltm_vars = model_ltm_variables(db, model, project);
 
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
@@ -306,7 +302,7 @@ pub(super) fn compile_ltm_equation_fragment(
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
 
-    // LTM vars are always compiled in the root model context
+    // Mini-layout starts after the 4 implicit time vars (time, dt, initial_time, final_time)
     let mut mini_offset = crate::vm::IMPLICIT_VAR_COUNT;
 
     // Add implicit time/dt/initial_time/final_time variables
@@ -617,11 +613,7 @@ pub(super) fn compile_ltm_equation_fragment(
                         .unwrap_or(1);
 
                     // Parse the parent LTM equation to get implicit var references
-                    let parent_ltm_vars = if project.ltm_discovery_mode(db) {
-                        model_ltm_all_link_synthetic_variables(db, model, project)
-                    } else {
-                        model_ltm_synthetic_variables(db, model, project)
-                    };
+                    let parent_ltm_vars = model_ltm_variables(db, model, project);
                     let parent_ltm = parent_ltm_vars
                         .vars
                         .iter()
@@ -1598,6 +1590,231 @@ pub(super) fn compile_ltm_implicit_var_fragment(
             stock_bytecodes,
         },
     })
+}
+
+/// Unified LTM variable generation for any model (root or sub-model).
+///
+/// Auto-detects sub-model behavior by checking for input ports with causal
+/// pathways to output. Sub-models and discovery mode generate link scores
+/// for ALL edges; exhaustive mode on root models generates link scores only
+/// for edges in detected loops, plus loop/relative loop scores.
+///
+/// Pathway and composite scores are generated for models with input ports.
+/// Module-containing loops are no longer filtered out because
+/// `link_score_equation_text` now handles module links via composite refs.
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_variables(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> super::LtmVariablesResult {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{CyclePartitions, Loop, assign_loop_ids};
+    use std::collections::HashSet;
+
+    use super::{
+        LtmLinkId, LtmSyntheticVar, LtmVariablesResult, generate_max_abs_chain_str,
+        model_causal_edges, model_cycle_partitions, model_loop_circuits,
+        module_input_pathways_from_edges, reconstruct_model_variables,
+    };
+
+    let edges_result = model_causal_edges(db, model, project);
+    if edges_result.stocks.is_empty() {
+        return LtmVariablesResult { vars: vec![] };
+    }
+
+    let is_discovery = project.ltm_discovery_mode(db);
+    let pathways = module_input_pathways_from_edges(edges_result);
+    let has_input_ports = !pathways.is_empty();
+
+    let mut vars = Vec::new();
+
+    // Pre-compute loops for exhaustive mode. Both the link-score
+    // strategy (loop edges only) and loop/relative score generation
+    // share this data, so compute once and reuse.
+    let loops: Option<Vec<Loop>> = if !is_discovery {
+        let circuits_result = model_loop_circuits(db, model, project);
+        if circuits_result.circuits.is_empty() {
+            if !has_input_ports {
+                return LtmVariablesResult { vars: vec![] };
+            }
+            None
+        } else {
+            let variables = reconstruct_model_variables(db, model, project);
+            let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
+                .edges
+                .iter()
+                .map(|(from, tos)| {
+                    (
+                        Ident::new(from),
+                        tos.iter().map(|t| Ident::new(t)).collect(),
+                    )
+                })
+                .collect();
+            let stocks: HashSet<Ident<Canonical>> =
+                edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+            let graph = crate::ltm::CausalGraph {
+                edges,
+                stocks,
+                variables: variables.clone(),
+                module_graphs: HashMap::new(),
+            };
+
+            let mut detected: Vec<Loop> = circuits_result
+                .circuits
+                .iter()
+                .map(|circuit_strs| {
+                    let circuit: Vec<Ident<Canonical>> =
+                        circuit_strs.iter().map(|s| Ident::new(s)).collect();
+                    let links = graph.circuit_to_links(&circuit);
+                    let parent_stocks = graph.find_stocks_in_loop(&circuit);
+                    let polarity = graph.calculate_polarity(&links);
+                    Loop {
+                        id: String::new(),
+                        links,
+                        stocks: parent_stocks,
+                        polarity,
+                    }
+                })
+                .collect();
+
+            assign_loop_ids(&mut detected);
+            Some(detected)
+        }
+    } else {
+        None
+    };
+
+    // Part 1: Link scores.
+    // Sub-models and discovery mode need scores for ALL edges (pathways
+    // reference arbitrary edges). Exhaustive root models only need
+    // scores for edges that participate in loops.
+    if has_input_ports || is_discovery {
+        for (from, tos) in &edges_result.edges {
+            for to in tos {
+                let link_id = LtmLinkId::new(db, from.clone(), to.clone());
+                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                    vars.push(lsv.clone());
+                }
+            }
+        }
+    } else if let Some(ref detected_loops) = loops {
+        let mut seen_links: HashSet<(String, String)> = HashSet::new();
+        for loop_item in detected_loops {
+            for link in &loop_item.links {
+                let key = (link.from.to_string(), link.to.to_string());
+                if seen_links.insert(key) {
+                    let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
+                    if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
+                        vars.push(lsv.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Part 2: Loop scores and relative loop scores (exhaustive mode only).
+    // Generated for any model with feedback loops, regardless of whether
+    // it also has input ports. A model can be both a reusable sub-model
+    // AND have internal loops that need scoring.
+    if let Some(ref detected_loops) = loops {
+        let partitions_result = model_cycle_partitions(db, model, project);
+        let partitions = CyclePartitions {
+            partitions: partitions_result
+                .partitions
+                .iter()
+                .map(|p| p.iter().map(|s| Ident::new(s)).collect())
+                .collect(),
+            stock_partition: partitions_result
+                .stock_partition
+                .iter()
+                .map(|(k, v)| (Ident::new(k), *v))
+                .collect(),
+        };
+
+        let loop_vars =
+            crate::ltm_augment::generate_loop_score_variables(detected_loops, &partitions);
+        for (name, var) in loop_vars {
+            let equation = match var.get_equation() {
+                Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
+                _ => String::new(),
+            };
+            vars.push(LtmSyntheticVar {
+                name: name.to_string(),
+                equation,
+            });
+        }
+    }
+
+    // Pathway and composite scores for models with input ports
+    for (input_port, port_pathways) in &pathways {
+        let mut pathway_names = Vec::new();
+        for (idx, pathway_links) in port_pathways.iter().enumerate() {
+            let path_var_name = format!(
+                "$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{}",
+                input_port.as_str(),
+                idx
+            );
+
+            let link_score_refs: Vec<String> = pathway_links
+                .iter()
+                .map(|link| {
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}\"",
+                        link.from.as_str(),
+                        link.to.as_str()
+                    )
+                })
+                .collect();
+
+            let equation = if link_score_refs.is_empty() {
+                "0".to_string()
+            } else {
+                link_score_refs.join(" * ")
+            };
+
+            pathway_names.push(path_var_name.clone());
+            vars.push(LtmSyntheticVar {
+                name: path_var_name,
+                equation,
+            });
+        }
+
+        let composite_name = format!(
+            "$\u{205A}ltm\u{205A}composite\u{205A}{}",
+            input_port.as_str()
+        );
+        let equation = generate_max_abs_chain_str(&pathway_names);
+        vars.push(LtmSyntheticVar {
+            name: composite_name,
+            equation,
+        });
+    }
+
+    // Sort by evaluation-order category (link_score before path before
+    // composite) so the VM's sequential flow evaluation respects the
+    // dependency chain: composites reference paths which reference link
+    // scores. Within each category, sort lexically for determinism.
+    vars.sort_by(|a, b| {
+        fn category(name: &str) -> u8 {
+            if name.contains("\u{205A}composite\u{205A}") {
+                3
+            } else if name.contains("\u{205A}path\u{205A}") {
+                2
+            } else if name.contains("\u{205A}loop_score\u{205A}")
+                || name.contains("\u{205A}rel_loop_score\u{205A}")
+            {
+                1
+            } else {
+                0 // link_score and anything else
+            }
+        }
+        category(&a.name)
+            .cmp(&category(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    LtmVariablesResult { vars }
 }
 
 #[cfg(test)]
