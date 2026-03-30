@@ -3748,11 +3748,12 @@ mod tests {
         let contents = std::fs::read_to_string(mdl_path).unwrap();
         let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
         let model = datamodel_project.models.first().unwrap();
-        let project = std::rc::Rc::new(crate::Project::from(datamodel_project.clone()));
-        let reference = crate::interpreter::Simulation::new(&project, "main")
-            .unwrap()
-            .run_to_end()
-            .unwrap();
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &datamodel_project);
+        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main").unwrap();
+        let mut vm = crate::vm::Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let reference = vm.into_results();
 
         for (label, vdf_path) in [
             ("wrld3-scen01", "../../test/metasd/WRLD3-03/SCEN01.VDF"),

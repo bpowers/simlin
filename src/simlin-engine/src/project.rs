@@ -280,7 +280,10 @@ mod tests {
 
     #[test]
     fn test_unit_definition_errors_surface_in_project_errors() {
-        use crate::common::ErrorCode;
+        use crate::db::{
+            DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+            sync_from_datamodel,
+        };
         use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
 
         let model = x_model("main", vec![x_aux("x", "1", None)]);
@@ -300,24 +303,29 @@ mod tests {
             aliases: vec![],
         });
 
-        let project = Project::from(dm);
-        let unit_errs: Vec<_> = project
-            .errors
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &dm);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
+
+        let unit_errs: Vec<_> = diagnostics
             .iter()
-            .filter(|e| e.code == ErrorCode::UnitDefinitionErrors)
+            .filter(|d| {
+                d.severity == DiagnosticSeverity::Error
+                    && matches!(&d.error, DiagnosticError::Unit(_))
+            })
             .collect();
         assert!(
             !unit_errs.is_empty(),
-            "Project.errors should contain UnitDefinitionErrors, got: {:?}",
-            project.errors,
+            "diagnostics should contain unit definition errors, got: {:?}",
+            diagnostics,
         );
-        // The failing unit name must appear in the error details so
+        // The failing unit name must appear in the diagnostic so
         // callers can identify which unit definition is broken.
         assert!(
             unit_errs
                 .iter()
-                .any(|e| e.details.as_deref().unwrap_or("").contains("widget")),
-            "Error details should include the unit name 'widget', got: {:?}",
+                .any(|d| d.variable.as_deref().unwrap_or("").contains("widget")),
+            "Diagnostic variable should include the unit name 'widget', got: {:?}",
             unit_errs,
         );
     }
