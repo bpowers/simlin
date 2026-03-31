@@ -60,7 +60,7 @@ impl Specs {
         // values only save points within [start, stop] are counted.
         //
         // The effective save cadence is max(save_step, dt) because the VM
-        // and interpreter cannot save more often than once per dt step
+        // cannot save more often than once per dt step
         // (save_every = max(1, round(save_step/dt))).
         let effective_save_step = if save_step > dt { save_step } else { dt };
         let n_chunks = ((specs.stop - specs.start) / effective_save_step + 1.0) as usize;

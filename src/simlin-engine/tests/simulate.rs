@@ -7,15 +7,13 @@ mod test_helpers;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::rc::Rc;
 
 #[cfg(feature = "file_io")]
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Project, Results, Vm, project_io};
+use simlin_engine::{Results, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use test_helpers::ensure_results;
@@ -241,9 +239,7 @@ fn simulate_path(xmile_path: &str) {
 fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
     eprintln!("model: {xmile_path}");
 
-    // first read-in the XMILE model, convert it to our own representation,
-    // and simulate it using our tree-walking interpreter
-    let (datamodel_project, results1) = {
+    let datamodel_project = {
         let f = File::open(xmile_path).unwrap();
         let mut f = BufReader::new(f);
 
@@ -251,36 +247,22 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         if let Err(ref err) = datamodel_project {
             eprintln!("model '{xmile_path}' error: {err}");
         }
-        let datamodel_project = datamodel_project.unwrap();
-        let project = Rc::new(Project::from(datamodel_project.clone()));
-        let sim = Simulation::new(&project, "main").unwrap();
-
-        // sim.debug_print_runlists("main");
-        let results = sim.run_to_end();
-        assert!(results.is_ok());
-        (datamodel_project, results.unwrap())
+        datamodel_project.unwrap()
     };
 
-    // next simulate the model using our bytecode VM
-    let results2 = {
+    // simulate the model using our bytecode VM
+    let results = {
         let compiled_sim = compile(&datamodel_project);
         let mut vm = Vm::new(compiled_sim).unwrap();
         vm.run_to_end().unwrap();
         vm.into_results()
     };
 
-    // Ensure both paths match the reference results. We no longer
-    // cross-validate interpreter vs VM directly because the incremental
-    // compilation path may produce different evaluation orders for
-    // internal variables (e.g., implicit SMOOTH/DELAY sub-model variables)
-    // at the initial timestep. Both paths are independently validated
-    // against the known-good reference output.
     let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results1);
-    ensure_results(&expected, &results2);
+    ensure_results(&expected, &results);
 
-    // serialized our project through protobufs and ensure we don't see problems
-    let results3 = {
+    // serialize our project through protobufs and ensure we don't see problems
+    let results_proto = {
         use simlin_engine::prost::Message;
 
         let pb_project_inner = serialize(&datamodel_project).unwrap();
@@ -295,15 +277,14 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         vm.into_results()
     };
-    ensure_results(&expected, &results3);
+    ensure_results(&expected, &results_proto);
 
     // serialize our project back to XMILE
     let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
 
     // and then read it back in from the XMILE string and simulate it
-    let (roundtripped_project, results4) = {
+    let (roundtripped_project, results_xmile) = {
         let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
-        // eprintln!("xmile:\n{}", serialized_xmile);
         let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
 
         let compiled_sim = compile(&roundtripped_project);
@@ -311,38 +292,12 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
     };
-    ensure_results(&expected, &results4);
+    ensure_results(&expected, &results_xmile);
 
     // finally ensure that if we re-serialize to XMILE the results are
     // byte-for-byte identical (we aren't losing any information)
     let serialized_xmile2 = xmile::project_to_xmile(&roundtripped_project).unwrap();
     assert_eq!(&serialized_xmile, &serialized_xmile2);
-}
-
-/// Interpreter-only simulation test - runs the interpreter and compares
-/// results against expected output, but skips the VM (for models that use
-/// array builtins like SUM which aren't yet supported in bytecode).
-fn simulate_path_interpreter_only(xmile_path: &str) {
-    eprintln!("model (interpreter-only): {xmile_path}");
-
-    let f = File::open(xmile_path).unwrap();
-    let mut f = BufReader::new(f);
-
-    let datamodel_project = xmile::project_from_reader(&mut f);
-    if let Err(ref err) = datamodel_project {
-        eprintln!("model '{xmile_path}' error: {err}");
-    }
-    let datamodel_project = datamodel_project.unwrap();
-    let project = Rc::new(Project::from(datamodel_project));
-    let sim = Simulation::new(&project, "main").unwrap();
-
-    let results = sim.run_to_end();
-    assert!(results.is_ok(), "interpreter run failed: {:?}", results);
-    let results = results.unwrap();
-
-    // compare against expected results
-    let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results);
 }
 
 fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
@@ -367,9 +322,8 @@ fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
     None
 }
 
-/// Simulate a Vensim MDL file via the native parser, running both interpreter
-/// and VM and comparing against expected output.
-#[allow(dead_code)]
+/// Simulate a Vensim MDL file via the native parser, running the VM
+/// and comparing against expected output.
 fn simulate_mdl_path(mdl_path: &str) {
     eprintln!("model (vensim mdl): {mdl_path}");
 
@@ -379,56 +333,16 @@ fn simulate_mdl_path(mdl_path: &str) {
     let datamodel_project =
         open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-    let results1 = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    // VM leg via incremental path
     let compiled = compile_vm(&datamodel_project);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results2 = vm.into_results();
+    let results = vm.into_results();
 
-    // Validate both paths independently against expected output rather
-    // than cross-validating interpreter vs VM, since the incremental
-    // compilation path may produce different evaluation orders for
-    // internal variables.
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results1);
-        ensure_results(&expected, &results2);
-    } else {
-        ensure_results(&results1, &results2);
-    }
-}
-
-/// Interpreter-only simulation test for MDL files (for models that use
-/// array builtins like SUM which aren't yet supported in bytecode).
-fn simulate_mdl_path_interpreter_only(mdl_path: &str) {
-    eprintln!("model (vensim mdl, interpreter-only): {mdl_path}");
-
-    let contents = std::fs::read_to_string(mdl_path)
-        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
-
-    let datamodel_project =
-        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
-    let project = Rc::new(Project::from(datamodel_project));
-
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results);
-    }
+    let expected = load_expected_results_for_mdl(mdl_path)
+        .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
+    ensure_results(&expected, &results);
 }
 
 /// Simulate a Vensim MDL file that references external data files.
@@ -449,28 +363,16 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     let datamodel_project = open_vensim_with_data(&contents, Some(&provider))
         .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-    let results1 = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    // VM leg via incremental path
     let compiled = compile_vm(&datamodel_project);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results2 = vm.into_results();
+    let results = vm.into_results();
 
-    if let Some(expected) = load_expected_results_for_mdl(mdl_path) {
-        ensure_results(&expected, &results1);
-        ensure_results(&expected, &results2);
-    } else {
-        ensure_results(&results1, &results2);
-    }
+    let expected = load_expected_results_for_mdl(mdl_path)
+        .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
+    ensure_results(&expected, &results);
 }
 
 #[test]
@@ -577,30 +479,17 @@ fn simulates_except_xmile() {
 
 #[test]
 fn simulates_except() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except/except.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/except/except.mdl");
 }
 
 #[test]
 fn simulates_except2() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/except2/except2.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/except2/except2.mdl");
 }
 
 #[test]
 fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
-}
-
-#[test]
-fn simulates_sum_interpreter_only() {
-    simulate_path_interpreter_only("../../test/sdeverywhere/models/sum/sum.xmile");
-}
-
-// Ignored: xmutil drops EXCEPT semantics and subscript mappings when converting
-// MDL to XMILE.
-#[test]
-#[ignore]
-fn simulates_except_xmile_interpreter_only() {
-    simulate_path_interpreter_only("../../test/sdeverywhere/models/except/except.xmile");
 }
 
 /// End-to-end test for EXCEPT through the MDL->simulation pipeline.
@@ -628,14 +517,12 @@ TIME STEP = 1 ~~|
 ";
     let datamodel_project =
         open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse except_basic mdl: {e}"));
-    let project = Rc::new(Project::from(datamodel_project.clone()));
 
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
-
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
 
     let get = |name: &str| -> f64 {
         let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
@@ -672,40 +559,6 @@ TIME STEP = 1 ~~|
     assert!((get("u[a1]") - 99.0).abs() < 1e-10, "u[A1] should be 99");
     assert!((get("u[a2]") - 1.0).abs() < 1e-10, "u[A2] should be 1");
     assert!((get("u[a3]") - 1.0).abs() < 1e-10, "u[A3] should be 1");
-
-    // Also verify VM path via incremental compilation
-    let compiled = compile_vm(&datamodel_project);
-    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
-    vm.run_to_end()
-        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
-    let vm_results = vm.into_results();
-
-    let get_vm = |name: &str| -> f64 {
-        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
-        let off = vm_results.offsets[&ident];
-        vm_results.iter().next().unwrap()[off]
-    };
-
-    assert!(
-        (get_vm("g[a1]") - 10.0).abs() < 1e-10,
-        "VM g[A1] should be 10"
-    );
-    assert!(
-        (get_vm("g[a2]") - 7.0).abs() < 1e-10,
-        "VM g[A2] should be 7"
-    );
-    assert!(
-        (get_vm("p[a1]") - 5.0).abs() < 1e-10,
-        "VM p[A1] should be 5"
-    );
-    assert!(
-        (get_vm("s[a2]") - 14.0).abs() < 1e-10,
-        "VM s[A2] should be 14"
-    );
-    assert!(
-        (get_vm("s[a3]") - 13.0).abs() < 1e-10,
-        "VM s[A3] should be 13"
-    );
 }
 
 #[test]
@@ -751,7 +604,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // --- XMILE-path limitations (xmutil conversion issues) ---
     //
-    // Tested via simulates_allocate_xmile (interpreter-only; VM lacks ALLOCATE AVAILABLE)
+    // Tested via simulates_allocate_xmile
     // "test/sdeverywhere/models/allocate/allocate.xmile",
     //
     // xmutil converts DELAY FIXED into delay1 approximation which produces NaN.
@@ -969,7 +822,7 @@ fn simulates_allocate_xmile() {
 
 #[test]
 fn simulates_longeqns_mdl() {
-    simulate_mdl_path_interpreter_only("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
+    simulate_mdl_path("../../test/sdeverywhere/models/longeqns/longeqns.mdl");
 }
 
 // Ignored: xmutil strips GET DATA BETWEEN TIMES calls in XMILE conversion,
@@ -999,9 +852,9 @@ fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-    let project = Project::from(datamodel_project);
-    let project = Rc::new(project);
-    assert!(Simulation::new(&project, "blerg").is_err());
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    assert!(compile_project_incremental(&db, sync.project, "blerg").is_err());
 }
 
 #[test]
@@ -1070,23 +923,12 @@ fn simulates_wrld3_03() {
     let datamodel_project =
         open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-    let results1 = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    // VM leg via incremental path
     let compiled = compile_vm(&datamodel_project);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results2 = vm.into_results();
-
-    ensure_results(&results1, &results2);
+    let results = vm.into_results();
 
     // Verify VDF parsing and section6 mapping succeed on the WRLD3 reference
     // data. Full series-level comparison requires empirical refinement which
@@ -1108,7 +950,7 @@ fn simulates_wrld3_03() {
     let vdf_data = vdf_file
         .extract_data()
         .unwrap_or_else(|e| panic!("VDF extract_data failed: {e}"));
-    assert_eq!(vdf_data.time_values.len(), results1.step_count);
+    assert_eq!(vdf_data.time_values.len(), results.step_count);
 }
 
 // C-LEARN uses Vensim macros (SAMPLE UNTIL, SSHAPE) that the native MDL
@@ -1129,23 +971,12 @@ fn simulates_clearn() {
     let datamodel_project =
         open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation for {mdl_path}: {e}"));
-    let results1 = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed for {mdl_path}: {e}"));
-
-    // VM leg via incremental path
     let compiled = compile_vm(&datamodel_project);
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results2 = vm.into_results();
-
-    ensure_results(&results1, &results2);
+    let results = vm.into_results();
 
     let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
     let vdf_data_bytes =
@@ -1161,7 +992,7 @@ fn simulates_clearn() {
         .unwrap_or_else(|e| panic!("VDF extract_data failed: {e}"));
     let vdf_results = build_results_from_ot_map(&vdf_data, &ot_map);
 
-    ensure_vdf_results(&vdf_results, &results1);
+    ensure_vdf_results(&vdf_results, &results);
 }
 
 /// All test models that the monolithic compiler can handle.
@@ -1264,7 +1095,7 @@ fn simulates_directsubs_mdl() {
 }
 
 /// End-to-end test: scalar GET DIRECT DATA from CSV, parsed through MDL
-/// pipeline with FilesystemDataProvider, simulated via interpreter and VM.
+/// pipeline with FilesystemDataProvider, simulated via VM.
 #[test]
 fn simulates_get_direct_data_scalar_csv() {
     use std::io::Write;
@@ -1289,13 +1120,11 @@ SAVEPER = TIME STEP ~~|
     let datamodel_project = open_vensim_with_data(mdl, Some(&provider))
         .unwrap_or_else(|e| panic!("failed to parse: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
 
     let get = |name: &str| -> Vec<f64> {
         let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
@@ -1327,14 +1156,6 @@ SAVEPER = TIME STEP ~~|
         (y_vals[2] - 600.0).abs() < 1e-6,
         "y at t=2020 should be 600"
     );
-
-    // VM leg via incremental path
-    let compiled = compile_vm(&datamodel_project);
-    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
-    vm.run_to_end()
-        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
-    let vm_results = vm.into_results();
-    ensure_results(&results, &vm_results);
 }
 
 /// End-to-end test: scalar GET DIRECT CONSTANTS from CSV.
@@ -1361,13 +1182,11 @@ SAVEPER = TIME STEP ~~|
     let datamodel_project = open_vensim_with_data(mdl, Some(&provider))
         .unwrap_or_else(|e| panic!("failed to parse: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
 
     let get = |name: &str| -> f64 {
         let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
@@ -1377,13 +1196,6 @@ SAVEPER = TIME STEP ~~|
 
     assert!((get("a") - 42.0).abs() < 1e-6, "a should be 42");
     assert!((get("b") - 50.0).abs() < 1e-6, "b should be 50");
-
-    // VM leg via incremental path
-    let compiled = compile_vm(&datamodel_project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let vm_results = vm.into_results();
-    ensure_results(&results, &vm_results);
 }
 
 /// End-to-end test: scalar GET DIRECT LOOKUPS from CSV.
@@ -1413,13 +1225,11 @@ SAVEPER = TIME STEP ~~|
     let datamodel_project = open_vensim_with_data(mdl, Some(&provider))
         .unwrap_or_else(|e| panic!("failed to parse: {e}"));
 
-    // Interpreter leg (retained for cross-validation per AC4.6)
-    let project = Rc::new(Project::from(datamodel_project.clone()));
-    let sim = Simulation::new(&project, "main")
-        .unwrap_or_else(|e| panic!("failed to create simulation: {e}"));
-    let results = sim
-        .run_to_end()
-        .unwrap_or_else(|e| panic!("interpreter run failed: {e}"));
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
 
     let get = |name: &str, step: usize| -> f64 {
         let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
@@ -1436,13 +1246,6 @@ SAVEPER = TIME STEP ~~|
     // At time 10: x=30, y=60
     assert!((get("x", 2) - 30.0).abs() < 1e-6, "x at t=10 should be 30");
     assert!((get("y", 2) - 60.0).abs() < 1e-6, "y at t=10 should be 60");
-
-    // VM leg via incremental path
-    let compiled = compile_vm(&datamodel_project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let vm_results = vm.into_results();
-    ensure_results(&results, &vm_results);
 }
 
 #[test]

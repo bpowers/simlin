@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn test_parse_link_offsets() {
         // Test the link offset parsing from variable names.
-        // Use Ident::new() directly to match how the interpreter stores keys.
+        // Use Ident::new() directly to match how the VM stores keys.
         let mut offsets = HashMap::new();
         offsets.insert(Ident::new("$⁚ltm⁚link_score⁚population→births"), 0usize);
         offsets.insert(Ident::new("$⁚ltm⁚link_score⁚births→population"), 1usize);

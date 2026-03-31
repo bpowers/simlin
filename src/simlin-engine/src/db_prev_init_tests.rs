@@ -79,7 +79,6 @@ fn test_nested_previous_does_not_create_false_cycle_via_helper_deps() {
         .aux("z", "PREVIOUS(PREVIOUS(x))", None);
 
     tp.assert_compiles_incremental();
-    tp.assert_sim_builds();
 
     let vm = tp.run_vm().expect("VM should run");
     let x_vals = vm.get("x").expect("x not in VM results");

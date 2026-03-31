@@ -31,7 +31,6 @@ pub mod db;
 pub mod diagram;
 mod dimensions;
 pub mod float;
-pub mod interpreter;
 pub mod json;
 #[cfg(test)]
 mod json_proptest;
@@ -77,7 +76,6 @@ mod vm;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-pub use self::interpreter::Simulation;
 pub use self::model::{ModelStage1, get_incoming_links, resolve_non_private_dependencies};
 pub use self::patch::{
     ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,

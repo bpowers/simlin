@@ -7,26 +7,14 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, ErrorCode, Ident, UnitError};
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
-use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use crate::db::{
+    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    compile_project_incremental, sync_from_datamodel_incremental,
+};
 use crate::vm::{CompiledSimulation, Vm};
 use std::collections::HashMap;
-
-#[cfg(any(test, feature = "testing"))]
-use crate::common::ErrorCode;
-#[cfg(any(test, feature = "testing"))]
-use crate::common::UnitError;
-#[cfg(any(test, feature = "testing"))]
-use crate::compiler::Module;
-#[cfg(any(test, feature = "testing"))]
-use crate::interpreter::Simulation;
-#[cfg(any(test, feature = "testing"))]
-use crate::project::Project as CompiledProject;
-#[cfg(any(test, feature = "testing"))]
-use std::collections::BTreeSet;
-#[cfg(any(test, feature = "testing"))]
-use std::sync::Arc;
 
 /// Builder for creating test projects with support for arrays, units, and all variable types
 pub struct TestProject {
@@ -387,26 +375,25 @@ impl TestProject {
     }
 }
 
-/// Methods that use the monolithic `Project::from` construction path.
-/// These are retained only for the AST interpreter cross-validation path
-/// (AC4.6). Production compilation uses `compile_project_incremental`.
-#[cfg(any(test, feature = "testing"))]
+/// Methods for tests that inspect compiler internals (e.g. lowered
+/// expressions via `Module::get_flow_exprs`).
+#[cfg(test)]
 impl TestProject {
-    /// Build and compile the project
-    pub fn compile(&self) -> Result<CompiledProject, Vec<(String, ErrorCode)>> {
+    /// Build and compile the project via `Project::from`.
+    pub fn compile(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
+        use std::sync::Arc;
+
         let datamodel = self.build_datamodel();
-        let compiled = Arc::new(CompiledProject::from(datamodel));
+        let compiled = Arc::new(crate::project::Project::from(datamodel));
 
         let mut errors = Vec::new();
 
-        // Check project-level errors
         if !compiled.errors.is_empty() {
             for err in &compiled.errors {
                 errors.push(("project".to_string(), err.code));
             }
         }
 
-        // Check model-level errors
         for (model_name, model) in &compiled.models {
             if let Some(model_errors) = &model.errors {
                 for err in model_errors {
@@ -414,14 +401,12 @@ impl TestProject {
                 }
             }
 
-            // Check variable-level equation errors
             for (var_name, var_errors) in model.get_variable_errors() {
                 for err in var_errors {
                     errors.push((format!("{model_name}.{var_name}"), err.code));
                 }
             }
 
-            // Check variable-level unit errors
             for (var_name, unit_errors) in model.get_unit_errors() {
                 for err in unit_errors {
                     let code = match err {
@@ -441,264 +426,15 @@ impl TestProject {
         }
     }
 
-    /// Build a Simulation (requires successful compilation)
-    pub fn build_sim(&self) -> Result<Simulation, String> {
-        let datamodel = self.build_datamodel();
-        let compiled = Arc::new(CompiledProject::from(datamodel));
-
-        // Check for compilation errors first
-        let mut has_errors = false;
-        if !compiled.errors.is_empty() {
-            has_errors = true;
-        }
-
-        for model in compiled.models.values() {
-            if model.errors.is_some() || !model.get_variable_errors().is_empty() {
-                has_errors = true;
-                break;
-            }
-        }
-
-        if has_errors {
-            return Err("Project has compilation errors".to_string());
-        }
-
-        Simulation::new(&compiled, "main")
-            .map_err(|e| format!("Failed to create simulation: {e:?}"))
-    }
-
-    /// Run the interpreter and get results
-    pub fn run_interpreter(&self) -> Result<HashMap<String, Vec<f64>>, String> {
-        let sim = self.build_sim()?;
-
-        // Run the simulation using the tree-walking interpreter
-        let results = sim
-            .run_to_end()
-            .map_err(|e| format!("Simulation failed: {e:?}"))?;
-
-        // Extract results
-        let mut output = HashMap::new();
-
-        // First collect all individual array elements
-        for (name, &offset) in &results.offsets {
-            let mut values = Vec::new();
-            for step in 0..results.step_count {
-                let idx = step * results.step_size + offset;
-                values.push(results.data[idx]);
-            }
-            output.insert(name.to_string(), values);
-        }
-
-        // Now collect array variables by their base name
-        // Array elements are stored as "varname[subscript]", we want to collect them as "varname"
-        // We need to preserve the original offset order, not sort alphabetically
-        type ArrayElement = (usize, String, Vec<f64>);
-        let mut array_results: HashMap<Ident<Canonical>, Vec<ArrayElement>> = HashMap::new();
-        for (name, values) in &output {
-            if let Some(bracket_pos) = name.as_str().find('[') {
-                let base_name =
-                    Ident::<Canonical>::from_str_unchecked(&name.as_str()[..bracket_pos]);
-                // Get the offset for this element to maintain proper ordering
-                let offset = results
-                    .offsets
-                    .get(&Ident::<Canonical>::from_str_unchecked(name))
-                    .copied()
-                    .unwrap_or(usize::MAX);
-                let entry = array_results.entry(base_name.clone()).or_default();
-                entry.push((offset, name.to_string(), values.clone()));
-            }
-        }
-
-        // Sort array elements by their offset (not alphabetically!) and flatten into single vector
-        for (base_name, mut elements) in array_results {
-            // Sort by offset to ensure correct ordering (not alphabetical)
-            elements.sort_by_key(|e| e.0);
-
-            // For simplicity, we'll just concatenate all values at each timestep
-            // This assumes all elements have the same number of timesteps
-            if !elements.is_empty() {
-                let n_steps = elements[0].2.len();
-                let mut combined = Vec::new();
-
-                // Since we're testing array values, we only want the values at the final timestep
-                // (arrays don't change over time in our test cases)
-                // Get the last timestep values
-                let last_step = n_steps - 1;
-                for (_offset, _name, values) in &elements {
-                    if last_step < values.len() {
-                        combined.push(values[last_step]);
-                    }
-                }
-
-                // Store with base name (without brackets)
-                output.insert(base_name.to_string(), combined);
-            }
-        }
-
-        Ok(output)
-    }
-
-    /// Test that compilation fails with specific error
-    pub fn assert_compile_error(&self, expected_error: ErrorCode) {
-        self.assert_compile_error_impl(expected_error)
-    }
-
-    /// Test that unit mismatch is detected (as a warning that doesn't block compilation).
-    /// Since unit errors are now non-blocking, this checks that:
-    /// 1. Compilation succeeds (unit errors don't block simulation)
-    /// 2. A unit warning or unit error is present
-    pub fn assert_unit_error(&self) {
-        let datamodel = self.build_datamodel();
-        let compiled = CompiledProject::from(datamodel);
-
-        // Collect all unit-related errors and warnings
-        let mut unit_issues: Vec<(String, ErrorCode)> = Vec::new();
-
-        for (model_name, model) in &compiled.models {
-            // Check unit_warnings (model-level unit mismatches from inference)
-            if let Some(warnings) = &model.unit_warnings {
-                for warning in warnings {
-                    unit_issues.push((model_name.to_string(), warning.code));
-                }
-            }
-
-            // Check per-variable unit errors
-            for (var_name, unit_errors) in model.get_unit_errors() {
-                for err in unit_errors {
-                    let code = match err {
-                        UnitError::DefinitionError(eq_err, _) => eq_err.code,
-                        UnitError::ConsistencyError(code, _, _) => code,
-                        UnitError::InferenceError { code, .. } => code,
-                    };
-                    unit_issues.push((format!("{model_name}.{var_name}"), code));
-                }
-            }
-        }
-
-        let has_unit_mismatch = unit_issues
-            .iter()
-            .any(|(_, code)| *code == ErrorCode::UnitMismatch);
-
-        if !has_unit_mismatch {
-            if unit_issues.is_empty() {
-                panic!("Expected unit mismatch warning, but no unit issues were found");
-            } else {
-                let issues_msg = unit_issues
-                    .iter()
-                    .map(|(loc, code)| format!("{loc}: {code:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                panic!("Expected UnitMismatch, but got: {issues_msg}");
-            }
-        }
-    }
-
-    fn assert_compile_error_impl(&self, expected_error: ErrorCode) {
-        match self.compile() {
-            Ok(_) => {
-                panic!("Expected compilation to fail with {expected_error:?}, but it succeeded")
-            }
-            Err(errors) => {
-                let has_expected = errors.iter().any(|(_, code)| *code == expected_error);
-                if !has_expected {
-                    let error_msg = errors
-                        .iter()
-                        .map(|(loc, code)| format!("{loc}: {code:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    panic!("Expected error {expected_error:?}, but got: {error_msg}");
-                }
-            }
-        }
-    }
-
-    /// Test that interpreter evaluation succeeds and returns expected values for a scalar variable
-    /// (checks only the final timestep value)
-    pub fn assert_scalar_result(&self, var_name: &str, expected: f64) {
-        let results = self
-            .run_interpreter()
-            .expect("Interpreter should run successfully");
-
-        let actual = results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in results"));
-
-        let final_value = actual
-            .last()
-            .copied()
-            .unwrap_or_else(|| panic!("Variable {var_name} has no values"));
-
-        assert!(
-            (final_value - expected).abs() < 1e-6,
-            "Value mismatch for {var_name}: expected {expected}, got {final_value}"
-        );
-    }
-
-    /// Test that interpreter evaluation succeeds and returns expected values
-    pub fn assert_interpreter_result(&self, var_name: &str, expected: &[f64]) {
-        let results = self
-            .run_interpreter()
-            .expect("Interpreter should run successfully");
-
-        let actual = results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in results"));
-
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "Result length mismatch for {var_name}: expected {}, got {}",
-            expected.len(),
-            actual.len()
-        );
-
-        for (i, (actual_val, expected_val)) in actual.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (actual_val - expected_val).abs() < 1e-6,
-                "Value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
-            );
-        }
-    }
-
-    /// Get interpreter results for a variable (allows checking for NaN values)
-    pub fn interpreter_result(&self, var_name: &str) -> Vec<f64> {
-        let results = self
-            .run_interpreter()
-            .expect("Interpreter should run successfully");
-
-        results
-            .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {var_name} not found in results"))
-            .clone()
-    }
-
-    /// Returns true if the flow runlist for the compiled module contains at least one
-    /// AssignTemp node (indicating A2A hoisting occurred for array-producing builtins).
-    pub fn flow_runlist_has_assign_temp(&self) -> bool {
-        let module = match self.build_module() {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        module
-            .runlist_flows
-            .iter()
-            .any(|e| matches!(e, crate::compiler::Expr::AssignTemp(_, _, _)))
-    }
-
-    /// Test that simulation creation succeeds
-    pub fn assert_sim_builds(&self) {
-        self.build_sim()
-            .expect("Simulation should build successfully");
-    }
-
     /// Build a Module for testing lowered expressions.
-    /// Returns the compiled Module for the main model, allowing inspection of
-    /// the lowered expressions via get_flow_exprs() and get_initial_exprs().
-    pub fn build_module(&self) -> Result<Module, String> {
-        let datamodel = self.build_datamodel();
-        let compiled = Arc::new(CompiledProject::from(datamodel));
+    pub fn build_module(&self) -> Result<crate::compiler::Module, String> {
+        use crate::common::Canonical;
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
 
-        // Check for compilation errors first
+        let datamodel = self.build_datamodel();
+        let compiled = Arc::new(crate::project::Project::from(datamodel));
+
         if !compiled.errors.is_empty() {
             return Err(format!(
                 "Project has compilation errors: {:?}",
@@ -716,9 +452,8 @@ impl TestProject {
             return Err(format!("Model has errors: {:?}", model.errors));
         }
 
-        // Create module with no inputs (root model)
         let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-        Module::new(&compiled, model.clone(), &inputs, true)
+        crate::compiler::Module::new(&compiled, model.clone(), &inputs, true)
             .map_err(|e| format!("Failed to create module: {e:?}"))
     }
 }
@@ -829,6 +564,104 @@ impl TestProject {
                 "Incremental VM value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
             );
         }
+    }
+
+    // ── Diagnostic helpers (incremental path) ─────────────────────────
+
+    /// Sync the datamodel into a salsa DB and collect all diagnostics.
+    fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
+        let datamodel = self.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        collect_all_diagnostics(&db, &sync.to_sync_result())
+    }
+
+    /// Assert that incremental compilation produces the expected error code.
+    pub fn assert_compile_error_vm(&self, expected_error: ErrorCode) {
+        let diagnostics = self.diagnostics_incremental();
+
+        let has_error = diagnostics.iter().any(|d| {
+            d.severity == DiagnosticSeverity::Error
+                && match &d.error {
+                    DiagnosticError::Equation(eq_err) => eq_err.code == expected_error,
+                    DiagnosticError::Model(err) => err.code == expected_error,
+                    _ => false,
+                }
+        });
+
+        if !has_error {
+            if diagnostics.is_empty() {
+                panic!(
+                    "Expected compilation error {expected_error:?}, but no diagnostics were emitted"
+                );
+            } else {
+                let diag_summary: Vec<_> = diagnostics
+                    .iter()
+                    .map(|d| format!("{}: {:?} ({:?})", d.model, d.error, d.severity))
+                    .collect();
+                panic!(
+                    "Expected compilation error {expected_error:?}, but got:\n{}",
+                    diag_summary.join("\n")
+                );
+            }
+        }
+    }
+
+    /// Assert that incremental compilation produces a unit mismatch diagnostic.
+    pub fn assert_unit_error_vm(&self) {
+        let diagnostics = self.diagnostics_incremental();
+
+        let has_unit_mismatch = diagnostics.iter().any(|d| {
+            if let DiagnosticError::Unit(unit_err) = &d.error {
+                let code = match unit_err {
+                    UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                    UnitError::ConsistencyError(code, _, _) => *code,
+                    UnitError::InferenceError { code, .. } => *code,
+                };
+                code == ErrorCode::UnitMismatch
+            } else {
+                false
+            }
+        });
+
+        if !has_unit_mismatch {
+            let unit_diags: Vec<_> = diagnostics
+                .iter()
+                .filter(|d| matches!(&d.error, DiagnosticError::Unit(_)))
+                .map(|d| {
+                    format!(
+                        "{}.{}: {:?}",
+                        d.model,
+                        d.variable.as_deref().unwrap_or("?"),
+                        d.error
+                    )
+                })
+                .collect();
+            if unit_diags.is_empty() {
+                panic!("Expected unit mismatch warning, but no unit diagnostics were found");
+            } else {
+                panic!("Expected UnitMismatch, but got:\n{}", unit_diags.join("\n"));
+            }
+        }
+    }
+
+    /// Assert that a scalar variable's final-timestep value matches the expected value.
+    pub fn assert_vm_scalar_result(&self, var_name: &str, expected: f64) {
+        let results = self.run_vm().expect("VM should run successfully");
+
+        let series = results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("variable '{var_name}' not found in VM results"));
+
+        let actual = *series
+            .last()
+            .unwrap_or_else(|| panic!("variable '{var_name}' has empty timeseries"));
+
+        let diff = (actual - expected).abs();
+        assert!(
+            diff < 1e-6,
+            "variable '{var_name}': expected {expected}, got {actual} (diff: {diff})"
+        );
     }
 }
 

@@ -750,7 +750,6 @@ mod tests {
             .array_aux("d[SubA]", "DELAY1(input[SubA], delay_time, init)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test arrayed DELAY1 with mixed scalar and arrayed arguments
@@ -765,7 +764,6 @@ mod tests {
             .array_aux("d[DimA]", "DELAY1(input_a[DimA], delay, init_scalar)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that arrayed DELAY1 produces correct numerical output
@@ -788,12 +786,11 @@ mod tests {
             .array_aux("d[DimA]", "DELAY1(input_a[DimA], delay, init)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
 
         // Get results for 2 timesteps (0 and 1)
         // Each element should have independent delay state
         // At step 1, output should be input/delay = 10/5 = 2
-        project.assert_interpreter_result("d", &[2.0, 2.0]);
+        project.assert_vm_result("d", &[2.0, 2.0]);
     }
 
     /// Test arrayed DELAY1 with all arrayed arguments
@@ -812,7 +809,6 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test arrayed DELAY1 with per-element different values (like d5 model)
@@ -836,12 +832,11 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
 
         // At step 1: output = stock/delay
         // For A1: input=10, delay=2, init=0 -> stock(1)=10, output(1)=10/2=5
         // For A2: input=20, delay=2, init=0 -> stock(1)=20, output(1)=20/2=10
-        project.assert_interpreter_result("d", &[5.0, 10.0]);
+        project.assert_vm_result("d", &[5.0, 10.0]);
     }
 
     /// Test arrayed DELAY3 with arrayed delay time
@@ -855,7 +850,6 @@ mod tests {
             .array_aux("d[DimA]", "DELAY3(input, delay_a[DimA])");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that DELAYN with order=1 is rewritten to DELAY1 and works in A2A.
@@ -869,7 +863,6 @@ mod tests {
             .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 1, init)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that DELAYN with order=3 is rewritten to DELAY3.
@@ -883,7 +876,6 @@ mod tests {
             .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 3, init)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test arrayed SMOOTH1/SMTH1
@@ -896,7 +888,6 @@ mod tests {
             .array_aux("s[DimA]", "SMTH1(input_a[DimA], smooth_time)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that SMTHN with order=1 is rewritten to SMTH1.
@@ -910,7 +901,6 @@ mod tests {
             .array_aux("s[DimA]", "SMTHN(input_a[DimA], smooth_time, 1, init)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that unsupported DELAYN order is rejected.
@@ -923,7 +913,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 2, init)");
 
-        project.assert_compile_error(crate::ErrorCode::UnknownBuiltin);
+        project.assert_compile_error_vm(crate::ErrorCode::UnknownBuiltin);
     }
 
     /// Test with indexed dimensions (numeric 1,2,3...)
@@ -937,7 +927,6 @@ mod tests {
             .array_aux("d[Idx]", "DELAY1(input[Idx], delay_time, init)");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test DELAY in expression context (k * DELAY3(...))
@@ -951,7 +940,6 @@ mod tests {
             .array_aux("d[DimA]", "k * DELAY3(input, delay_a[DimA])");
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that per-element (Arrayed) equations with stdlib calls get unique module names.
@@ -974,7 +962,6 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test per-element Arrayed equations mixing stdlib and non-stdlib expressions
@@ -991,7 +978,6 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that per-element (Arrayed) equations with stdlib calls using
@@ -1013,7 +999,6 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 
     /// Test that NPV stdlib model compiles and produces accumulation.
@@ -1036,12 +1021,11 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
         // output = stock + inflow * DT
         // t=0: stock=0, inflow=10*1*(1+0)^0=10, output = 0 + 10*1 = 10
         // t=1: stock=10, inflow=10, output = 10 + 10 = 20
         // t=2: stock=20, inflow=10, output = 20 + 10 = 30
-        project.assert_interpreter_result("result", &[10.0, 20.0, 30.0]);
+        project.assert_vm_result("result", &[10.0, 20.0, 30.0]);
     }
 
     /// Test NPV with non-zero discount rate
@@ -1062,8 +1046,7 @@ mod tests {
             );
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
-        let results = project.run_interpreter().unwrap();
+        let results = project.run_vm().unwrap();
         let vals = results.get("result").unwrap();
         // output = stock + inflow * DT
         // t=0: stock=0, inflow=100*1.1^0=100, output = 0 + 100 = 100
@@ -1083,8 +1066,7 @@ mod tests {
             .aux("result", "MODULO(a, b)", None);
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
-        project.assert_interpreter_result("result", &[1.0, 1.0]);
+        project.assert_vm_result("result", &[1.0, 1.0]);
     }
 
     /// Regression test: nested INIT must not repeatedly wrap generated arg helpers.
@@ -1095,8 +1077,7 @@ mod tests {
             .aux("result", "INIT(INIT(x + 1))", None);
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
-        project.assert_interpreter_result("result", &[2.0, 2.0]);
+        project.assert_vm_result("result", &[2.0, 2.0]);
     }
 
     /// Test that DELAY (from DELAY FIXED mapping) works as delay1
@@ -1109,6 +1090,5 @@ mod tests {
             .aux("result", "DELAY(input, delay_time, init)", None);
 
         project.assert_compiles_incremental();
-        project.assert_sim_builds();
     }
 }

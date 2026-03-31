@@ -765,12 +765,11 @@ mod tests {
             None,
         );
 
-        // Trying to build a simulation should fail gracefully, not panic.
+        // Trying to compile should fail gracefully, not panic.
         // The stock references "nonexistent_inflow" which doesn't exist.
-        let result = project.build_sim();
         assert!(
-            result.is_err(),
-            "Expected an error for missing flow reference, but got Ok"
+            project.compile_incremental().is_err(),
+            "expected compilation error for stock with nonexistent flow"
         );
     }
 
@@ -786,7 +785,7 @@ mod tests {
             .array_with_ranges("b[DimB]", vec![("B1", "1"), ("B2", "2"), ("B3", "3")])
             .array_aux("a[DimA]", "b[DimB]");
 
-        let results = project.run_interpreter();
+        let results = project.run_vm();
         assert!(
             results.is_ok(),
             "Cross-dimension mapping should compile and simulate: {:?}",
@@ -818,7 +817,7 @@ mod tests {
             .array_with_ranges("b[DimB]", vec![("B1", "1"), ("B2", "2"), ("B3", "3")])
             .array_aux("a[DimA]", "b[DimB]");
 
-        let results = project.run_interpreter();
+        let results = project.run_vm();
         assert!(
             results.is_ok(),
             "Reverse cross-dimension mapping should compile and simulate: {:?}",
@@ -848,7 +847,7 @@ mod tests {
             .array_with_ranges("src[DimB]", vec![("B1", "10"), ("B2", "20"), ("B3", "30")])
             .array_aux("dst[SubA]", "src");
 
-        let results = project.run_interpreter();
+        let results = project.run_vm();
         assert!(
             results.is_ok(),
             "implicit subscript through mapped parent should compile and run: {:?}",

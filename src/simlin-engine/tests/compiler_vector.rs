@@ -15,31 +15,29 @@ use simlin_engine::test_common::TestProject;
 // ---------------------------------------------------------------------------
 
 #[test]
-fn vector_sort_order_a2a_produces_assign_temp() {
-    // result[D] = vector_sort_order(vals[*], 1) must be hoisted into AssignTemp
-    // because the whole-array sort cannot be done per-element.
+fn vector_sort_order_a2a_produces_correct_results() {
+    // VectorSortOrder in array context must be hoisted into AssignTemp;
+    // verify via behavioral assertion that the VM produces correct values.
     let project = TestProject::new("vso_a2a_struct")
         .indexed_dimension("D", 3)
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "vector_sort_order(vals[*], 1)");
 
-    assert!(
-        project.flow_runlist_has_assign_temp(),
-        "VectorSortOrder in array context should produce AssignTemp in the flow runlist"
-    );
+    project.assert_compiles_incremental();
+    project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
 }
 
 #[test]
-fn vector_sort_order_a2a_produces_correct_values_interpreter() {
+fn vector_sort_order_a2a_produces_correct_values_monolithic() {
     // vals = [30, 10, 20], ascending sort order (1)
     // sorted ascending: 10, 20, 30 -> original positions (1-based): 2, 3, 1
     // so result[D1]=2, result[D2]=3, result[D3]=1
-    let project = TestProject::new("vso_a2a_vals_interp")
+    let project = TestProject::new("vso_a2a_vals_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "vector_sort_order(vals[*], 1)");
 
-    project.assert_interpreter_result("result", &[2.0, 3.0, 1.0]);
+    project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
 }
 
 #[test]
@@ -57,32 +55,30 @@ fn vector_sort_order_a2a_produces_correct_values_vm() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn vector_elm_map_a2a_produces_assign_temp() {
-    // result[D] = vector_elm_map(source[*], offsets[*]) must be hoisted into AssignTemp
-    // because the whole-array mapping cannot be done per-element.
+fn vector_elm_map_a2a_produces_correct_results() {
+    // VectorElmMap in array context must be hoisted into AssignTemp;
+    // verify via behavioral assertion that the VM produces correct values.
     let project = TestProject::new("vem_a2a_struct")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "1")])
         .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
 
-    assert!(
-        project.flow_runlist_has_assign_temp(),
-        "VectorElmMap in array context should produce AssignTemp in the flow runlist"
-    );
+    project.assert_compiles_incremental();
+    project.assert_vm_result("result", &[10.0, 30.0, 20.0]);
 }
 
 #[test]
-fn vector_elm_map_a2a_produces_correct_values_interpreter() {
+fn vector_elm_map_a2a_produces_correct_values_monolithic() {
     // source = [10, 20, 30], offsets = [0, 2, 1]
     // result: source[0]=10, source[2]=30, source[1]=20
-    let project = TestProject::new("vem_a2a_vals_interp")
+    let project = TestProject::new("vem_a2a_vals_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "1")])
         .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
 
-    project.assert_interpreter_result("result", &[10.0, 30.0, 20.0]);
+    project.assert_vm_result("result", &[10.0, 30.0, 20.0]);
 }
 
 #[test]
@@ -97,10 +93,10 @@ fn vector_elm_map_a2a_produces_correct_values_vm() {
 }
 
 #[test]
-fn nested_vector_elm_map_inside_max_interpreter() {
+fn nested_vector_elm_map_inside_max_monolithic() {
     // source = [10, 20, 30], offsets = [2, 0, 1] => VEM = [30, 10, 20]
     // MAX(VEM, 15) should be element-wise: [30, 15, 20]
-    let project = TestProject::new("vem_nested_max_interp")
+    let project = TestProject::new("vem_nested_max_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
@@ -109,7 +105,7 @@ fn nested_vector_elm_map_inside_max_interpreter() {
             "max(vector_elm_map(source[*], offsets[*]), 15)",
         );
 
-    project.assert_interpreter_result("result", &[30.0, 15.0, 20.0]);
+    project.assert_vm_result("result", &[30.0, 15.0, 20.0]);
 }
 
 #[test]
@@ -148,16 +144,16 @@ fn scalar_max_with_vector_elm_map_returns_structured_vm_compile_error() {
 }
 
 #[test]
-fn nested_vector_elm_map_inside_sum_interpreter() {
+fn nested_vector_elm_map_inside_sum_monolithic() {
     // source = [10, 20, 30], offsets = [2, 0, 1] => VEM = [30, 10, 20]
     // SUM(VEM) = 60
-    let project = TestProject::new("vem_nested_sum_interp")
+    let project = TestProject::new("vem_nested_sum_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
         .scalar_aux("result", "sum(vector_elm_map(source[*], offsets[*]))");
 
-    project.assert_interpreter_result("result", &[60.0, 60.0]);
+    project.assert_vm_result("result", &[60.0, 60.0]);
 }
 
 #[test]
@@ -172,16 +168,16 @@ fn nested_vector_elm_map_inside_sum_vm() {
 }
 
 #[test]
-fn nested_vector_elm_map_inside_sum_in_array_context_interpreter() {
+fn nested_vector_elm_map_inside_sum_in_array_context_monolithic() {
     // In array context, SUM(VEM(...)) should still evaluate VEM as an array,
     // not as an element-local scalar.
-    let project = TestProject::new("vem_nested_sum_array_context_interp")
+    let project = TestProject::new("vem_nested_sum_array_context_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
         .array_aux("result[D]", "sum(vector_elm_map(source[*], offsets[*]))");
 
-    project.assert_interpreter_result("result", &[60.0, 60.0, 60.0]);
+    project.assert_vm_result("result", &[60.0, 60.0, 60.0]);
 }
 
 #[test]
@@ -196,14 +192,14 @@ fn nested_vector_elm_map_inside_sum_in_array_context_vm() {
 }
 
 #[test]
-fn nested_vector_sort_order_inside_sum_in_array_context_interpreter() {
+fn nested_vector_sort_order_inside_sum_in_array_context_monolithic() {
     // vals = [30, 10, 20], vector_sort_order(vals, 1) = [2, 3, 1], SUM = 6
-    let project = TestProject::new("vso_nested_sum_array_context_interp")
+    let project = TestProject::new("vso_nested_sum_array_context_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
 
-    project.assert_interpreter_result("result", &[6.0, 6.0, 6.0]);
+    project.assert_vm_result("result", &[6.0, 6.0, 6.0]);
 }
 
 #[test]
@@ -261,37 +257,35 @@ fn make_alloc_project(name: &str) -> TestProject {
 }
 
 #[test]
-fn allocate_available_a2a_produces_assign_temp() {
-    // result[D] = allocate_available(request[*], pp, supply) must be hoisted into
-    // AssignTemp because the whole-array allocation cannot be done per-element.
+fn allocate_available_a2a_produces_correct_results() {
+    // AllocateAvailable in array context must be hoisted into AssignTemp;
+    // verify via behavioral assertion that the VM produces correct values.
     let project = make_alloc_project("alloc_a2a_struct");
-    assert!(
-        project.flow_runlist_has_assign_temp(),
-        "AllocateAvailable in array context should produce AssignTemp in the flow runlist"
-    );
+    project.assert_compiles_incremental();
+    project.assert_vm_scalar_result("total_alloc", 40.0);
 }
 
 #[test]
-fn allocate_available_a2a_sums_to_supply_interpreter() {
+fn allocate_available_a2a_sums_to_supply_monolithic() {
     // With requests [10, 20, 30] and supply = 40, total allocated should equal supply.
     // Equal priority, Normal dist: all requests are within available supply, so each
     // requester gets their full request (10 + 20 + 30 = 60 > 40, so proportional).
-    let project = make_alloc_project("alloc_a2a_sum_interp");
-    project.assert_scalar_result("total_alloc", 40.0);
+    let project = make_alloc_project("alloc_a2a_sum_mono");
+    project.assert_vm_scalar_result("total_alloc", 40.0);
 }
 
 #[test]
 fn allocate_available_a2a_sums_to_supply_vm() {
     let project = make_alloc_project("alloc_a2a_sum_vm");
-    project.assert_scalar_result("total_alloc", 40.0);
+    project.assert_vm_scalar_result("total_alloc", 40.0);
 }
 
 #[test]
-fn nested_allocate_available_inside_sum_in_array_context_interpreter() {
+fn nested_allocate_available_inside_sum_in_array_context_monolithic() {
     // allocate_available(request, pp, supply) returns a D-array whose total is supply.
     // SUM(...) should therefore be 40, and in array context each element should
     // receive that same scalar reduction result.
-    let project = TestProject::new("alloc_nested_sum_array_context_interp")
+    let project = TestProject::new("alloc_nested_sum_array_context_mono")
         .indexed_dimension("D", 3)
         .indexed_dimension("XP", 4)
         .array_with_ranges("request[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
@@ -318,7 +312,7 @@ fn nested_allocate_available_inside_sum_in_array_context_interpreter() {
             "sum(allocate_available(request[*], pp[*,1], supply))",
         );
 
-    project.assert_interpreter_result("result", &[40.0, 40.0, 40.0]);
+    project.assert_vm_result("result", &[40.0, 40.0, 40.0]);
 }
 
 #[test]
@@ -389,14 +383,14 @@ fn allocate_by_priority_compiles_and_runs_vm() {
     // AC5.1: allocate_by_priority in XMILE equations compiles and executes correctly
     let project = make_alloc_by_priority_project("alloc_by_pri_vm");
     // Total allocated should equal supply
-    project.assert_scalar_result("total_alloc", 35.0);
+    project.assert_vm_scalar_result("total_alloc", 35.0);
 }
 
 #[test]
-fn allocate_by_priority_compiles_and_runs_interpreter() {
-    // AC5.1: same via interpreter
-    let project = make_alloc_by_priority_project("alloc_by_pri_interp");
-    project.assert_scalar_result("total_alloc", 35.0);
+fn allocate_by_priority_compiles_and_runs_vm_monolithic() {
+    // AC5.1: same scenario via non-incremental VM path
+    let project = make_alloc_by_priority_project("alloc_by_pri_mono");
+    project.assert_vm_scalar_result("total_alloc", 35.0);
 }
 
 #[test]

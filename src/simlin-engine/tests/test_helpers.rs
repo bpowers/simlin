@@ -24,8 +24,8 @@ fn is_vensim_internal_module_var(name: &str) -> bool {
 /// Check if a variable name is an implicit module variable created by
 /// builtins_visitor for SMOOTH/DELAY/TREND/etc. These names start with
 /// "$\u{205A}" (dollar sign + two dot punctuation) and are internal
-/// implementation details whose evaluation order may legitimately differ
-/// between the interpreter and incremental VM paths.
+/// implementation details whose initial values may legitimately differ
+/// across compilation paths due to evaluation order differences.
 fn is_implicit_module_var(name: &str) -> bool {
     name.starts_with("$\u{205A}")
 }
@@ -54,8 +54,8 @@ pub fn ensure_results(expected: &Results, results: &Results) {
             }
             // Skip implicit module variables (from SMOOTH/DELAY/TREND
             // expansion). These internal variables may legitimately have
-            // different initial values between the interpreter and
-            // incremental VM paths due to evaluation order differences.
+            // different initial values across compilation paths due to
+            // evaluation order differences.
             if is_implicit_module_var(ident.as_str()) {
                 continue;
             }

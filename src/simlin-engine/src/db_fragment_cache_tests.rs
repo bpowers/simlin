@@ -246,18 +246,21 @@ fn test_previous_plus_current_keeps_current_step_dependency() {
 }
 
 #[test]
-fn test_previous_lagged_feedback_interpreter_path_is_acyclic() {
-    let tp = TestProject::new("prev_lag_interp")
+fn test_previous_lagged_feedback_is_acyclic() {
+    let tp = TestProject::new("prev_lag_vm")
         .with_sim_time(0.0, 3.0, 1.0)
         .aux("a", "PREVIOUS(b)", None)
         .aux("b", "a + 1", None);
 
     let results = tp
-        .run_interpreter()
-        .expect("interpreter path should compile/run lagged PREVIOUS feedback without cycles");
+        .run_vm()
+        .expect("VM should compile/run lagged PREVIOUS feedback without cycles");
     let a = results.get("a").expect("missing a results");
     let b = results.get("b").expect("missing b results");
 
+    // a = PREVIOUS(b), b = a + 1
+    // t=0: a=0 (PREVIOUS returns 0 at initial step), b=0+1=1
+    // t=1: a=PREVIOUS(b)=1 (previous step's b), b=1+1=2
     assert_eq!(a[0], 0.0);
     assert_eq!(b[0], 1.0);
     assert_eq!(a[1], 1.0);
@@ -817,9 +820,9 @@ fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
 }
 
 #[test]
-fn test_init_feedback_interpreter_path_is_acyclic() {
+fn test_init_feedback_path_is_acyclic() {
     let project = datamodel::Project {
-        name: "init_lag_interp".to_string(),
+        name: "init_lag".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
         dimensions: vec![],
         units: vec![],

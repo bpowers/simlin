@@ -671,27 +671,18 @@ where
 }
 
 /// Result of classifying all dependency categories from a single AST walk.
-///
-/// Replaces the five separate AST-walking functions that previously computed
-/// these categories independently: `identifier_set`, `init_referenced_idents`,
-/// `previous_referenced_idents`, `lagged_only_previous_idents_with_module_inputs`,
-/// and `init_only_referenced_idents_with_module_inputs`.
 #[derive(Default)]
 pub struct DepClassification {
     /// All referenced identifiers (current + lagged + init-only).
-    /// Dimension names are filtered out. Replaces `identifier_set`.
+    /// Dimension names are filtered out.
     pub all: HashSet<Ident<Canonical>>,
     /// Idents appearing as direct args to INIT() calls.
-    /// Replaces `init_referenced_idents`.
     pub init_referenced: BTreeSet<String>,
     /// Idents appearing as direct args to PREVIOUS() calls.
-    /// Replaces `previous_referenced_idents`.
     pub previous_referenced: BTreeSet<String>,
     /// Idents referenced ONLY inside PREVIOUS() -- not outside it.
-    /// Replaces `lagged_only_previous_idents_with_module_inputs`.
     pub previous_only: BTreeSet<String>,
     /// Idents referenced ONLY inside INIT() or PREVIOUS() -- not outside either.
-    /// Replaces `init_only_referenced_idents_with_module_inputs`.
     pub init_only: BTreeSet<String>,
 }
 
@@ -932,42 +923,11 @@ pub fn identifier_set(
     classify_dependencies(ast, dimensions, module_inputs).all
 }
 
-/// Collect variable identifiers referenced by `INIT(x)` calls in an AST.
-///
-/// These are not same-step dependencies, but they must be included in the
-/// initials runlist so INIT can read their captured t=0 values.
-#[cfg(any(test, feature = "testing"))]
-pub fn init_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    classify_dependencies(ast, &[], None).init_referenced
-}
-
 /// Collect variable identifiers referenced by `PREVIOUS(x)` calls in an AST.
 ///
 /// These identifiers are lagged dependencies (t-1), not same-step edges.
 pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
     classify_dependencies(ast, &[], None).previous_referenced
-}
-
-/// Collect identifiers referenced *only* through PREVIOUS(...) in an AST.
-///
-/// If an identifier appears both inside and outside PREVIOUS, it is excluded.
-#[cfg(any(test, feature = "testing"))]
-pub fn lagged_only_previous_idents_with_module_inputs(
-    ast: &Ast<Expr2>,
-    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-) -> BTreeSet<String> {
-    classify_dependencies(ast, &[], module_inputs).previous_only
-}
-
-/// Collect identifiers referenced *only* through INIT(...) in an AST.
-///
-/// If an identifier appears both inside and outside INIT, it is excluded.
-#[cfg(any(test, feature = "testing"))]
-pub fn init_only_referenced_idents_with_module_inputs(
-    ast: &Ast<Expr2>,
-    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-) -> BTreeSet<String> {
-    classify_dependencies(ast, &[], module_inputs).init_only
 }
 
 /// Build an `Ast<Expr2>` from a scalar equation string via parse + lower.

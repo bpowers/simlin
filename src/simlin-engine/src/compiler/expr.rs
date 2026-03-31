@@ -45,6 +45,7 @@ pub enum SubscriptIndex {
 
 impl SubscriptIndex {
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn strip_loc(self) -> Self {
         match self {
             SubscriptIndex::Single(expr) => SubscriptIndex::Single(expr.strip_loc()),
@@ -109,6 +110,7 @@ impl Expr {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn strip_loc(self) -> Self {
         let loc = Loc::default();
         match self {
