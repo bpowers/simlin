@@ -1,0 +1,26 @@
+{
+  "variables": [
+    {
+      "type": "stock",
+      "name": "Population",
+      "equation": "100",
+      "inflows": ["births"],
+      "outflows": []
+    },
+    {
+      "type": "flow",
+      "name": "births",
+      "equation": "Population * birth_rate"
+    },
+    {
+      "type": "variable",
+      "name": "birth_rate",
+      "equation": "0.05"
+    }
+  ],
+  "specs": {
+    "startTime": 0,
+    "stopTime": 10,
+    "dt": 1
+  }
+}

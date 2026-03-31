@@ -981,4 +981,60 @@ mod tests {
 
         let _dm_project: datamodel::Project = sdai_model.into();
     }
+
+    #[test]
+    fn test_sd_ai_simple_fixture_parses() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/sd-ai-simple.sd.json");
+        let content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", fixture_path.display(), e));
+        let model: SdaiModel = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(model.variables.len(), 3);
+
+        // Verify variable types and names
+        match &model.variables[0] {
+            Variable::Stock(s) => {
+                assert_eq!(s.name, "Population");
+                assert_eq!(s.equation.as_deref(), Some("100"));
+                assert_eq!(
+                    s.inflows.as_deref(),
+                    Some(["births".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected stock, got {:?}", std::mem::discriminant(other)),
+        }
+        match &model.variables[1] {
+            Variable::Flow(f) => {
+                assert_eq!(f.name, "births");
+                assert_eq!(f.equation.as_deref(), Some("Population * birth_rate"));
+            }
+            other => panic!("expected flow, got {:?}", std::mem::discriminant(other)),
+        }
+        match &model.variables[2] {
+            Variable::Variable(a) => {
+                assert_eq!(a.name, "birth_rate");
+                assert_eq!(a.equation.as_deref(), Some("0.05"));
+            }
+            other => panic!(
+                "expected auxiliary, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+
+        // Verify sim specs
+        let specs = model.specs.as_ref().unwrap();
+        assert_eq!(specs.start_time, 0.0);
+        assert_eq!(specs.stop_time, 10.0);
+        assert_eq!(specs.dt, Some(1.0));
+
+        // Verify conversion to datamodel
+        let project: datamodel::Project = model.into();
+        assert_eq!(project.models.len(), 1);
+        assert_eq!(project.models[0].variables.len(), 3);
+    }
 }
