@@ -73,6 +73,44 @@ impl From<simlin_engine::layout::metadata::DominantPeriod> for DominantPeriodOut
     }
 }
 
+/// Structured error detail included in EditModel error responses.
+///
+/// Converts engine `FormattedError` into a serializable type suitable for
+/// MCP structured content, so LLM clients can programmatically inspect
+/// what went wrong.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // used by EditModel error gate in Phase 4 Task 3
+pub struct ErrorOutput {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variable_name: Option<String>,
+    pub kind: String,
+}
+
+impl From<&simlin_engine::errors::FormattedError> for ErrorOutput {
+    fn from(fe: &simlin_engine::errors::FormattedError) -> Self {
+        use simlin_engine::errors::FormattedErrorKind;
+        let kind = match fe.kind {
+            FormattedErrorKind::Project => "project",
+            FormattedErrorKind::Model => "model",
+            FormattedErrorKind::Variable => "variable",
+            FormattedErrorKind::Units => "units",
+            FormattedErrorKind::Simulation => "simulation",
+        };
+        Self {
+            code: fe.code.to_string(),
+            message: fe.message.clone().unwrap_or_default(),
+            model_name: fe.model_name.clone(),
+            variable_name: fe.variable_name.clone(),
+            kind: kind.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +171,71 @@ mod tests {
         assert_eq!(arr[0].as_f64().unwrap(), 1.0);
         assert_eq!(arr[1].as_f64().unwrap(), 100.0);
         assert_eq!(arr[2].as_f64().unwrap(), 0.5);
+    }
+
+    #[test]
+    fn error_output_serializes_camel_case() {
+        let err = ErrorOutput {
+            code: "unknown_dependency".to_string(),
+            message: "error in model 'main' variable 'x': unknown_dependency".to_string(),
+            model_name: Some("main".to_string()),
+            variable_name: Some("x".to_string()),
+            kind: "variable".to_string(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], "unknown_dependency");
+        assert_eq!(json["modelName"], "main");
+        assert_eq!(json["variableName"], "x");
+        assert_eq!(json["kind"], "variable");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown_dependency")
+        );
+    }
+
+    #[test]
+    fn error_output_skips_none_fields() {
+        let err = ErrorOutput {
+            code: "not_simulatable".to_string(),
+            message: "assembly error".to_string(),
+            model_name: None,
+            variable_name: None,
+            kind: "simulation".to_string(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert!(
+            json.get("modelName").is_none(),
+            "None modelName must be omitted"
+        );
+        assert!(
+            json.get("variableName").is_none(),
+            "None variableName must be omitted"
+        );
+        assert_eq!(json["code"], "not_simulatable");
+        assert_eq!(json["kind"], "simulation");
+    }
+
+    #[test]
+    fn error_output_from_formatted_error() {
+        use simlin_engine::common::ErrorCode;
+        use simlin_engine::errors::{FormattedError, FormattedErrorKind};
+
+        let fe = FormattedError {
+            code: ErrorCode::UnknownDependency,
+            message: Some("error in model 'main' variable 'bad': unknown_dependency".to_string()),
+            model_name: Some("main".to_string()),
+            variable_name: Some("bad".to_string()),
+            start_offset: 4,
+            end_offset: 9,
+            kind: FormattedErrorKind::Variable,
+            unit_error_kind: None,
+        };
+        let output = ErrorOutput::from(&fe);
+        assert_eq!(output.code, "unknown_dependency");
+        assert_eq!(output.model_name.as_deref(), Some("main"));
+        assert_eq!(output.variable_name.as_deref(), Some("bad"));
+        assert_eq!(output.kind, "variable");
     }
 }

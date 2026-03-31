@@ -339,12 +339,17 @@ fn handle_call_tool(registry: &Registry, id: Value, params: Option<Value>) -> Re
         }
         Err(e) => {
             let error_text = format!("{e}");
+            // When a handler bails with a JSON-serialized message (e.g. from
+            // EditModel's error gate), preserve the structure so LLM clients
+            // can programmatically inspect error details.
+            let structured_content = serde_json::from_str::<serde_json::Value>(&error_text)
+                .unwrap_or_else(|_| serde_json::json!({ "error": &error_text }));
             let call_result = CallToolResult {
                 content: vec![ContentBlock {
                     r#type: "text",
-                    text: serde_json::json!({ "error": &error_text }).to_string(),
+                    text: error_text,
                 }],
-                structured_content: Some(serde_json::json!({ "error": error_text })),
+                structured_content: Some(structured_content),
                 is_error: true,
             };
             result_response(id, serde_json::to_value(call_result).unwrap())
@@ -812,5 +817,68 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert!(responses[0]["error"].is_object());
         assert_eq!(responses[0]["error"]["code"], ERR_METHOD_NOT_FOUND);
+    }
+
+    // mcp-publish-ready.AC3.5: JSON-serialized tool errors preserve structure in structured_content
+    struct JsonErrorTool;
+
+    impl Tool for JsonErrorTool {
+        fn name(&self) -> &str {
+            "json_error"
+        }
+        fn description(&self) -> &str {
+            "returns a JSON-structured error"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        fn call(&self, _input: Value) -> anyhow::Result<Value> {
+            let err_json = serde_json::json!({
+                "error": "edit introduces compilation errors",
+                "errors": [{ "code": "unknown_dependency", "kind": "variable" }]
+            });
+            Err(anyhow::anyhow!(
+                "{}",
+                serde_json::to_string(&err_json).unwrap()
+            ))
+        }
+    }
+
+    #[test]
+    fn test_json_error_preserves_structured_content() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(JsonErrorTool));
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json_error"}}"#,
+        );
+
+        assert_eq!(resp["result"]["isError"], true);
+        let structured = &resp["result"]["structuredContent"];
+        assert_eq!(structured["error"], "edit introduces compilation errors");
+        let errors = structured["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["code"], "unknown_dependency");
+        assert_eq!(errors[0]["kind"], "variable");
+    }
+
+    #[test]
+    fn test_plain_error_wraps_in_error_key() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(FailTool));
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fail"}}"#,
+        );
+
+        assert_eq!(resp["result"]["isError"], true);
+        let structured = &resp["result"]["structuredContent"];
+        assert_eq!(structured["error"], "deliberate failure");
     }
 }
