@@ -237,23 +237,25 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
             .any(|op| !matches!(op, EditOperation::SetLoopName(_)))
     });
 
-    // Count pre-edit error-severity diagnostics for the target model only, so
-    // we can detect regressions without being confused by errors in sibling
-    // models.  This allows incremental repair: an edit that fixes errors (or
-    // doesn't change the error count for the target model) is accepted; one
-    // that introduces new errors in the target model is not.
-    let pre_edit_error_count = {
+    // Collect pre-edit error signatures for the target model so we can
+    // detect NEW errors after the edit. We compare on (error_code, variable_name)
+    // rather than counting, because an edit that fixes one error but introduces
+    // a different one should be rejected even though the count stays the same.
+    let pre_edit_error_keys: std::collections::HashSet<_> = {
         let pre_db = simlin_engine::db::SimlinDb::default();
         let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
-        let error_diags: Vec<_> = simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync)
-            .into_iter()
-            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
-            .collect();
-        simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
-            .errors
-            .iter()
-            .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
-            .count()
+        let all_diags = simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync);
+        simlin_engine::errors::collect_formatted_errors(
+            all_diags
+                .iter()
+                .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error)),
+            &project,
+        )
+        .errors
+        .into_iter()
+        .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
+        .map(|e| (e.code, e.variable_name))
+        .collect()
     };
 
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
@@ -270,25 +272,28 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
 
-    // Reject the edit only if it increased the error count for the target model.
+    // Reject the edit if it introduces any NEW errors for the target model.
     // Errors in sibling models must not affect whether this edit is accepted.
-    // Edits that reduce or preserve the existing error count are accepted so
-    // models with pre-existing errors can be repaired incrementally.
+    // Edits that fix errors without introducing new ones are accepted, enabling
+    // incremental repair of models with pre-existing errors.
     let all_diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
-    let post_error_diags: Vec<_> = all_diagnostics
-        .iter()
-        .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
-        .cloned()
-        .collect();
-    let post_formatted =
-        simlin_engine::errors::collect_formatted_errors(&post_error_diags, &project);
+    let post_formatted = simlin_engine::errors::collect_formatted_errors(
+        all_diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error)),
+        &project,
+    );
     let post_edit_model_errors: Vec<_> = post_formatted
         .errors
         .iter()
         .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
         .collect();
 
-    if post_edit_model_errors.len() > pre_edit_error_count {
+    let has_new_errors = post_edit_model_errors
+        .iter()
+        .any(|e| !pre_edit_error_keys.contains(&(e.code, e.variable_name.clone())));
+
+    if has_new_errors {
         let error_outputs: Vec<ErrorOutput> = post_edit_model_errors
             .iter()
             .map(|e| ErrorOutput::from(*e))
@@ -311,11 +316,11 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
                 .context("failed to serialize XMILE")?
                 .into_bytes(),
             super::SourceFormat::NativeJson => {
-                let json_project = ejson::Project::from(project.clone());
+                let json_project = ejson::Project::from(&project);
                 serde_json::to_string_pretty(&json_project)?.into_bytes()
             }
             super::SourceFormat::SdaiJson => {
-                let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(project.clone());
+                let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(&project);
                 // The relationships field is not captured in datamodel::Project,
                 // so re-parse the original content to retrieve it and avoid
                 // silently dropping it on write-back.
@@ -323,6 +328,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
                     serde_json::from_str::<simlin_engine::json_sdai::SdaiModel>(&contents)
                 {
                     sdai_model.relationships = original.relationships;
+                    sdai_model.filter_stale_relationships();
                 }
                 serde_json::to_string_pretty(&sdai_model)?.into_bytes()
             }
@@ -2255,5 +2261,124 @@ mod tests {
              got: {:?}",
             result
         );
+    }
+
+    // ---- Issue #430: error gate compares actual errors, not just count ----
+
+    #[test]
+    fn error_gate_rejects_edit_that_swaps_errors() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Model with one pre-existing error: flow references nonexistent variable.
+        let model_json = serde_json::json!({
+            "name": "swap-error-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{
+                    "uid": 1,
+                    "name": "population",
+                    "initialEquation": "100",
+                    "inflows": ["births"],
+                    "outflows": []
+                }],
+                "flows": [{
+                    "uid": 2,
+                    "name": "births",
+                    "equation": "population * nonexistent_rate"
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "swap.simlin.json", &model_json);
+
+        // Edit that fixes the births error (by giving it a valid equation)
+        // but introduces a new error on a different variable.
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.1"
+                    }
+                },
+                {
+                    "upsertAuxiliary": {
+                        "name": "bad_aux",
+                        "equation": "another_missing_var + 1"
+                    }
+                }
+            ]
+        }));
+
+        // The edit fixes one error but introduces a different one. The error
+        // gate must reject this because a new error appeared, even though the
+        // total error count stayed the same (or decreased).
+        assert!(
+            result.is_err(),
+            "edit that swaps one error for a different one must be rejected; got: {:?}",
+            result
+        );
+    }
+
+    // ---- Issue #431: RemoveVariable filters stale SD-AI relationships ----
+
+    #[test]
+    fn remove_variable_filters_stale_sdai_relationships() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // SD-AI model with three independent variables and relationships.
+        // C depends on A (not B), so removing B won't break C's equation.
+        let sdai_json = serde_json::json!({
+            "variables": [
+                { "type": "variable", "name": "A", "equation": "10" },
+                { "type": "variable", "name": "B", "equation": "A * 2" },
+                { "type": "variable", "name": "C", "equation": "A + 1" }
+            ],
+            "relationships": [
+                { "from": "A", "to": "B", "polarity": "+" },
+                { "from": "B", "to": "C", "polarity": "+" },
+                { "from": "A", "to": "C", "polarity": "+" }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 10.0,
+                "dt": 1.0
+            }
+        });
+        let path = dir.path().join("rel-test.sd.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&sdai_json).unwrap()).unwrap();
+
+        // Remove variable B. After the edit, relationships referencing B
+        // must be filtered out of the saved file.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{ "removeVariable": { "name": "B" } }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let relationships = saved["relationships"]
+            .as_array()
+            .expect("relationships must be present");
+
+        // Only A->C should remain; A->B and B->C reference the removed variable.
+        assert_eq!(
+            relationships.len(),
+            1,
+            "expected 1 relationship after removing B, got {}: {:?}",
+            relationships.len(),
+            relationships
+        );
+        assert_eq!(relationships[0]["from"], "A");
+        assert_eq!(relationships[0]["to"], "C");
     }
 }

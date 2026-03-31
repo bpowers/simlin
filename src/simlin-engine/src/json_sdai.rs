@@ -412,6 +412,29 @@ impl SdaiModel {
             )
         })
     }
+
+    /// Remove relationships that reference variables not present in the model.
+    ///
+    /// After variable additions or removals, the externally-sourced
+    /// relationships may contain stale entries. This filters them to only
+    /// retain relationships where both `from` and `to` name a variable
+    /// that currently exists.
+    pub fn filter_stale_relationships(&mut self) {
+        if let Some(ref mut rels) = self.relationships {
+            let var_names: std::collections::HashSet<&str> = self
+                .variables
+                .iter()
+                .map(|v| match v {
+                    Variable::Stock(s) => s.name.as_str(),
+                    Variable::Flow(f) => f.name.as_str(),
+                    Variable::Variable(a) => a.name.as_str(),
+                })
+                .collect();
+            rels.retain(|r| {
+                var_names.contains(r.from.as_str()) && var_names.contains(r.to.as_str())
+            });
+        }
+    }
 }
 
 // Conversions FROM datamodel types TO SDAI types
@@ -605,6 +628,48 @@ impl From<datamodel::Project> for SdaiModel {
             .into_iter()
             .map(|lm| lm.into())
             .collect();
+
+        SdaiModel {
+            variables,
+            relationships: None,
+            specs,
+            views,
+            loop_metadata,
+        }
+    }
+}
+
+impl From<&datamodel::Project> for SdaiModel {
+    fn from(project: &datamodel::Project) -> Self {
+        let model = project.models.first();
+
+        let mut variables = Vec::new();
+
+        let vars = model.map(|m| m.variables.as_slice()).unwrap_or(&[]);
+        for var in vars {
+            match var {
+                datamodel::Variable::Stock(s) => {
+                    variables.push(Variable::Stock(s.clone().into()));
+                }
+                datamodel::Variable::Flow(f) => {
+                    variables.push(Variable::Flow(f.clone().into()));
+                }
+                datamodel::Variable::Aux(a) => {
+                    variables.push(Variable::Variable(a.clone().into()));
+                }
+                datamodel::Variable::Module(_) => {}
+            }
+        }
+
+        let specs = Some(project.sim_specs.clone().into());
+
+        let views = model
+            .filter(|m| !m.views.is_empty())
+            .map(|m| m.views.iter().map(|v| v.clone().into()).collect());
+
+        let loop_metadata = model
+            .map(|m| m.loop_metadata.iter().map(|lm| lm.clone().into()).collect())
+            .unwrap_or_default();
 
         SdaiModel {
             variables,
@@ -1129,5 +1194,122 @@ mod tests {
         let project: datamodel::Project = model.into();
         assert_eq!(project.models.len(), 1);
         assert_eq!(project.models[0].variables.len(), 3);
+    }
+
+    #[test]
+    fn filter_stale_relationships_removes_references_to_absent_vars() {
+        let mut model = SdaiModel {
+            variables: vec![
+                Variable::Variable(AuxiliaryFields {
+                    name: "A".to_string(),
+                    equation: Some("10".to_string()),
+                    documentation: None,
+                    units: None,
+                    graphical_function: None,
+                    uid: None,
+                }),
+                Variable::Variable(AuxiliaryFields {
+                    name: "C".to_string(),
+                    equation: Some("A + 1".to_string()),
+                    documentation: None,
+                    units: None,
+                    graphical_function: None,
+                    uid: None,
+                }),
+            ],
+            relationships: Some(vec![
+                Relationship {
+                    reasoning: None,
+                    from: "A".to_string(),
+                    to: "B".to_string(),
+                    polarity: Polarity::Positive,
+                    polarity_reasoning: None,
+                },
+                Relationship {
+                    reasoning: None,
+                    from: "B".to_string(),
+                    to: "C".to_string(),
+                    polarity: Polarity::Positive,
+                    polarity_reasoning: None,
+                },
+                Relationship {
+                    reasoning: None,
+                    from: "A".to_string(),
+                    to: "C".to_string(),
+                    polarity: Polarity::Positive,
+                    polarity_reasoning: None,
+                },
+            ]),
+            specs: None,
+            views: None,
+            loop_metadata: vec![],
+        };
+
+        model.filter_stale_relationships();
+
+        let rels = model.relationships.unwrap();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].from, "A");
+        assert_eq!(rels[0].to, "C");
+    }
+
+    #[test]
+    fn filter_stale_relationships_noop_when_none() {
+        let mut model = SdaiModel {
+            variables: vec![],
+            relationships: None,
+            specs: None,
+            views: None,
+            loop_metadata: vec![],
+        };
+
+        model.filter_stale_relationships();
+        assert!(model.relationships.is_none());
+    }
+
+    #[test]
+    fn from_ref_project_matches_from_owned() {
+        let sdai = SdaiModel {
+            variables: vec![
+                Variable::Stock(StockFields {
+                    name: "pop".to_string(),
+                    equation: Some("100".to_string()),
+                    documentation: None,
+                    units: None,
+                    inflows: Some(vec!["births".to_string()]),
+                    outflows: None,
+                    graphical_function: None,
+                    uid: None,
+                }),
+                Variable::Flow(FlowFields {
+                    name: "births".to_string(),
+                    equation: Some("pop * 0.1".to_string()),
+                    documentation: None,
+                    units: None,
+                    graphical_function: None,
+                    uid: None,
+                }),
+            ],
+            relationships: None,
+            specs: Some(SimSpecs {
+                start_time: 0.0,
+                stop_time: 10.0,
+                dt: Some(1.0),
+                time_units: None,
+                save_step: None,
+                method: None,
+            }),
+            views: None,
+            loop_metadata: vec![],
+        };
+        let dm_project: datamodel::Project = sdai.into();
+
+        let from_owned = SdaiModel::from(dm_project.clone());
+        let from_ref = SdaiModel::from(&dm_project);
+
+        assert_eq!(from_owned.variables.len(), from_ref.variables.len());
+        assert_eq!(from_owned.specs, from_ref.specs);
+        assert_eq!(from_owned.views, from_ref.views);
+        assert_eq!(from_owned.loop_metadata, from_ref.loop_metadata);
     }
 }

@@ -1969,6 +1969,23 @@ impl From<datamodel::Project> for Project {
     }
 }
 
+impl From<&datamodel::Project> for Project {
+    fn from(project: &datamodel::Project) -> Self {
+        Project {
+            name: project.name.clone(),
+            sim_specs: project.sim_specs.clone().into(),
+            models: project.models.iter().map(|m| m.clone().into()).collect(),
+            dimensions: project
+                .dimensions
+                .iter()
+                .map(|d| d.clone().into())
+                .collect(),
+            units: project.units.iter().map(|u| u.clone().into()).collect(),
+            source: project.source.as_ref().map(|s| s.clone().into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3901,5 +3918,64 @@ mod tests {
         } else {
             panic!("Expected Aux variable");
         }
+    }
+
+    #[test]
+    fn from_ref_project_matches_from_owned() {
+        let json_project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs {
+                start_time: 0.0,
+                end_time: 10.0,
+                dt: "1".to_string(),
+                save_step: 0.0,
+                method: String::new(),
+                time_units: String::new(),
+            },
+            models: vec![Model {
+                name: "main".to_string(),
+                stocks: vec![Stock {
+                    uid: 1,
+                    name: "pop".to_string(),
+                    initial_equation: "100".to_string(),
+                    units: String::new(),
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    documentation: String::new(),
+                    arrayed_equation: None,
+                    compat: None,
+                    non_negative: false,
+                    can_be_module_input: false,
+                    is_public: false,
+                }],
+                flows: vec![],
+                auxiliaries: vec![],
+                modules: vec![],
+                sim_specs: None,
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            dimensions: vec![],
+            units: vec![],
+            source: None,
+        };
+
+        let dm_project: datamodel::Project = json_project.into();
+        let from_owned = Project::from(dm_project.clone());
+        let from_ref = Project::from(&dm_project);
+
+        assert_eq!(from_owned.name, from_ref.name);
+        assert_eq!(from_owned.models.len(), from_ref.models.len());
+        assert_eq!(
+            from_owned.models[0].stocks.len(),
+            from_ref.models[0].stocks.len()
+        );
+        assert_eq!(
+            from_owned.models[0].stocks[0].name,
+            from_ref.models[0].stocks[0].name
+        );
+        assert_eq!(from_owned.dimensions.len(), from_ref.dimensions.len());
+        assert_eq!(from_owned.units.len(), from_ref.units.len());
     }
 }

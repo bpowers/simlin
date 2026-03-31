@@ -63,24 +63,27 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
 
     let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
     let errors: Vec<ErrorOutput> = {
-        let error_diags: Vec<_> = diagnostics
+        let has_errors = diagnostics
             .iter()
-            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
-            .cloned()
-            .collect();
-        if error_diags.is_empty() {
+            .any(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error));
+        if !has_errors {
             vec![]
         } else {
-            simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
-                .errors
-                .iter()
-                // Only include errors that belong to the requested model or that
-                // are not scoped to any model (e.g. project-level errors).
-                // Errors from sibling models in a multi-model project must not
-                // appear here -- they would confuse clients reading a clean model.
-                .filter(|e| e.model_name.as_ref().is_none_or(|name| name == model_name))
-                .map(ErrorOutput::from)
-                .collect()
+            simlin_engine::errors::collect_formatted_errors(
+                diagnostics
+                    .iter()
+                    .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error)),
+                &project,
+            )
+            .errors
+            .iter()
+            // Only include errors that belong to the requested model or that
+            // are not scoped to any model (e.g. project-level errors).
+            // Errors from sibling models in a multi-model project must not
+            // appear here -- they would confuse clients reading a clean model.
+            .filter(|e| e.model_name.as_ref().is_none_or(|name| name == model_name))
+            .map(ErrorOutput::from)
+            .collect()
         }
     };
 

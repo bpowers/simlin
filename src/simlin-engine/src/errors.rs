@@ -281,8 +281,12 @@ pub fn format_diagnostic_with_datamodel(
 
 /// Collect and format all diagnostics from the incremental (salsa) path,
 /// enriching equation/unit errors with snippet context from the datamodel.
-pub fn collect_formatted_errors(
-    diagnostics: &[db::Diagnostic],
+///
+/// Accepts any iterator yielding references to `Diagnostic`, so callers
+/// with `Vec<&Diagnostic>` (from filtering) can pass directly without
+/// cloning into a new `Vec<Diagnostic>`.
+pub fn collect_formatted_errors<'a>(
+    diagnostics: impl IntoIterator<Item = &'a db::Diagnostic>,
     datamodel: &DatamodelProject,
 ) -> FormattedErrors {
     let mut formatted = FormattedErrors::default();
@@ -451,5 +455,32 @@ mod tests {
         let formatted = format_unit_error("test_model", "no_loc_var", None, &error);
         assert_eq!(formatted.start_offset, 0);
         assert_eq!(formatted.end_offset, 0);
+    }
+
+    #[test]
+    fn collect_formatted_errors_accepts_filtered_iterator() {
+        let datamodel = TestProject::new("filter-iter")
+            .aux("ok_var", "42", None)
+            .aux("bad_var", "1 + bogus", None)
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, &sync);
+
+        // Pass a filtered iterator directly (the use case for issue #426).
+        let formatted = collect_formatted_errors(
+            diagnostics
+                .iter()
+                .filter(|d| matches!(d.severity, db::DiagnosticSeverity::Error)),
+            &datamodel,
+        );
+
+        assert!(!formatted.errors.is_empty());
+        assert!(
+            formatted
+                .errors
+                .iter()
+                .any(|e| e.variable_name.as_deref() == Some("bad_var"))
+        );
     }
 }
