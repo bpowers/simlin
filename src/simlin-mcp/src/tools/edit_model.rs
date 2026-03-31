@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use simlin_engine::json as ejson;
 
-use super::types::{DominantPeriodOutput, LoopDominanceSummary};
+use super::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary};
 use crate::tool::TypedTool;
 
 // ── Curated input types ───────────────────────────────────────────────────────
@@ -181,9 +181,8 @@ pub struct EditModelInput {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EditModelOutput {
-    /// Path where the model was written (or the input path on dry-run).
-    /// For non-JSON source files (.stmx, .xmile, .mdl) this will differ from
-    /// the input path, pointing to the generated `.simlin.json` file instead.
+    /// Path where the model was written -- always the same as the input path,
+    /// regardless of source format.
     project_path: String,
     model: ejson::Model,
     time: Vec<f64>,
@@ -241,39 +240,49 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         sync_diagram(&mut project, &model_name, model_patch.as_ref());
     }
 
+    // Create one SimlinDb and sync, reused for both the diagnostic gate
+    // and the subsequent analysis call.
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
-    let source_project = sync.project;
 
+    // Reject the edit if it introduces compilation errors.
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let error_diagnostics: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+        .collect();
+
+    if !error_diagnostics.is_empty() {
+        let formatted = simlin_engine::errors::collect_formatted_errors(&diagnostics, &project);
+        let error_outputs: Vec<ErrorOutput> =
+            formatted.errors.iter().map(ErrorOutput::from).collect();
+        let error_json = serde_json::json!({
+            "error": "edit introduces compilation errors",
+            "errors": error_outputs,
+        });
+        anyhow::bail!("{}", serde_json::to_string(&error_json)?);
+    }
+
+    let source_project = sync.project;
     let analysis =
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, &model_name)
             .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
-    let (write_path, serialized) = match source_format {
-        super::SourceFormat::Xmile => {
-            let wp = path.with_extension("simlin.json");
-            let json_project = ejson::Project::from(project);
-            (wp, serde_json::to_string_pretty(&json_project)?)
-        }
-        super::SourceFormat::NativeJson => {
-            let json_project = ejson::Project::from(project);
-            (
-                path.to_path_buf(),
-                serde_json::to_string_pretty(&json_project)?,
-            )
-        }
-        super::SourceFormat::SdaiJson => {
-            let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
-            (
-                path.to_path_buf(),
-                serde_json::to_string_pretty(&sdai_model)?,
-            )
-        }
-    };
-
     if !dry_run {
-        std::fs::write(&write_path, &serialized)
-            .with_context(|| format!("failed to write model to {}", write_path.display()))?;
+        let serialized = match source_format {
+            super::SourceFormat::Xmile => simlin_engine::to_xmile(&project)
+                .context("failed to serialize XMILE")?
+                .into_bytes(),
+            super::SourceFormat::NativeJson => {
+                let json_project = ejson::Project::from(project.clone());
+                serde_json::to_string_pretty(&json_project)?.into_bytes()
+            }
+            super::SourceFormat::SdaiJson => {
+                let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project.clone());
+                serde_json::to_string_pretty(&sdai_model)?.into_bytes()
+            }
+        };
+        simlin_engine::io::atomic_write(path, &serialized).context("failed to write model file")?;
     }
 
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
@@ -289,7 +298,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         .collect();
 
     let output = EditModelOutput {
-        project_path: write_path.display().to_string(),
+        project_path: path.display().to_string(),
         model: analysis.model,
         time: analysis.time,
         loop_dominance,
@@ -636,18 +645,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
+        // Define the flows referenced by the stock so the model compiles.
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertStock": {
-                    "name": "population",
-                    "initialEquation": "1000",
-                    "units": "people",
-                    "documentation": "Total population",
-                    "inflows": ["births"],
-                    "outflows": ["deaths"]
+            "operations": [
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.03"
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "deaths",
+                        "equation": "population * 0.01"
+                    }
+                },
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "1000",
+                        "units": "people",
+                        "documentation": "Total population",
+                        "inflows": ["births"],
+                        "outflows": ["deaths"]
+                    }
                 }
-            }]
+            ]
         }))
         .unwrap();
 
@@ -668,9 +692,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
+        // Define the stock that flows reference so the model compiles.
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
             "operations": [
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "1000",
+                        "inflows": ["births"]
+                    }
+                },
                 {
                     "upsertFlow": {
                         "name": "births",
@@ -839,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn project_path_in_output_redirects_for_stmx_file() {
+    fn project_path_in_output_equals_input_for_stmx_file() {
         let stmx_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
@@ -855,15 +887,10 @@ mod tests {
         }))
         .unwrap();
 
-        let expected_json_path = dir.path().join("logistic_growth.simlin.json");
         assert_eq!(
             result["projectPath"],
-            expected_json_path.to_str().unwrap(),
-            "editing a .stmx file must report the .simlin.json write path"
-        );
-        assert!(
-            expected_json_path.exists(),
-            ".simlin.json must be written to disk"
+            dest.to_str().unwrap(),
+            "editing a .stmx file must report the original .stmx path, not a sidecar"
         );
     }
 
@@ -881,15 +908,9 @@ mod tests {
         }))
         .unwrap();
 
-        let expected_json_path = std::path::Path::new(stmx_path).with_extension("simlin.json");
         assert_eq!(
-            result["projectPath"],
-            expected_json_path.to_str().unwrap(),
-            "dry-run on a .stmx file must still report the .simlin.json path"
-        );
-        assert!(
-            !expected_json_path.exists(),
-            ".simlin.json must NOT be written to disk on dry-run"
+            result["projectPath"], stmx_path,
+            "dry-run on a .stmx file must report the original .stmx path"
         );
     }
 
@@ -933,31 +954,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
-        // Create a stock with inflows, outflows, units, and documentation.
+        // Create a stock with inflows, outflows, units, documentation, and
+        // the flows it references so the model compiles.
         call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertStock": {
-                    "name": "population",
-                    "initialEquation": "1000",
-                    "units": "people",
-                    "documentation": "pop count",
-                    "inflows": ["births"],
-                    "outflows": ["deaths"]
+            "operations": [
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.03"
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "deaths",
+                        "equation": "population * 0.01"
+                    }
+                },
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "1000",
+                        "units": "people",
+                        "documentation": "pop count",
+                        "inflows": ["births"],
+                        "outflows": ["deaths"]
+                    }
                 }
-            }]
+            ]
         }))
         .unwrap();
 
-        // Upsert with only name and initialEquation -- all other fields must be cleared.
+        // Upsert with only name and initialEquation -- all other fields must
+        // be cleared. We must also remove the flows so the model compiles
+        // (stock no longer has inflows/outflows and the orphan flows would
+        // reference the stock).
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertStock": {
-                    "name": "population",
-                    "initialEquation": "2000"
+            "operations": [
+                { "removeVariable": { "name": "births" } },
+                { "removeVariable": { "name": "deaths" } },
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "2000"
+                    }
                 }
-            }]
+            ]
         }))
         .unwrap();
 
@@ -1484,6 +1527,219 @@ mod tests {
                 .iter()
                 .any(|a| a["name"] == "decay_rate"),
             "new variable must be in saved file"
+        );
+    }
+
+    // ---- AC2.1: XMILE write-back ----
+
+    #[test]
+    fn ac2_1_stmx_edit_writes_back_to_original_file() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let original_contents = std::fs::read_to_string(&dest).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "test_aux", "equation": "42" }
+            }]
+        }))
+        .unwrap();
+
+        let updated_contents = std::fs::read_to_string(&dest).unwrap();
+        assert_ne!(
+            original_contents, updated_contents,
+            "the .stmx file must be modified by the edit"
+        );
+        assert!(
+            updated_contents.contains("test_aux"),
+            "the .stmx file must contain the new variable"
+        );
+    }
+
+    // ---- AC2.3: output projectPath equals input path for all formats ----
+
+    #[test]
+    fn ac2_3_project_path_equals_input_for_stmx() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(
+            result["projectPath"],
+            dest.to_str().unwrap(),
+            "projectPath must equal the input .stmx path"
+        );
+    }
+
+    #[test]
+    fn ac2_3_project_path_equals_input_for_native_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(result["projectPath"], path.to_str().unwrap());
+    }
+
+    #[test]
+    fn ac2_3_project_path_equals_input_for_sdai_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let dest = dir.path().join("model.sd.json");
+        std::fs::copy(fixture, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(result["projectPath"], dest.to_str().unwrap());
+    }
+
+    // ---- AC2.5: no .simlin.json sidecar created for XMILE edits ----
+
+    #[test]
+    fn ac2_5_no_sidecar_created_for_stmx_edit() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "aux_var", "equation": "1" }
+            }]
+        }))
+        .unwrap();
+
+        let sidecar = dir.path().join("logistic_growth.simlin.json");
+        assert!(
+            !sidecar.exists(),
+            "no .simlin.json sidecar must be created when editing a .stmx file"
+        );
+    }
+
+    // ---- AC3.4: EditModel rejects edit that introduces compilation errors ----
+
+    #[test]
+    fn ac3_4_edit_with_compilation_error_returns_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "bad_var",
+                    "equation": "nonexistent_dependency + 1"
+                }
+            }]
+        }));
+
+        assert!(
+            result.is_err(),
+            "EditModel must reject an edit that introduces compilation errors"
+        );
+    }
+
+    // ---- AC3.5: structured error response includes error details ----
+
+    #[test]
+    fn ac3_5_structured_error_includes_error_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "bad_var",
+                    "equation": "nonexistent_dep + 1"
+                }
+            }]
+        }));
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        // The error message is a JSON string with structured content
+        let err_json: serde_json::Value = serde_json::from_str(&err_msg).unwrap();
+        assert!(
+            err_json.get("errors").is_some(),
+            "error response must contain 'errors' array: {err_msg}"
+        );
+        let errors = err_json["errors"].as_array().unwrap();
+        assert!(!errors.is_empty(), "errors array must not be empty");
+        // Each error must have code, message, variableName, kind fields
+        let first = &errors[0];
+        assert!(
+            first.get("code").is_some(),
+            "error must have 'code' field: {first}"
+        );
+        assert!(
+            first.get("message").is_some(),
+            "error must have 'message' field: {first}"
+        );
+        assert!(
+            first.get("kind").is_some(),
+            "error must have 'kind' field: {first}"
+        );
+    }
+
+    // ---- AC3.6: file not modified when edit introduces errors ----
+
+    #[test]
+    fn ac3_6_file_not_modified_when_edit_has_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "broken_var",
+                    "equation": "does_not_exist * 2"
+                }
+            }]
+        }));
+
+        assert!(result.is_err());
+
+        let after_contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "file must not be modified when edit introduces compilation errors"
         );
     }
 }

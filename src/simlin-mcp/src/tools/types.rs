@@ -80,7 +80,6 @@ impl From<simlin_engine::layout::metadata::DominantPeriod> for DominantPeriodOut
 /// what went wrong.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // used by EditModel error gate in Phase 4 Task 3
 pub struct ErrorOutput {
     pub code: String,
     pub message: String,
