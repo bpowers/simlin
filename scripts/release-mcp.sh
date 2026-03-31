@@ -42,6 +42,9 @@ cargo test -p simlin-mcp
 # Update the first version = "..." line in [package] section of Cargo.toml
 sed -i '0,/^version = ".*"/{s/^version = ".*"/version = "'"$VERSION"'"/}' "$MCP_DIR/Cargo.toml"
 
+# Refresh Cargo.lock to reflect the new simlin-mcp version
+cargo check -p simlin-mcp --quiet
+
 # Update wrapper package.json: top-level version + all optionalDependencies
 jq --arg v "$VERSION" '
   .version = $v |
@@ -71,7 +74,7 @@ done
 
 echo "All 5 package.json files agree on version $VERSION"
 
-git add "$MCP_DIR/Cargo.toml" "$MCP_DIR/package.json"
+git add "$MCP_DIR/Cargo.toml" "$REPO_ROOT/Cargo.lock" "$MCP_DIR/package.json"
 for f in "${PACKAGE_FILES[@]:1}"; do
   git add "$f"
 done
