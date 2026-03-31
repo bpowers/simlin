@@ -212,7 +212,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
-    let mut project = super::open_project(path, &contents)?;
+    let (mut project, _source_format) = super::open_project(path, &contents)?;
     let requested_name = input.model_name.as_deref().unwrap_or("main");
     let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);

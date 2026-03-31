@@ -18,6 +18,8 @@ pub mod types;
 use std::io::BufReader;
 use std::path::Path;
 
+use anyhow::Context as _;
+
 use crate::tool::Registry;
 
 /// Register all Simlin MCP tools in the given registry.
@@ -51,8 +53,22 @@ pub(crate) fn resolve_model_name<'a>(
     requested
 }
 
-/// Open a project from file contents, detecting format by extension.
-fn open_project(path: &Path, contents: &str) -> anyhow::Result<simlin_engine::datamodel::Project> {
+/// Identifies how a model file was parsed, so write-back can use the
+/// same format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceFormat {
+    Xmile,
+    NativeJson,
+    SdaiJson,
+}
+
+/// Open a project from file contents.  XMILE and Vensim formats are
+/// detected by extension; JSON files use content-based detection
+/// (top-level `models` key = native, `variables` key = SD-AI).
+pub(crate) fn open_project(
+    path: &Path,
+    contents: &str,
+) -> anyhow::Result<(simlin_engine::datamodel::Project, SourceFormat)> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -62,15 +78,31 @@ fn open_project(path: &Path, contents: &str) -> anyhow::Result<simlin_engine::da
     match ext.as_str() {
         "stmx" | "xmile" | "xml" => {
             let mut reader = BufReader::new(contents.as_bytes());
-            simlin_engine::open_xmile(&mut reader)
-                .map_err(|e| anyhow::anyhow!("failed to parse XMILE: {e:?}"))
+            let project = simlin_engine::open_xmile(&mut reader)
+                .map_err(|e| anyhow::anyhow!("failed to parse XMILE: {e:?}"))?;
+            Ok((project, SourceFormat::Xmile))
         }
-        "mdl" => simlin_engine::open_vensim(contents)
-            .map_err(|e| anyhow::anyhow!("failed to parse Vensim: {e:?}")),
+        "mdl" => {
+            let project = simlin_engine::open_vensim(contents)
+                .map_err(|e| anyhow::anyhow!("failed to parse Vensim: {e:?}"))?;
+            Ok((project, SourceFormat::Xmile))
+        }
         _ => {
-            let json_project: simlin_engine::json::Project = serde_json::from_str(contents)
-                .map_err(|e| anyhow::anyhow!("failed to parse model as JSON: {e}"))?;
-            Ok(json_project.into())
+            let v: serde_json::Value =
+                serde_json::from_str(contents).context("failed to parse JSON")?;
+            if v.get("models").is_some() {
+                let json_project: simlin_engine::json::Project =
+                    serde_json::from_value(v).context("failed to parse native Simlin JSON")?;
+                Ok((json_project.into(), SourceFormat::NativeJson))
+            } else if v.get("variables").is_some() {
+                let sdai_model: simlin_engine::json_sdai::SdaiModel =
+                    serde_json::from_value(v).context("failed to parse SD-AI JSON")?;
+                Ok((sdai_model.into(), SourceFormat::SdaiJson))
+            } else {
+                anyhow::bail!(
+                    "unrecognized JSON format: expected top-level 'models' (native) or 'variables' (SD-AI)"
+                )
+            }
         }
     }
 }
@@ -114,5 +146,83 @@ mod tests {
                 def.name
             );
         }
+    }
+
+    // ---- AC7.1: native JSON detection ----
+
+    #[test]
+    fn ac7_1_open_project_detects_native_json() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic-growth.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, format) = open_project(path, &contents).unwrap();
+        assert_eq!(format, SourceFormat::NativeJson);
+        assert!(
+            !project.models.is_empty(),
+            "project must have at least one model"
+        );
+    }
+
+    // ---- AC7.2: SD-AI JSON detection ----
+
+    #[test]
+    fn ac7_2_open_project_detects_sdai_json() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, format) = open_project(path, &contents).unwrap();
+        assert_eq!(format, SourceFormat::SdaiJson);
+        assert!(
+            !project.models.is_empty(),
+            "project must have at least one model"
+        );
+    }
+
+    // ---- AC7.4: unrecognized JSON format returns descriptive error ----
+
+    #[test]
+    fn ac7_4_unrecognized_json_returns_error() {
+        let path = std::path::Path::new("test.sd.json");
+        let contents = r#"{"foo": "bar"}"#;
+        let result = open_project(path, contents);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("models") && err_msg.contains("variables"),
+            "error must mention expected formats: {err_msg}"
+        );
+    }
+
+    // ---- AC7.5: .sd.json extension works for both formats ----
+
+    #[test]
+    fn ac7_5_sd_json_extension_works_for_both_formats() {
+        let native_path = std::path::Path::new("model.sd.json");
+        let native_content = r#"{"name":"test","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        let (_, format) = open_project(native_path, native_content).unwrap();
+        assert_eq!(format, SourceFormat::NativeJson);
+
+        let sdai_path = std::path::Path::new("model.sd.json");
+        let sdai_content = r#"{"variables":[{"type":"variable","name":"x","equation":"1"}]}"#;
+        let (_, format) = open_project(sdai_path, sdai_content).unwrap();
+        assert_eq!(format, SourceFormat::SdaiJson);
+    }
+
+    // ---- XMILE detection ----
+
+    #[test]
+    fn open_project_detects_xmile() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, format) = open_project(path, &contents).unwrap();
+        assert_eq!(format, SourceFormat::Xmile);
+        assert!(!project.models.is_empty());
     }
 }

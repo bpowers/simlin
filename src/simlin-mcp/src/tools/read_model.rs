@@ -51,7 +51,7 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
-    let project = super::open_project(path, &contents)?;
+    let (project, _source_format) = super::open_project(path, &contents)?;
     let requested_name = input.model_name.as_deref().unwrap_or("main");
     let model_name = super::resolve_model_name(&project, requested_name);
 
