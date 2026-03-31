@@ -231,6 +231,20 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let dry_run = input.dry_run.unwrap_or(false);
 
     let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
+
+    // Count pre-edit error-severity diagnostics so we can detect regressions
+    // rather than rejecting edits that land on a model that already has errors.
+    // This allows incremental repair: an edit that fixes errors (or doesn't
+    // change the error count) is accepted; one that introduces new errors is not.
+    let pre_edit_error_count = {
+        let pre_db = simlin_engine::db::SimlinDb::default();
+        let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
+        simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync)
+            .into_iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .count()
+    };
+
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
     let model_patch = patch.models.iter().find(|m| m.name == model_name).cloned();
     simlin_engine::apply_patch(&mut project, patch)
@@ -245,15 +259,17 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
 
-    // Reject the edit if it introduces compilation errors.
+    // Reject the edit only if it increased the error count. Edits that reduce
+    // or preserve the existing error count are accepted so models with
+    // pre-existing errors can be repaired incrementally.
     let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
-    let error_diagnostics: Vec<_> = diagnostics
+    let post_edit_error_diagnostics: Vec<_> = diagnostics
         .iter()
         .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
         .collect();
 
-    if !error_diagnostics.is_empty() {
-        let error_diags_owned: Vec<_> = error_diagnostics.into_iter().cloned().collect();
+    if post_edit_error_diagnostics.len() > pre_edit_error_count {
+        let error_diags_owned: Vec<_> = post_edit_error_diagnostics.into_iter().cloned().collect();
         let formatted =
             simlin_engine::errors::collect_formatted_errors(&error_diags_owned, &project);
         let error_outputs: Vec<ErrorOutput> =
@@ -280,7 +296,15 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
                 serde_json::to_string_pretty(&json_project)?.into_bytes()
             }
             super::SourceFormat::SdaiJson => {
-                let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project.clone());
+                let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(project.clone());
+                // The relationships field is not captured in datamodel::Project,
+                // so re-parse the original content to retrieve it and avoid
+                // silently dropping it on write-back.
+                if let Ok(original) =
+                    serde_json::from_str::<simlin_engine::json_sdai::SdaiModel>(&contents)
+                {
+                    sdai_model.relationships = original.relationships;
+                }
                 serde_json::to_string_pretty(&sdai_model)?.into_bytes()
             }
         };
@@ -1820,6 +1844,204 @@ mod tests {
         assert_eq!(
             original_contents, after_contents,
             "dry-run must not modify the .stmx file on disk"
+        );
+    }
+
+    // ---- Issue 1: error gate allows incremental repair of broken models ----
+
+    #[test]
+    fn error_gate_allows_edit_on_already_broken_model() {
+        // A model that already has a compilation error (broken_dep does not
+        // exist) should still accept a new, unrelated valid auxiliary. Pre-
+        // existing errors must not block further edits.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        // Introduce a broken variable by writing it directly to the file,
+        // bypassing EditModel's gate.
+        let broken = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "variables": [
+                    {
+                        "type": "aux",
+                        "name": "broken",
+                        "equation": "nonexistent_variable + 1"
+                    }
+                ]
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+
+        // Now add a valid unrelated variable -- should succeed despite the
+        // pre-existing error on "broken".
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "unrelated_valid", "equation": "42" }
+            }]
+        }));
+
+        assert!(
+            result.is_ok(),
+            "edit on a model with pre-existing errors must succeed when it does not \
+             introduce new errors, got: {:?}",
+            result
+        );
+        let value = result.unwrap();
+        let auxes = value["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "unrelated_valid"),
+            "the new valid auxiliary must appear in the response"
+        );
+    }
+
+    #[test]
+    fn error_gate_rejects_edit_that_adds_new_error_on_broken_model() {
+        // When the model already has one error, an edit that introduces a
+        // second (new) error must still be rejected.
+        let dir = tempfile::tempdir().unwrap();
+
+        let broken = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "variables": [
+                    {
+                        "type": "aux",
+                        "name": "already_broken",
+                        "equation": "does_not_exist + 1"
+                    }
+                ]
+            }]
+        });
+        let path = dir.path().join("model.simlin.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+
+        // Introduce a second error -- should be rejected since error count increases.
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "also_broken",
+                    "equation": "another_missing_var * 2"
+                }
+            }]
+        }));
+
+        assert!(
+            result.is_err(),
+            "edit that increases the error count must be rejected even on an already-broken model"
+        );
+    }
+
+    // ---- Issue 4: SD-AI relationships field preserved on write-back ----
+
+    fn sdai_fixture_with_relationships() -> serde_json::Value {
+        serde_json::json!({
+            "variables": [
+                {
+                    "type": "stock",
+                    "name": "population",
+                    "equation": "1000"
+                },
+                {
+                    "type": "flow",
+                    "name": "births",
+                    "equation": "population * 0.03"
+                }
+            ],
+            "relationships": [
+                {
+                    "from": "births",
+                    "to": "population",
+                    "polarity": "+",
+                    "reasoning": "more births increase population"
+                }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 100.0
+            }
+        })
+    }
+
+    #[test]
+    fn sdai_relationships_preserved_after_edit() {
+        // The relationships field is metadata not captured in datamodel::Project.
+        // EditModel must re-attach it from the original content on write-back to
+        // avoid silently discarding it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.sd.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&sdai_fixture_with_relationships()).unwrap(),
+        )
+        .unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "birth_rate", "equation": "0.03" }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let relationships = saved
+            .get("relationships")
+            .expect("relationships field must be preserved in the saved SD-AI file after an edit");
+        let rels = relationships.as_array().unwrap();
+        assert_eq!(rels.len(), 1, "original relationship must be preserved");
+        assert_eq!(rels[0]["from"], "births");
+        assert_eq!(rels[0]["to"], "population");
+        assert_eq!(rels[0]["polarity"], "+");
+    }
+
+    #[test]
+    fn sdai_relationships_preserved_on_dry_run() {
+        // On a dry-run, relationships are not written to disk (nothing is).
+        // But the test verifies the original file is unchanged, meaning relationships
+        // remain intact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.sd.json");
+        let original = sdai_fixture_with_relationships();
+        std::fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "dryRun": true,
+            "operations": [{
+                "upsertAuxiliary": { "name": "some_var", "equation": "1" }
+            }]
+        }))
+        .unwrap();
+
+        let after_contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "dry-run must not modify the SD-AI file (including relationships)"
         );
     }
 }
