@@ -14,7 +14,6 @@ Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD mod
 - Primary compilation path is `db::compile_project_incremental()` using salsa tracked functions for fine-grained incrementality (`db.rs`, `db_analysis.rs`, `db_ltm.rs`)
 - Equation text is parsed via recursive descent parser (`parser/mod.rs`)
 - Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes
-- AST-walking `interpreter.rs` is deprecated for production; retained as a reference spec for VM correctness
 - `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
 - Native Vensim MDL parser in `mdl/` (replaces C++ xmutil); see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
 

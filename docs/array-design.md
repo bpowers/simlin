@@ -112,7 +112,7 @@ Indexed dimensions (e.g., numeric dimensions like `Periods(5)`) can use position
 - Broadcasting: `BeginBroadcastIter`, `LoadBroadcastElement`, `StoreBroadcastElement`
 - Sparse iteration support via pre-computed flat offsets
 
-#### Array Builtins (in both interpreter and VM)
+#### Array Builtins
 - `SUM(array)` - Sum all elements
 - `MEAN(array)` - Arithmetic mean
 - `STDDEV(array)` - Standard deviation
