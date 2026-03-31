@@ -3578,12 +3578,29 @@ pub fn compute_metadata(
         // Filter to only include deps that are actual rendered model
         // variables. AST extraction can yield module-internal identifiers
         // (e.g. "m·out") that don't correspond to any rendered element.
+        // For dotted identifiers like "module·output", map back to the
+        // module name when that prefix is in all_idents -- the module
+        // is the rendered element, not the qualified output port.
         // Also exclude self-references: the string heuristic skips them,
         // but AST extraction doesn't (stocks reference themselves through
         // init expressions, SMOOTH/DELAY patterns, etc.).
         let deps: Vec<String> = deps
             .into_iter()
-            .filter(|d| d != &var_ident && all_idents.contains(d))
+            .filter_map(|d| {
+                if d == var_ident {
+                    return None;
+                }
+                if all_idents.contains(&d) {
+                    return Some(d);
+                }
+                if let Some(prefix) = d.split('·').next()
+                    && prefix != d
+                    && all_idents.contains(prefix)
+                {
+                    return Some(prefix.to_string());
+                }
+                None
+            })
             .collect();
 
         if deps.is_empty() && !matches!(var, datamodel::Variable::Stock(_)) {

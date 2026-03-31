@@ -5202,5 +5202,119 @@ fn test_pinned_settlement_multiple_new_elements() {
     }
 }
 
+/// When an aux references a module output via a dotted name
+/// (e.g., `my_module.the_output` which canonicalizes to `my_module·the_output`),
+/// the salsa AST path produces a dependency on the dotted form. The dep_graph
+/// filter must map that back to the module name so the layout edge is preserved.
+#[test]
+fn test_module_output_dep_preserved_with_db_state() {
+    use crate::db::{SimlinDb, sync_from_datamodel};
+
+    // Submodel: has an output variable named "the_output"
+    let submodel = datamodel::Model {
+        name: "sub".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "the_output".to_string(),
+            equation: datamodel::Equation::Scalar("42".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat {
+                visibility: datamodel::Visibility::Public,
+                ..Default::default()
+            },
+            ai_state: None,
+            uid: Some(10),
+        })],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    // Main model: a module instance and an aux that references
+    // my_module.the_output (canonicalized as my_module·the_output).
+    let main_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "my_module".to_string(),
+                model_name: "sub".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: Vec::new(),
+                ai_state: None,
+                uid: Some(1),
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..Default::default()
+                },
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "consumer".to_string(),
+                equation: datamodel::Equation::Scalar("my_module.the_output + 1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat {
+                    visibility: datamodel::Visibility::Public,
+                    ..Default::default()
+                },
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+
+    let project = datamodel::Project {
+        name: TEST_MODEL.to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![main_model, submodel],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+
+    let metadata = compute_metadata(&project, TEST_MODEL, Some((&mut db, source_project))).unwrap();
+
+    // "consumer" should depend on "my_module" (the module variable),
+    // not the unresolvable "my_module·the_output".
+    let consumer_deps = metadata
+        .dep_graph
+        .get("consumer")
+        .expect("consumer should be in the dep graph");
+    assert!(
+        consumer_deps.contains("my_module"),
+        "consumer should depend on my_module via module output ref, got: {:?}",
+        consumer_deps,
+    );
+
+    // The reverse dep_graph should also reflect this edge.
+    let my_module_rdeps = metadata
+        .reverse_dep_graph
+        .get("my_module")
+        .expect("my_module should be in the reverse dep graph");
+    assert!(
+        my_module_rdeps.contains("consumer"),
+        "my_module reverse deps should include consumer, got: {:?}",
+        my_module_rdeps,
+    );
+
+    // consumer should NOT be classified as a constant.
+    assert!(
+        !metadata.constants.contains("consumer"),
+        "consumer has a dependency and should not be a constant",
+    );
+}
+
 #[path = "layout_review_tests.rs"]
 mod review_tests;
