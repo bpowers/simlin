@@ -16,6 +16,7 @@
 //! ```
 
 mod protocol;
+mod resource;
 mod tool;
 mod tools;
 mod transport;
