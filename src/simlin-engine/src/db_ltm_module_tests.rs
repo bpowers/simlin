@@ -198,6 +198,148 @@ fn test_ltm_passthrough_module_compiles() {
     );
 }
 
+/// Issue #417: modules with stocks whose output variable is not named
+/// "output" should still get composite/pathway LTM variables. This test
+/// uses a user-defined module with an internal stock and output named
+/// "result" instead of the stdlib convention "output".
+#[test]
+fn test_ltm_module_with_non_standard_output_name() {
+    use salsa::Setter;
+
+    let project = datamodel::Project {
+        name: "custom_output_name".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_aux("goal", "100", None),
+                    x_stock("level", "50", &["adjustment"], &[], None),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "smoothed".to_string(),
+                        equation: datamodel::Equation::Scalar("custom_smooth.result".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    x_aux("gap", "goal - smoothed", None),
+                    x_flow("adjustment", "gap / 5", None),
+                    x_module(
+                        "custom_smooth",
+                        &[("level", "input"), ("3", "delay_time")],
+                        None,
+                    ),
+                ],
+            ),
+            // Custom smooth module with output named "result" instead of "output"
+            x_model(
+                "custom_smooth",
+                vec![
+                    x_aux("input", "0", None),
+                    x_aux("delay_time", "1", None),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "flow".to_string(),
+                        equation: datamodel::Equation::Scalar(
+                            "(input - result) / delay_time".to_string(),
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    x_stock("result", "0", &["flow"], &[], None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, sub_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["custom_smooth"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // The sub-model should generate pathway/composite variables
+    // despite its output stock being named "result" instead of "output".
+    let ltm_vars = model_ltm_variables(&db, sub_model, source_project);
+    let has_composite = ltm_vars.vars.iter().any(|v| v.name.contains("composite"));
+    assert!(
+        has_composite,
+        "sub-model should have composite score variable (output named 'result'). vars: {:?}",
+        ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Issue #418: loops through SMOOTH modules should have determined polarity
+/// (Balancing), not Undetermined. This verifies that module_graphs is
+/// properly populated from sub-model causal edges.
+#[test]
+fn test_module_loop_polarity_is_determined() {
+    let project = datamodel::Project {
+        name: "smooth_polarity".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("goal", "100", None),
+                x_stock("level", "50", &["adjustment"], &[], None),
+                x_aux("smoothed_level", "SMTH1(level, 3)", None),
+                x_aux("gap", "goal - smoothed_level", None),
+                x_flow("adjustment", "gap / 5", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+
+    assert!(
+        !detected.loops.is_empty(),
+        "Should detect loops through SMOOTH"
+    );
+
+    // Every loop should have a determined polarity
+    for loop_item in &detected.loops {
+        assert_ne!(
+            loop_item.polarity,
+            super::DetectedLoopPolarity::Undetermined,
+            "Loop {} ({}) should have determined polarity, not Undetermined",
+            loop_item.id,
+            loop_item.variables.join(" -> ")
+        );
+    }
+}
+
 /// AC1.8: A model with two SMOOTH instances on different variables
 /// generates independent LTM synthetic variables for each feedback path
 /// when LTM is enabled.

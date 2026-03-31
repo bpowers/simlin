@@ -45,9 +45,9 @@ mod tests {
     #[test]
     fn test_smth1_unit_mismatch_initial() {
         // SMTH1 with mismatched initial value units (gadgets vs widgets).
-        // The salsa incremental diagnostic path does not yet propagate
-        // unit constraints through stdlib module argument mappings, so
-        // this compiles without a unit diagnostic.
+        // The initial_value argument should have the same units as input
+        // (widgets), but it's declared as gadgets. This should produce
+        // a unit diagnostic.
         TestProject::new("smth1_mismatch_test")
             .with_time_units("seconds")
             .unit("widgets", None)
@@ -57,7 +57,7 @@ mod tests {
             .aux_with_units("delay_time", "5", Some("seconds"))
             .aux_with_units("initial", "50", Some("gadgets")) // Wrong units!
             .aux_with_units("smoothed", "SMTH1(input, delay_time, initial)", None)
-            .assert_compiles_incremental();
+            .assert_unit_error_vm();
     }
 
     #[test]

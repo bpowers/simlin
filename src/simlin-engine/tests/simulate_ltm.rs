@@ -626,6 +626,22 @@ fn test_smooth_goal_seeking_ltm() {
         "Should detect at least one loop through SMOOTH"
     );
 
+    // Issue #418: module-containing loops should have known polarity
+    // (Balancing in this case), not Undetermined.
+    let has_determined_polarity = detected.loops.iter().any(|l| {
+        l.polarity == DetectedLoopPolarity::Reinforcing
+            || l.polarity == DetectedLoopPolarity::Balancing
+    });
+    assert!(
+        has_determined_polarity,
+        "Loops through SMOOTH should have determined polarity, not Undetermined. Found: {:?}",
+        detected
+            .loops
+            .iter()
+            .map(|l| (&l.id, &l.polarity, &l.variables))
+            .collect::<Vec<_>>()
+    );
+
     // Simulation via VM with LTM enabled
     let compiled = compile_ltm_incremental(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
@@ -644,9 +660,8 @@ fn test_smooth_goal_seeking_ltm() {
     );
 }
 
-// Still ignored: discovery mode doesn't yet find loops through SMOOTH composite paths.
+// Issue #419: discovery mode should find loops through SMOOTH composite paths.
 #[test]
-#[ignore]
 fn test_smooth_model_discovery_mode() {
     // Same model as test_smooth_goal_seeking_ltm, but in discovery mode.
     let datamodel_project = TestProject::new("smooth_discovery")

@@ -113,6 +113,80 @@ pub(crate) fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm:
     }
 }
 
+/// Build a full CausalGraph with variables populated for polarity analysis
+/// and module_graphs populated for module-containing loops.
+///
+/// For each dynamic module referenced by the model, recursively builds
+/// the sub-model's causal graph so that polarity calculation and stock
+/// enrichment can traverse module boundaries.
+pub(crate) fn causal_graph_with_modules(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> crate::ltm::CausalGraph {
+    use crate::common::{Canonical, Ident};
+    use std::collections::HashSet;
+
+    let edges_result = model_causal_edges(db, model, project);
+    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
+        .edges
+        .iter()
+        .map(|(from, tos)| {
+            (
+                Ident::new(from),
+                tos.iter().map(|t| Ident::new(t)).collect(),
+            )
+        })
+        .collect();
+    let stocks: HashSet<Ident<Canonical>> =
+        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+    let variables = reconstruct_model_variables(db, model, project);
+
+    let project_models = project.models(db);
+    let mut module_graphs: HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> = HashMap::new();
+
+    for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
+        if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
+            let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
+            // Only build graphs for dynamic modules (those with stocks)
+            if sub_edges_result.stocks.is_empty() {
+                continue;
+            }
+            let sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = sub_edges_result
+                .edges
+                .iter()
+                .map(|(from, tos)| {
+                    (
+                        Ident::new(from),
+                        tos.iter().map(|t| Ident::new(t)).collect(),
+                    )
+                })
+                .collect();
+            let sub_stocks: HashSet<Ident<Canonical>> = sub_edges_result
+                .stocks
+                .iter()
+                .map(|s| Ident::new(s))
+                .collect();
+            let sub_variables = reconstruct_model_variables(db, *sub_source_model, project);
+
+            let sub_graph = crate::ltm::CausalGraph {
+                edges: sub_edges,
+                stocks: sub_stocks,
+                variables: sub_variables,
+                module_graphs: HashMap::new(),
+            };
+            module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
+        }
+    }
+
+    crate::ltm::CausalGraph {
+        edges,
+        stocks,
+        variables,
+        module_graphs,
+    }
+}
+
 /// Build the causal edge structure for a model from salsa-tracked
 /// dependency sets and structural variable info.
 ///
@@ -269,11 +343,7 @@ pub fn model_detected_loops(
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
-    let edges_result = model_causal_edges(db, model, project);
-    let mut graph = causal_graph_from_edges(edges_result);
-
-    // Populate variables for polarity analysis so loop IDs match LTM
-    graph.variables = reconstruct_model_variables(db, model, project);
+    let graph = causal_graph_with_modules(db, model, project);
 
     let loops = graph.find_loops();
     DetectedLoopsResult {
@@ -320,9 +390,7 @@ pub fn compute_link_polarities(
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<(String, String), crate::ltm::LinkPolarity> {
-    let edges_result = model_causal_edges(db, model, project);
-    let mut graph = causal_graph_from_edges(edges_result);
-    graph.variables = reconstruct_model_variables(db, model, project);
+    let graph = causal_graph_with_modules(db, model, project);
     graph.all_link_polarities()
 }
 

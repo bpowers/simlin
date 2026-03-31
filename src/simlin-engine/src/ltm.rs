@@ -503,8 +503,7 @@ impl CausalGraph {
                 .find(|inp| &inp.src == predecessor)
                 .map(|inp| &inp.dst);
 
-            let output_ident = Ident::new("output");
-            let pathways = module_graph.enumerate_module_pathways(&output_ident);
+            let pathways = module_graph.enumerate_pathways_to_outputs(&[]);
 
             let internal_stocks: Vec<Ident<Canonical>> = if let Some(port) = internal_port {
                 // Collect stocks from all pathways for the matched input port.
@@ -657,8 +656,8 @@ impl CausalGraph {
         }
     }
 
-    /// Enumerate internal pathways through a module from each input port to the
-    /// output. Returns a map from input port name to the list of open paths.
+    /// Enumerate internal pathways through a module from each input port to a
+    /// specific output. Returns a map from input port name to the list of open paths.
     pub(crate) fn enumerate_module_pathways(
         &self,
         output_name: &Ident<Canonical>,
@@ -695,6 +694,72 @@ impl CausalGraph {
         }
 
         result
+    }
+
+    /// Enumerate internal pathways from each input port to the given output ports.
+    ///
+    /// Output ports are the variables that the parent model references from
+    /// this sub-model (e.g., "output" for stdlib SMOOTH, or any variable
+    /// name for user-defined modules). When no output ports are specified,
+    /// auto-detects by looking for graph sinks (variables with no outgoing
+    /// edges) and falling back to the "output" convention.
+    pub(crate) fn enumerate_pathways_to_outputs(
+        &self,
+        output_ports: &[Ident<Canonical>],
+    ) -> HashMap<Ident<Canonical>, Vec<Vec<Link>>> {
+        let ports = if output_ports.is_empty() {
+            self.detect_output_ports()
+        } else {
+            output_ports.to_vec()
+        };
+
+        let mut combined: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
+        for output_port in &ports {
+            let pathways = self.enumerate_module_pathways(output_port);
+            for (input_port, paths) in pathways {
+                combined.entry(input_port).or_default().extend(paths);
+            }
+        }
+        combined
+    }
+
+    /// Auto-detect output ports for a module sub-graph.
+    ///
+    /// Tries graph sinks (no outgoing edges) first, then falls back to
+    /// the stdlib "output" convention.
+    fn detect_output_ports(&self) -> Vec<Ident<Canonical>> {
+        let all_nodes: HashSet<&Ident<Canonical>> = self
+            .edges
+            .keys()
+            .chain(self.edges.values().flat_map(|tos| tos.iter()))
+            .collect();
+
+        let has_outgoing: HashSet<&Ident<Canonical>> = self
+            .edges
+            .iter()
+            .filter(|(_, tos)| !tos.is_empty())
+            .map(|(from, _)| from)
+            .collect();
+
+        let sinks: Vec<Ident<Canonical>> = all_nodes
+            .iter()
+            .filter(|n| !has_outgoing.contains(*n))
+            .map(|n| (*n).clone())
+            .collect();
+
+        if !sinks.is_empty() {
+            return sinks;
+        }
+
+        // No true sinks: all variables participate in internal feedback.
+        // Fall back to the conventional "output" variable name used by
+        // stdlib modules (smth1, delay1, etc.).
+        let output_ident = Ident::new("output");
+        if all_nodes.contains(&output_ident) {
+            vec![output_ident]
+        } else {
+            vec![]
+        }
     }
 
     /// Find stocks in a loop
@@ -816,6 +881,17 @@ impl CausalGraph {
                     return LinkPolarity::Negative;
                 }
                 // If 'from' is not a flow for this stock, fall through to AST analysis
+            }
+
+            // When the target is a module, the edge represents an input
+            // feeding into the module. Module inputs are direct bindings
+            // (positive relationship). If the module has an internal graph,
+            // we could trace through it, but for the input->module edge
+            // itself the polarity is positive.
+            if let Variable::Module { inputs, .. } = to_var
+                && inputs.iter().any(|inp| &inp.src == from)
+            {
+                return LinkPolarity::Positive;
             }
 
             // General case: analyze the equation AST
@@ -3721,5 +3797,67 @@ mod tests {
                 .map(|l| &l.variables)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_enumerate_pathways_to_outputs_non_standard_output() {
+        // Module graph with output named "result" instead of "output"
+        let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+        edges.insert(Ident::new("input_val"), vec![Ident::new("intermediate")]);
+        edges.insert(Ident::new("intermediate"), vec![Ident::new("result")]);
+
+        let graph = CausalGraph {
+            edges,
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        // enumerate_module_pathways with hard-coded "output" finds nothing
+        let pathways_old = graph.enumerate_module_pathways(&Ident::new("output"));
+        assert!(
+            pathways_old.is_empty(),
+            "Hard-coded 'output' should find no pathways when output is named 'result'"
+        );
+
+        // With explicit output ports, pathways are found correctly
+        let pathways = graph.enumerate_pathways_to_outputs(&[Ident::new("result")]);
+        assert!(
+            !pathways.is_empty(),
+            "Explicit output port should find pathways to 'result'"
+        );
+        assert!(
+            pathways.contains_key(&Ident::new("input_val")),
+            "Should find pathway from input_val to the sink"
+        );
+
+        // Auto-detection also works: "result" is a sink (no outgoing edges)
+        let pathways_auto = graph.enumerate_pathways_to_outputs(&[]);
+        assert!(
+            !pathways_auto.is_empty(),
+            "Auto-detected sink should find pathways to 'result'"
+        );
+    }
+
+    #[test]
+    fn test_enumerate_pathways_to_outputs_standard_output() {
+        // Module graph with output named "output" (standard case)
+        let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+        edges.insert(Ident::new("input"), vec![Ident::new("output")]);
+
+        let graph = CausalGraph {
+            edges,
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        // Auto-detection: "output" node is a sink, so it's found automatically
+        let pathways = graph.enumerate_pathways_to_outputs(&[]);
+        assert!(
+            !pathways.is_empty(),
+            "Should find pathways with standard 'output' name"
+        );
+        assert!(pathways.contains_key(&Ident::new("input")));
     }
 }

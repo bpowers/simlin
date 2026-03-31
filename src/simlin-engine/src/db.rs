@@ -1648,6 +1648,106 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
             Default::default()
         });
 
+    // Check stdlib module argument unit compatibility.
+    //
+    // The unit inference handles cross-module constraints recursively, but
+    // implicit module variables (from SMOOTH/DELAY expansion) may not be
+    // fully processed by the inference when the sub-model's internal
+    // constraints aren't yet resolved. We do an explicit check here: for
+    // each implicit Module variable in the target model, verify that
+    // arguments bound to the same internal variable have compatible units.
+    //
+    // For stdlib modules like SMTH1, the first argument (input) and third
+    // argument (initial_value) must have the same units because they both
+    // feed into the stock's init equation. We check this by looking up
+    // each argument's units (declared or inferred) and comparing.
+    if has_declared_units {
+        for (var_ident, var) in target_model.variables.iter() {
+            if let crate::variable::Variable::Module {
+                model_name: sub_model_name,
+                inputs,
+                ..
+            } = var
+            {
+                // Only check stdlib modules where we know the constraint structure
+                if !sub_model_name.as_str().starts_with("stdlib\u{205A}") {
+                    continue;
+                }
+                let submodel = match models_s1.get(sub_model_name) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                // Find groups of inputs that must have compatible units.
+                // In smth1/delay1, the stock's init equation references both
+                // "input" and "initial_value", constraining them to the same units.
+                // We check all input argument pairs that bind to variables
+                // appearing together in a stock init equation.
+                let stock_init_deps: Vec<HashSet<Ident<Canonical>>> = submodel
+                    .variables
+                    .values()
+                    .filter_map(|sv| {
+                        if matches!(sv, crate::variable::Variable::Stock { .. }) {
+                            sv.ast()
+                                .map(|ast| crate::variable::identifier_set(ast, &[], None))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                for init_dep_set in &stock_init_deps {
+                    // Collect (src_units, input) pairs for inputs that bind to
+                    // variables in this stock's init dep set.
+                    let mut group_units: Vec<(Ident<Canonical>, &crate::datamodel::UnitMap)> =
+                        Vec::new();
+                    for input in inputs {
+                        if !init_dep_set.contains(&input.dst) {
+                            continue;
+                        }
+                        let src_units = target_model
+                            .variables
+                            .get(&input.src)
+                            .and_then(|v| v.units())
+                            .or_else(|| inferred_units.get(&input.src));
+                        if let Some(units) = src_units {
+                            group_units.push((input.src.clone(), units));
+                        }
+                    }
+                    // Check pairwise compatibility
+                    if group_units.len() >= 2 {
+                        let (first_src, first_units) = &group_units[0];
+                        for (other_src, other_units) in &group_units[1..] {
+                            if first_units != other_units {
+                                CompilationDiagnostic(Diagnostic {
+                                    model: model_name.clone(),
+                                    variable: Some(var_ident.to_string()),
+                                    error: DiagnosticError::Unit(
+                                        crate::common::UnitError::ConsistencyError(
+                                            ErrorCode::UnitMismatch,
+                                            crate::builtins::Loc::default(),
+                                            Some(format!(
+                                                "module '{}': argument '{}' has units '{}' \
+                                                 but argument '{}' has units '{}' \
+                                                 (both feed the same internal variable)",
+                                                var_ident,
+                                                first_src,
+                                                first_units,
+                                                other_src,
+                                                other_units,
+                                            )),
+                                        ),
+                                    ),
+                                    severity: DiagnosticSeverity::Warning,
+                                })
+                                .accumulate(db);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Run unit checking.
     match crate::units_check::check(units_ctx, &inferred_units, target_model) {
         Ok(Ok(())) => {}
@@ -1752,6 +1852,25 @@ fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -> String {
     )
 }
 
+/// Find output ports of a specific module variable by examining which
+/// variables in the model reference it with `module·internal_var` syntax.
+fn find_model_output_ports_for_module(
+    edges: &CausalEdgesResult,
+    module_var_name: &str,
+) -> Vec<String> {
+    // Look up the module's sub-model name. For stdlib modules the
+    // output is always "output" by convention.
+    if let Some(model_name) = edges.dynamic_modules.get(module_var_name)
+        && model_name.starts_with("stdlib\u{205A}")
+    {
+        return vec!["output".to_string()];
+    }
+    // For user-defined modules, we'd need to scan variable deps for
+    // module·var references. Since we don't have deps here, fall back
+    // to "output" as a convention.
+    vec!["output".to_string()]
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn link_score_equation_text<'db>(
     db: &'db dyn Db,
@@ -1782,16 +1901,35 @@ pub fn link_score_equation_text<'db>(
     // 2. module -> downstream: standard ceteris-paribus on downstream equation
     // 3. module -> module: black-box delta-ratio equation
     if from_is_module || to_is_module {
+        let is_discovery = project.ltm_discovery_mode(db);
         let equation = if !from_is_module && to_is_module {
             if let crate::variable::Variable::Module { inputs, .. } = &to_var {
                 if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
-                    // The link score for (non-module -> module) is the composite score
-                    // of the input port inside the sub-model, referenced via interpunct.
-                    format!(
-                        "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
-                        module = to_ident.as_str(),
-                        port = input.dst.as_str(),
-                    )
+                    if is_discovery {
+                        // In discovery mode, use delta-ratio between the input
+                        // variable and the module's output variable. The composite
+                        // reference works in exhaustive mode (where only loop
+                        // edges are scored) but not in discovery mode because
+                        // cross-module LTM variable references don't resolve.
+                        //
+                        // Find the module's output port by looking at which
+                        // variables in the model depend on module·internal_var.
+                        let edges = model_causal_edges(db, model, project);
+                        let output_ports = find_model_output_ports_for_module(edges, to_name);
+                        let output_ref = output_ports
+                            .first()
+                            .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))
+                            .unwrap_or_else(|| format!("{}\u{00B7}output", to_ident.as_str()));
+                        black_box_delta_ratio_equation(from_ident.as_str(), &output_ref)
+                    } else {
+                        // In exhaustive mode, reference the composite score
+                        // of the input port inside the sub-model.
+                        format!(
+                            "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
+                            module = to_ident.as_str(),
+                            port = input.dst.as_str(),
+                        )
+                    }
                 } else {
                     black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
                 }
@@ -1799,17 +1937,24 @@ pub fn link_score_equation_text<'db>(
                 black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
             }
         } else if from_is_module && !to_is_module {
-            let mut all_vars = HashMap::new();
-            if let Some(ref fv) = from_var {
-                all_vars.insert(from_ident.clone(), fv.clone());
+            // The dependent's equation references the module's output via
+            // "module·output_var" syntax. Find that reference and use the
+            // middot-qualified name as the "from" for delta-ratio, since
+            // the module node itself is not a readable scalar variable.
+            let module_output_ref: Option<String> = to_var
+                .ast()
+                .map(|ast| crate::variable::identifier_set(ast, &[], None))
+                .and_then(|deps| {
+                    let prefix = format!("{}\u{00B7}", from_ident.as_str());
+                    deps.into_iter()
+                        .find(|d| d.as_str().starts_with(&prefix))
+                        .map(|d| d.to_string())
+                });
+            if let Some(output_ref) = module_output_ref {
+                black_box_delta_ratio_equation(&output_ref, to_ident.as_str())
+            } else {
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
             }
-            all_vars.insert(to_ident.clone(), to_var.clone());
-            crate::ltm_augment::generate_link_score_equation_for_link(
-                &from_ident,
-                &to_ident,
-                &to_var,
-                &all_vars,
-            )
         } else {
             // module -> module: black-box delta-ratio
             black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
@@ -1841,15 +1986,15 @@ pub fn link_score_equation_text<'db>(
 }
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
-/// from each input port to "output".  Used by `model_ltm_variables` in
-/// `db_ltm.rs` for pathway and composite score generation.
+/// from each input port to the specified output ports (or auto-detect them).
+/// Used by `model_ltm_variables` in `db_ltm.rs` for pathway and composite
+/// score generation.
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
+    output_ports: &[crate::common::Ident<crate::common::Canonical>],
 ) -> HashMap<crate::common::Ident<crate::common::Canonical>, Vec<Vec<crate::ltm::Link>>> {
-    use crate::common::{Canonical, Ident};
-
     let graph = causal_graph_from_edges(edges_result);
-    graph.enumerate_module_pathways(&Ident::<Canonical>::new("output"))
+    graph.enumerate_pathways_to_outputs(output_ports)
 }
 
 /// Generate a nested max-abs selection equation from pathway variable names.

@@ -1592,6 +1592,87 @@ pub(super) fn compile_ltm_implicit_var_fragment(
     })
 }
 
+/// Find the output ports for a model by scanning other models' variable
+/// dependencies for module·var references that target this model.
+///
+/// When variable X depends on `module_var·internal_var` and `module_var`
+/// maps to this model (via `dynamic_modules`), then `internal_var` is
+/// an output port. The result is passed to `enumerate_pathways_to_outputs`
+/// so that composite scores are generated for the correct output ports.
+fn find_model_output_ports(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<Ident<Canonical>> {
+    let model_name = model.name(db);
+    let project_models = project.models(db);
+    let middot = '\u{00B7}';
+    let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
+
+    for (_, other_model) in project_models.iter() {
+        if other_model == &model {
+            continue;
+        }
+        let other_edges = super::model_causal_edges(db, *other_model, project);
+
+        // Build a set of module variable names that reference this model
+        let module_var_names: HashSet<&String> = other_edges
+            .dynamic_modules
+            .iter()
+            .filter(|(_var_name, mn)| mn.as_str() == model_name.as_str())
+            .map(|(var_name, _mn)| var_name)
+            .collect();
+
+        if module_var_names.is_empty() {
+            continue;
+        }
+
+        // Scan dependencies for module·internal_var references
+        let other_vars = other_model.variables(db);
+        let module_ctx = super::model_module_ident_context(db, *other_model, vec![]);
+        for (_, source_var) in other_vars.iter() {
+            let deps = super::variable_direct_dependencies(db, *source_var, project);
+            for dep in &deps.dt_deps {
+                if let Some(dot_pos) = dep.find(middot) {
+                    let module_part = &dep[..dot_pos];
+                    let internal_var = &dep[dot_pos + middot.len_utf8()..];
+                    if module_var_names.contains(&module_part.to_string()) {
+                        output_ports.insert(Ident::new(internal_var));
+                    }
+                }
+            }
+
+            // Also check implicit variable deps (SMOOTH/DELAY expansion
+            // creates helper auxes whose deps may reference module outputs)
+            let parsed = super::parse_source_variable_with_module_context(
+                db,
+                *source_var,
+                project,
+                module_ctx,
+            );
+            for implicit_dm_var in &parsed.implicit_vars {
+                if let datamodel::Variable::Module(_) = implicit_dm_var {
+                    continue;
+                }
+                let deps = super::variable_direct_dependencies(db, *source_var, project);
+                for iv_dep in &deps.implicit_vars {
+                    for dep in &iv_dep.dt_deps {
+                        if let Some(dot_pos) = dep.find(middot) {
+                            let module_part = &dep[..dot_pos];
+                            let internal_var = &dep[dot_pos + middot.len_utf8()..];
+                            if module_var_names.contains(&module_part.to_string()) {
+                                output_ports.insert(Ident::new(internal_var));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    output_ports.into_iter().collect()
+}
+
 /// Unified LTM variable generation for any model (root or sub-model).
 ///
 /// Auto-detects sub-model behavior by checking for input ports with causal
@@ -1613,9 +1694,9 @@ pub fn model_ltm_variables(
     use std::collections::HashSet;
 
     use super::{
-        LtmLinkId, LtmSyntheticVar, LtmVariablesResult, generate_max_abs_chain_str,
-        model_causal_edges, model_cycle_partitions, model_loop_circuits,
-        module_input_pathways_from_edges, reconstruct_model_variables,
+        LtmLinkId, LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules,
+        generate_max_abs_chain_str, model_causal_edges, model_cycle_partitions,
+        model_loop_circuits, module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
@@ -1624,7 +1705,22 @@ pub fn model_ltm_variables(
     }
 
     let is_discovery = project.ltm_discovery_mode(db);
-    let pathways = module_input_pathways_from_edges(edges_result);
+
+    // Determine output ports for this model. Stdlib models always use
+    // the "output" convention. For user-defined models, output ports are
+    // determined by which internal variables are referenced from parent
+    // models via module·var syntax.
+    let model_name_str = model.name(db);
+    let output_ports = if model_name_str.starts_with("stdlib\u{205A}") {
+        vec![Ident::new("output")]
+    } else {
+        find_model_output_ports(db, model, project)
+    };
+    let pathways = if output_ports.is_empty() {
+        HashMap::new()
+    } else {
+        module_input_pathways_from_edges(edges_result, &output_ports)
+    };
     let has_input_ports = !pathways.is_empty();
 
     let mut vars = Vec::new();
@@ -1640,26 +1736,7 @@ pub fn model_ltm_variables(
             }
             None
         } else {
-            let variables = reconstruct_model_variables(db, model, project);
-            let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-                .edges
-                .iter()
-                .map(|(from, tos)| {
-                    (
-                        Ident::new(from),
-                        tos.iter().map(|t| Ident::new(t)).collect(),
-                    )
-                })
-                .collect();
-            let stocks: HashSet<Ident<Canonical>> =
-                edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-            let graph = crate::ltm::CausalGraph {
-                edges,
-                stocks,
-                variables: variables.clone(),
-                module_graphs: HashMap::new(),
-            };
+            let graph = causal_graph_with_modules(db, model, project);
 
             let mut detected: Vec<Loop> = circuits_result
                 .circuits
