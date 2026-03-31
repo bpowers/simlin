@@ -1347,4 +1347,86 @@ mod tests {
             "native JSON must not gain a 'variables' key after edit"
         );
     }
+
+    // ---- end-to-end SD-AI roundtrip: edit adds variable and file stays SD-AI ----
+
+    #[test]
+    fn e2e_sdai_edit_roundtrip_adds_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let dest = dir.path().join("model.sd.json");
+        std::fs::copy(fixture, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "growth_factor", "equation": "0.1" }
+            }]
+        }))
+        .unwrap();
+
+        // The response model should contain the new variable.
+        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "growth_factor"),
+            "new variable must appear in response: {auxes:?}"
+        );
+
+        // The file on disk must remain SD-AI format with the new variable.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(saved.get("variables").is_some(), "must stay SD-AI format");
+
+        let vars = saved["variables"].as_array().unwrap();
+        assert!(
+            vars.iter().any(|v| v["name"] == "growth_factor"),
+            "new variable must be in saved file: {vars:?}"
+        );
+    }
+
+    // ---- end-to-end native JSON roundtrip: edit adds variable and file stays native ----
+
+    #[test]
+    fn e2e_native_json_edit_roundtrip_adds_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "decay_rate", "equation": "0.02" }
+            }]
+        }))
+        .unwrap();
+
+        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "decay_rate"),
+            "new variable must appear in response"
+        );
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            saved.get("models").is_some(),
+            "must stay native JSON format"
+        );
+
+        let model_auxes = &saved["models"][0]["auxiliaries"];
+        assert!(
+            model_auxes.is_array(),
+            "models[0].auxiliaries must be present"
+        );
+        assert!(
+            model_auxes
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["name"] == "decay_rate"),
+            "new variable must be in saved file"
+        );
+    }
 }

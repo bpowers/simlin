@@ -276,4 +276,41 @@ mod tests {
         assert!(schema["properties"]["projectPath"].is_object());
         assert_eq!(schema["properties"]["projectPath"]["type"], "string");
     }
+
+    // ---- AC7.1: ReadModel reads SD-AI JSON files ----
+
+    #[test]
+    fn ac7_1_read_model_sdai_json() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let output = call_tool(serde_json::json!({ "projectPath": path })).unwrap();
+        assert!(output["model"].is_object(), "expected model object");
+
+        let stocks = output["model"]["stocks"].as_array().unwrap();
+        assert!(
+            stocks.iter().any(|s| s["name"] == "Population"),
+            "SD-AI model must contain Population stock"
+        );
+    }
+
+    // ---- AC7.4: unrecognized JSON returns descriptive error ----
+
+    #[test]
+    fn ac7_4_unrecognized_json_returns_descriptive_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("bad.sd.json");
+        std::fs::write(&file_path, r#"{"unrelated": true}"#).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": file_path.to_str().unwrap()
+        }));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("models") && err_msg.contains("variables"),
+            "error must mention expected formats: {err_msg}"
+        );
+    }
 }
