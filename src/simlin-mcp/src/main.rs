@@ -100,7 +100,9 @@ mod tests {
         );
     }
 
-    // mcp-publish-ready.AC4.5: version matches latest pysimlin git tag
+    // mcp-publish-ready.AC4.5: version matches latest pysimlin git tag.
+    // Validates instructions.md and all skill files that reference the
+    // pysimlin version so a new release tag surfaces any stale references.
     #[test]
     fn instructions_reference_current_pysimlin_version() {
         let output = std::process::Command::new("git")
@@ -112,9 +114,19 @@ mod tests {
         let version = latest_tag
             .strip_prefix("pysimlin-v")
             .expect("unexpected tag format");
-        assert!(
-            INSTRUCTIONS.contains(version),
-            "instructions.md references outdated pysimlin version. Latest: {version}"
-        );
+
+        let versioned_files: &[(&str, &str)] = &[
+            ("instructions.md", INSTRUCTIONS),
+            (
+                "skills/pysimlin-basics.md",
+                include_str!("skills/pysimlin-basics.md"),
+            ),
+        ];
+        for (name, content) in versioned_files {
+            assert!(
+                content.contains(version),
+                "{name} references outdated pysimlin version. Latest: {version}"
+            );
+        }
     }
 }
