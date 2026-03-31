@@ -259,8 +259,8 @@ mod wildcard_tests {
     }
 
     #[test]
-    fn wildcard_interpreter_basic() {
-        TestProject::new("wildcard_interpreter")
+    fn wildcard_basic() {
+        TestProject::new("wildcard_basic")
             .indexed_dimension("Widgets", 3)
             .array_const("source[Widgets]", 10.0)
             .array_aux("result[Widgets]", "source[*]")
@@ -268,7 +268,7 @@ mod wildcard_tests {
     }
 
     #[test]
-    fn wildcard_interpreter_expression_indexed() {
+    fn wildcard_expression_indexed() {
         let project = TestProject::new("wildcard_expr")
             .indexed_dimension("Index", 3)
             .array_aux("values[Index]", "1 + Index") // Assuming Index gives position
@@ -279,7 +279,7 @@ mod wildcard_tests {
     }
 
     #[test]
-    fn wildcard_interpreter_expression_named() {
+    fn wildcard_expression_named() {
         let project = TestProject::new("wildcard_expr")
             .named_dimension("Cities", &["Boston", "NYC"])
             .array_aux("values[Cities]", "1 + Cities") // Assuming Index gives position
@@ -301,7 +301,7 @@ mod wildcard_tests {
     }
 
     #[test]
-    fn wildcard_interpreter_expression_scalar_fails() {
+    fn wildcard_expression_scalar_fails() {
         let project = TestProject::new("wildcard_expr")
             .named_dimension("Cities", &["Boston", "NYC"])
             .scalar_aux("value", "1 + Cities");
@@ -3330,7 +3330,7 @@ mod sum_of_conditional_tests {
     use crate::test_common::TestProject;
 
     #[test]
-    fn sum_if_interpreter() {
+    fn sum_if_monolithic() {
         // SUM(IF a[*] > 2 THEN a[*] ELSE 0) should sum only elements > 2
         // a = [1, 3, 5], so only 3 and 5 pass => sum = 8
         let project = TestProject::new("sum_if")
@@ -3355,7 +3355,7 @@ mod sum_of_conditional_tests {
     }
 
     #[test]
-    fn sum_if_count_interpreter() {
+    fn sum_if_count_monolithic() {
         // SUM(IF a[*] > 2 THEN 1 ELSE 0) counts elements > 2
         // a = [1, 3, 5], so 2 elements pass => sum = 2
         let project = TestProject::new("sum_if_count")
@@ -3441,31 +3441,31 @@ mod vector_select_action_tests {
     }
 
     #[test]
-    fn vssum_interpreter() {
+    fn vssum_monolithic() {
         let project = make_project("vssum", 0);
         project.assert_vm_result("result", &[8.0, 8.0]);
     }
 
     #[test]
-    fn vsmin_interpreter() {
+    fn vsmin_monolithic() {
         let project = make_project("vsmin", 1);
         project.assert_vm_result("result", &[2.0, 2.0]);
     }
 
     #[test]
-    fn vsmean_interpreter() {
+    fn vsmean_monolithic() {
         let project = make_project("vsmean", 2);
         project.assert_vm_result("result", &[4.0, 4.0]);
     }
 
     #[test]
-    fn vsmax_interpreter() {
+    fn vsmax_monolithic() {
         let project = make_project("vsmax", 3);
         project.assert_vm_result("result", &[6.0, 6.0]);
     }
 
     #[test]
-    fn vsprod_interpreter() {
+    fn vsprod_monolithic() {
         let project = make_project("vsprod", 4);
         project.assert_vm_result("result", &[12.0, 12.0]);
     }
@@ -3497,8 +3497,8 @@ mod vector_elm_map_tests {
     }
 
     #[test]
-    fn in_bounds_elements_map_correctly_interpreter() {
-        let project = make_oob_project("vem_inbounds_interp");
+    fn in_bounds_elements_map_correctly_monolithic() {
+        let project = make_oob_project("vem_inbounds_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
@@ -3514,8 +3514,8 @@ mod vector_elm_map_tests {
     }
 
     #[test]
-    fn out_of_bounds_element_returns_nan_interpreter() {
-        let project = make_oob_project("vem_oob_interp");
+    fn out_of_bounds_element_returns_nan_monolithic() {
+        let project = make_oob_project("vem_oob_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3, "expected 3 elements");
         assert!(
@@ -3555,9 +3555,9 @@ mod vector_elm_map_tests {
     }
 
     #[test]
-    fn negative_offset_returns_nan_interpreter() {
+    fn negative_offset_returns_nan_monolithic() {
         // A negative offset value (stored as a float like -1.0) should also produce NaN.
-        let project = TestProject::new("vem_neg_interp")
+        let project = TestProject::new("vem_neg_mono")
             .indexed_dimension("D", 2)
             .array_with_ranges("source[D]", vec![("1", "100"), ("2", "200")])
             .array_with_ranges("offsets[D]", vec![("1", "-1"), ("2", "0")])
@@ -3672,8 +3672,8 @@ mod first_element_override_hoisting_tests {
     }
 
     #[test]
-    fn first_override_rest_default_interpreter() {
-        let project = make_project("first_override_interp");
+    fn first_override_rest_default_monolithic() {
+        let project = make_project("first_override_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
@@ -3739,8 +3739,8 @@ mod mixed_element_hoisting_tests {
     }
 
     #[test]
-    fn mixed_elements_interpreter() {
-        let project = make_project("mixed_elements_interp");
+    fn mixed_elements_monolithic() {
+        let project = make_project("mixed_elements_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
@@ -3806,8 +3806,8 @@ mod nested_hoisting_first_override_tests {
     }
 
     #[test]
-    fn nested_first_override_interpreter() {
-        let project = make_project("nested_first_override_interp");
+    fn nested_first_override_monolithic() {
+        let project = make_project("nested_first_override_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
@@ -3873,8 +3873,8 @@ mod nested_override_different_wrapping_tests {
     }
 
     #[test]
-    fn nested_different_wrapping_interpreter() {
-        let project = make_project("nested_diff_wrap_interp");
+    fn nested_different_wrapping_monolithic() {
+        let project = make_project("nested_diff_wrap_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
@@ -3938,8 +3938,8 @@ mod toplevel_default_nested_override_tests {
     }
 
     #[test]
-    fn toplevel_default_nested_override_interpreter() {
-        let project = make_project("toplevel_nested_interp");
+    fn toplevel_default_nested_override_monolithic() {
+        let project = make_project("toplevel_nested_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
@@ -4004,8 +4004,8 @@ mod different_builtin_override_tests {
     }
 
     #[test]
-    fn different_builtin_override_interpreter() {
-        let project = make_project("diff_builtin_interp");
+    fn different_builtin_override_monolithic() {
+        let project = make_project("diff_builtin_mono");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
@@ -4113,11 +4113,11 @@ mod flag_split_tests {
     /// offset so SUM iterates only over DimB for each row, NOT over the
     /// entire matrix.
     #[test]
-    fn reducer_does_not_promote_active_dim_ref_interpreter() {
+    fn reducer_does_not_promote_active_dim_ref_monolithic() {
         // matrix is 2x3:
         //   row 1: [1, 2, 3]  -> row_sum[1] = 6
         //   row 2: [10, 20, 30] -> row_sum[2] = 60
-        let project = TestProject::new("reducer_no_promote_interp")
+        let project = TestProject::new("reducer_no_promote_mono")
             .indexed_dimension("DimA", 2)
             .indexed_dimension("DimB", 3)
             .array_with_ranges(
@@ -4164,10 +4164,10 @@ mod flag_split_tests {
     /// to Wildcard so the full array view is available.  This is a focused
     /// unit test documenting the intent (also covered by compiler_vector.rs).
     #[test]
-    fn vector_builtin_promotes_active_dim_ref_interpreter() {
+    fn vector_builtin_promotes_active_dim_ref_monolithic() {
         // vals = [30, 10, 20]
         // VECTOR SORT ORDER ascending: [2, 3, 1] (rank by sorted position)
-        let project = TestProject::new("vector_promotes_interp")
+        let project = TestProject::new("vector_promotes_mono")
             .indexed_dimension("DimA", 3)
             .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
             .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
@@ -4189,8 +4189,8 @@ mod flag_split_tests {
 
     /// Partial MEAN should reduce over one dimension while the other iterates.
     #[test]
-    fn mean_partial_reduction_interpreter() {
-        let project = TestProject::new("mean_partial_interp")
+    fn mean_partial_reduction_monolithic() {
+        let project = TestProject::new("mean_partial_mono")
             .indexed_dimension("DimA", 2)
             .indexed_dimension("DimB", 3)
             .array_with_ranges(
@@ -4281,8 +4281,8 @@ mod dimension_dependent_scalar_arg_tests {
     }
 
     #[test]
-    fn vso_direction_varies_by_dimension_interpreter() {
-        let project = make_vso_dim_dep_project("vso_dim_dep_interp");
+    fn vso_direction_varies_by_dimension_monolithic() {
+        let project = make_vso_dim_dep_project("vso_dim_dep_mono");
         project.assert_compiles_incremental();
         assert_vso_dim_dep_results(&project.vm_result_incremental("result"));
     }
@@ -4382,8 +4382,8 @@ mod array_reducer_tests {
     // -- SUM --
 
     #[test]
-    fn sum_interpreter() {
-        let project = make_reducer_project("sum_interp", "SUM");
+    fn sum_monolithic() {
+        let project = make_reducer_project("sum_mono", "SUM");
         project.assert_vm_result("result", &[100.0]);
     }
 
@@ -4396,8 +4396,8 @@ mod array_reducer_tests {
     // -- SIZE --
 
     #[test]
-    fn size_interpreter() {
-        let project = make_reducer_project("size_interp", "SIZE");
+    fn size_monolithic() {
+        let project = make_reducer_project("size_mono", "SIZE");
         project.assert_vm_result("result", &[4.0]);
     }
 
@@ -4410,8 +4410,8 @@ mod array_reducer_tests {
     // -- MEAN --
 
     #[test]
-    fn mean_interpreter() {
-        let project = make_reducer_project("mean_interp", "MEAN");
+    fn mean_monolithic() {
+        let project = make_reducer_project("mean_mono", "MEAN");
         project.assert_vm_result("result", &[25.0]);
     }
 
@@ -4424,8 +4424,8 @@ mod array_reducer_tests {
     // -- MIN --
 
     #[test]
-    fn min_interpreter() {
-        let project = make_reducer_project("min_interp", "MIN");
+    fn min_monolithic() {
+        let project = make_reducer_project("min_mono", "MIN");
         project.assert_vm_result("result", &[10.0]);
     }
 
@@ -4438,8 +4438,8 @@ mod array_reducer_tests {
     // -- MAX --
 
     #[test]
-    fn max_interpreter() {
-        let project = make_reducer_project("max_interp", "MAX");
+    fn max_monolithic() {
+        let project = make_reducer_project("max_mono", "MAX");
         project.assert_vm_result("result", &[40.0]);
     }
 
@@ -4452,10 +4452,10 @@ mod array_reducer_tests {
     // -- STDDEV --
 
     #[test]
-    fn stddev_interpreter() {
+    fn stddev_monolithic() {
         // Vensim VSSTDEV uses population stddev (N divisor):
         // mean = 25, sum_sq_diff = 500, stddev = sqrt(500/4) = sqrt(125)
-        let project = make_reducer_project("stddev_interp", "STDDEV");
+        let project = make_reducer_project("stddev_mono", "STDDEV");
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 1);
         let expected = (500.0_f64 / 4.0).sqrt();
@@ -4484,8 +4484,8 @@ mod array_reducer_tests {
     // -- Single-element arrays: verify reducers handle size==1 correctly --
 
     #[test]
-    fn stddev_single_element_interpreter() {
-        let project = TestProject::new("stddev_single_interp")
+    fn stddev_single_element_monolithic() {
+        let project = TestProject::new("stddev_single_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 1)
             .array_with_ranges("vals[D]", vec![("1", "42")])
@@ -4557,8 +4557,8 @@ mod rank_tests {
     }
 
     #[test]
-    fn rank_ascending_interpreter() {
-        let project = make_rank_ascending("rank_asc_interp");
+    fn rank_ascending_monolithic() {
+        let project = make_rank_ascending("rank_asc_mono");
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[3.0, 1.0, 2.0]);
     }
@@ -4584,8 +4584,8 @@ mod rank_tests {
     }
 
     #[test]
-    fn rank_descending_interpreter() {
-        let project = make_rank_descending("rank_desc_interp");
+    fn rank_descending_monolithic() {
+        let project = make_rank_descending("rank_desc_mono");
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[1.0, 3.0, 2.0]);
     }
@@ -4633,8 +4633,8 @@ mod rank_tests {
     // -- 5-element test with named dimensions --
 
     #[test]
-    fn rank_named_dimension_interpreter() {
-        let project = TestProject::new("rank_named_interp")
+    fn rank_named_dimension_monolithic() {
+        let project = TestProject::new("rank_named_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .named_dimension("Company", &["A", "B", "C", "D", "E"])
             .array_with_ranges(
@@ -4679,8 +4679,8 @@ mod rank_tests {
     // -- Already sorted input --
 
     #[test]
-    fn rank_already_sorted_interpreter() {
-        let project = TestProject::new("rank_sorted_interp")
+    fn rank_already_sorted_monolithic() {
+        let project = TestProject::new("rank_sorted_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 4)
             .array_with_ranges(
@@ -4696,8 +4696,8 @@ mod rank_tests {
     // -- Reverse sorted input --
 
     #[test]
-    fn rank_reverse_sorted_interpreter() {
-        let project = TestProject::new("rank_rev_sorted_interp")
+    fn rank_reverse_sorted_monolithic() {
+        let project = TestProject::new("rank_rev_sorted_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 4)
             .array_with_ranges(
@@ -4728,9 +4728,9 @@ mod rank_tests {
     // -- Equal values (ties) --
 
     #[test]
-    fn rank_equal_values_interpreter() {
+    fn rank_equal_values_monolithic() {
         // All equal: ranks are assigned by sort stability (position order)
-        let project = TestProject::new("rank_equal_interp")
+        let project = TestProject::new("rank_equal_mono")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 3)
             .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "10"), ("3", "10")])
@@ -4771,10 +4771,10 @@ mod rank_tests {
         project.assert_vm_result_incremental("result", &[1.0, 2.0, 3.0]);
     }
 
-    // -- Interpreter and VM agreement on a larger example --
+    // -- Monolithic and incremental VM agreement on a larger example --
 
     #[test]
-    fn rank_interpreter_vm_agreement() {
+    fn rank_monolithic_vm_agreement() {
         let project = TestProject::new("rank_agreement")
             .with_sim_time(0.0, 0.0, 1.0)
             .indexed_dimension("D", 5)
