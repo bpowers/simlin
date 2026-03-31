@@ -868,6 +868,94 @@ mod tests {
     }
 
     #[test]
+    fn test_project_sdai_json_roundtrip() {
+        use crate::testutils::feedback_loop_project;
+
+        let project = feedback_loop_project();
+        let original_model = &project.models[0];
+        let original_var_names: Vec<String> = original_model
+            .variables
+            .iter()
+            .map(|v| match v {
+                datamodel::Variable::Stock(s) => s.ident.clone(),
+                datamodel::Variable::Flow(f) => f.ident.clone(),
+                datamodel::Variable::Aux(a) => a.ident.clone(),
+                datamodel::Variable::Module(m) => m.ident.clone(),
+            })
+            .collect();
+
+        // datamodel::Project -> SdaiModel -> JSON string
+        let sdai: SdaiModel = project.clone().into();
+        let json_str = serde_json::to_string_pretty(&sdai).unwrap();
+
+        // JSON string -> SdaiModel -> datamodel::Project
+        let sdai_parsed: SdaiModel = serde_json::from_str(&json_str).unwrap();
+        let project_back: datamodel::Project = sdai_parsed.into();
+
+        // Variable names survive roundtrip
+        let back_model = &project_back.models[0];
+        let back_var_names: Vec<String> = back_model
+            .variables
+            .iter()
+            .map(|v| match v {
+                datamodel::Variable::Stock(s) => s.ident.clone(),
+                datamodel::Variable::Flow(f) => f.ident.clone(),
+                datamodel::Variable::Aux(a) => a.ident.clone(),
+                datamodel::Variable::Module(m) => m.ident.clone(),
+            })
+            .collect();
+        assert_eq!(original_var_names, back_var_names);
+
+        // Equations survive roundtrip
+        for (orig, back) in original_model
+            .variables
+            .iter()
+            .zip(back_model.variables.iter())
+        {
+            let orig_eqn = match orig {
+                datamodel::Variable::Stock(s) => &s.equation,
+                datamodel::Variable::Flow(f) => &f.equation,
+                datamodel::Variable::Aux(a) => &a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            let back_eqn = match back {
+                datamodel::Variable::Stock(s) => &s.equation,
+                datamodel::Variable::Flow(f) => &f.equation,
+                datamodel::Variable::Aux(a) => &a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            assert_eq!(orig_eqn, back_eqn);
+        }
+
+        // Sim specs survive roundtrip
+        assert_eq!(project.sim_specs.start, project_back.sim_specs.start);
+        assert_eq!(project.sim_specs.stop, project_back.sim_specs.stop);
+
+        // Stock inflows/outflows survive
+        if let datamodel::Variable::Stock(orig_stock) = &original_model.variables[0] {
+            if let datamodel::Variable::Stock(back_stock) = &back_model.variables[0] {
+                assert_eq!(orig_stock.inflows, back_stock.inflows);
+                assert_eq!(orig_stock.outflows, back_stock.outflows);
+            } else {
+                panic!("expected stock after roundtrip");
+            }
+        } else {
+            panic!("expected stock in original");
+        }
+
+        // The serialized JSON uses the SD-AI top-level structure
+        let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(
+            json_value.get("variables").is_some(),
+            "SD-AI JSON should have top-level 'variables' key"
+        );
+        assert!(
+            json_value.get("models").is_none(),
+            "SD-AI JSON should not have 'models' key"
+        );
+    }
+
+    #[test]
     fn test_relationships_ignored() {
         let json_str = r#"{
             "variables": [
