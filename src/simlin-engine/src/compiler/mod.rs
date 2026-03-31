@@ -791,8 +791,7 @@ fn is_array_producing_builtin(expr: &Expr) -> bool {
     )
 }
 
-/// Extract the output ArrayView from an expression, analogous to the
-/// interpreter's `find_array_dims`.  For array-producing builtins, the
+/// Extract the output ArrayView from an expression.  For array-producing builtins, the
 /// output dimensions come from the builtin's "shaping" argument:
 ///   VectorElmMap(_, offset)    -> offset's view
 ///   VectorSortOrder(arr, _)    -> arr's view
@@ -2226,8 +2225,7 @@ fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut Has
     }
 }
 
-/// Per-variable initial expressions, kept alongside the flat runlist for
-/// interpreter compatibility.
+/// Per-variable initial expressions, kept alongside the flat runlist.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub(crate) struct VarInitial {

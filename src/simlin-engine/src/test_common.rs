@@ -375,12 +375,11 @@ impl TestProject {
     }
 }
 
-/// Methods that use the monolithic `Project::from` construction path,
-/// retained for tests that inspect compiler internals (e.g. lowered
+/// Methods for tests that inspect compiler internals (e.g. lowered
 /// expressions via `Module::get_flow_exprs`).
 #[cfg(test)]
 impl TestProject {
-    /// Build and compile the project via the monolithic path.
+    /// Build and compile the project via `Project::from`.
     pub fn compile(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
         use std::sync::Arc;
 
@@ -647,7 +646,6 @@ impl TestProject {
     }
 
     /// Assert that a scalar variable's final-timestep value matches the expected value.
-    /// Parallels the gated `assert_scalar_result` but uses the VM execution path.
     pub fn assert_vm_scalar_result(&self, var_name: &str, expected: f64) {
         let results = self.run_vm().expect("VM should run successfully");
 

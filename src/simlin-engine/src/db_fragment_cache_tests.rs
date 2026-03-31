@@ -820,9 +820,9 @@ fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
 }
 
 #[test]
-fn test_init_feedback_interpreter_path_is_acyclic() {
+fn test_init_feedback_path_is_acyclic() {
     let project = datamodel::Project {
-        name: "init_lag_interp".to_string(),
+        name: "init_lag".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
         dimensions: vec![],
         units: vec![],

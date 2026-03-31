@@ -671,27 +671,18 @@ where
 }
 
 /// Result of classifying all dependency categories from a single AST walk.
-///
-/// Replaces the five separate AST-walking functions that previously computed
-/// these categories independently: `identifier_set`, `init_referenced_idents`,
-/// `previous_referenced_idents`, `lagged_only_previous_idents_with_module_inputs`,
-/// and `init_only_referenced_idents_with_module_inputs`.
 #[derive(Default)]
 pub struct DepClassification {
     /// All referenced identifiers (current + lagged + init-only).
-    /// Dimension names are filtered out. Replaces `identifier_set`.
+    /// Dimension names are filtered out.
     pub all: HashSet<Ident<Canonical>>,
     /// Idents appearing as direct args to INIT() calls.
-    /// Replaces `init_referenced_idents`.
     pub init_referenced: BTreeSet<String>,
     /// Idents appearing as direct args to PREVIOUS() calls.
-    /// Replaces `previous_referenced_idents`.
     pub previous_referenced: BTreeSet<String>,
     /// Idents referenced ONLY inside PREVIOUS() -- not outside it.
-    /// Replaces `lagged_only_previous_idents_with_module_inputs`.
     pub previous_only: BTreeSet<String>,
     /// Idents referenced ONLY inside INIT() or PREVIOUS() -- not outside either.
-    /// Replaces `init_only_referenced_idents_with_module_inputs`.
     pub init_only: BTreeSet<String>,
 }
 

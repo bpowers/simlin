@@ -3290,8 +3290,7 @@ mod cross_dimension_reduction_tests {
         project.assert_vm_result("result", &[11.0, 11.0]);
     }
 
-    /// Test that the VM produces the same results as the interpreter for cross-dimension
-    /// broadcasting. This verifies the bytecode compiler and VM handle these cases correctly.
+    /// Test that the VM handles cross-dimension broadcasting correctly.
     #[test]
     fn vm_cross_dimension_sum() {
         // Same test as sum_cross_dimension_named but using VM
@@ -3303,9 +3302,7 @@ mod cross_dimension_reduction_tests {
             .scalar_aux("result", "SUM(a[*]+h[*])");
 
         project.assert_compiles_incremental();
-        // Verify interpreter result
         project.assert_vm_result("result", &[198.0, 198.0]);
-        // Verify VM result matches
         project.assert_vm_result_incremental("result", &[198.0, 198.0]);
     }
 
@@ -3323,9 +3320,7 @@ mod cross_dimension_reduction_tests {
             .scalar_aux("result", "SUM(MEAN(a[*]+h[*]) + c[*])");
 
         project.assert_compiles_incremental();
-        // Verify interpreter result
         project.assert_vm_result("result", &[344.0, 344.0]);
-        // Verify VM result matches
         project.assert_vm_result_incremental("result", &[344.0, 344.0]);
     }
 }
@@ -4365,10 +4360,10 @@ mod dimension_dependent_scalar_arg_tests {
     }
 }
 
-/// Tests verifying array reducer builtins produce correct values and that
-/// the interpreter and VM agree. Empty-view guard tests for the VM are in
-/// vm::empty_view_reduce_tests (zero-element dimensions cannot currently be
-/// constructed through the model compilation pipeline).
+/// Tests verifying array reducer builtins produce correct values.
+/// Empty-view guard tests for the VM are in vm::empty_view_reduce_tests
+/// (zero-element dimensions cannot currently be constructed through
+/// the model compilation pipeline).
 #[cfg(test)]
 mod array_reducer_tests {
     use crate::test_common::TestProject;

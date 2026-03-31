@@ -45,11 +45,9 @@ mod tests {
     #[test]
     fn test_smth1_unit_mismatch_initial() {
         // SMTH1 with mismatched initial value units (gadgets vs widgets).
-        // The old CompiledProject::from path detected this through
-        // check_units propagating constraints into the stdlib module, but
-        // the salsa incremental diagnostic path does not yet propagate unit
-        // constraints through stdlib module argument mappings, so this
-        // compiles without a unit diagnostic.
+        // The salsa incremental diagnostic path does not yet propagate
+        // unit constraints through stdlib module argument mappings, so
+        // this compiles without a unit diagnostic.
         TestProject::new("smth1_mismatch_test")
             .with_time_units("seconds")
             .unit("widgets", None)

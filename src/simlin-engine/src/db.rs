@@ -5315,9 +5315,9 @@ fn enumerate_module_instances_inner(
     Ok(())
 }
 
-/// Compute flattened offsets for the incremental path.
-/// Mirrors calc_flattened_offsets from interpreter.rs but works with
-/// SourceModel/SourceVariable from the salsa database.
+/// Compute flattened offsets for each variable in a model, mapping
+/// canonical variable names to (start_offset, size) pairs.
+/// Works with SourceModel/SourceVariable from the salsa database.
 fn calc_flattened_offsets_incremental(
     db: &dyn Db,
     project: SourceProject,

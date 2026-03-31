@@ -1980,7 +1980,7 @@ impl Vm {
                     if !sel_view.is_valid || !expr_view.is_valid {
                         stack.push(f64::NAN);
                     } else {
-                        // Match interpreter's zip semantics: stop at the shorter array
+                        // Zip semantics: stop at the shorter array
                         let size = sel_view.size().min(expr_view.size());
                         let n_dims = sel_view.dims.len();
 
