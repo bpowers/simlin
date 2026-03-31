@@ -35,12 +35,7 @@ async fn main() {
     let config = protocol::ServerConfig {
         name: "simlin-mcp".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        instructions: Some(
-            "Simlin MCP server for system dynamics modeling. \
-             Use read_model to inspect models, edit_model to apply patches, \
-             and create_model to create new model files."
-                .to_string(),
-        ),
+        instructions: Some(include_str!("instructions.md").to_string()),
     };
 
     let mut registry = tool::Registry::new();
@@ -56,5 +51,70 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("simlin-mcp: fatal error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const INSTRUCTIONS: &str = include_str!("instructions.md");
+
+    // mcp-publish-ready.AC4.1: instructions field is non-empty
+    #[test]
+    fn instructions_not_empty() {
+        assert!(
+            !INSTRUCTIONS.is_empty(),
+            "instructions.md must not be empty"
+        );
+    }
+
+    // mcp-publish-ready.AC4.2: instructions mention core tools and concepts
+    #[test]
+    fn instructions_mention_core_tools() {
+        for keyword in ["ReadModel", "EditModel", "CreateModel", ".mdl", "pysimlin"] {
+            assert!(
+                INSTRUCTIONS.contains(keyword),
+                "instructions.md must mention '{keyword}'"
+            );
+        }
+    }
+
+    // mcp-publish-ready.AC4.3: instructions include SetLoopName guidance
+    #[test]
+    fn instructions_include_set_loop_name() {
+        assert!(
+            INSTRUCTIONS.contains("SetLoopName"),
+            "instructions.md must mention SetLoopName"
+        );
+        assert!(
+            INSTRUCTIONS.contains("variables"),
+            "instructions.md must mention 'variables' (SetLoopName field)"
+        );
+    }
+
+    // mcp-publish-ready.AC4.4: instructions reference current pysimlin version
+    #[test]
+    fn instructions_reference_pysimlin_version() {
+        assert!(
+            INSTRUCTIONS.contains("0.6.2"),
+            "instructions.md must reference pysimlin version 0.6.2"
+        );
+    }
+
+    // mcp-publish-ready.AC4.5: version matches latest pysimlin git tag
+    #[test]
+    fn instructions_reference_current_pysimlin_version() {
+        let output = std::process::Command::new("git")
+            .args(["tag", "--list", "pysimlin-v*", "--sort=-v:refname"])
+            .output()
+            .expect("git tag command failed");
+        let tags = String::from_utf8(output.stdout).unwrap();
+        let latest_tag = tags.lines().next().expect("no pysimlin tags found");
+        let version = latest_tag
+            .strip_prefix("pysimlin-v")
+            .expect("unexpected tag format");
+        assert!(
+            INSTRUCTIONS.contains(version),
+            "instructions.md references outdated pysimlin version. Latest: {version}"
+        );
     }
 }
