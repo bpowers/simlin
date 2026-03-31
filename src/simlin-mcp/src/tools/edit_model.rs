@@ -1742,4 +1742,82 @@ mod tests {
             "file must not be modified when edit introduces compilation errors"
         );
     }
+
+    // ---- AC2.2: XMILE roundtrip -- edit then read back ----
+
+    #[test]
+    fn ac2_2_xmile_roundtrip_edit_then_read() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        // Edit: add an auxiliary variable
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "roundtrip_var", "equation": "123" }
+            }]
+        }))
+        .unwrap();
+
+        // Read back with ReadModel on the same .stmx file
+        let read_tool = super::super::read_model::tool();
+        let read_result = read_tool
+            .call(serde_json::json!({
+                "projectPath": dest.to_str().unwrap()
+            }))
+            .unwrap();
+
+        // The newly added variable must appear in the ReadModel output
+        let auxes = read_result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "roundtrip_var"),
+            "variable added by EditModel must be visible via ReadModel on the same .stmx file; \
+             auxiliaries: {auxes:?}"
+        );
+    }
+
+    // ---- AC2.4: XMILE dry-run does not modify file ----
+
+    #[test]
+    fn ac2_4_xmile_dry_run_does_not_modify_file() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let original_contents = std::fs::read(&dest).unwrap();
+
+        // Dry-run edit: add a variable
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "dryRun": true,
+            "operations": [{
+                "upsertAuxiliary": { "name": "dry_run_var", "equation": "99" }
+            }]
+        }))
+        .unwrap();
+
+        // The response should still show the variable in the model snapshot
+        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "dry_run_var"),
+            "dry-run response must include the new variable"
+        );
+        assert_eq!(result["dryRun"], true);
+
+        // The file on disk must be byte-for-byte unchanged
+        let after_contents = std::fs::read(&dest).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "dry-run must not modify the .stmx file on disk"
+        );
+    }
 }
