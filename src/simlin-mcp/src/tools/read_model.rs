@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use simlin_engine::json;
 
-use super::types::{DominantPeriodOutput, LoopDominanceSummary};
+use super::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary};
 use crate::tool::TypedTool;
 
 /// Input for the `ReadModel` tool.
@@ -34,6 +34,8 @@ struct ReadModelOutput {
     time: Vec<f64>,
     loop_dominance: Vec<LoopDominanceSummary>,
     dominant_loops_by_period: Vec<DominantPeriodOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<ErrorOutput>,
 }
 
 pub fn tool() -> TypedTool<ReadModelInput> {
@@ -59,6 +61,24 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
     let source_project = sync.project;
 
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let errors: Vec<ErrorOutput> = {
+        let error_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .cloned()
+            .collect();
+        if error_diags.is_empty() {
+            vec![]
+        } else {
+            simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
+                .errors
+                .iter()
+                .map(ErrorOutput::from)
+                .collect()
+        }
+    };
+
     let analysis =
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name)
             .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
@@ -80,6 +100,7 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
         time: analysis.time,
         loop_dominance,
         dominant_loops_by_period,
+        errors,
     };
 
     serde_json::to_value(&output).map_err(Into::into)
@@ -263,6 +284,108 @@ mod tests {
             output["time"].as_array().unwrap().len(),
             0,
             "time must be empty"
+        );
+    }
+
+    // ---- AC3.1: broken equations return model snapshot + non-empty errors array ----
+
+    #[test]
+    fn ac3_1_broken_equations_return_errors() {
+        let broken_json = serde_json::json!({
+            "name": "broken-errors-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{"name": "population", "initialEquation": "10", "inflows": ["births"], "outflows": []}],
+                "flows": [{"name": "births", "equation": "nonexistent_variable * population"}]
+            }]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("broken-errors.simlin.json");
+        std::fs::write(&file_path, broken_json.to_string()).unwrap();
+
+        let output =
+            call_tool(serde_json::json!({ "projectPath": file_path.to_str().unwrap() })).unwrap();
+
+        assert!(
+            output["model"].is_object(),
+            "model snapshot must be present even with errors"
+        );
+        let errors = output["errors"]
+            .as_array()
+            .expect("errors field must be present");
+        assert!(
+            !errors.is_empty(),
+            "errors array must be non-empty for broken equations"
+        );
+    }
+
+    // ---- AC3.2: each error has code, message, variableName, kind ----
+
+    #[test]
+    fn ac3_2_error_fields_present() {
+        let broken_json = serde_json::json!({
+            "name": "error-fields-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{"name": "population", "initialEquation": "10", "inflows": ["births"], "outflows": []}],
+                "flows": [{"name": "births", "equation": "nonexistent_variable * population"}]
+            }]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("error-fields.simlin.json");
+        std::fs::write(&file_path, broken_json.to_string()).unwrap();
+
+        let output =
+            call_tool(serde_json::json!({ "projectPath": file_path.to_str().unwrap() })).unwrap();
+
+        let errors = output["errors"].as_array().expect("errors must be present");
+        for err in errors {
+            assert!(
+                err["code"].is_string(),
+                "each error must have a string 'code' field"
+            );
+            assert!(
+                err["message"].is_string(),
+                "each error must have a string 'message' field"
+            );
+            assert!(
+                err["variableName"].is_string(),
+                "each error must have a string 'variableName' field"
+            );
+            assert!(
+                err["kind"].is_string(),
+                "each error must have a string 'kind' field"
+            );
+        }
+    }
+
+    // ---- AC3.3: clean model omits errors field ----
+
+    #[test]
+    fn ac3_3_clean_model_omits_errors() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic-growth.sd.json"
+        );
+        let output = call_tool(serde_json::json!({ "projectPath": path })).unwrap();
+
+        assert!(
+            output.get("errors").is_none(),
+            "clean model must omit errors field entirely (skip_serializing_if)"
         );
     }
 
