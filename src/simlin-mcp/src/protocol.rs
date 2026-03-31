@@ -511,6 +511,30 @@ mod tests {
         assert_eq!(resp["result"]["serverInfo"]["name"], "test-server");
     }
 
+    // mcp-publish-ready.AC4.1: initialize response includes non-empty instructions field
+    #[test]
+    fn test_initialize_instructions_present_when_configured() {
+        let registry = Registry::new();
+        let config = ServerConfig {
+            name: "test-server".to_string(),
+            version: "0.1.0".to_string(),
+            instructions: Some("test instructions".to_string()),
+        };
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1.0"},"capabilities":{}}}"#,
+        );
+
+        let instructions = resp["result"]["instructions"].as_str().unwrap_or("");
+        assert!(
+            !instructions.is_empty(),
+            "expected non-empty instructions in initialize response, got: {}",
+            resp["result"]["instructions"]
+        );
+    }
+
     #[test]
     fn test_ping() {
         let registry = Registry::new();
