@@ -899,10 +899,24 @@ impl Expr2 {
                 // Compute array bounds for unary operations
                 let array_bounds = match (&op, l_expr.get_array_bounds()) {
                     (UnaryOp::Transpose, Some(bounds)) => {
-                        // Transpose reverses dimensions
+                        // Transpose reverses both dimensions and dimension names.
+                        // Preserving names is critical: when this expression gets
+                        // decomposed into a TempArray by Pass1, the temp view's
+                        // dim_ids must match the source view's transposed dim_ids
+                        // for the VM's LoadIterViewAt dimension matching to succeed.
                         let mut transposed_dims = bounds.dims().to_vec();
                         transposed_dims.reverse();
-                        Some(Self::allocate_temp_array(ctx, transposed_dims))
+                        if let Some(names) = bounds.dim_names() {
+                            let mut transposed_names = names.to_vec();
+                            transposed_names.reverse();
+                            Some(Self::allocate_temp_array_with_names(
+                                ctx,
+                                transposed_dims,
+                                transposed_names,
+                            ))
+                        } else {
+                            Some(Self::allocate_temp_array(ctx, transposed_dims))
+                        }
                     }
                     (_, Some(bounds)) => {
                         // Other unary ops preserve array structure

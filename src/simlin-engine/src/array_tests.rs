@@ -587,14 +587,8 @@ mod transpose_tests {
             .scalar_aux("sum_transpose", "SUM(matrix')");
 
         project.assert_compiles_incremental();
-        // TODO: SUM over transposed matrix should yield 21, but the VM currently
-        // produces NaN for SUM applied directly to a transposed view.
-        let vals = project.vm_result_incremental("sum_transpose");
-        assert!(
-            vals.last().unwrap().is_nan(),
-            "expected NaN from SUM(matrix'), got {}",
-            vals.last().unwrap()
-        );
+        // SUM is invariant under transposition: 1+2+3+4+5+6 = 21
+        project.assert_vm_scalar_result("sum_transpose", 21.0);
     }
 
     #[test]
@@ -1984,14 +1978,8 @@ mod structural_lowering_tests {
             .scalar_aux("total", "SUM(data[start_idx:end_idx])");
 
         project.assert_compiles_incremental();
-        // TODO: reversed range should ideally produce empty sum (0), but the VM
-        // currently produces NaN for SUM with reversed dynamic range bounds.
-        let vals = project.vm_result_incremental("total");
-        assert!(
-            vals.last().unwrap().is_nan(),
-            "expected NaN from reversed range SUM, got {}",
-            vals.last().unwrap()
-        );
+        // Reversed range (start > end) is empty, so SUM yields the additive identity 0.0
+        project.assert_vm_scalar_result("total", 0.0);
     }
 
     #[test]
@@ -4053,9 +4041,9 @@ mod vector_op_invalid_view_tests {
     use crate::test_common::TestProject;
 
     #[test]
-    fn vector_select_invalid_view_returns_nan() {
-        // A reversed dynamic range (start > end) creates an invalid view.
-        // VECTOR SELECT should propagate NaN instead of returning max_value.
+    fn vector_select_empty_view_returns_max_value() {
+        // A reversed dynamic range (start > end) creates an empty (zero-element)
+        // view. With no elements to select, VECTOR SELECT returns max_value.
         let project = TestProject::new("vsel_invalid")
             .indexed_dimension("D", 3)
             .array_aux("sel[D]", "1")
@@ -4068,17 +4056,13 @@ mod vector_op_invalid_view_tests {
             );
 
         project.assert_compiles_incremental();
-        let vals = project.vm_result_incremental("result");
-        assert!(
-            vals[0].is_nan(),
-            "VECTOR SELECT with invalid view should return NaN, got {}",
-            vals[0]
-        );
+        project.assert_vm_scalar_result("result", -999.0);
     }
 
     #[test]
-    fn vector_select_invalid_expr_view_returns_nan() {
-        // Invalid view on the expr (second) argument should also propagate NaN.
+    fn vector_select_empty_expr_view_returns_max_value() {
+        // Empty view on the expr (second) argument also yields max_value
+        // because zip semantics stop at the shorter (zero-length) array.
         let project = TestProject::new("vsel_invalid_expr")
             .indexed_dimension("D", 3)
             .array_aux("sel[D]", "1")
@@ -4091,12 +4075,7 @@ mod vector_op_invalid_view_tests {
             );
 
         project.assert_compiles_incremental();
-        let vals = project.vm_result_incremental("result");
-        assert!(
-            vals[0].is_nan(),
-            "VECTOR SELECT with invalid expr view should return NaN, got {}",
-            vals[0]
-        );
+        project.assert_vm_scalar_result("result", -999.0);
     }
 }
 

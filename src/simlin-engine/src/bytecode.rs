@@ -361,9 +361,13 @@ impl RuntimeView {
     /// - If dim_idx is out of bounds, marks view as invalid
     /// - If start_1based is 0 or > dim size, clamps to valid range
     /// - If end_1based > dim size, clamps to dim size
-    /// - If range is empty or reversed (start >= end), marks view as invalid
+    /// - If range is empty or reversed (start >= end after clamping),
+    ///   sets dimension size to 0 but keeps the view valid. This produces
+    ///   a zero-element view so reduction operations return their identity
+    ///   (0 for SUM, NaN for MIN/MAX).
     ///
-    /// Returns true if a valid range was applied, false otherwise.
+    /// Returns true if a non-empty range was applied, false if the range
+    /// was empty (but the view remains valid).
     pub fn apply_range_checked(
         &mut self,
         dim_idx: usize,
@@ -393,12 +397,11 @@ impl RuntimeView {
         // Clamp end to dimension size (end_1based is inclusive, so use as-is for exclusive bound)
         let end_0based = end_1based.min(dim_size);
 
-        // Check for empty or reversed range.
-        // This also catches out-of-bounds start: if start_0based >= dim_size,
-        // then start_0based >= end_0based (since end_0based <= dim_size).
+        // Empty range (reversed bounds or start past end after clamping).
+        // The view stays valid with zero elements rather than being marked
+        // invalid, so reduction operations return their identity values.
         if start_0based >= end_0based {
             self.dims[dim_idx] = 0;
-            self.is_valid = false;
             return false;
         }
 
@@ -2036,11 +2039,15 @@ mod tests {
         let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
         let mut view = RuntimeView::for_var(0, dims, dim_ids);
 
-        // Reversed range [7:3] should be invalid (start > end)
+        // Reversed range [7:3] produces an empty but valid view so that
+        // reduction operations return their identity (0 for SUM).
         let result = view.apply_range_checked(0, 7, 3);
 
         assert!(!result, "reversed range should return false");
-        assert!(!view.is_valid, "view should be marked invalid");
+        assert!(
+            view.is_valid,
+            "view should remain valid (empty, not invalid)"
+        );
         assert_eq!(view.dims.as_slice(), &[0]); // Empty dimension
     }
 
@@ -2104,7 +2111,10 @@ mod tests {
         let result = view.apply_range_checked(0, 10, 15);
 
         assert!(!result, "range beyond bounds should return false");
-        assert!(!view.is_valid, "view should be marked invalid");
+        assert!(
+            view.is_valid,
+            "view should remain valid (empty, not invalid)"
+        );
         assert_eq!(view.dims.as_slice(), &[0]); // Empty dimension
     }
 
