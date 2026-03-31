@@ -228,6 +228,7 @@ fn sdai_model_strategy() -> impl Strategy<Value = SdaiModel> {
             relationships,
             specs,
             views: None, // Views are complex and tested separately in json_proptest
+            loop_metadata: vec![],
         })
 }
 
@@ -757,6 +758,7 @@ mod schema_tests {
             relationships: None,
             specs: None,
             views: None,
+            loop_metadata: vec![],
         };
 
         let json = serde_json::to_string(&empty_model).unwrap();
@@ -888,6 +890,7 @@ mod protobuf_roundtrip_tests {
                 method: None,
             }),
             views: None,
+            loop_metadata: vec![],
         };
 
         // First roundtrip
@@ -932,6 +935,7 @@ mod protobuf_roundtrip_tests {
                 method: None,
             }),
             views: None,
+            loop_metadata: vec![],
         };
 
         let (pb_bytes1, json_str1) = roundtrip_sdai_pb_json(&sdai_model);

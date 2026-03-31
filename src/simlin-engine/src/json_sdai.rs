@@ -180,6 +180,8 @@ pub struct SdaiModel {
     pub specs: Option<SimSpecs>,
     #[serde(skip_serializing_if = "is_none")]
     pub views: Option<Vec<crate::json::View>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub loop_metadata: Vec<crate::json::LoopMetadata>,
 }
 
 /// Generate the JSON Schema for the SdaiModel type
@@ -350,12 +352,14 @@ impl From<SdaiModel> for datamodel::Project {
             .map(|vs| vs.into_iter().map(|v| v.into()).collect())
             .unwrap_or_default();
 
+        let loop_metadata = sdai.loop_metadata.into_iter().map(|lm| lm.into()).collect();
+
         let model = datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables,
             views,
-            loop_metadata: vec![],
+            loop_metadata,
             groups: vec![],
         };
 
@@ -581,11 +585,18 @@ impl From<datamodel::Project> for SdaiModel {
             Some(model.views.into_iter().map(|v| v.into()).collect())
         };
 
+        let loop_metadata = model
+            .loop_metadata
+            .into_iter()
+            .map(|lm| lm.into())
+            .collect();
+
         SdaiModel {
             variables,
             relationships: None,
             specs,
             views,
+            loop_metadata,
         }
     }
 }
@@ -742,6 +753,7 @@ mod tests {
                 method: None,
             }),
             views: None,
+            loop_metadata: vec![],
         };
 
         let dm_project: datamodel::Project = sdai_model.clone().into();
@@ -785,6 +797,7 @@ mod tests {
                 method: None,
             }),
             views: None,
+            loop_metadata: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&sdai_model).unwrap();
@@ -953,6 +966,60 @@ mod tests {
             json_value.get("models").is_none(),
             "SD-AI JSON should not have 'models' key"
         );
+    }
+
+    #[test]
+    fn loop_metadata_survives_roundtrip() {
+        // Build an SdaiModel with loop_metadata, convert to datamodel::Project
+        // and back, and verify the names survive.
+        let sdai = SdaiModel {
+            variables: vec![
+                Variable::Stock(StockFields {
+                    name: "population".to_string(),
+                    equation: Some("100".to_string()),
+                    documentation: None,
+                    units: None,
+                    inflows: Some(vec!["births".to_string()]),
+                    outflows: None,
+                    graphical_function: None,
+                }),
+                Variable::Flow(FlowFields {
+                    name: "births".to_string(),
+                    equation: Some("population * 0.05".to_string()),
+                    documentation: None,
+                    units: None,
+                    graphical_function: None,
+                }),
+            ],
+            relationships: None,
+            specs: None,
+            views: None,
+            loop_metadata: vec![crate::json::LoopMetadata {
+                uids: vec![1, 2],
+                deleted: false,
+                name: "Growth Loop".to_string(),
+                description: "reinforcing growth".to_string(),
+            }],
+        };
+
+        let project: datamodel::Project = sdai.clone().into();
+        assert_eq!(project.models[0].loop_metadata.len(), 1);
+        assert_eq!(project.models[0].loop_metadata[0].name, "Growth Loop");
+
+        let sdai2: SdaiModel = project.into();
+        assert_eq!(sdai2.loop_metadata.len(), 1);
+        assert_eq!(sdai2.loop_metadata[0].name, "Growth Loop");
+        assert_eq!(sdai2.loop_metadata[0].description, "reinforcing growth");
+
+        // Verify JSON roundtrip preserves loop_metadata
+        let json_str = serde_json::to_string_pretty(&sdai2).unwrap();
+        assert!(
+            json_str.contains("loop_metadata"),
+            "serialized JSON must contain loop_metadata key"
+        );
+        let sdai3: SdaiModel = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(sdai3.loop_metadata.len(), 1);
+        assert_eq!(sdai3.loop_metadata[0].name, "Growth Loop");
     }
 
     #[test]

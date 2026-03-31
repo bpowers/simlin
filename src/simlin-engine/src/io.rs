@@ -12,6 +12,12 @@ use std::path::Path;
 /// Writes to `{path}.new`, fsyncs the file, renames over the target,
 /// then best-effort fsyncs the parent directory for durability.
 /// Cleans up the temp file on any error.
+///
+/// On Unix the rename is fully atomic. On Windows `fs::rename` does not
+/// overwrite an existing file, so the target is removed first; there is a
+/// brief window where neither file exists. This is a known Windows
+/// limitation -- true atomic replacement requires `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`, which std does not expose.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut tmp_name = OsString::from(path.as_os_str());
     tmp_name.push(".new");
@@ -30,6 +36,13 @@ fn write_and_rename(tmp: &Path, target: &Path, contents: &[u8]) -> io::Result<()
     let file = fs::File::open(tmp)?;
     file.sync_all()?;
     drop(file);
+
+    // On Windows, rename does not atomically replace an existing file.
+    // Remove the target first so rename succeeds.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = fs::remove_file(target);
+    }
 
     fs::rename(tmp, target)?;
 

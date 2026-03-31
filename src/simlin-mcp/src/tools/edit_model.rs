@@ -230,7 +230,12 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);
 
-    let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
+    // SetLoopName only writes loop metadata -- it doesn't add, remove, or
+    // rename any variables, so it must not trigger diagram regeneration.
+    let has_variable_ops = input.operations.as_ref().is_some_and(|ops| {
+        ops.iter()
+            .any(|op| !matches!(op, EditOperation::SetLoopName(_)))
+    });
 
     // Count pre-edit error-severity diagnostics so we can detect regressions
     // rather than rejecting edits that land on a model that already has errors.
@@ -1201,6 +1206,77 @@ mod tests {
     }
 
     #[test]
+    fn set_loop_name_does_not_regenerate_diagram() {
+        let dir = tempfile::tempdir().unwrap();
+        // Variables need UIDs so SetLoopName can resolve them. Native JSON
+        // format uses stocks/flows/auxiliaries keys with explicit uid fields.
+        let project_with_views = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{
+                    "uid": 1,
+                    "name": "population",
+                    "initialEquation": "100",
+                    "inflows": ["births"],
+                    "outflows": []
+                }],
+                "flows": [{
+                    "uid": 2,
+                    "name": "births",
+                    "equation": "population * 0.1"
+                }],
+                "views": [{
+                    "kind": "stock_flow",
+                    "elements": [
+                        {"uid": 1, "type": "stock", "name": "population", "x": 999.0, "y": 888.0, "labelSide": "bottom"},
+                        {"uid": 2, "type": "flow", "name": "births", "x": 700.0, "y": 888.0, "labelSide": "bottom",
+                         "points": [{"x": 600.0, "y": 888.0}, {"x": 999.0, "y": 888.0}]}
+                    ]
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "model.simlin.json", &project_with_views);
+
+        // A SetLoopName-only edit must not modify the diagram.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "setLoopName": {
+                    "variables": ["population", "births"],
+                    "name": "Growth Loop",
+                    "description": "reinforcing growth"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let elements = saved["models"][0]["views"][0]["elements"]
+            .as_array()
+            .expect("views must still be present");
+        // The hand-placed positions must be unchanged -- diagram was not regenerated.
+        let stock = elements
+            .iter()
+            .find(|e| e["name"] == "population")
+            .expect("population element must still exist");
+        assert_eq!(
+            stock["x"].as_f64().unwrap(),
+            999.0,
+            "SetLoopName must not move hand-placed elements"
+        );
+    }
+
+    #[test]
     fn dry_run_does_not_regenerate_diagram_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
@@ -2042,6 +2118,72 @@ mod tests {
         assert_eq!(
             original_contents, after_contents,
             "dry-run must not modify the SD-AI file (including relationships)"
+        );
+    }
+
+    // ---- SD-AI loop_metadata persists through SetLoopName write-back ----
+
+    #[test]
+    fn sdai_loop_metadata_persists_after_set_loop_name() {
+        // Upsert and SetLoopName must be in the same EditModel call because
+        // SD-AI format doesn't carry UIDs between calls (UIDs are internal
+        // engine bookkeeping). Upsert auto-assigns UIDs in memory; SetLoopName
+        // then references them within the same patch application, and the
+        // resulting loop_metadata is written to the SD-AI file.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.sd.json");
+
+        let sdai_content = serde_json::json!({
+            "variables": [],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 100.0,
+                "dt": 1.0
+            }
+        });
+        std::fs::write(&dest, serde_json::to_string_pretty(&sdai_content).unwrap()).unwrap();
+
+        // Upsert variables and name the loop in a single EditModel call.
+        // Operations are applied sequentially: upserts assign UIDs first,
+        // then SetLoopName resolves those UIDs.
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "100",
+                        "inflows": ["births"]
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.05"
+                    }
+                },
+                {
+                    "setLoopName": {
+                        "variables": ["population", "births"],
+                        "name": "Growth Loop",
+                        "description": "reinforcing growth"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        // Re-read the file and verify loop_metadata is present and correct.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        let loop_meta = saved
+            .get("loop_metadata")
+            .and_then(|v| v.as_array())
+            .expect("loop_metadata must be persisted in the SD-AI file");
+        assert!(!loop_meta.is_empty(), "at least one loop must be saved");
+        assert!(
+            loop_meta.iter().any(|lm| lm["name"] == "Growth Loop"),
+            "loop named 'Growth Loop' must be in saved file"
         );
     }
 }

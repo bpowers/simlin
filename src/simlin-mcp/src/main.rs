@@ -110,6 +110,12 @@ mod tests {
             .output()
             .expect("git tag command failed");
         let tags = String::from_utf8(output.stdout).unwrap();
+        if tags.trim().is_empty() {
+            // Shallow checkout or no tags -- cannot validate version freshness.
+            // The non-git test (instructions_reference_pysimlin_version) still
+            // validates the hardcoded version string.
+            return;
+        }
         let latest_tag = tags.lines().next().expect("no pysimlin tags found");
         let version = latest_tag
             .strip_prefix("pysimlin-v")
