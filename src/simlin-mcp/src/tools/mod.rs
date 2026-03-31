@@ -62,6 +62,60 @@ pub(crate) enum SourceFormat {
     SdaiJson,
 }
 
+/// Ensure every variable in every model of the project has a UID.
+///
+/// Variables parsed from some file formats (SD-AI, older JSON files without
+/// UIDs) may arrive with `uid: None`.  Any operation that needs to reference
+/// variables by UID (e.g. `SetLoopName`) will fail on those variables.  We
+/// assign UIDs eagerly at open time so callers never need to guard against
+/// the missing-UID case.
+///
+/// We compute a single high-water-mark across both variable UIDs and view
+/// element UIDs for each model to guarantee uniqueness.
+fn ensure_variable_uids(project: &mut simlin_engine::datamodel::Project) {
+    for model in &mut project.models {
+        let max_var_uid = model
+            .variables
+            .iter()
+            .filter_map(|v| match v {
+                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+            })
+            .max()
+            .unwrap_or(0);
+        let max_view_uid = model
+            .views
+            .iter()
+            .flat_map(|v| match v {
+                simlin_engine::datamodel::View::StockFlow(sf) => sf.elements.iter(),
+            })
+            .map(|e| e.get_uid())
+            .max()
+            .unwrap_or(0);
+        let mut next_uid = max_var_uid.max(max_view_uid) + 1;
+
+        for var in &mut model.variables {
+            let has_uid = match var {
+                simlin_engine::datamodel::Variable::Stock(s) => s.uid.is_some(),
+                simlin_engine::datamodel::Variable::Flow(f) => f.uid.is_some(),
+                simlin_engine::datamodel::Variable::Aux(a) => a.uid.is_some(),
+                simlin_engine::datamodel::Variable::Module(m) => m.uid.is_some(),
+            };
+            if !has_uid {
+                match var {
+                    simlin_engine::datamodel::Variable::Stock(s) => s.uid = Some(next_uid),
+                    simlin_engine::datamodel::Variable::Flow(f) => f.uid = Some(next_uid),
+                    simlin_engine::datamodel::Variable::Aux(a) => a.uid = Some(next_uid),
+                    simlin_engine::datamodel::Variable::Module(m) => m.uid = Some(next_uid),
+                }
+                next_uid += 1;
+            }
+        }
+    }
+}
+
 /// Open a project from file contents.  XMILE and Vensim formats are
 /// detected by extension; JSON files use content-based detection
 /// (top-level `models` key = native, `variables` key = SD-AI).
@@ -75,17 +129,17 @@ pub(crate) fn open_project(
         .unwrap_or("")
         .to_lowercase();
 
-    match ext.as_str() {
+    let (mut project, format) = match ext.as_str() {
         "stmx" | "xmile" | "xml" => {
             let mut reader = BufReader::new(contents.as_bytes());
             let project = simlin_engine::open_xmile(&mut reader)
                 .map_err(|e| anyhow::anyhow!("failed to parse XMILE: {e:?}"))?;
-            Ok((project, SourceFormat::Xmile))
+            (project, SourceFormat::Xmile)
         }
         "mdl" => {
             let project = simlin_engine::open_vensim(contents)
                 .map_err(|e| anyhow::anyhow!("failed to parse Vensim: {e:?}"))?;
-            Ok((project, SourceFormat::Xmile))
+            (project, SourceFormat::Xmile)
         }
         _ => {
             let v: serde_json::Value =
@@ -93,18 +147,21 @@ pub(crate) fn open_project(
             if v.get("models").is_some() {
                 let json_project: simlin_engine::json::Project =
                     serde_json::from_value(v).context("failed to parse native Simlin JSON")?;
-                Ok((json_project.into(), SourceFormat::NativeJson))
+                (json_project.into(), SourceFormat::NativeJson)
             } else if v.get("variables").is_some() {
                 let sdai_model: simlin_engine::json_sdai::SdaiModel =
                     serde_json::from_value(v).context("failed to parse SD-AI JSON")?;
-                Ok((sdai_model.into(), SourceFormat::SdaiJson))
+                (sdai_model.into(), SourceFormat::SdaiJson)
             } else {
                 anyhow::bail!(
                     "unrecognized JSON format: expected top-level 'models' (native) or 'variables' (SD-AI)"
                 )
             }
         }
-    }
+    };
+
+    ensure_variable_uids(&mut project);
+    Ok((project, format))
 }
 
 #[cfg(test)]
@@ -224,5 +281,99 @@ mod tests {
         let (project, format) = open_project(path, &contents).unwrap();
         assert_eq!(format, SourceFormat::Xmile);
         assert!(!project.models.is_empty());
+    }
+
+    // ---- Issue 1: ensure_variable_uids assigns UIDs on open ----
+
+    // SD-AI JSON has no UIDs on variables. After open_project every variable
+    // must have a UID so that SetLoopName (which maps variable names to UIDs)
+    // can succeed without a "has no UID" error.
+    #[test]
+    fn open_project_sdai_assigns_uids_to_all_variables() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, _) = open_project(path, &contents).unwrap();
+
+        for model in &project.models {
+            for var in &model.variables {
+                let uid = match var {
+                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                };
+                assert!(
+                    uid.is_some(),
+                    "variable '{}' must have a UID after open_project",
+                    var.get_ident()
+                );
+            }
+        }
+    }
+
+    // Verifies that UIDs assigned by ensure_variable_uids are unique across
+    // variables within each model.
+    #[test]
+    fn open_project_sdai_uids_are_unique() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, _) = open_project(path, &contents).unwrap();
+
+        for model in &project.models {
+            let uids: Vec<i32> = model
+                .variables
+                .iter()
+                .filter_map(|v| match v {
+                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                })
+                .collect();
+            let unique: std::collections::HashSet<i32> = uids.iter().copied().collect();
+            assert_eq!(
+                uids.len(),
+                unique.len(),
+                "model '{}' must have unique UIDs across all variables",
+                model.name
+            );
+        }
+    }
+
+    // Existing UIDs in a native JSON file must not be altered by ensure_variable_uids.
+    #[test]
+    fn open_project_native_json_preserves_existing_uids() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic-growth.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+        let (project, _) = open_project(path, &contents).unwrap();
+
+        // Collect UIDs from a second open for comparison; both must match.
+        let (project2, _) = open_project(path, &contents).unwrap();
+        for (m1, m2) in project.models.iter().zip(project2.models.iter()) {
+            for (v1, v2) in m1.variables.iter().zip(m2.variables.iter()) {
+                let uid1 = match v1 {
+                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                };
+                let uid2 = match v2 {
+                    simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                    simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                    simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                    simlin_engine::datamodel::Variable::Module(m) => m.uid,
+                };
+                assert_eq!(uid1, uid2, "UIDs must be stable across repeated opens");
+            }
+        }
     }
 }

@@ -237,16 +237,22 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
             .any(|op| !matches!(op, EditOperation::SetLoopName(_)))
     });
 
-    // Count pre-edit error-severity diagnostics so we can detect regressions
-    // rather than rejecting edits that land on a model that already has errors.
-    // This allows incremental repair: an edit that fixes errors (or doesn't
-    // change the error count) is accepted; one that introduces new errors is not.
+    // Count pre-edit error-severity diagnostics for the target model only, so
+    // we can detect regressions without being confused by errors in sibling
+    // models.  This allows incremental repair: an edit that fixes errors (or
+    // doesn't change the error count for the target model) is accepted; one
+    // that introduces new errors in the target model is not.
     let pre_edit_error_count = {
         let pre_db = simlin_engine::db::SimlinDb::default();
         let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
-        simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync)
+        let error_diags: Vec<_> = simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync)
             .into_iter()
             .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .collect();
+        simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
+            .errors
+            .iter()
+            .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
             .count()
     };
 
@@ -264,21 +270,29 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
 
-    // Reject the edit only if it increased the error count. Edits that reduce
-    // or preserve the existing error count are accepted so models with
-    // pre-existing errors can be repaired incrementally.
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
-    let post_edit_error_diagnostics: Vec<_> = diagnostics
+    // Reject the edit only if it increased the error count for the target model.
+    // Errors in sibling models must not affect whether this edit is accepted.
+    // Edits that reduce or preserve the existing error count are accepted so
+    // models with pre-existing errors can be repaired incrementally.
+    let all_diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let post_error_diags: Vec<_> = all_diagnostics
         .iter()
         .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+        .cloned()
+        .collect();
+    let post_formatted =
+        simlin_engine::errors::collect_formatted_errors(&post_error_diags, &project);
+    let post_edit_model_errors: Vec<_> = post_formatted
+        .errors
+        .iter()
+        .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
         .collect();
 
-    if post_edit_error_diagnostics.len() > pre_edit_error_count {
-        let error_diags_owned: Vec<_> = post_edit_error_diagnostics.into_iter().cloned().collect();
-        let formatted =
-            simlin_engine::errors::collect_formatted_errors(&error_diags_owned, &project);
-        let error_outputs: Vec<ErrorOutput> =
-            formatted.errors.iter().map(ErrorOutput::from).collect();
+    if post_edit_model_errors.len() > pre_edit_error_count {
+        let error_outputs: Vec<ErrorOutput> = post_edit_model_errors
+            .iter()
+            .map(|e| ErrorOutput::from(*e))
+            .collect();
         let error_json = serde_json::json!({
             "error": "edit introduces compilation errors",
             "errors": error_outputs,
@@ -2184,6 +2198,62 @@ mod tests {
         assert!(
             loop_meta.iter().any(|lm| lm["name"] == "Growth Loop"),
             "loop named 'Growth Loop' must be in saved file"
+        );
+    }
+
+    // ---- Issue 1: SetLoopName works on pre-existing SD-AI models without UIDs ----
+
+    // When an SD-AI file is opened, variables parsed from it start with uid: None.
+    // open_project now assigns UIDs via ensure_variable_uids, so a subsequent
+    // SetLoopName call on that already-saved file must succeed.
+    #[test]
+    fn set_loop_name_succeeds_on_sdai_model_loaded_from_file() {
+        // Build a SD-AI model file with a feedback loop (population -> births -> population).
+        let sdai_content = serde_json::json!({
+            "variables": [
+                {
+                    "type": "stock",
+                    "name": "population",
+                    "equation": "100",
+                    "inflows": ["births"],
+                    "outflows": []
+                },
+                {
+                    "type": "flow",
+                    "name": "births",
+                    "equation": "population * 0.05"
+                }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 100.0,
+                "dt": 1.0
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("feedback.sd.json");
+        std::fs::write(&dest, serde_json::to_string_pretty(&sdai_content).unwrap()).unwrap();
+
+        // SetLoopName in a separate EditModel call from when the variables were created.
+        // Before the fix, this would fail with "variable '...' has no UID" because
+        // SD-AI parsed variables arrive without UIDs and were not assigned at open time.
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "setLoopName": {
+                    "variables": ["population", "births"],
+                    "name": "Growth Loop",
+                    "description": "reinforcing growth"
+                }
+            }]
+        }));
+
+        assert!(
+            result.is_ok(),
+            "SetLoopName on a loaded SD-AI model must succeed after UIDs are assigned on open; \
+             got: {:?}",
+            result
         );
     }
 }

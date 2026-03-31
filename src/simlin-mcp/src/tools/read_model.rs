@@ -74,6 +74,11 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
             simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
                 .errors
                 .iter()
+                // Only include errors that belong to the requested model or that
+                // are not scoped to any model (e.g. project-level errors).
+                // Errors from sibling models in a multi-model project must not
+                // appear here -- they would confuse clients reading a clean model.
+                .filter(|e| e.model_name.as_ref().is_none_or(|name| name == model_name))
                 .map(ErrorOutput::from)
                 .collect()
         }
@@ -567,6 +572,68 @@ mod tests {
         assert!(
             err_msg.contains("models") && err_msg.contains("variables"),
             "error must mention expected formats: {err_msg}"
+        );
+    }
+
+    // ---- Issue 2: errors are scoped to the requested model ----
+
+    // A multi-model project where one model has errors and the other is clean.
+    // ReadModel on the clean model must return an empty errors array, not errors
+    // from the broken sibling.
+    #[test]
+    fn read_model_errors_scoped_to_requested_model() {
+        // Project with two models: "clean_model" has no errors, "broken_model"
+        // references a nonexistent variable.  ReadModel on "clean_model" must
+        // not surface "broken_model"'s errors.
+        let project_json = serde_json::json!({
+            "name": "multi-model-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [
+                {
+                    "name": "clean_model",
+                    "auxiliaries": [
+                        {"uid": 1, "name": "clean_var", "equation": "42"}
+                    ]
+                },
+                {
+                    "name": "broken_model",
+                    "auxiliaries": [
+                        {"uid": 2, "name": "broken_var", "equation": "nonexistent_dep + 1"}
+                    ]
+                }
+            ]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("multi.simlin.json");
+        std::fs::write(
+            &file_path,
+            serde_json::to_string_pretty(&project_json).unwrap(),
+        )
+        .unwrap();
+
+        let output = call_tool(serde_json::json!({
+            "projectPath": file_path.to_str().unwrap(),
+            "modelName": "clean_model"
+        }))
+        .unwrap();
+
+        // The errors field must be absent or empty: the clean model has no errors.
+        // If errors from broken_model bleed through, this assertion would fail.
+        let errors = output.get("errors");
+        assert!(
+            errors.is_none()
+                || errors
+                    .and_then(|e| e.as_array())
+                    .is_some_and(|a| a.is_empty()),
+            "ReadModel on clean_model must not surface errors from broken_model; \
+             got errors: {:?}",
+            errors
         );
     }
 }
