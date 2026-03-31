@@ -13,8 +13,8 @@ Simlin is a system dynamics modeling tool. This server exposes tools for reading
 - `upsertStock` -- Create or replace a stock (accumulator). Requires `name` and `initialEquation`. Optional: `units`, `documentation`, `inflows`, `outflows`.
 - `upsertFlow` -- Create or replace a flow (rate). Requires `name` and `equation`. Optional: `units`, `documentation`, `graphicalFunction`.
 - `upsertAuxiliary` -- Create or replace an auxiliary variable. Requires `name` and `equation`. Optional: `units`, `documentation`, `graphicalFunction`.
-- `RemoveVariable` -- Remove a variable by `name`.
-- `SetLoopName` -- Assign a human-readable name to a feedback loop. Requires `variables` (list of variable names forming the loop) and `name`. Optional: `description`.
+- `removeVariable` -- Remove a variable by `name`.
+- `setLoopName` -- Assign a human-readable name to a feedback loop. Requires `variables` (list of variable names forming the loop) and `name`. Optional: `description`.
 
 ### Typical workflow
 

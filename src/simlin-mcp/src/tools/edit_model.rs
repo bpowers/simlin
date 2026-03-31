@@ -253,7 +253,9 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         .collect();
 
     if !error_diagnostics.is_empty() {
-        let formatted = simlin_engine::errors::collect_formatted_errors(&diagnostics, &project);
+        let error_diags_owned: Vec<_> = error_diagnostics.into_iter().cloned().collect();
+        let formatted =
+            simlin_engine::errors::collect_formatted_errors(&error_diags_owned, &project);
         let error_outputs: Vec<ErrorOutput> =
             formatted.errors.iter().map(ErrorOutput::from).collect();
         let error_json = serde_json::json!({
