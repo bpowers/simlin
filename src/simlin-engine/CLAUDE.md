@@ -22,8 +22,7 @@ Equation text flows through these stages in order:
    - `pretty.rs` - Debug pretty-printing
 6. **`src/bytecode.rs`** - Instruction set definition, opcodes, type aliases (`LiteralId`, `ModuleId`, `DimId`, `TempId`, etc.). Includes `LoadPrev`/`LoadInitial` opcodes for `PREVIOUS()`/`INIT()` intrinsics and vector operation opcodes (`VectorSelect`, `VectorElmMap`, `VectorSortOrder`, `Rank`, `AllocateAvailable`, `AllocateByPriority`) that operate on view-stack arrays and write results to temp storage.
 7. **`src/vm.rs`** - Stack-based bytecode VM. Hot loop uses proven-safe unchecked array access validated at compile time by `ByteCodeBuilder`. Maintains `prev_values` and `initial_values` snapshot buffers for `LoadPrev`/`LoadInitial` opcodes. Implements vector operation dispatch (VectorSelect, VectorElmMap, VectorSortOrder, Rank, AllocateAvailable, AllocateByPriority). Array reducers (ArrayMax, ArrayMin, ArrayMean, ArrayStddev) return NaN for empty views; ArraySum returns 0.0 (additive identity).
-8. **`src/interpreter.rs`** - AST-walking interpreter. Retained as a reference spec for VM correctness verification via `Simulation::new()` + `run_to_end()`. Production compilation uses `db::compile_project_incremental`.
-9. **`src/alloc.rs`** - Allocation helpers shared by interpreter and VM: `allocate_available()` (bisection-based priority allocation), `alloc_curve()` (per-requester allocation curves for 6 profile types), `normal_cdf()`/`erfc_approx()`.
+8. **`src/alloc.rs`** - Allocation helpers for VM priority allocation: `allocate_available()` (bisection-based priority allocation), `alloc_curve()` (per-requester allocation curves for 6 profile types), `normal_cdf()`/`erfc_approx()`.
 
 ## Data model and project structure
 

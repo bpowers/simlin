@@ -68,6 +68,8 @@ impl Ast<Expr0> {
 }
 
 impl Ast<Expr2> {
+    // Called from db.rs via salsa tracked functions; clippy can't follow salsa dispatch.
+    #[allow(dead_code)]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),

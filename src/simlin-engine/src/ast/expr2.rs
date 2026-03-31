@@ -108,6 +108,7 @@ impl IndexExpr2 {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             IndexExpr2::Wildcard(_) => None,
@@ -969,6 +970,7 @@ impl Expr2 {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Expr2::Const(_s, _n, _loc) => None,

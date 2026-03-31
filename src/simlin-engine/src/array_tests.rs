@@ -1841,7 +1841,8 @@ mod structural_lowering_tests {
     //! Tests that verify the structure of lowered expressions, not just execution results.
     //! These tests use Module::get_flow_exprs() to inspect the AST after lowering.
 
-    use crate::compiler::{BuiltinFn, Expr, pretty};
+    use crate::compiler::pretty::pretty;
+    use crate::compiler::{BuiltinFn, Expr};
     use crate::test_common::TestProject;
 
     #[test]
@@ -2240,7 +2241,8 @@ mod pass0_structural_lowering_tests {
     //! - Transpose still works correctly
     //! - Dimension reordering works correctly
 
-    use crate::compiler::{Expr, pretty};
+    use crate::compiler::Expr;
+    use crate::compiler::pretty::pretty;
     use crate::test_common::TestProject;
 
     #[test]

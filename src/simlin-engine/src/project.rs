@@ -10,7 +10,7 @@ use crate::dimensions::DimensionsContext;
 use crate::model::ModelStage1;
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use {crate::model::ScopeStage0, crate::units::Context, std::collections::BTreeSet};
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -36,14 +36,14 @@ impl Project {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::from_datamodel(project_datamodel)
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl Project {
     /// Convenience constructor for tests: creates a local salsa DB,
     /// syncs the datamodel, and builds the Project via `from_salsa`.

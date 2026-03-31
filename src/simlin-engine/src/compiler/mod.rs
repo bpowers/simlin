@@ -25,9 +25,7 @@ use crate::{Error, sim_err};
 
 // Re-exports for crate-internal API
 pub(crate) use self::context::{Context, ContextCore, VariableMetadata};
-pub(crate) use self::dimensions::UnaryOp;
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table};
-pub(crate) use self::pretty::pretty;
 
 use self::codegen::Compiler;
 
@@ -2240,12 +2238,13 @@ pub(crate) struct VarInitial {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[allow(dead_code)]
 pub struct Module {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) inputs: HashSet<Ident<Canonical>>,
-    pub(crate) n_slots: usize,         // number of f64s we need storage for
-    pub(crate) n_temps: usize,         // number of temporary arrays
-    pub(crate) temp_sizes: Vec<usize>, // size of each temporary array
+    pub(crate) n_slots: usize,
+    pub(crate) n_temps: usize,
+    pub(crate) temp_sizes: Vec<usize>,
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_initials_by_var: Vec<VarInitial>,
     pub(crate) runlist_flows: Vec<Expr>,
@@ -2253,16 +2252,12 @@ pub struct Module {
     pub(crate) offsets: VariableOffsetMap,
     pub(crate) runlist_order: Vec<Ident<Canonical>>,
     pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
-    /// All dimensions from the project, for bytecode compilation
     pub(crate) dimensions: Vec<Dimension>,
-    /// DimensionsContext for subdimension relationship lookups
     pub(crate) dimensions_ctx: DimensionsContext,
-    /// Maps module variable idents to their full ModuleKey (model_name, input_set).
-    /// Used to correctly expand nested modules in runlist_order.
     pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
-// calculate a mapping of module variable name -> module model name
+#[allow(dead_code)]
 pub(crate) fn calc_module_model_map(
     project: &Project,
     model_name: &Ident<Canonical>,
@@ -2297,6 +2292,7 @@ pub(crate) fn calc_module_model_map(
     all_models
 }
 
+#[allow(dead_code)]
 pub(crate) fn build_metadata<'p>(
     project: &'p Project,
     model_name: &Ident<Canonical>,
@@ -2433,6 +2429,7 @@ pub(crate) fn build_metadata<'p>(
     all_offsets.insert(model_name.clone(), offsets);
 }
 
+#[allow(dead_code)]
 fn calc_n_slots(
     all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>>,
     model_name: &Ident<Canonical>,
@@ -2442,6 +2439,7 @@ fn calc_n_slots(
     metadata.values().map(|v| v.size).sum()
 }
 
+#[allow(dead_code)]
 impl Module {
     pub(crate) fn new(
         project: &Project,

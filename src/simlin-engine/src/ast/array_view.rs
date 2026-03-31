@@ -88,6 +88,7 @@ impl ArrayView {
     }
 
     /// Check if this view represents contiguous data in row-major order
+    #[allow(dead_code)]
     pub fn is_contiguous(&self) -> bool {
         if self.offset != 0 || !self.sparse.is_empty() {
             return false;
