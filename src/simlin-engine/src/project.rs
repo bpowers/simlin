@@ -44,7 +44,7 @@ impl From<datamodel::Project> for Project {
 impl Project {
     /// Convenience constructor: creates a local salsa DB,
     /// syncs the datamodel, and builds the Project via `from_salsa`.
-    pub fn from_datamodel(project_datamodel: datamodel::Project) -> Self {
+    pub(crate) fn from_datamodel(project_datamodel: datamodel::Project) -> Self {
         let db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
         Self::from_salsa(
