@@ -73,6 +73,43 @@ impl From<simlin_engine::layout::metadata::DominantPeriod> for DominantPeriodOut
     }
 }
 
+/// Structured error detail included in EditModel error responses.
+///
+/// Converts engine `FormattedError` into a serializable type suitable for
+/// MCP structured content, so LLM clients can programmatically inspect
+/// what went wrong.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorOutput {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variable_name: Option<String>,
+    pub kind: String,
+}
+
+impl From<&simlin_engine::errors::FormattedError> for ErrorOutput {
+    fn from(fe: &simlin_engine::errors::FormattedError) -> Self {
+        use simlin_engine::errors::FormattedErrorKind;
+        let kind = match fe.kind {
+            FormattedErrorKind::Project => "project",
+            FormattedErrorKind::Model => "model",
+            FormattedErrorKind::Variable => "variable",
+            FormattedErrorKind::Units => "units",
+            FormattedErrorKind::Simulation => "simulation",
+        };
+        Self {
+            code: fe.code.to_string(),
+            message: fe.message.clone().unwrap_or_default(),
+            model_name: fe.model_name.clone(),
+            variable_name: fe.variable_name.clone(),
+            kind: kind.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +170,131 @@ mod tests {
         assert_eq!(arr[0].as_f64().unwrap(), 1.0);
         assert_eq!(arr[1].as_f64().unwrap(), 100.0);
         assert_eq!(arr[2].as_f64().unwrap(), 0.5);
+    }
+
+    #[test]
+    fn error_output_serializes_camel_case() {
+        let err = ErrorOutput {
+            code: "unknown_dependency".to_string(),
+            message: "error in model 'main' variable 'x': unknown_dependency".to_string(),
+            model_name: Some("main".to_string()),
+            variable_name: Some("x".to_string()),
+            kind: "variable".to_string(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], "unknown_dependency");
+        assert_eq!(json["modelName"], "main");
+        assert_eq!(json["variableName"], "x");
+        assert_eq!(json["kind"], "variable");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown_dependency")
+        );
+    }
+
+    #[test]
+    fn error_output_skips_none_fields() {
+        let err = ErrorOutput {
+            code: "not_simulatable".to_string(),
+            message: "assembly error".to_string(),
+            model_name: None,
+            variable_name: None,
+            kind: "simulation".to_string(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert!(
+            json.get("modelName").is_none(),
+            "None modelName must be omitted"
+        );
+        assert!(
+            json.get("variableName").is_none(),
+            "None variableName must be omitted"
+        );
+        assert_eq!(json["code"], "not_simulatable");
+        assert_eq!(json["kind"], "simulation");
+    }
+
+    #[test]
+    fn error_output_from_formatted_error() {
+        use simlin_engine::common::ErrorCode;
+        use simlin_engine::errors::{FormattedError, FormattedErrorKind};
+
+        let fe = FormattedError {
+            code: ErrorCode::UnknownDependency,
+            message: Some("error in model 'main' variable 'bad': unknown_dependency".to_string()),
+            model_name: Some("main".to_string()),
+            variable_name: Some("bad".to_string()),
+            start_offset: 4,
+            end_offset: 9,
+            kind: FormattedErrorKind::Variable,
+            unit_error_kind: None,
+        };
+        let output = ErrorOutput::from(&fe);
+        assert_eq!(output.code, "unknown_dependency");
+        assert_eq!(output.model_name.as_deref(), Some("main"));
+        assert_eq!(output.variable_name.as_deref(), Some("bad"));
+        assert_eq!(output.kind, "variable");
+    }
+
+    /// Verifies that `ErrorOutput::from` produces the same snake_case code
+    /// strings as `ErrorCode`'s `Display` impl, which is the authoritative
+    /// source shared with pysimlin (via libsimlin's `SimlinErrorCode`).
+    ///
+    /// Both MCP and pysimlin derive their error codes from `ErrorCode`.  MCP
+    /// uses `Display` directly; pysimlin maps through `SimlinErrorCode` integer
+    /// values with matching semantics.  This test locks down the string
+    /// representation for the error codes most commonly encountered during
+    /// model editing, ensuring the MCP `code` field stays aligned.
+    #[test]
+    fn error_code_strings_align_with_pysimlin() {
+        use simlin_engine::common::ErrorCode;
+        use simlin_engine::errors::{FormattedError, FormattedErrorKind};
+
+        let cases: Vec<(ErrorCode, &str)> = vec![
+            (ErrorCode::NoError, "no_error"),
+            (ErrorCode::DoesNotExist, "does_not_exist"),
+            (ErrorCode::InvalidToken, "invalid_token"),
+            (ErrorCode::UnrecognizedEof, "unrecognized_eof"),
+            (ErrorCode::UnrecognizedToken, "unrecognized_token"),
+            (ErrorCode::ExtraToken, "extra_token"),
+            (ErrorCode::UnknownBuiltin, "unknown_builtin"),
+            (ErrorCode::BadBuiltinArgs, "bad_builtin_args"),
+            (ErrorCode::EmptyEquation, "empty_equation"),
+            (ErrorCode::NotSimulatable, "not_simulatable"),
+            (ErrorCode::CircularDependency, "circular_dependency"),
+            (ErrorCode::DuplicateVariable, "duplicate_variable"),
+            (ErrorCode::UnknownDependency, "unknown_dependency"),
+            (ErrorCode::VariablesHaveErrors, "variables_have_errors"),
+            (ErrorCode::UnitMismatch, "unit_mismatch"),
+            (ErrorCode::Generic, "generic"),
+        ];
+
+        for (code, expected_str) in &cases {
+            // Verify Display impl produces the expected snake_case string
+            assert_eq!(
+                code.to_string(),
+                *expected_str,
+                "ErrorCode::{code:?} Display mismatch"
+            );
+
+            // Verify ErrorOutput::from uses Display for the code field
+            let fe = FormattedError {
+                code: *code,
+                message: None,
+                model_name: None,
+                variable_name: None,
+                start_offset: 0,
+                end_offset: 0,
+                kind: FormattedErrorKind::Variable,
+                unit_error_kind: None,
+            };
+            let output = ErrorOutput::from(&fe);
+            assert_eq!(
+                output.code, *expected_str,
+                "ErrorOutput.code for {code:?} should match Display"
+            );
+        }
     }
 }

@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use simlin_engine::json;
 
-use super::types::{DominantPeriodOutput, LoopDominanceSummary};
+use super::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary};
 use crate::tool::TypedTool;
 
 /// Input for the `ReadModel` tool.
@@ -34,6 +34,8 @@ struct ReadModelOutput {
     time: Vec<f64>,
     loop_dominance: Vec<LoopDominanceSummary>,
     dominant_loops_by_period: Vec<DominantPeriodOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<ErrorOutput>,
 }
 
 pub fn tool() -> TypedTool<ReadModelInput> {
@@ -51,13 +53,36 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
-    let project = super::open_project(path, &contents)?;
+    let (project, _source_format) = super::open_project(path, &contents)?;
     let requested_name = input.model_name.as_deref().unwrap_or("main");
     let model_name = super::resolve_model_name(&project, requested_name);
 
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
     let source_project = sync.project;
+
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let errors: Vec<ErrorOutput> = {
+        let error_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .cloned()
+            .collect();
+        if error_diags.is_empty() {
+            vec![]
+        } else {
+            simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
+                .errors
+                .iter()
+                // Only include errors that belong to the requested model or that
+                // are not scoped to any model (e.g. project-level errors).
+                // Errors from sibling models in a multi-model project must not
+                // appear here -- they would confuse clients reading a clean model.
+                .filter(|e| e.model_name.as_ref().is_none_or(|name| name == model_name))
+                .map(ErrorOutput::from)
+                .collect()
+        }
+    };
 
     let analysis =
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name)
@@ -80,6 +105,7 @@ fn handle_read_model(input: ReadModelInput) -> anyhow::Result<serde_json::Value>
         time: analysis.time,
         loop_dominance,
         dominant_loops_by_period,
+        errors,
     };
 
     serde_json::to_value(&output).map_err(Into::into)
@@ -266,6 +292,108 @@ mod tests {
         );
     }
 
+    // ---- AC3.1: broken equations return model snapshot + non-empty errors array ----
+
+    #[test]
+    fn ac3_1_broken_equations_return_errors() {
+        let broken_json = serde_json::json!({
+            "name": "broken-errors-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{"name": "population", "initialEquation": "10", "inflows": ["births"], "outflows": []}],
+                "flows": [{"name": "births", "equation": "nonexistent_variable * population"}]
+            }]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("broken-errors.simlin.json");
+        std::fs::write(&file_path, broken_json.to_string()).unwrap();
+
+        let output =
+            call_tool(serde_json::json!({ "projectPath": file_path.to_str().unwrap() })).unwrap();
+
+        assert!(
+            output["model"].is_object(),
+            "model snapshot must be present even with errors"
+        );
+        let errors = output["errors"]
+            .as_array()
+            .expect("errors field must be present");
+        assert!(
+            !errors.is_empty(),
+            "errors array must be non-empty for broken equations"
+        );
+    }
+
+    // ---- AC3.2: each error has code, message, variableName, kind ----
+
+    #[test]
+    fn ac3_2_error_fields_present() {
+        let broken_json = serde_json::json!({
+            "name": "error-fields-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{"name": "population", "initialEquation": "10", "inflows": ["births"], "outflows": []}],
+                "flows": [{"name": "births", "equation": "nonexistent_variable * population"}]
+            }]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("error-fields.simlin.json");
+        std::fs::write(&file_path, broken_json.to_string()).unwrap();
+
+        let output =
+            call_tool(serde_json::json!({ "projectPath": file_path.to_str().unwrap() })).unwrap();
+
+        let errors = output["errors"].as_array().expect("errors must be present");
+        for err in errors {
+            assert!(
+                err["code"].is_string(),
+                "each error must have a string 'code' field"
+            );
+            assert!(
+                err["message"].is_string(),
+                "each error must have a string 'message' field"
+            );
+            assert!(
+                err["variableName"].is_string(),
+                "each error must have a string 'variableName' field"
+            );
+            assert!(
+                err["kind"].is_string(),
+                "each error must have a string 'kind' field"
+            );
+        }
+    }
+
+    // ---- AC3.3: clean model omits errors field ----
+
+    #[test]
+    fn ac3_3_clean_model_omits_errors() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic-growth.sd.json"
+        );
+        let output = call_tool(serde_json::json!({ "projectPath": path })).unwrap();
+
+        assert!(
+            output.get("errors").is_none(),
+            "clean model must omit errors field entirely (skip_serializing_if)"
+        );
+    }
+
     // ---- schema check ----
 
     #[test]
@@ -275,5 +403,237 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["projectPath"].is_object());
         assert_eq!(schema["properties"]["projectPath"]["type"], "string");
+    }
+
+    // ---- AC7.1: ReadModel reads SD-AI JSON files ----
+
+    #[test]
+    fn ac7_1_read_model_sdai_json() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let output = call_tool(serde_json::json!({ "projectPath": path })).unwrap();
+        assert!(output["model"].is_object(), "expected model object");
+
+        let stocks = output["model"]["stocks"].as_array().unwrap();
+        assert!(
+            stocks.iter().any(|s| s["name"] == "Population"),
+            "SD-AI model must contain Population stock"
+        );
+    }
+
+    // ---- AC6.4: loop names set via EditModel appear in ReadModel output ----
+
+    #[test]
+    fn ac6_4_loop_names_surface_in_read_model() {
+        let edit_tool = super::super::edit_model::tool();
+
+        // Build a logistic growth model with UIDs on variables so that
+        // SetLoopName can resolve variable names to UIDs for loop_metadata.
+        let model_json = serde_json::json!({
+            "name": "loop-name-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{
+                    "uid": 1,
+                    "name": "population",
+                    "initialEquation": "5",
+                    "inflows": ["net_birth_rate"],
+                    "outflows": []
+                }],
+                "flows": [{
+                    "uid": 2,
+                    "name": "net_birth_rate",
+                    "equation": "fractional_growth_rate * population"
+                }],
+                "auxiliaries": [
+                    { "uid": 3, "name": "maximum_growth_rate", "equation": ".12" },
+                    { "uid": 4, "name": "carrying_capacity", "equation": "1000" },
+                    {
+                        "uid": 5,
+                        "name": "fractional_growth_rate",
+                        "equation": "maximum_growth_rate * (1 - fraction_of_carrying_capacity_used)"
+                    },
+                    {
+                        "uid": 6,
+                        "name": "fraction_of_carrying_capacity_used",
+                        "equation": "population/carrying_capacity"
+                    }
+                ]
+            }]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("loop-name.simlin.json");
+        std::fs::write(
+            &file_path,
+            serde_json::to_string_pretty(&model_json).unwrap(),
+        )
+        .unwrap();
+        let path_str = file_path.to_str().unwrap();
+
+        // Step 1: ReadModel to discover loops and their variables.
+        let initial_output = call_tool(serde_json::json!({ "projectPath": path_str })).unwrap();
+        let loops = initial_output["loopDominance"]
+            .as_array()
+            .expect("loopDominance must be present");
+        assert!(
+            !loops.is_empty(),
+            "logistic growth model must produce at least one feedback loop"
+        );
+
+        // Pick the first discovered loop and note its variables.
+        let first_loop = &loops[0];
+        let loop_vars: Vec<String> = first_loop["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            first_loop["name"].is_null(),
+            "loop should not have a name before SetLoopName"
+        );
+
+        // Step 2: EditModel with SetLoopName to name the loop.
+        // The variables list in LoopSummary includes duplicates (first var
+        // repeated at end to close the cycle), so deduplicate for the
+        // SetLoopName call which just needs the participating variables.
+        let unique_vars: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            loop_vars
+                .into_iter()
+                .filter(|v| seen.insert(v.clone()))
+                .collect()
+        };
+        let loop_name = "Growth Feedback";
+        let edit_result = edit_tool.call(serde_json::json!({
+            "projectPath": path_str,
+            "operations": [{
+                "setLoopName": {
+                    "variables": unique_vars,
+                    "name": loop_name,
+                    "description": "reinforcing growth loop"
+                }
+            }]
+        }));
+        assert!(
+            edit_result.is_ok(),
+            "EditModel SetLoopName must succeed: {:?}",
+            edit_result.err()
+        );
+
+        // Step 3: ReadModel the same file and verify the loop name surfaces.
+        let final_output = call_tool(serde_json::json!({ "projectPath": path_str })).unwrap();
+        let final_loops = final_output["loopDominance"]
+            .as_array()
+            .expect("loopDominance must be present after naming");
+
+        let named_loop = final_loops
+            .iter()
+            .find(|l| l["name"].as_str() == Some(loop_name));
+        assert!(
+            named_loop.is_some(),
+            "ReadModel output must contain a loop named '{}' after SetLoopName; \
+             found loops: {:?}",
+            loop_name,
+            final_loops
+                .iter()
+                .map(|l| format!(
+                    "id={}, name={:?}, vars={:?}",
+                    l["loopId"], l["name"], l["variables"]
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ---- AC7.4: unrecognized JSON returns descriptive error ----
+
+    #[test]
+    fn ac7_4_unrecognized_json_returns_descriptive_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("bad.sd.json");
+        std::fs::write(&file_path, r#"{"unrelated": true}"#).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": file_path.to_str().unwrap()
+        }));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("models") && err_msg.contains("variables"),
+            "error must mention expected formats: {err_msg}"
+        );
+    }
+
+    // ---- Issue 2: errors are scoped to the requested model ----
+
+    // A multi-model project where one model has errors and the other is clean.
+    // ReadModel on the clean model must return an empty errors array, not errors
+    // from the broken sibling.
+    #[test]
+    fn read_model_errors_scoped_to_requested_model() {
+        // Project with two models: "clean_model" has no errors, "broken_model"
+        // references a nonexistent variable.  ReadModel on "clean_model" must
+        // not surface "broken_model"'s errors.
+        let project_json = serde_json::json!({
+            "name": "multi-model-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [
+                {
+                    "name": "clean_model",
+                    "auxiliaries": [
+                        {"uid": 1, "name": "clean_var", "equation": "42"}
+                    ]
+                },
+                {
+                    "name": "broken_model",
+                    "auxiliaries": [
+                        {"uid": 2, "name": "broken_var", "equation": "nonexistent_dep + 1"}
+                    ]
+                }
+            ]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("multi.simlin.json");
+        std::fs::write(
+            &file_path,
+            serde_json::to_string_pretty(&project_json).unwrap(),
+        )
+        .unwrap();
+
+        let output = call_tool(serde_json::json!({
+            "projectPath": file_path.to_str().unwrap(),
+            "modelName": "clean_model"
+        }))
+        .unwrap();
+
+        // The errors field must be absent or empty: the clean model has no errors.
+        // If errors from broken_model bleed through, this assertion would fail.
+        let errors = output.get("errors");
+        assert!(
+            errors.is_none()
+                || errors
+                    .and_then(|e| e.as_array())
+                    .is_some_and(|a| a.is_empty()),
+            "ReadModel on clean_model must not surface errors from broken_model; \
+             got errors: {:?}",
+            errors
+        );
     }
 }

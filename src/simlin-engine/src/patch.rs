@@ -61,6 +61,11 @@ pub enum ModelOperation {
         inflows: Vec<String>,
         outflows: Vec<String>,
     },
+    SetLoopName {
+        variables: Vec<String>,
+        name: String,
+        description: Option<String>,
+    },
 }
 
 /// Returns true when the patch only touches views (UpsertView/DeleteView)
@@ -140,6 +145,13 @@ pub fn apply_patch(project: &mut datamodel::Project, patch: ProjectPatch) -> Res
                         } => {
                             apply_update_stock_flows(model, &ident, &inflows, &outflows)?;
                         }
+                        ModelOperation::SetLoopName {
+                            variables,
+                            name,
+                            description,
+                        } => {
+                            apply_set_loop_name(model, variables, name, description)?;
+                        }
                         ModelOperation::RenameVariable { .. } => unreachable!(),
                     }
                 }
@@ -207,6 +219,29 @@ fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
         }
         *existing = variable;
     } else {
+        // New variables created via patch (e.g., from MCP EditModel) may arrive
+        // without a UID. Assign one so that SetLoopName can later reference them
+        // by UID. We consider both variable UIDs and view element UIDs to avoid
+        // collisions when variables lack UIDs but views already have them.
+        if get_uid(&variable).is_none() {
+            let max_var_uid = model
+                .variables
+                .iter()
+                .filter_map(get_uid)
+                .max()
+                .unwrap_or(0);
+            let max_view_uid = model
+                .views
+                .iter()
+                .flat_map(|v| match v {
+                    datamodel::View::StockFlow(sf) => sf.elements.iter(),
+                })
+                .map(|e| e.get_uid())
+                .max()
+                .unwrap_or(0);
+            let max_uid = max_var_uid.max(max_view_uid);
+            set_uid(&mut variable, Some(max_uid + 1));
+        }
         model.variables.push(variable);
     }
 }
@@ -284,6 +319,60 @@ fn apply_update_stock_flows(
     stock.inflows.sort_unstable();
     stock.outflows.sort_unstable();
 
+    Ok(())
+}
+
+fn apply_set_loop_name(
+    model: &mut datamodel::Model,
+    variables: Vec<String>,
+    name: String,
+    description: Option<String>,
+) -> Result<()> {
+    // ReadModel returns loops with the first variable repeated at the end to
+    // close the cycle (e.g., ["a", "b", "a"]). Deduplicate before resolving
+    // UIDs so that a client passing the ReadModel output directly doesn't
+    // produce duplicate entries in the sorted UID list.
+    let mut seen = std::collections::HashSet::new();
+    let unique_vars: Vec<&String> = variables
+        .iter()
+        .filter(|v| seen.insert(v.as_str()))
+        .collect();
+
+    let mut uids: Vec<i32> = Vec::with_capacity(unique_vars.len());
+    for var_name in &unique_vars {
+        let var = model.get_variable(var_name).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Model,
+                ErrorCode::DoesNotExist,
+                Some(format!("variable '{}' not found", var_name)),
+            )
+        })?;
+        let uid = get_uid(var).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Model,
+                ErrorCode::DoesNotExist,
+                Some(format!("variable '{}' has no UID", var_name)),
+            )
+        })?;
+        uids.push(uid);
+    }
+    uids.sort();
+
+    if let Some(existing) = model.loop_metadata.iter_mut().find(|lm| {
+        let mut existing_uids = lm.uids.clone();
+        existing_uids.sort();
+        existing_uids == uids
+    }) {
+        existing.name = name;
+        existing.description = description.unwrap_or_default();
+    } else {
+        model.loop_metadata.push(datamodel::LoopMetadata {
+            uids,
+            deleted: false,
+            name,
+            description: description.unwrap_or_default(),
+        });
+    }
     Ok(())
 }
 
@@ -2774,7 +2863,10 @@ mod tests {
     }
 
     #[test]
-    fn upsert_new_variable_keeps_uid_none() {
+    fn upsert_new_variable_gets_uid_assigned() {
+        // New variables that arrive without a UID must have one assigned so that
+        // SetLoopName can reference them later. With no existing variables, the
+        // first assigned UID should be 1 (0 + 1).
         let mut project = TestProject::new("test").build_datamodel();
 
         let stock = datamodel::Stock {
@@ -2800,10 +2892,183 @@ mod tests {
         let model = project.get_model("main").unwrap();
         match model.get_variable("brand_new").unwrap() {
             Variable::Stock(stock) => {
-                assert_eq!(stock.uid, None);
+                assert!(stock.uid.is_some(), "new variable must receive a UID");
+                assert_eq!(stock.uid, Some(1));
             }
             _ => panic!("expected stock"),
         }
+    }
+
+    #[test]
+    fn upsert_new_variable_uid_increments_past_existing_max() {
+        // When the model already has variables with UIDs, the new UID must be
+        // max_existing_uid + 1 to avoid collisions.
+        let mut project = TestProject::new("test")
+            .aux("existing", "1", None)
+            .build_datamodel();
+
+        // Give the existing variable a high UID (99) so we can verify the next
+        // inserted variable gets uid = 100.
+        assign_uids(&mut project, "main", &[("existing", 99)]);
+
+        let aux = datamodel::Aux {
+            ident: "new_aux".to_string(),
+            equation: Equation::Scalar("42".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        };
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::UpsertAux(aux)],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+        match model.get_variable("new_aux").unwrap() {
+            Variable::Aux(a) => {
+                assert_eq!(a.uid, Some(100), "new UID should be max+1 = 100");
+            }
+            _ => panic!("expected aux"),
+        }
+    }
+
+    #[test]
+    fn set_loop_name_with_duplicate_variable_names_deduplicates() {
+        // ReadModel returns loops with the first variable repeated at the end
+        // (e.g., ["population", "births", "population"]). When the client passes
+        // that list directly to SetLoopName, the duplicate must be stripped.
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .aux("y", "x", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 1), ("y", 2)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "y".to_string(), "x".to_string()],
+                    name: "loop".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+        assert_eq!(model.loop_metadata.len(), 1);
+        let lm = &model.loop_metadata[0];
+        // UIDs should be [1, 2] (sorted), not [1, 1, 2]
+        assert_eq!(lm.uids, vec![1, 2]);
+    }
+
+    #[test]
+    fn set_loop_name_duplicate_and_non_duplicate_match_same_entry() {
+        // ["x", "y", "x"] (with duplicate) and ["x", "y"] (without) must resolve
+        // to the same LoopMetadata entry so that re-calling SetLoopName updates
+        // rather than creates a second entry.
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .aux("y", "x", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 1), ("y", 2)]);
+
+        // First call with closing duplicate
+        let patch1 = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "y".to_string(), "x".to_string()],
+                    name: "first name".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch1).unwrap();
+
+        // Second call without duplicate
+        let patch2 = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "y".to_string()],
+                    name: "second name".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch2).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(
+            model.loop_metadata.len(),
+            1,
+            "should update the same entry, not create a second one"
+        );
+        assert_eq!(model.loop_metadata[0].name, "second name");
+    }
+
+    #[test]
+    fn set_loop_name_on_uid_assigned_variable_works() {
+        // Variables added via upsert without explicit UIDs now get UIDs assigned.
+        // SetLoopName must be able to reference them.
+        let mut project = TestProject::new("test").build_datamodel();
+
+        // Add two variables without UIDs; upsert_variable should assign them.
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![
+                    ModelOperation::UpsertAux(datamodel::Aux {
+                        ident: "population".to_string(),
+                        equation: Equation::Scalar("births".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    ModelOperation::UpsertAux(datamodel::Aux {
+                        ident: "births".to_string(),
+                        equation: Equation::Scalar("population * 0.03".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    ModelOperation::SetLoopName {
+                        variables: vec!["population".to_string(), "births".to_string()],
+                        name: "growth loop".to_string(),
+                        description: None,
+                    },
+                ],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+        assert_eq!(
+            model.loop_metadata.len(),
+            1,
+            "SetLoopName should succeed on patch-added variables"
+        );
+        let lm = &model.loop_metadata[0];
+        assert_eq!(lm.name, "growth loop");
+        assert_eq!(lm.uids.len(), 2, "loop should reference both variable UIDs");
     }
 
     #[test]
@@ -2873,5 +3138,111 @@ mod tests {
             models: vec![],
         };
         assert!(!is_view_only_patch(&project_op_patch));
+    }
+
+    /// Helper to set UIDs on variables in a built datamodel, since TestProject
+    /// doesn't assign them.
+    fn assign_uids(project: &mut datamodel::Project, model_name: &str, uids: &[(&str, i32)]) {
+        let model = project.get_model_mut(model_name).unwrap();
+        for (ident, uid) in uids {
+            let var = model.get_variable_mut(ident).unwrap();
+            set_uid(var, Some(*uid));
+        }
+    }
+
+    #[test]
+    fn set_loop_name_creates_loop_metadata() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .aux("y", "x", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 10), ("y", 20)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "y".to_string()],
+                    name: "reinforcing loop".to_string(),
+                    description: Some("test loop".to_string()),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+        let model = project.get_model("main").unwrap();
+        assert_eq!(model.loop_metadata.len(), 1);
+        let lm = &model.loop_metadata[0];
+        assert_eq!(lm.uids, vec![10, 20]);
+        assert_eq!(lm.name, "reinforcing loop");
+        assert_eq!(lm.description, "test loop");
+        assert!(!lm.deleted);
+    }
+
+    #[test]
+    fn set_loop_name_updates_existing_loop() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .aux("y", "x", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 10), ("y", 20)]);
+
+        // First SetLoopName creates the entry
+        let patch1 = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "y".to_string()],
+                    name: "old name".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch1).unwrap();
+
+        // Second SetLoopName with same variables (different order) updates
+        let patch2 = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["y".to_string(), "x".to_string()],
+                    name: "new name".to_string(),
+                    description: Some("updated".to_string()),
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch2).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(model.loop_metadata.len(), 1, "should update, not duplicate");
+        let lm = &model.loop_metadata[0];
+        assert_eq!(lm.name, "new name");
+        assert_eq!(lm.description, "updated");
+    }
+
+    #[test]
+    fn set_loop_name_unknown_variable_returns_error() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 10)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "nonexistent".to_string()],
+                    name: "loop".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+
+        let err = apply_patch(&mut project, patch).unwrap_err();
+        assert_eq!(err.code, ErrorCode::DoesNotExist);
     }
 }

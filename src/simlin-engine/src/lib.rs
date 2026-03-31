@@ -30,7 +30,9 @@ pub mod datamodel;
 pub mod db;
 pub mod diagram;
 mod dimensions;
+pub mod errors;
 pub mod float;
+pub mod io;
 pub mod json;
 #[cfg(test)]
 mod json_proptest;

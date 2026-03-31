@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use simlin_engine::json as ejson;
 
-use super::types::{DominantPeriodOutput, LoopDominanceSummary};
+use super::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary};
 use crate::tool::TypedTool;
 
 // ── Curated input types ───────────────────────────────────────────────────────
@@ -126,6 +126,19 @@ pub struct RemoveVariableInput {
     pub name: String,
 }
 
+/// Assign a human-readable name to a feedback loop identified by its
+/// participating variables.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLoopNameInput {
+    /// Variable names that form the loop (order does not matter).
+    pub variables: Vec<String>,
+    /// Human-readable name for the loop.
+    pub name: String,
+    /// Optional description of the loop's behavior.
+    pub description: Option<String>,
+}
+
 /// An edit operation on a model.
 ///
 /// Serde's default externally-tagged representation produces JSON like:
@@ -137,6 +150,7 @@ pub enum EditOperation {
     UpsertFlow(UpsertFlowInput),
     UpsertAuxiliary(UpsertAuxiliaryInput),
     RemoveVariable(RemoveVariableInput),
+    SetLoopName(SetLoopNameInput),
 }
 
 /// Input for the `EditModel` tool.
@@ -167,9 +181,8 @@ pub struct EditModelInput {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EditModelOutput {
-    /// Path where the model was written (or the input path on dry-run).
-    /// For non-JSON source files (.stmx, .xmile, .mdl) this will differ from
-    /// the input path, pointing to the generated `.simlin.json` file instead.
+    /// Path where the model was written -- always the same as the input path,
+    /// regardless of source format.
     project_path: String,
     model: ejson::Model,
     time: Vec<f64>,
@@ -212,12 +225,37 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
-    let mut project = super::open_project(path, &contents)?;
+    let (mut project, source_format) = super::open_project(path, &contents)?;
     let requested_name = input.model_name.as_deref().unwrap_or("main");
     let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);
 
-    let has_variable_ops = input.operations.as_ref().is_some_and(|ops| !ops.is_empty());
+    // SetLoopName only writes loop metadata -- it doesn't add, remove, or
+    // rename any variables, so it must not trigger diagram regeneration.
+    let has_variable_ops = input.operations.as_ref().is_some_and(|ops| {
+        ops.iter()
+            .any(|op| !matches!(op, EditOperation::SetLoopName(_)))
+    });
+
+    // Count pre-edit error-severity diagnostics for the target model only, so
+    // we can detect regressions without being confused by errors in sibling
+    // models.  This allows incremental repair: an edit that fixes errors (or
+    // doesn't change the error count for the target model) is accepted; one
+    // that introduces new errors in the target model is not.
+    let pre_edit_error_count = {
+        let pre_db = simlin_engine::db::SimlinDb::default();
+        let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
+        let error_diags: Vec<_> = simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync)
+            .into_iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .collect();
+        simlin_engine::errors::collect_formatted_errors(&error_diags, &project)
+            .errors
+            .iter()
+            .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
+            .count()
+    };
+
     let patch = build_patch(&model_name, input.sim_specs, input.operations);
     let model_patch = patch.models.iter().find(|m| m.name == model_name).cloned();
     simlin_engine::apply_patch(&mut project, patch)
@@ -227,30 +265,69 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         sync_diagram(&mut project, &model_name, model_patch.as_ref());
     }
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let write_path = if matches!(ext.as_str(), "stmx" | "xmile" | "xml" | "mdl") {
-        path.with_extension("simlin.json")
-    } else {
-        path.to_path_buf()
-    };
-
+    // Create one SimlinDb and sync, reused for both the diagnostic gate
+    // and the subsequent analysis call.
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
-    let source_project = sync.project;
 
+    // Reject the edit only if it increased the error count for the target model.
+    // Errors in sibling models must not affect whether this edit is accepted.
+    // Edits that reduce or preserve the existing error count are accepted so
+    // models with pre-existing errors can be repaired incrementally.
+    let all_diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let post_error_diags: Vec<_> = all_diagnostics
+        .iter()
+        .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+        .cloned()
+        .collect();
+    let post_formatted =
+        simlin_engine::errors::collect_formatted_errors(&post_error_diags, &project);
+    let post_edit_model_errors: Vec<_> = post_formatted
+        .errors
+        .iter()
+        .filter(|e| e.model_name.as_ref().is_none_or(|name| name == &model_name))
+        .collect();
+
+    if post_edit_model_errors.len() > pre_edit_error_count {
+        let error_outputs: Vec<ErrorOutput> = post_edit_model_errors
+            .iter()
+            .map(|e| ErrorOutput::from(*e))
+            .collect();
+        let error_json = serde_json::json!({
+            "error": "edit introduces compilation errors",
+            "errors": error_outputs,
+        });
+        anyhow::bail!("{}", serde_json::to_string(&error_json)?);
+    }
+
+    let source_project = sync.project;
     let analysis =
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, &model_name)
             .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
     if !dry_run {
-        let json_project = ejson::Project::from(project);
-        let json_str = serde_json::to_string_pretty(&json_project)?;
-        std::fs::write(&write_path, &json_str)
-            .with_context(|| format!("failed to write model to {}", write_path.display()))?;
+        let serialized = match source_format {
+            super::SourceFormat::Xmile => simlin_engine::to_xmile(&project)
+                .context("failed to serialize XMILE")?
+                .into_bytes(),
+            super::SourceFormat::NativeJson => {
+                let json_project = ejson::Project::from(project.clone());
+                serde_json::to_string_pretty(&json_project)?.into_bytes()
+            }
+            super::SourceFormat::SdaiJson => {
+                let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(project.clone());
+                // The relationships field is not captured in datamodel::Project,
+                // so re-parse the original content to retrieve it and avoid
+                // silently dropping it on write-back.
+                if let Ok(original) =
+                    serde_json::from_str::<simlin_engine::json_sdai::SdaiModel>(&contents)
+                {
+                    sdai_model.relationships = original.relationships;
+                }
+                serde_json::to_string_pretty(&sdai_model)?.into_bytes()
+            }
+        };
+        simlin_engine::io::atomic_write(path, &serialized).context("failed to write model file")?;
     }
 
     let loop_dominance: Vec<LoopDominanceSummary> = analysis
@@ -266,7 +343,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         .collect();
 
     let output = EditModelOutput {
-        project_path: write_path.display().to_string(),
+        project_path: path.display().to_string(),
         model: analysis.model,
         time: analysis.time,
         loop_dominance,
@@ -442,6 +519,11 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
         EditOperation::RemoveVariable(r) => {
             simlin_engine::ModelOperation::DeleteVariable { ident: r.name }
         }
+        EditOperation::SetLoopName(input) => simlin_engine::ModelOperation::SetLoopName {
+            variables: input.variables,
+            name: input.name,
+            description: input.description,
+        },
     }
 }
 
@@ -544,11 +626,49 @@ mod tests {
             "upsertFlow",
             "upsertAuxiliary",
             "removeVariable",
+            "setLoopName",
         ] {
             assert!(
                 schema_str.contains(variant),
                 "schema should contain {variant}"
             );
+        }
+    }
+
+    #[test]
+    fn schema_set_loop_name_has_expected_fields() {
+        let t = tool();
+        let schema = t.input_schema();
+        let schema_str = serde_json::to_string(&schema).unwrap();
+
+        // SetLoopNameInput must expose variables, name, and description
+        for field in ["variables", "\"name\"", "description"] {
+            assert!(
+                schema_str.contains(field),
+                "SetLoopName schema should contain field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_set_loop_name_operation() {
+        let op = EditOperation::SetLoopName(SetLoopNameInput {
+            variables: vec!["population".into(), "births".into()],
+            name: "Growth Loop".into(),
+            description: Some("reinforcing growth".into()),
+        });
+        let model_op = convert_operation(op);
+        match model_op {
+            simlin_engine::ModelOperation::SetLoopName {
+                variables,
+                name,
+                description,
+            } => {
+                assert_eq!(variables, vec!["population", "births"]);
+                assert_eq!(name, "Growth Loop");
+                assert_eq!(description.as_deref(), Some("reinforcing growth"));
+            }
+            _ => panic!("expected SetLoopName variant"),
         }
     }
 
@@ -570,18 +690,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
+        // Define the flows referenced by the stock so the model compiles.
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertStock": {
-                    "name": "population",
-                    "initialEquation": "1000",
-                    "units": "people",
-                    "documentation": "Total population",
-                    "inflows": ["births"],
-                    "outflows": ["deaths"]
+            "operations": [
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.03"
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "deaths",
+                        "equation": "population * 0.01"
+                    }
+                },
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "1000",
+                        "units": "people",
+                        "documentation": "Total population",
+                        "inflows": ["births"],
+                        "outflows": ["deaths"]
+                    }
                 }
-            }]
+            ]
         }))
         .unwrap();
 
@@ -602,9 +737,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
+        // Define the stock that flows reference so the model compiles.
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
             "operations": [
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "1000",
+                        "inflows": ["births"]
+                    }
+                },
                 {
                     "upsertFlow": {
                         "name": "births",
@@ -773,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn project_path_in_output_redirects_for_stmx_file() {
+    fn project_path_in_output_equals_input_for_stmx_file() {
         let stmx_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
@@ -789,15 +932,10 @@ mod tests {
         }))
         .unwrap();
 
-        let expected_json_path = dir.path().join("logistic_growth.simlin.json");
         assert_eq!(
             result["projectPath"],
-            expected_json_path.to_str().unwrap(),
-            "editing a .stmx file must report the .simlin.json write path"
-        );
-        assert!(
-            expected_json_path.exists(),
-            ".simlin.json must be written to disk"
+            dest.to_str().unwrap(),
+            "editing a .stmx file must report the original .stmx path, not a sidecar"
         );
     }
 
@@ -815,15 +953,9 @@ mod tests {
         }))
         .unwrap();
 
-        let expected_json_path = std::path::Path::new(stmx_path).with_extension("simlin.json");
         assert_eq!(
-            result["projectPath"],
-            expected_json_path.to_str().unwrap(),
-            "dry-run on a .stmx file must still report the .simlin.json path"
-        );
-        assert!(
-            !expected_json_path.exists(),
-            ".simlin.json must NOT be written to disk on dry-run"
+            result["projectPath"], stmx_path,
+            "dry-run on a .stmx file must report the original .stmx path"
         );
     }
 
@@ -867,31 +999,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
 
-        // Create a stock with inflows, outflows, units, and documentation.
+        // Create a stock with inflows, outflows, units, documentation, and
+        // the flows it references so the model compiles.
         call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertStock": {
-                    "name": "population",
-                    "initialEquation": "1000",
-                    "units": "people",
-                    "documentation": "pop count",
-                    "inflows": ["births"],
-                    "outflows": ["deaths"]
+            "operations": [
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.03"
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "deaths",
+                        "equation": "population * 0.01"
+                    }
+                },
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "1000",
+                        "units": "people",
+                        "documentation": "pop count",
+                        "inflows": ["births"],
+                        "outflows": ["deaths"]
+                    }
                 }
-            }]
+            ]
         }))
         .unwrap();
 
-        // Upsert with only name and initialEquation -- all other fields must be cleared.
+        // Upsert with only name and initialEquation -- all other fields must
+        // be cleared. We must also remove the flows so the model compiles
+        // (stock no longer has inflows/outflows and the orphan flows would
+        // reference the stock).
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
-            "operations": [{
-                "upsertStock": {
-                    "name": "population",
-                    "initialEquation": "2000"
+            "operations": [
+                { "removeVariable": { "name": "births" } },
+                { "removeVariable": { "name": "deaths" } },
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "2000"
+                    }
                 }
-            }]
+            ]
         }))
         .unwrap();
 
@@ -1062,6 +1216,77 @@ mod tests {
         assert!(
             elements.iter().any(|e| e["name"] == "hand_placed"),
             "hand-placed elements must be preserved for simSpecs-only edits"
+        );
+    }
+
+    #[test]
+    fn set_loop_name_does_not_regenerate_diagram() {
+        let dir = tempfile::tempdir().unwrap();
+        // Variables need UIDs so SetLoopName can resolve them. Native JSON
+        // format uses stocks/flows/auxiliaries keys with explicit uid fields.
+        let project_with_views = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{
+                    "uid": 1,
+                    "name": "population",
+                    "initialEquation": "100",
+                    "inflows": ["births"],
+                    "outflows": []
+                }],
+                "flows": [{
+                    "uid": 2,
+                    "name": "births",
+                    "equation": "population * 0.1"
+                }],
+                "views": [{
+                    "kind": "stock_flow",
+                    "elements": [
+                        {"uid": 1, "type": "stock", "name": "population", "x": 999.0, "y": 888.0, "labelSide": "bottom"},
+                        {"uid": 2, "type": "flow", "name": "births", "x": 700.0, "y": 888.0, "labelSide": "bottom",
+                         "points": [{"x": 600.0, "y": 888.0}, {"x": 999.0, "y": 888.0}]}
+                    ]
+                }]
+            }]
+        });
+        let path = write_model(dir.path(), "model.simlin.json", &project_with_views);
+
+        // A SetLoopName-only edit must not modify the diagram.
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "setLoopName": {
+                    "variables": ["population", "births"],
+                    "name": "Growth Loop",
+                    "description": "reinforcing growth"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let elements = saved["models"][0]["views"][0]["elements"]
+            .as_array()
+            .expect("views must still be present");
+        // The hand-placed positions must be unchanged -- diagram was not regenerated.
+        let stock = elements
+            .iter()
+            .find(|e| e["name"] == "population")
+            .expect("population element must still exist");
+        assert_eq!(
+            stock["x"].as_f64().unwrap(),
+            999.0,
+            "SetLoopName must not move hand-placed elements"
         );
     }
 
@@ -1278,6 +1503,757 @@ mod tests {
         assert!(
             auxes.iter().any(|a| a["name"] == "extra_aux"),
             "upserted auxiliary must appear in the response model"
+        );
+    }
+
+    // ---- AC7.3: format preservation on write-back ----
+
+    #[test]
+    fn ac7_3_sdai_json_format_preserved_after_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let dest = dir.path().join("model.sd.json");
+        std::fs::copy(fixture, &dest).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_aux", "equation": "42" }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(
+            saved.get("variables").is_some(),
+            "SD-AI file must retain top-level 'variables' key after edit, got: {}",
+            serde_json::to_string_pretty(&saved).unwrap()
+        );
+        assert!(
+            saved.get("models").is_none(),
+            "SD-AI file must not gain a 'models' key after edit"
+        );
+    }
+
+    #[test]
+    fn ac7_3_native_json_format_preserved_after_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_aux", "equation": "42" }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            saved.get("models").is_some(),
+            "native JSON must retain top-level 'models' key after edit"
+        );
+        assert!(
+            saved.get("variables").is_none(),
+            "native JSON must not gain a 'variables' key after edit"
+        );
+    }
+
+    // ---- end-to-end SD-AI roundtrip: edit adds variable and file stays SD-AI ----
+
+    #[test]
+    fn e2e_sdai_edit_roundtrip_adds_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let dest = dir.path().join("model.sd.json");
+        std::fs::copy(fixture, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "growth_factor", "equation": "0.1" }
+            }]
+        }))
+        .unwrap();
+
+        // The response model should contain the new variable.
+        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "growth_factor"),
+            "new variable must appear in response: {auxes:?}"
+        );
+
+        // The file on disk must remain SD-AI format with the new variable.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(saved.get("variables").is_some(), "must stay SD-AI format");
+
+        let vars = saved["variables"].as_array().unwrap();
+        assert!(
+            vars.iter().any(|v| v["name"] == "growth_factor"),
+            "new variable must be in saved file: {vars:?}"
+        );
+    }
+
+    // ---- end-to-end native JSON roundtrip: edit adds variable and file stays native ----
+
+    #[test]
+    fn e2e_native_json_edit_roundtrip_adds_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "decay_rate", "equation": "0.02" }
+            }]
+        }))
+        .unwrap();
+
+        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "decay_rate"),
+            "new variable must appear in response"
+        );
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            saved.get("models").is_some(),
+            "must stay native JSON format"
+        );
+
+        let model_auxes = &saved["models"][0]["auxiliaries"];
+        assert!(
+            model_auxes.is_array(),
+            "models[0].auxiliaries must be present"
+        );
+        assert!(
+            model_auxes
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["name"] == "decay_rate"),
+            "new variable must be in saved file"
+        );
+    }
+
+    // ---- AC2.1: XMILE write-back ----
+
+    #[test]
+    fn ac2_1_stmx_edit_writes_back_to_original_file() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let original_contents = std::fs::read_to_string(&dest).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "test_aux", "equation": "42" }
+            }]
+        }))
+        .unwrap();
+
+        let updated_contents = std::fs::read_to_string(&dest).unwrap();
+        assert_ne!(
+            original_contents, updated_contents,
+            "the .stmx file must be modified by the edit"
+        );
+        assert!(
+            updated_contents.contains("test_aux"),
+            "the .stmx file must contain the new variable"
+        );
+    }
+
+    // ---- AC2.3: output projectPath equals input path for all formats ----
+
+    #[test]
+    fn ac2_3_project_path_equals_input_for_stmx() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(
+            result["projectPath"],
+            dest.to_str().unwrap(),
+            "projectPath must equal the input .stmx path"
+        );
+    }
+
+    #[test]
+    fn ac2_3_project_path_equals_input_for_native_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(result["projectPath"], path.to_str().unwrap());
+    }
+
+    #[test]
+    fn ac2_3_project_path_equals_input_for_sdai_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let dest = dir.path().join("model.sd.json");
+        std::fs::copy(fixture, &dest).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": []
+        }))
+        .unwrap();
+
+        assert_eq!(result["projectPath"], dest.to_str().unwrap());
+    }
+
+    // ---- AC2.5: no .simlin.json sidecar created for XMILE edits ----
+
+    #[test]
+    fn ac2_5_no_sidecar_created_for_stmx_edit() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "aux_var", "equation": "1" }
+            }]
+        }))
+        .unwrap();
+
+        let sidecar = dir.path().join("logistic_growth.simlin.json");
+        assert!(
+            !sidecar.exists(),
+            "no .simlin.json sidecar must be created when editing a .stmx file"
+        );
+    }
+
+    // ---- AC3.4: EditModel rejects edit that introduces compilation errors ----
+
+    #[test]
+    fn ac3_4_edit_with_compilation_error_returns_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "bad_var",
+                    "equation": "nonexistent_dependency + 1"
+                }
+            }]
+        }));
+
+        assert!(
+            result.is_err(),
+            "EditModel must reject an edit that introduces compilation errors"
+        );
+    }
+
+    // ---- AC3.5: structured error response includes error details ----
+
+    #[test]
+    fn ac3_5_structured_error_includes_error_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "bad_var",
+                    "equation": "nonexistent_dep + 1"
+                }
+            }]
+        }));
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        // The error message is a JSON string with structured content
+        let err_json: serde_json::Value = serde_json::from_str(&err_msg).unwrap();
+        assert!(
+            err_json.get("errors").is_some(),
+            "error response must contain 'errors' array: {err_msg}"
+        );
+        let errors = err_json["errors"].as_array().unwrap();
+        assert!(!errors.is_empty(), "errors array must not be empty");
+        // Each error must have code, message, variableName, kind fields
+        let first = &errors[0];
+        assert!(
+            first.get("code").is_some(),
+            "error must have 'code' field: {first}"
+        );
+        assert!(
+            first.get("message").is_some(),
+            "error must have 'message' field: {first}"
+        );
+        assert!(
+            first.get("kind").is_some(),
+            "error must have 'kind' field: {first}"
+        );
+    }
+
+    // ---- AC3.6: file not modified when edit introduces errors ----
+
+    #[test]
+    fn ac3_6_file_not_modified_when_edit_has_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "broken_var",
+                    "equation": "does_not_exist * 2"
+                }
+            }]
+        }));
+
+        assert!(result.is_err());
+
+        let after_contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "file must not be modified when edit introduces compilation errors"
+        );
+    }
+
+    // ---- AC2.2: XMILE roundtrip -- edit then read back ----
+
+    #[test]
+    fn ac2_2_xmile_roundtrip_edit_then_read() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        // Edit: add an auxiliary variable
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "roundtrip_var", "equation": "123" }
+            }]
+        }))
+        .unwrap();
+
+        // Read back with ReadModel on the same .stmx file
+        let read_tool = super::super::read_model::tool();
+        let read_result = read_tool
+            .call(serde_json::json!({
+                "projectPath": dest.to_str().unwrap()
+            }))
+            .unwrap();
+
+        // The newly added variable must appear in the ReadModel output
+        let auxes = read_result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "roundtrip_var"),
+            "variable added by EditModel must be visible via ReadModel on the same .stmx file; \
+             auxiliaries: {auxes:?}"
+        );
+    }
+
+    // ---- AC2.4: XMILE dry-run does not modify file ----
+
+    #[test]
+    fn ac2_4_xmile_dry_run_does_not_modify_file() {
+        let stmx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("logistic_growth.stmx");
+        std::fs::copy(stmx_path, &dest).unwrap();
+
+        let original_contents = std::fs::read(&dest).unwrap();
+
+        // Dry-run edit: add a variable
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "dryRun": true,
+            "operations": [{
+                "upsertAuxiliary": { "name": "dry_run_var", "equation": "99" }
+            }]
+        }))
+        .unwrap();
+
+        // The response should still show the variable in the model snapshot
+        let auxes = result["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "dry_run_var"),
+            "dry-run response must include the new variable"
+        );
+        assert_eq!(result["dryRun"], true);
+
+        // The file on disk must be byte-for-byte unchanged
+        let after_contents = std::fs::read(&dest).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "dry-run must not modify the .stmx file on disk"
+        );
+    }
+
+    // ---- Issue 1: error gate allows incremental repair of broken models ----
+
+    #[test]
+    fn error_gate_allows_edit_on_already_broken_model() {
+        // A model that already has a compilation error (broken_dep does not
+        // exist) should still accept a new, unrelated valid auxiliary. Pre-
+        // existing errors must not block further edits.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        // Introduce a broken variable by writing it directly to the file,
+        // bypassing EditModel's gate.
+        let broken = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "variables": [
+                    {
+                        "type": "aux",
+                        "name": "broken",
+                        "equation": "nonexistent_variable + 1"
+                    }
+                ]
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+
+        // Now add a valid unrelated variable -- should succeed despite the
+        // pre-existing error on "broken".
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "unrelated_valid", "equation": "42" }
+            }]
+        }));
+
+        assert!(
+            result.is_ok(),
+            "edit on a model with pre-existing errors must succeed when it does not \
+             introduce new errors, got: {:?}",
+            result
+        );
+        let value = result.unwrap();
+        let auxes = value["model"]["auxiliaries"].as_array().unwrap();
+        assert!(
+            auxes.iter().any(|a| a["name"] == "unrelated_valid"),
+            "the new valid auxiliary must appear in the response"
+        );
+    }
+
+    #[test]
+    fn error_gate_rejects_edit_that_adds_new_error_on_broken_model() {
+        // When the model already has one error, an edit that introduces a
+        // second (new) error must still be rejected.
+        let dir = tempfile::tempdir().unwrap();
+
+        let broken = serde_json::json!({
+            "name": "test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "variables": [
+                    {
+                        "type": "aux",
+                        "name": "already_broken",
+                        "equation": "does_not_exist + 1"
+                    }
+                ]
+            }]
+        });
+        let path = dir.path().join("model.simlin.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+
+        // Introduce a second error -- should be rejected since error count increases.
+        let result = call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": {
+                    "name": "also_broken",
+                    "equation": "another_missing_var * 2"
+                }
+            }]
+        }));
+
+        assert!(
+            result.is_err(),
+            "edit that increases the error count must be rejected even on an already-broken model"
+        );
+    }
+
+    // ---- Issue 4: SD-AI relationships field preserved on write-back ----
+
+    fn sdai_fixture_with_relationships() -> serde_json::Value {
+        serde_json::json!({
+            "variables": [
+                {
+                    "type": "stock",
+                    "name": "population",
+                    "equation": "1000"
+                },
+                {
+                    "type": "flow",
+                    "name": "births",
+                    "equation": "population * 0.03"
+                }
+            ],
+            "relationships": [
+                {
+                    "from": "births",
+                    "to": "population",
+                    "polarity": "+",
+                    "reasoning": "more births increase population"
+                }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 100.0
+            }
+        })
+    }
+
+    #[test]
+    fn sdai_relationships_preserved_after_edit() {
+        // The relationships field is metadata not captured in datamodel::Project.
+        // EditModel must re-attach it from the original content on write-back to
+        // avoid silently discarding it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.sd.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&sdai_fixture_with_relationships()).unwrap(),
+        )
+        .unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "birth_rate", "equation": "0.03" }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let relationships = saved
+            .get("relationships")
+            .expect("relationships field must be preserved in the saved SD-AI file after an edit");
+        let rels = relationships.as_array().unwrap();
+        assert_eq!(rels.len(), 1, "original relationship must be preserved");
+        assert_eq!(rels[0]["from"], "births");
+        assert_eq!(rels[0]["to"], "population");
+        assert_eq!(rels[0]["polarity"], "+");
+    }
+
+    #[test]
+    fn sdai_relationships_preserved_on_dry_run() {
+        // On a dry-run, relationships are not written to disk (nothing is).
+        // But the test verifies the original file is unchanged, meaning relationships
+        // remain intact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.sd.json");
+        let original = sdai_fixture_with_relationships();
+        std::fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "dryRun": true,
+            "operations": [{
+                "upsertAuxiliary": { "name": "some_var", "equation": "1" }
+            }]
+        }))
+        .unwrap();
+
+        let after_contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original_contents, after_contents,
+            "dry-run must not modify the SD-AI file (including relationships)"
+        );
+    }
+
+    // ---- SD-AI loop_metadata persists through SetLoopName write-back ----
+
+    #[test]
+    fn sdai_loop_metadata_persists_after_set_loop_name() {
+        // Upsert and SetLoopName must be in the same EditModel call because
+        // SD-AI format doesn't carry UIDs between calls (UIDs are internal
+        // engine bookkeeping). Upsert auto-assigns UIDs in memory; SetLoopName
+        // then references them within the same patch application, and the
+        // resulting loop_metadata is written to the SD-AI file.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.sd.json");
+
+        let sdai_content = serde_json::json!({
+            "variables": [],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 100.0,
+                "dt": 1.0
+            }
+        });
+        std::fs::write(&dest, serde_json::to_string_pretty(&sdai_content).unwrap()).unwrap();
+
+        // Upsert variables and name the loop in a single EditModel call.
+        // Operations are applied sequentially: upserts assign UIDs first,
+        // then SetLoopName resolves those UIDs.
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [
+                {
+                    "upsertStock": {
+                        "name": "population",
+                        "initialEquation": "100",
+                        "inflows": ["births"]
+                    }
+                },
+                {
+                    "upsertFlow": {
+                        "name": "births",
+                        "equation": "population * 0.05"
+                    }
+                },
+                {
+                    "setLoopName": {
+                        "variables": ["population", "births"],
+                        "name": "Growth Loop",
+                        "description": "reinforcing growth"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        // Re-read the file and verify loop_metadata is present and correct.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        let loop_meta = saved
+            .get("loop_metadata")
+            .and_then(|v| v.as_array())
+            .expect("loop_metadata must be persisted in the SD-AI file");
+        assert!(!loop_meta.is_empty(), "at least one loop must be saved");
+        assert!(
+            loop_meta.iter().any(|lm| lm["name"] == "Growth Loop"),
+            "loop named 'Growth Loop' must be in saved file"
+        );
+    }
+
+    // ---- Issue 1: SetLoopName works on pre-existing SD-AI models without UIDs ----
+
+    // When an SD-AI file is opened, variables parsed from it start with uid: None.
+    // open_project now assigns UIDs via ensure_variable_uids, so a subsequent
+    // SetLoopName call on that already-saved file must succeed.
+    #[test]
+    fn set_loop_name_succeeds_on_sdai_model_loaded_from_file() {
+        // Build a SD-AI model file with a feedback loop (population -> births -> population).
+        let sdai_content = serde_json::json!({
+            "variables": [
+                {
+                    "type": "stock",
+                    "name": "population",
+                    "equation": "100",
+                    "inflows": ["births"],
+                    "outflows": []
+                },
+                {
+                    "type": "flow",
+                    "name": "births",
+                    "equation": "population * 0.05"
+                }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 100.0,
+                "dt": 1.0
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("feedback.sd.json");
+        std::fs::write(&dest, serde_json::to_string_pretty(&sdai_content).unwrap()).unwrap();
+
+        // SetLoopName in a separate EditModel call from when the variables were created.
+        // Before the fix, this would fail with "variable '...' has no UID" because
+        // SD-AI parsed variables arrive without UIDs and were not assigned at open time.
+        let result = call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "setLoopName": {
+                    "variables": ["population", "births"],
+                    "name": "Growth Loop",
+                    "description": "reinforcing growth"
+                }
+            }]
+        }));
+
+        assert!(
+            result.is_ok(),
+            "SetLoopName on a loaded SD-AI model must succeed after UIDs are assigned on open; \
+             got: {:?}",
+            result
         );
     }
 }

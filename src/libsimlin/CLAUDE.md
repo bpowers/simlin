@@ -15,7 +15,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
   - `SimlinErrorCode` enum (35+ variants), `SimlinErrorKind`, `SimlinUnitErrorKind`
 - **`src/ffi.rs`** - Opaque FFI marker types for cbindgen (`SimlinProject`, `SimlinSim`, `SimlinModel`, `SimlinError`) and C-compatible structs (`SimlinLoop`, `SimlinLoops`, `SimlinLink`, `SimlinLinks`, `SimlinLoopPolarity`, `SimlinLinkPolarity`, `SimlinJsonFormat`)
 - **`src/ffi_error.rs`** - Rich error objects for FFI: `ErrorDetail` builder, `OwnedDetail` with CStrings, `SimlinError` struct with code/message/details array, `FfiError` wrapper for anyhow chains
-- **`src/errors.rs`** - Human-readable error formatting: `FormattedError`/`FormattedErrors`, `format_diagnostic()` (converts salsa `Diagnostic` to `FormattedError`), `collect_formatted_issues_from_diagnostics()` (bulk conversion), per-category formatters (equation/unit/assembly/simulation errors). The old monolithic `collect_formatted_issues()` was removed; all error collection now goes through the salsa diagnostic accumulator path.
+- **`src/errors.rs`** - Thin re-export module. The canonical implementation lives in `simlin_engine::errors`; this file re-exports all public types and functions (`FormattedError`, `FormattedErrors`, `FormattedErrorKind`, `UnitErrorKind`, `format_diagnostic`, `format_diagnostic_with_datamodel`, `format_simulation_error`, `collect_formatted_errors`) for backwards compatibility with existing libsimlin callers. Also re-exports `collect_formatted_errors` under the old name `collect_formatted_issues_from_diagnostics` as a compatibility alias.
 
 ### Project lifecycle
 

@@ -60,6 +60,10 @@ pub struct StockFields {
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
     #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
+    /// Stable numeric identifier for this variable, used to track references
+    /// from loop_metadata across file saves and reloads.
+    #[serde(skip_serializing_if = "is_none")]
+    pub uid: Option<i32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -76,6 +80,10 @@ pub struct FlowFields {
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
     #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
+    /// Stable numeric identifier for this variable, used to track references
+    /// from loop_metadata across file saves and reloads.
+    #[serde(skip_serializing_if = "is_none")]
+    pub uid: Option<i32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -92,6 +100,10 @@ pub struct AuxiliaryFields {
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
     #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
+    /// Stable numeric identifier for this variable, used to track references
+    /// from loop_metadata across file saves and reloads.
+    #[serde(skip_serializing_if = "is_none")]
+    pub uid: Option<i32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -180,6 +192,8 @@ pub struct SdaiModel {
     pub specs: Option<SimSpecs>,
     #[serde(skip_serializing_if = "is_none")]
     pub views: Option<Vec<crate::json::View>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub loop_metadata: Vec<crate::json::LoopMetadata>,
 }
 
 /// Generate the JSON Schema for the SdaiModel type
@@ -247,7 +261,7 @@ impl From<StockFields> for datamodel::Stock {
             inflows: stock.inflows.unwrap_or_default(),
             outflows: stock.outflows.unwrap_or_default(),
             ai_state: None,
-            uid: None,
+            uid: stock.uid,
             compat: datamodel::Compat::default(),
         }
     }
@@ -264,7 +278,7 @@ impl From<FlowFields> for datamodel::Flow {
             units: flow.units,
             gf: flow.graphical_function.map(|gf| gf.into()),
             ai_state: None,
-            uid: None,
+            uid: flow.uid,
             compat: datamodel::Compat::default(),
         }
     }
@@ -281,7 +295,7 @@ impl From<AuxiliaryFields> for datamodel::Aux {
             units: aux.units,
             gf: aux.graphical_function.map(|gf| gf.into()),
             ai_state: None,
-            uid: None,
+            uid: aux.uid,
             compat: datamodel::Compat::default(),
         }
     }
@@ -350,12 +364,14 @@ impl From<SdaiModel> for datamodel::Project {
             .map(|vs| vs.into_iter().map(|v| v.into()).collect())
             .unwrap_or_default();
 
+        let loop_metadata = sdai.loop_metadata.into_iter().map(|lm| lm.into()).collect();
+
         let model = datamodel::Model {
             name: "main".to_string(),
             sim_specs: None,
             variables,
             views,
-            loop_metadata: vec![],
+            loop_metadata,
             groups: vec![],
         };
 
@@ -464,6 +480,7 @@ impl From<datamodel::Stock> for StockFields {
                 Some(stock.outflows)
             },
             graphical_function: None,
+            uid: stock.uid,
         }
     }
 }
@@ -486,6 +503,7 @@ impl From<datamodel::Flow> for FlowFields {
             },
             units: flow.units,
             graphical_function: flow.gf.map(|gf| gf.into()),
+            uid: flow.uid,
         }
     }
 }
@@ -508,6 +526,7 @@ impl From<datamodel::Aux> for AuxiliaryFields {
             },
             units: aux.units,
             graphical_function: aux.gf.map(|gf| gf.into()),
+            uid: aux.uid,
         }
     }
 }
@@ -581,11 +600,18 @@ impl From<datamodel::Project> for SdaiModel {
             Some(model.views.into_iter().map(|v| v.into()).collect())
         };
 
+        let loop_metadata = model
+            .loop_metadata
+            .into_iter()
+            .map(|lm| lm.into())
+            .collect();
+
         SdaiModel {
             variables,
             relationships: None,
             specs,
             views,
+            loop_metadata,
         }
     }
 }
@@ -604,6 +630,7 @@ mod tests {
             inflows: Some(vec!["production".to_string()]),
             outflows: Some(vec!["sales".to_string()]),
             graphical_function: None,
+            uid: None,
         };
 
         let dm_stock: datamodel::Stock = sdai_stock.clone().into();
@@ -623,6 +650,7 @@ mod tests {
             documentation: None,
             units: Some("widgets/month".to_string()),
             graphical_function: None,
+            uid: None,
         };
 
         let dm_flow: datamodel::Flow = sdai_flow.clone().into();
@@ -641,6 +669,7 @@ mod tests {
             documentation: Some("Target level".to_string()),
             units: None,
             graphical_function: None,
+            uid: None,
         };
 
         let dm_aux: datamodel::Aux = sdai_aux.clone().into();
@@ -709,6 +738,7 @@ mod tests {
                     inflows: Some(vec!["production".to_string()]),
                     outflows: Some(vec!["sales".to_string()]),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "production".to_string(),
@@ -716,6 +746,7 @@ mod tests {
                     documentation: None,
                     units: Some("widgets/month".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "sales".to_string(),
@@ -723,6 +754,7 @@ mod tests {
                     documentation: None,
                     units: Some("widgets/month".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Variable(AuxiliaryFields {
                     name: "target_inventory".to_string(),
@@ -730,6 +762,7 @@ mod tests {
                     documentation: None,
                     units: Some("widgets".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
             ],
             relationships: None,
@@ -742,6 +775,7 @@ mod tests {
                 method: None,
             }),
             views: None,
+            loop_metadata: vec![],
         };
 
         let dm_project: datamodel::Project = sdai_model.clone().into();
@@ -766,6 +800,7 @@ mod tests {
                     inflows: Some(vec!["inflow".to_string()]),
                     outflows: Some(vec!["outflow".to_string()]),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "inflow".to_string(),
@@ -773,6 +808,7 @@ mod tests {
                     documentation: None,
                     units: None,
                     graphical_function: None,
+                    uid: None,
                 }),
             ],
             relationships: None,
@@ -785,6 +821,7 @@ mod tests {
                 method: None,
             }),
             views: None,
+            loop_metadata: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&sdai_model).unwrap();
@@ -868,6 +905,150 @@ mod tests {
     }
 
     #[test]
+    fn test_project_sdai_json_roundtrip() {
+        use crate::testutils::feedback_loop_project;
+
+        let project = feedback_loop_project();
+        let original_model = &project.models[0];
+        let original_var_names: Vec<String> = original_model
+            .variables
+            .iter()
+            .map(|v| match v {
+                datamodel::Variable::Stock(s) => s.ident.clone(),
+                datamodel::Variable::Flow(f) => f.ident.clone(),
+                datamodel::Variable::Aux(a) => a.ident.clone(),
+                datamodel::Variable::Module(m) => m.ident.clone(),
+            })
+            .collect();
+
+        // datamodel::Project -> SdaiModel -> JSON string
+        let sdai: SdaiModel = project.clone().into();
+        let json_str = serde_json::to_string_pretty(&sdai).unwrap();
+
+        // JSON string -> SdaiModel -> datamodel::Project
+        let sdai_parsed: SdaiModel = serde_json::from_str(&json_str).unwrap();
+        let project_back: datamodel::Project = sdai_parsed.into();
+
+        // Variable names survive roundtrip
+        let back_model = &project_back.models[0];
+        let back_var_names: Vec<String> = back_model
+            .variables
+            .iter()
+            .map(|v| match v {
+                datamodel::Variable::Stock(s) => s.ident.clone(),
+                datamodel::Variable::Flow(f) => f.ident.clone(),
+                datamodel::Variable::Aux(a) => a.ident.clone(),
+                datamodel::Variable::Module(m) => m.ident.clone(),
+            })
+            .collect();
+        assert_eq!(original_var_names, back_var_names);
+
+        // Equations survive roundtrip
+        for (orig, back) in original_model
+            .variables
+            .iter()
+            .zip(back_model.variables.iter())
+        {
+            let orig_eqn = match orig {
+                datamodel::Variable::Stock(s) => &s.equation,
+                datamodel::Variable::Flow(f) => &f.equation,
+                datamodel::Variable::Aux(a) => &a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            let back_eqn = match back {
+                datamodel::Variable::Stock(s) => &s.equation,
+                datamodel::Variable::Flow(f) => &f.equation,
+                datamodel::Variable::Aux(a) => &a.equation,
+                datamodel::Variable::Module(_) => continue,
+            };
+            assert_eq!(orig_eqn, back_eqn);
+        }
+
+        // Sim specs survive roundtrip
+        assert_eq!(project.sim_specs.start, project_back.sim_specs.start);
+        assert_eq!(project.sim_specs.stop, project_back.sim_specs.stop);
+
+        // Stock inflows/outflows survive
+        if let datamodel::Variable::Stock(orig_stock) = &original_model.variables[0] {
+            if let datamodel::Variable::Stock(back_stock) = &back_model.variables[0] {
+                assert_eq!(orig_stock.inflows, back_stock.inflows);
+                assert_eq!(orig_stock.outflows, back_stock.outflows);
+            } else {
+                panic!("expected stock after roundtrip");
+            }
+        } else {
+            panic!("expected stock in original");
+        }
+
+        // The serialized JSON uses the SD-AI top-level structure
+        let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(
+            json_value.get("variables").is_some(),
+            "SD-AI JSON should have top-level 'variables' key"
+        );
+        assert!(
+            json_value.get("models").is_none(),
+            "SD-AI JSON should not have 'models' key"
+        );
+    }
+
+    #[test]
+    fn loop_metadata_survives_roundtrip() {
+        // Build an SdaiModel with loop_metadata, convert to datamodel::Project
+        // and back, and verify the names survive.
+        let sdai = SdaiModel {
+            variables: vec![
+                Variable::Stock(StockFields {
+                    name: "population".to_string(),
+                    equation: Some("100".to_string()),
+                    documentation: None,
+                    units: None,
+                    inflows: Some(vec!["births".to_string()]),
+                    outflows: None,
+                    graphical_function: None,
+                    uid: None,
+                }),
+                Variable::Flow(FlowFields {
+                    name: "births".to_string(),
+                    equation: Some("population * 0.05".to_string()),
+                    documentation: None,
+                    units: None,
+                    graphical_function: None,
+                    uid: None,
+                }),
+            ],
+            relationships: None,
+            specs: None,
+            views: None,
+            loop_metadata: vec![crate::json::LoopMetadata {
+                uids: vec![1, 2],
+                deleted: false,
+                name: "Growth Loop".to_string(),
+                description: "reinforcing growth".to_string(),
+            }],
+        };
+
+        let project: datamodel::Project = sdai.clone().into();
+        assert_eq!(project.models[0].loop_metadata.len(), 1);
+        assert_eq!(project.models[0].loop_metadata[0].name, "Growth Loop");
+
+        let sdai2: SdaiModel = project.into();
+        assert_eq!(sdai2.loop_metadata.len(), 1);
+        assert_eq!(sdai2.loop_metadata[0].name, "Growth Loop");
+        assert_eq!(sdai2.loop_metadata[0].description, "reinforcing growth");
+
+        // Verify JSON roundtrip preserves loop_metadata
+        let json_str = serde_json::to_string_pretty(&sdai2).unwrap();
+        assert!(
+            json_str.contains("loop_metadata"),
+            "serialized JSON must contain loop_metadata key"
+        );
+        let sdai3: SdaiModel = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(sdai3.loop_metadata.len(), 1);
+        assert_eq!(sdai3.loop_metadata[0].name, "Growth Loop");
+    }
+
+    #[test]
     fn test_relationships_ignored() {
         let json_str = r#"{
             "variables": [
@@ -892,5 +1073,61 @@ mod tests {
         assert_eq!(sdai_model.relationships.as_ref().unwrap().len(), 1);
 
         let _dm_project: datamodel::Project = sdai_model.into();
+    }
+
+    #[test]
+    fn test_sd_ai_simple_fixture_parses() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test/sd-ai-simple.sd.json");
+        let content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", fixture_path.display(), e));
+        let model: SdaiModel = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(model.variables.len(), 3);
+
+        // Verify variable types and names
+        match &model.variables[0] {
+            Variable::Stock(s) => {
+                assert_eq!(s.name, "Population");
+                assert_eq!(s.equation.as_deref(), Some("100"));
+                assert_eq!(
+                    s.inflows.as_deref(),
+                    Some(["births".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected stock, got {:?}", std::mem::discriminant(other)),
+        }
+        match &model.variables[1] {
+            Variable::Flow(f) => {
+                assert_eq!(f.name, "births");
+                assert_eq!(f.equation.as_deref(), Some("Population * birth_rate"));
+            }
+            other => panic!("expected flow, got {:?}", std::mem::discriminant(other)),
+        }
+        match &model.variables[2] {
+            Variable::Variable(a) => {
+                assert_eq!(a.name, "birth_rate");
+                assert_eq!(a.equation.as_deref(), Some("0.05"));
+            }
+            other => panic!(
+                "expected auxiliary, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+
+        // Verify sim specs
+        let specs = model.specs.as_ref().unwrap();
+        assert_eq!(specs.start_time, 0.0);
+        assert_eq!(specs.stop_time, 10.0);
+        assert_eq!(specs.dt, Some(1.0));
+
+        // Verify conversion to datamodel
+        let project: datamodel::Project = model.into();
+        assert_eq!(project.models.len(), 1);
+        assert_eq!(project.models[0].variables.len(), 3);
     }
 }

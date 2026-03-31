@@ -97,10 +97,14 @@ struct InitializeResult {
 #[derive(Serialize)]
 struct ServerCapabilities {
     tools: ToolsCapability,
+    resources: ResourcesCapability,
 }
 
 #[derive(Serialize)]
 struct ToolsCapability {}
+
+#[derive(Serialize)]
+struct ResourcesCapability {}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +133,36 @@ struct CallToolResult {
 #[derive(Serialize)]
 struct ContentBlock {
     r#type: &'static str,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct ListResourcesResult {
+    resources: Vec<ResourceMetadata>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceMetadata {
+    uri: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReadResourceResult {
+    contents: Vec<ResourceContent>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceContent {
+    uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
     text: String,
 }
 
@@ -270,6 +304,8 @@ fn dispatch(
         "ping" => result_response(id, serde_json::json!({})),
         "tools/list" => handle_list_tools(registry, id),
         "tools/call" => handle_call_tool(registry, id, params),
+        "resources/list" => handle_resources_list(id),
+        "resources/read" => handle_resources_read(id, params),
         _ => error_response(id, ERR_METHOD_NOT_FOUND, "method not found", None),
     }
 }
@@ -288,6 +324,7 @@ fn handle_initialize(config: &ServerConfig, id: Value, params: Option<Value>) ->
         },
         capabilities: ServerCapabilities {
             tools: ToolsCapability {},
+            resources: ResourcesCapability {},
         },
         instructions: config.instructions.clone(),
     };
@@ -339,16 +376,69 @@ fn handle_call_tool(registry: &Registry, id: Value, params: Option<Value>) -> Re
         }
         Err(e) => {
             let error_text = format!("{e}");
+            // When a handler bails with a JSON-serialized message (e.g. from
+            // EditModel's error gate), preserve the structure so LLM clients
+            // can programmatically inspect error details.
+            let structured_content = serde_json::from_str::<serde_json::Value>(&error_text)
+                .unwrap_or_else(|_| serde_json::json!({ "error": &error_text }));
             let call_result = CallToolResult {
                 content: vec![ContentBlock {
                     r#type: "text",
-                    text: serde_json::json!({ "error": &error_text }).to_string(),
+                    text: error_text,
                 }],
-                structured_content: Some(serde_json::json!({ "error": error_text })),
+                structured_content: Some(structured_content),
                 is_error: true,
             };
             result_response(id, serde_json::to_value(call_result).unwrap())
         }
+    }
+}
+
+// ── Resource handlers ───────────────────────────────────────────────
+
+const ERR_RESOURCE_NOT_FOUND: i64 = -32002;
+
+fn handle_resources_list(id: Value) -> Response {
+    let resources: Vec<ResourceMetadata> = crate::resource::list()
+        .iter()
+        .map(|entry| ResourceMetadata {
+            uri: entry.metadata.uri.to_string(),
+            name: entry.metadata.name.to_string(),
+            description: entry.metadata.description.map(String::from),
+            mime_type: entry.metadata.mime_type.map(String::from),
+        })
+        .collect();
+    let result = ListResourcesResult { resources };
+    result_response(id, serde_json::to_value(result).unwrap())
+}
+
+fn handle_resources_read(id: Value, params: Option<Value>) -> Response {
+    let params = match params {
+        Some(p) => p,
+        None => return error_response(id, ERR_INVALID_PARAMS, "missing params", None),
+    };
+    let uri = match params.get("uri").and_then(|v| v.as_str()) {
+        Some(u) => u,
+        None => return error_response(id, ERR_INVALID_PARAMS, "missing uri parameter", None),
+    };
+
+    match crate::resource::get(uri) {
+        Some(entry) => {
+            let result = ReadResourceResult {
+                contents: vec![ResourceContent {
+                    uri: entry.metadata.uri.to_string(),
+                    mime_type: entry.metadata.mime_type.map(String::from),
+                    text: entry.content.to_string(),
+                }],
+            };
+            result_response(id, serde_json::to_value(result).unwrap())
+        }
+        None => error_response(
+            id,
+            ERR_RESOURCE_NOT_FOUND,
+            &format!("resource not found: {uri}"),
+            None,
+        ),
     }
 }
 
@@ -419,6 +509,30 @@ mod tests {
 
         assert_eq!(resp["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(resp["result"]["serverInfo"]["name"], "test-server");
+    }
+
+    // mcp-publish-ready.AC4.1: initialize response includes non-empty instructions field
+    #[test]
+    fn test_initialize_instructions_present_when_configured() {
+        let registry = Registry::new();
+        let config = ServerConfig {
+            name: "test-server".to_string(),
+            version: "0.1.0".to_string(),
+            instructions: Some("test instructions".to_string()),
+        };
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1.0"},"capabilities":{}}}"#,
+        );
+
+        let instructions = resp["result"]["instructions"].as_str().unwrap_or("");
+        assert!(
+            !instructions.is_empty(),
+            "expected non-empty instructions in initialize response, got: {}",
+            resp["result"]["instructions"]
+        );
     }
 
     #[test]
@@ -812,5 +926,193 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert!(responses[0]["error"].is_object());
         assert_eq!(responses[0]["error"]["code"], ERR_METHOD_NOT_FOUND);
+    }
+
+    // mcp-publish-ready.AC3.5: JSON-serialized tool errors preserve structure in structured_content
+    struct JsonErrorTool;
+
+    impl Tool for JsonErrorTool {
+        fn name(&self) -> &str {
+            "json_error"
+        }
+        fn description(&self) -> &str {
+            "returns a JSON-structured error"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        fn call(&self, _input: Value) -> anyhow::Result<Value> {
+            let err_json = serde_json::json!({
+                "error": "edit introduces compilation errors",
+                "errors": [{ "code": "unknown_dependency", "kind": "variable" }]
+            });
+            Err(anyhow::anyhow!(
+                "{}",
+                serde_json::to_string(&err_json).unwrap()
+            ))
+        }
+    }
+
+    #[test]
+    fn test_json_error_preserves_structured_content() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(JsonErrorTool));
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"json_error"}}"#,
+        );
+
+        assert_eq!(resp["result"]["isError"], true);
+        let structured = &resp["result"]["structuredContent"];
+        assert_eq!(structured["error"], "edit introduces compilation errors");
+        let errors = structured["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["code"], "unknown_dependency");
+        assert_eq!(errors[0]["kind"], "variable");
+    }
+
+    #[test]
+    fn test_plain_error_wraps_in_error_key() {
+        let mut registry = Registry::new();
+        registry.register(Box::new(FailTool));
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fail"}}"#,
+        );
+
+        assert_eq!(resp["result"]["isError"], true);
+        let structured = &resp["result"]["structuredContent"];
+        assert_eq!(structured["error"], "deliberate failure");
+    }
+
+    // ── Resource protocol tests ─────────────────────────────────────────
+
+    // mcp-publish-ready.AC5: initialize response includes resources capability
+    #[test]
+    fn test_initialize_includes_resources_capability() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1.0"},"capabilities":{}}}"#,
+        );
+
+        assert!(
+            resp["result"]["capabilities"]["resources"].is_object(),
+            "expected capabilities.resources to be an object, got: {}",
+            resp["result"]["capabilities"]
+        );
+    }
+
+    // mcp-publish-ready.AC5.1: resources/list returns metadata for all four skills
+    #[test]
+    fn test_resources_list() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#,
+        );
+
+        let resources = resp["result"]["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 4);
+
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
+        assert!(uris.contains(&"simlin://skills/pysimlin-basics"));
+        assert!(uris.contains(&"simlin://skills/scenario-analysis"));
+        assert!(uris.contains(&"simlin://skills/loop-dominance"));
+        assert!(uris.contains(&"simlin://skills/vensim-equation-syntax"));
+
+        for resource in resources {
+            assert!(resource["name"].is_string());
+            assert!(resource["description"].is_string());
+            assert_eq!(resource["mimeType"], "text/markdown");
+        }
+    }
+
+    // mcp-publish-ready.AC5.2: resources/read with valid URI returns content
+    #[test]
+    fn test_resources_read_valid_uri() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"simlin://skills/pysimlin-basics"}}"#,
+        );
+
+        let contents = resp["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["uri"], "simlin://skills/pysimlin-basics");
+        assert_eq!(contents[0]["mimeType"], "text/markdown");
+        let text = contents[0]["text"].as_str().unwrap();
+        assert!(!text.is_empty(), "resource content should not be empty");
+    }
+
+    // mcp-publish-ready.AC5.3: resources/read with unknown URI returns error -32002
+    #[test]
+    fn test_resources_read_unknown_uri() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"simlin://skills/nonexistent"}}"#,
+        );
+
+        assert!(resp["error"].is_object());
+        assert_eq!(resp["error"]["code"], ERR_RESOURCE_NOT_FOUND);
+        let msg = resp["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("nonexistent"),
+            "error message should mention the URI"
+        );
+    }
+
+    // mcp-publish-ready.AC5.3: resources/read with missing params returns -32602
+    #[test]
+    fn test_resources_read_missing_params() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read"}"#,
+        );
+
+        assert!(resp["error"].is_object());
+        assert_eq!(resp["error"]["code"], ERR_INVALID_PARAMS);
+    }
+
+    // mcp-publish-ready.AC5.3: resources/read with missing uri field returns -32602
+    #[test]
+    fn test_resources_read_missing_uri_field() {
+        let registry = Registry::new();
+        let config = test_config();
+
+        let resp = roundtrip(
+            &registry,
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}"#,
+        );
+
+        assert!(resp["error"].is_object());
+        assert_eq!(resp["error"]["code"], ERR_INVALID_PARAMS);
     }
 }
