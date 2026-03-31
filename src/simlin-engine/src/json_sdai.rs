@@ -60,6 +60,10 @@ pub struct StockFields {
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
     #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
+    /// Stable numeric identifier for this variable, used to track references
+    /// from loop_metadata across file saves and reloads.
+    #[serde(skip_serializing_if = "is_none")]
+    pub uid: Option<i32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -76,6 +80,10 @@ pub struct FlowFields {
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
     #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
+    /// Stable numeric identifier for this variable, used to track references
+    /// from loop_metadata across file saves and reloads.
+    #[serde(skip_serializing_if = "is_none")]
+    pub uid: Option<i32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -92,6 +100,10 @@ pub struct AuxiliaryFields {
     #[serde(rename = "graphicalFunction", skip_serializing_if = "is_none")]
     #[cfg_attr(feature = "schema", schemars(rename = "graphicalFunction"))]
     pub graphical_function: Option<GraphicalFunction>,
+    /// Stable numeric identifier for this variable, used to track references
+    /// from loop_metadata across file saves and reloads.
+    #[serde(skip_serializing_if = "is_none")]
+    pub uid: Option<i32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -249,7 +261,7 @@ impl From<StockFields> for datamodel::Stock {
             inflows: stock.inflows.unwrap_or_default(),
             outflows: stock.outflows.unwrap_or_default(),
             ai_state: None,
-            uid: None,
+            uid: stock.uid,
             compat: datamodel::Compat::default(),
         }
     }
@@ -266,7 +278,7 @@ impl From<FlowFields> for datamodel::Flow {
             units: flow.units,
             gf: flow.graphical_function.map(|gf| gf.into()),
             ai_state: None,
-            uid: None,
+            uid: flow.uid,
             compat: datamodel::Compat::default(),
         }
     }
@@ -283,7 +295,7 @@ impl From<AuxiliaryFields> for datamodel::Aux {
             units: aux.units,
             gf: aux.graphical_function.map(|gf| gf.into()),
             ai_state: None,
-            uid: None,
+            uid: aux.uid,
             compat: datamodel::Compat::default(),
         }
     }
@@ -468,6 +480,7 @@ impl From<datamodel::Stock> for StockFields {
                 Some(stock.outflows)
             },
             graphical_function: None,
+            uid: stock.uid,
         }
     }
 }
@@ -490,6 +503,7 @@ impl From<datamodel::Flow> for FlowFields {
             },
             units: flow.units,
             graphical_function: flow.gf.map(|gf| gf.into()),
+            uid: flow.uid,
         }
     }
 }
@@ -512,6 +526,7 @@ impl From<datamodel::Aux> for AuxiliaryFields {
             },
             units: aux.units,
             graphical_function: aux.gf.map(|gf| gf.into()),
+            uid: aux.uid,
         }
     }
 }
@@ -615,6 +630,7 @@ mod tests {
             inflows: Some(vec!["production".to_string()]),
             outflows: Some(vec!["sales".to_string()]),
             graphical_function: None,
+            uid: None,
         };
 
         let dm_stock: datamodel::Stock = sdai_stock.clone().into();
@@ -634,6 +650,7 @@ mod tests {
             documentation: None,
             units: Some("widgets/month".to_string()),
             graphical_function: None,
+            uid: None,
         };
 
         let dm_flow: datamodel::Flow = sdai_flow.clone().into();
@@ -652,6 +669,7 @@ mod tests {
             documentation: Some("Target level".to_string()),
             units: None,
             graphical_function: None,
+            uid: None,
         };
 
         let dm_aux: datamodel::Aux = sdai_aux.clone().into();
@@ -720,6 +738,7 @@ mod tests {
                     inflows: Some(vec!["production".to_string()]),
                     outflows: Some(vec!["sales".to_string()]),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "production".to_string(),
@@ -727,6 +746,7 @@ mod tests {
                     documentation: None,
                     units: Some("widgets/month".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "sales".to_string(),
@@ -734,6 +754,7 @@ mod tests {
                     documentation: None,
                     units: Some("widgets/month".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Variable(AuxiliaryFields {
                     name: "target_inventory".to_string(),
@@ -741,6 +762,7 @@ mod tests {
                     documentation: None,
                     units: Some("widgets".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
             ],
             relationships: None,
@@ -778,6 +800,7 @@ mod tests {
                     inflows: Some(vec!["inflow".to_string()]),
                     outflows: Some(vec!["outflow".to_string()]),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "inflow".to_string(),
@@ -785,6 +808,7 @@ mod tests {
                     documentation: None,
                     units: None,
                     graphical_function: None,
+                    uid: None,
                 }),
             ],
             relationships: None,
@@ -982,6 +1006,7 @@ mod tests {
                     inflows: Some(vec!["births".to_string()]),
                     outflows: None,
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "births".to_string(),
@@ -989,6 +1014,7 @@ mod tests {
                     documentation: None,
                     units: None,
                     graphical_function: None,
+                    uid: None,
                 }),
             ],
             relationships: None,

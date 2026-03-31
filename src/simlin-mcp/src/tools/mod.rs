@@ -376,4 +376,137 @@ mod tests {
             }
         }
     }
+
+    // UIDs assigned on first open of an SD-AI file must survive a
+    // serialize-then-reopen cycle.  Without persisting the uid field in
+    // StockFields/FlowFields/AuxiliaryFields, each open regenerates UIDs from
+    // the high-water-mark, which shifts if view elements are added between
+    // saves and causes loop_metadata UIDs to point to wrong variables.
+    #[test]
+    fn open_project_sdai_uids_stable_across_serialize_reopen() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+
+        // First open: UIDs are assigned by ensure_variable_uids
+        let (project1, _) = open_project(path, &contents).unwrap();
+        let uids1: Vec<Option<i32>> = project1.models[0]
+            .variables
+            .iter()
+            .map(|v| match v {
+                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+            })
+            .collect();
+
+        // Simulate save: convert to SdaiModel (which now embeds the uids) and
+        // serialize back to JSON.
+        let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project1);
+        let saved_json =
+            serde_json::to_string_pretty(&sdai_model).expect("serialization must succeed");
+
+        // Second open: UIDs should be read from the file, not reassigned
+        let fake_path = std::path::Path::new("model.sd.json");
+        let (project2, format2) = open_project(fake_path, &saved_json).unwrap();
+        assert_eq!(format2, SourceFormat::SdaiJson);
+
+        let uids2: Vec<Option<i32>> = project2.models[0]
+            .variables
+            .iter()
+            .map(|v| match v {
+                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+            })
+            .collect();
+
+        assert_eq!(
+            uids1, uids2,
+            "UIDs must be identical after serialize-then-reopen"
+        );
+    }
+
+    // A loop name set via loop_metadata UIDs must still resolve correctly after
+    // the model has been saved and reopened.  This exercises the full scenario:
+    //
+    // 1. Open SD-AI file (UIDs assigned)
+    // 2. Record the UIDs of two variables
+    // 3. Attach loop_metadata referencing those UIDs
+    // 4. Serialize to SD-AI JSON (UIDs now written to each variable's `uid` field)
+    // 5. Reopen: UIDs are read back, not regenerated
+    // 6. Loop metadata UIDs still map to the same variables
+    #[test]
+    fn loop_metadata_uids_remain_valid_after_save_reopen() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        ));
+        let contents = std::fs::read_to_string(path).unwrap();
+
+        // Open and collect UIDs for loop metadata construction
+        let (mut project, _) = open_project(path, &contents).unwrap();
+        let loop_uids: Vec<i32> = project.models[0]
+            .variables
+            .iter()
+            .filter_map(|v| match v {
+                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+            })
+            .take(2)
+            .collect();
+        assert_eq!(loop_uids.len(), 2, "fixture must have at least 2 variables");
+
+        // Attach loop metadata using those UIDs
+        project.models[0]
+            .loop_metadata
+            .push(simlin_engine::datamodel::LoopMetadata {
+                uids: loop_uids.clone(),
+                deleted: false,
+                name: "Test Loop".to_string(),
+                description: "stability test".to_string(),
+            });
+
+        // Save: serialize to SD-AI JSON with embedded UIDs
+        let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
+        let saved_json =
+            serde_json::to_string_pretty(&sdai_model).expect("serialization must succeed");
+
+        // Reopen: UIDs must match
+        let fake_path = std::path::Path::new("model.sd.json");
+        let (project2, _) = open_project(fake_path, &saved_json).unwrap();
+
+        let uids_after: Vec<i32> = project2.models[0]
+            .variables
+            .iter()
+            .filter_map(|v| match v {
+                simlin_engine::datamodel::Variable::Stock(s) => s.uid,
+                simlin_engine::datamodel::Variable::Flow(f) => f.uid,
+                simlin_engine::datamodel::Variable::Aux(a) => a.uid,
+                simlin_engine::datamodel::Variable::Module(m) => m.uid,
+            })
+            .take(2)
+            .collect();
+
+        // The loop metadata UIDs stored in the file must still match the
+        // variable UIDs present after reopening.
+        assert_eq!(
+            loop_uids, uids_after,
+            "variable UIDs must be stable so loop_metadata references remain valid"
+        );
+
+        // The loop name must survive the roundtrip
+        assert_eq!(project2.models[0].loop_metadata.len(), 1);
+        assert_eq!(project2.models[0].loop_metadata[0].name, "Test Loop");
+        assert_eq!(
+            project2.models[0].loop_metadata[0].uids, loop_uids,
+            "loop_metadata UIDs must match variable UIDs after reopen"
+        );
+    }
 }

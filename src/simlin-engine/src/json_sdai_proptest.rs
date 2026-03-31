@@ -104,9 +104,10 @@ fn stock_fields_strategy() -> impl Strategy<Value = StockFields> {
         option_non_empty_vec(ident_strategy(), 3),
         option_non_empty_vec(ident_strategy(), 3),
         prop::option::of(graphical_function_strategy()),
+        prop::option::of(1i32..10000),
     )
         .prop_map(
-            |(name, equation, documentation, units, inflows, outflows, graphical_function)| {
+            |(name, equation, documentation, units, inflows, outflows, graphical_function, uid)| {
                 StockFields {
                     name,
                     equation,
@@ -115,6 +116,7 @@ fn stock_fields_strategy() -> impl Strategy<Value = StockFields> {
                     inflows,
                     outflows,
                     graphical_function,
+                    uid,
                 }
             },
         )
@@ -127,14 +129,16 @@ fn flow_fields_strategy() -> impl Strategy<Value = FlowFields> {
         prop::option::of(documentation_strategy()),
         prop::option::of(units_strategy()),
         prop::option::of(graphical_function_strategy()),
+        prop::option::of(1i32..10000),
     )
         .prop_map(
-            |(name, equation, documentation, units, graphical_function)| FlowFields {
+            |(name, equation, documentation, units, graphical_function, uid)| FlowFields {
                 name,
                 equation,
                 documentation,
                 units,
                 graphical_function,
+                uid,
             },
         )
 }
@@ -146,14 +150,16 @@ fn auxiliary_fields_strategy() -> impl Strategy<Value = AuxiliaryFields> {
         prop::option::of(documentation_strategy()),
         prop::option::of(units_strategy()),
         prop::option::of(graphical_function_strategy()),
+        prop::option::of(1i32..10000),
     )
         .prop_map(
-            |(name, equation, documentation, units, graphical_function)| AuxiliaryFields {
+            |(name, equation, documentation, units, graphical_function, uid)| AuxiliaryFields {
                 name,
                 equation,
                 documentation,
                 units,
                 graphical_function,
+                uid,
             },
         )
 }
@@ -434,6 +440,7 @@ mod schema_tests {
             inflows: None,
             outflows: None,
             graphical_function: None,
+            uid: None,
         });
 
         let json = serde_json::to_string(&stock).unwrap();
@@ -449,6 +456,7 @@ mod schema_tests {
             documentation: None,
             units: None,
             graphical_function: None,
+            uid: None,
         });
 
         let json = serde_json::to_string(&flow).unwrap();
@@ -464,6 +472,7 @@ mod schema_tests {
             documentation: None,
             units: None,
             graphical_function: None,
+            uid: None,
         });
 
         let json = serde_json::to_string(&aux).unwrap();
@@ -851,6 +860,7 @@ mod protobuf_roundtrip_tests {
                     inflows: Some(vec!["production".to_string()]),
                     outflows: Some(vec!["sales".to_string()]),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "production".to_string(),
@@ -858,6 +868,7 @@ mod protobuf_roundtrip_tests {
                     documentation: None,
                     units: Some("widgets/month".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Flow(FlowFields {
                     name: "sales".to_string(),
@@ -865,6 +876,7 @@ mod protobuf_roundtrip_tests {
                     documentation: None,
                     units: Some("widgets/month".to_string()),
                     graphical_function: None,
+                    uid: None,
                 }),
                 Variable::Variable(AuxiliaryFields {
                     name: "target_inventory".to_string(),
@@ -872,6 +884,7 @@ mod protobuf_roundtrip_tests {
                     documentation: None,
                     units: None,
                     graphical_function: None,
+                    uid: None,
                 }),
             ],
             relationships: Some(vec![Relationship {
@@ -924,6 +937,7 @@ mod protobuf_roundtrip_tests {
                         Point { x: 1.0, y: 1.0 },
                     ],
                 }),
+                uid: None,
             })],
             relationships: None,
             specs: Some(SimSpecs {
