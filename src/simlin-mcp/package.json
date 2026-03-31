@@ -14,6 +14,15 @@
     "@simlin/mcp-linux-x64": "0.1.0",
     "@simlin/mcp-win32-x64": "0.1.0"
   },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "publishConfig": {
