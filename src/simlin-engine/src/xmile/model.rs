@@ -12,8 +12,28 @@ use crate::xmile::variables::{Var, ai_state_from};
 use crate::xmile::views::{View, ViewType};
 use crate::xmile::{
     SimSpecs, ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start,
-    write_tag_start_with_attrs,
+    write_tag_start_with_attrs, write_tag_with_attrs,
 };
+
+/// Vendor extension for persisting named feedback loop metadata.
+/// Serialized as `<simlin:loop-metadata>` within a `<model>` element.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct XmileLoopMetadata {
+    #[serde(rename = "@name")]
+    pub name: String,
+    #[serde(rename = "@deleted", skip_serializing_if = "Option::is_none", default)]
+    pub deleted: Option<bool>,
+    #[serde(
+        rename = "@description",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub description: Option<String>,
+    /// Comma-separated list of variable UIDs
+    #[serde(rename = "$text", default)]
+    pub uids_text: Option<String>,
+}
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
@@ -26,6 +46,10 @@ pub struct Model {
     pub sim_specs: Option<SimSpecs>,
     pub variables: Option<Variables>,
     pub views: Option<Views>,
+    /// Vendor extension: named feedback loop metadata.
+    /// Serde rename uses local name without prefix (quick-xml strips namespace prefixes).
+    #[serde(rename = "loop-metadata", default)]
+    pub loop_metadata: Option<Vec<XmileLoopMetadata>>,
 }
 
 impl ToXml<XmlWriter> for Model {
@@ -79,6 +103,22 @@ impl ToXml<XmlWriter> for Model {
 
         write_tag_end(writer, "views")?;
 
+        if let Some(ref loop_metadata) = self.loop_metadata {
+            for lm in loop_metadata {
+                let mut attrs: Vec<(&str, &str)> = vec![("name", &lm.name)];
+                let deleted_str;
+                if lm.deleted == Some(true) {
+                    deleted_str = "true".to_string();
+                    attrs.push(("deleted", &deleted_str));
+                }
+                if let Some(ref desc) = lm.description {
+                    attrs.push(("description", desc));
+                }
+                let uids_text = lm.uids_text.as_deref().unwrap_or("");
+                write_tag_with_attrs(writer, "simlin:loop-metadata", uids_text, &attrs)?;
+            }
+        }
+
         write_tag_end(writer, "model")
     }
 }
@@ -117,6 +157,26 @@ impl From<Model> for datamodel::Model {
                     .collect()
             })
             .unwrap_or_default();
+        let loop_metadata: Vec<datamodel::LoopMetadata> = model
+            .loop_metadata
+            .unwrap_or_default()
+            .into_iter()
+            .map(|lm| {
+                let uids: Vec<i32> = lm
+                    .uids_text
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<i32>().ok())
+                    .collect();
+                datamodel::LoopMetadata {
+                    uids,
+                    deleted: lm.deleted.unwrap_or(false),
+                    name: lm.name,
+                    description: lm.description.unwrap_or_default(),
+                }
+            })
+            .collect();
+
         datamodel::Model {
             name: model.name.as_deref().unwrap_or("main").to_string(),
             sim_specs: model.sim_specs.map(datamodel::SimSpecs::from),
@@ -138,7 +198,7 @@ impl From<Model> for datamodel::Model {
                 _ => vec![],
             },
             views,
-            loop_metadata: vec![],
+            loop_metadata,
             groups,
         }
     }
@@ -151,8 +211,8 @@ impl From<datamodel::Model> for Model {
             sim_specs,
             variables,
             views,
+            loop_metadata,
             groups,
-            ..
         } = model;
 
         // Convert groups to semantic groups
@@ -167,6 +227,34 @@ impl From<datamodel::Model> for Model {
                         owner: g.parent,
                         run: if g.run_enabled { Some(true) } else { None },
                         vars: g.members,
+                    })
+                    .collect(),
+            )
+        };
+
+        let xmile_loop_metadata: Option<Vec<XmileLoopMetadata>> = if loop_metadata.is_empty() {
+            None
+        } else {
+            Some(
+                loop_metadata
+                    .into_iter()
+                    .map(|lm| {
+                        let uids_text = lm
+                            .uids
+                            .iter()
+                            .map(|uid| uid.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        XmileLoopMetadata {
+                            name: lm.name,
+                            deleted: if lm.deleted { Some(true) } else { None },
+                            description: if lm.description.is_empty() {
+                                None
+                            } else {
+                                Some(lm.description)
+                            },
+                            uids_text: Some(uids_text),
+                        }
                     })
                     .collect(),
             )
@@ -195,6 +283,7 @@ impl From<datamodel::Model> for Model {
                     groups: semantic_groups,
                 })
             },
+            loop_metadata: xmile_loop_metadata,
         }
     }
 }

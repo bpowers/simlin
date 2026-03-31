@@ -328,6 +328,14 @@ fn apply_set_loop_name(
     name: String,
     description: Option<String>,
 ) -> Result<()> {
+    if variables.is_empty() {
+        return Err(Error::new(
+            ErrorKind::Model,
+            ErrorCode::Generic,
+            Some("SetLoopName requires at least one variable".to_owned()),
+        ));
+    }
+
     // ReadModel returns loops with the first variable repeated at the end to
     // close the cycle (e.g., ["a", "b", "a"]). Deduplicate before resolving
     // UIDs so that a client passing the ReadModel output directly doesn't
@@ -3244,5 +3252,51 @@ mod tests {
 
         let err = apply_patch(&mut project, patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DoesNotExist);
+    }
+
+    #[test]
+    fn set_loop_name_empty_variables_returns_error() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 10)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec![],
+                    name: "loop".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+
+        let err = apply_patch(&mut project, patch).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Generic);
+    }
+
+    #[test]
+    fn set_loop_name_all_invalid_variables_returns_error() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 10)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["nonexistent_a".to_string(), "nonexistent_b".to_string()],
+                    name: "loop".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+
+        let result = apply_patch(&mut project, patch);
+        assert!(result.is_err());
     }
 }

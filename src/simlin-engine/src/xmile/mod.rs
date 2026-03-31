@@ -21,6 +21,7 @@ pub mod views;
 pub use self::dimensions::{Dimension, Gf, GraphicalFunctionKind, GraphicalFunctionScale, Index};
 pub use self::model::{
     Connect, Model, Module, NonNegative, Reference, SemanticGroup, Variables, Views,
+    XmileLoopMetadata,
 };
 pub use self::variables::{Aux, Flow, Stock, Var, VarElement};
 pub use self::views::view_element;
@@ -1134,4 +1135,67 @@ fn test_xmile_roundtrips_data_source() {
     } else {
         panic!("expected Aux variable");
     }
+}
+
+#[test]
+fn test_xmile_roundtrips_loop_metadata() {
+    use crate::datamodel::{Dt, LoopMetadata, SimMethod, SimSpecs};
+    use std::io::BufReader;
+
+    let project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![
+                LoopMetadata {
+                    uids: vec![1, 2, 3],
+                    deleted: false,
+                    name: "growth loop".to_string(),
+                    description: "a reinforcing loop".to_string(),
+                },
+                LoopMetadata {
+                    uids: vec![4, 5],
+                    deleted: true,
+                    name: "decay loop".to_string(),
+                    description: String::new(),
+                },
+            ],
+            groups: vec![],
+        }],
+        source: Default::default(),
+        ai_information: None,
+    };
+
+    let xml = project_to_xmile(&project).unwrap();
+    let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+
+    assert_eq!(
+        roundtripped.models[0].loop_metadata.len(),
+        2,
+        "loop_metadata must survive XMILE round-trip"
+    );
+    let lm0 = &roundtripped.models[0].loop_metadata[0];
+    assert_eq!(lm0.uids, vec![1, 2, 3]);
+    assert_eq!(lm0.name, "growth loop");
+    assert_eq!(lm0.description, "a reinforcing loop");
+    assert!(!lm0.deleted);
+
+    let lm1 = &roundtripped.models[0].loop_metadata[1];
+    assert_eq!(lm1.uids, vec![4, 5]);
+    assert_eq!(lm1.name, "decay loop");
+    assert!(lm1.deleted);
+    assert!(lm1.description.is_empty());
 }
