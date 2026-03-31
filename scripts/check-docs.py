@@ -104,7 +104,10 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
             # Skip glob patterns
             if "*" in token:
                 continue
-            if resolve_path(token, file_dir, repo_root) is None:
+            # For tokens with arguments (e.g. "scripts/foo.sh <version>"),
+            # check only the path portion before the first space
+            path_to_check = token.split()[0] if " " in token else token
+            if resolve_path(path_to_check, file_dir, repo_root) is None:
                 line_num = content[:match.start()].count("\n") + 1
                 errors.append(f"{rel_path}:{line_num}: broken path reference '{token}'")
 

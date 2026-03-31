@@ -6,7 +6,7 @@ MCP (Model Context Protocol) server exposing the Simlin simulation engine as too
 
 ## Architecture
 
-- `build.rs` -- Build script that reads `pysimlin.version` and performs `{PYSIMLIN_VERSION}` template substitution on `instructions.md` and `skills/pysimlin-basics.md`, writing processed files to `OUT_DIR`
+- `build.rs` -- Build script that reads `pysimlin.version` and performs `{PYSIMLIN_VERSION}` template substitution on `instructions.md` and `src/skills/pysimlin-basics.md`, writing processed files to `OUT_DIR`
 - `pysimlin.version` -- Single source of truth for the pysimlin version embedded in MCP content. Updated by `scripts/release-pysimlin.sh`
 - `src/main.rs` -- Binary entry point. Loads build-processed `instructions.md` from `OUT_DIR` via `include_str!`, registers tools, and runs the async server loop
 - `src/protocol.rs` -- Stdio JSON-RPC 2.0 MCP server (newline-delimited JSON). Handles six methods: initialize, ping, tools list, tools call, resources list, resources read. Advertises both tools and resources capabilities. `ServerConfig.instructions` is included in the initialize response
@@ -90,7 +90,7 @@ Published to npm as `@simlin/mcp` with platform-specific binary packages followi
 The pysimlin version referenced in MCP instructions and skill resources is managed through build-time template substitution rather than hardcoded strings:
 
 1. `pysimlin.version` contains the current version (e.g. `0.6.3`)
-2. `build.rs` reads this file and substitutes `{PYSIMLIN_VERSION}` in `instructions.md` and `skills/pysimlin-basics.md`, writing processed output to `OUT_DIR`
+2. `build.rs` reads this file and substitutes `{PYSIMLIN_VERSION}` in `instructions.md` and `src/skills/pysimlin-basics.md`, writing processed output to `OUT_DIR`
 3. `main.rs` and `resource.rs` include the processed files from `OUT_DIR`
 4. Tests validate that the version in `pysimlin.version` matches the latest `pysimlin-v*` git tag and that substitution produced correct output
 
