@@ -2,19 +2,21 @@
 
 MCP (Model Context Protocol) server exposing the Simlin simulation engine as tools for AI assistants.
 
-<!-- Last reviewed: 2026-03-30 -->
+<!-- Last reviewed: 2026-03-31 -->
 
 ## Architecture
 
-- `src/main.rs` -- Binary entry point. Loads embedded `instructions.md` via `include_str!`, registers tools, and runs the async server loop
+- `build.rs` -- Build script that reads `pysimlin.version` and performs `{PYSIMLIN_VERSION}` template substitution on `instructions.md` and `skills/pysimlin-basics.md`, writing processed files to `OUT_DIR`
+- `pysimlin.version` -- Single source of truth for the pysimlin version embedded in MCP content. Updated by `scripts/release-pysimlin.sh`
+- `src/main.rs` -- Binary entry point. Loads build-processed `instructions.md` from `OUT_DIR` via `include_str!`, registers tools, and runs the async server loop
 - `src/protocol.rs` -- Stdio JSON-RPC 2.0 MCP server (newline-delimited JSON). Handles six methods: initialize, ping, tools list, tools call, resources list, resources read. Advertises both tools and resources capabilities. `ServerConfig.instructions` is included in the initialize response
 - `src/tool.rs` -- `Tool` trait, `TypedTool<I>` helper, `Registry`, and `input_schema_for<T>()` schema generator
-- `src/resource.rs` -- Static resource registry for MCP resource listing and reading. All resources are compiled into the binary via `include_str!`. `list()` returns all entries; `get(uri)` looks up by URI. Each `ResourceEntry` has metadata (uri, name, description, mime_type) and content
+- `src/resource.rs` -- Static resource registry for MCP resource listing and reading. Resources are compiled into the binary via `include_str!` (versioned files from `OUT_DIR`, others from source). `list()` returns all entries; `get(uri)` looks up by URI. Each `ResourceEntry` has metadata (uri, name, description, mime_type) and content
 - `src/tools/` -- Tool implementations (see Tools section below)
 - `src/tools/types.rs` -- Shared output types: `LoopDominanceSummary` (with 3-sig-fig importance rounding), `DominantPeriodOutput`, `ErrorOutput` (structured error detail with code/message/modelName/variableName/kind). `ErrorOutput` converts from `simlin_engine::errors::FormattedError`
-- `src/instructions.md` -- Comprehensive instructions embedded in the binary, covering tool usage, SD concepts, Vensim syntax, and workflow guidance
+- `src/instructions.md` -- Comprehensive instructions template embedded in the binary, covering tool usage, SD concepts, Vensim syntax, and workflow guidance. Contains `{PYSIMLIN_VERSION}` placeholder resolved at build time
 - `src/skills/` -- Four skill markdown files compiled into the binary as MCP resources:
-  - `pysimlin-basics.md` -- Loading models, simulation, DataFrame access
+  - `pysimlin-basics.md` -- Loading models, simulation, DataFrame access. Contains `{PYSIMLIN_VERSION}` placeholder resolved at build time
   - `scenario-analysis.md` -- Parameter sweeps and intervention analysis
   - `loop-dominance.md` -- Plotting behavior, annotating dominant periods
   - `vensim-equation-syntax.md` -- MDL-to-XMILE mapping table
@@ -80,6 +82,19 @@ Published to npm as `@simlin/mcp` with platform-specific binary packages followi
 - `build-npm-packages.sh` -- generates platform `package.json` files in `npm/@simlin/mcp-*`
 - `scripts/cross-build.sh` -- local cross-compilation via Docker + cargo-zigbuild (outputs to dist/)
 - `Dockerfile.cross` -- toolchain image for cross-build.sh
+- `scripts/release-mcp.sh <version>` (repo root) -- bumps Cargo.toml + npm package versions, runs tests, commits, and creates `mcp-v<version>` tag. Does not push
+- `scripts/release-pysimlin.sh <version>` (repo root) -- updates `pysimlin.version`, commits, and creates `pysimlin-v<version>` tag. Does not push
+
+## Version Management
+
+The pysimlin version referenced in MCP instructions and skill resources is managed through build-time template substitution rather than hardcoded strings:
+
+1. `pysimlin.version` contains the current version (e.g. `0.6.3`)
+2. `build.rs` reads this file and substitutes `{PYSIMLIN_VERSION}` in `instructions.md` and `skills/pysimlin-basics.md`, writing processed output to `OUT_DIR`
+3. `main.rs` and `resource.rs` include the processed files from `OUT_DIR`
+4. Tests validate that the version in `pysimlin.version` matches the latest `pysimlin-v*` git tag and that substitution produced correct output
+
+To update the pysimlin version reference: run `scripts/release-pysimlin.sh <version>`.
 
 ## Build / Test
 
