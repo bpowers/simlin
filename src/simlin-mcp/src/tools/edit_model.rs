@@ -212,7 +212,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read model file: {}", input.project_path))?;
 
-    let (mut project, _source_format) = super::open_project(path, &contents)?;
+    let (mut project, source_format) = super::open_project(path, &contents)?;
     let requested_name = input.model_name.as_deref().unwrap_or("main");
     let model_name = super::resolve_model_name(&project, requested_name).to_string();
     let dry_run = input.dry_run.unwrap_or(false);
@@ -227,17 +227,6 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         sync_diagram(&mut project, &model_name, model_patch.as_ref());
     }
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let write_path = if matches!(ext.as_str(), "stmx" | "xmile" | "xml" | "mdl") {
-        path.with_extension("simlin.json")
-    } else {
-        path.to_path_buf()
-    };
-
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
     let source_project = sync.project;
@@ -246,10 +235,30 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, &model_name)
             .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
 
+    let (write_path, serialized) = match source_format {
+        super::SourceFormat::Xmile => {
+            let wp = path.with_extension("simlin.json");
+            let json_project = ejson::Project::from(project);
+            (wp, serde_json::to_string_pretty(&json_project)?)
+        }
+        super::SourceFormat::NativeJson => {
+            let json_project = ejson::Project::from(project);
+            (
+                path.to_path_buf(),
+                serde_json::to_string_pretty(&json_project)?,
+            )
+        }
+        super::SourceFormat::SdaiJson => {
+            let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
+            (
+                path.to_path_buf(),
+                serde_json::to_string_pretty(&sdai_model)?,
+            )
+        }
+    };
+
     if !dry_run {
-        let json_project = ejson::Project::from(project);
-        let json_str = serde_json::to_string_pretty(&json_project)?;
-        std::fs::write(&write_path, &json_str)
+        std::fs::write(&write_path, &serialized)
             .with_context(|| format!("failed to write model to {}", write_path.display()))?;
     }
 
@@ -1278,6 +1287,64 @@ mod tests {
         assert!(
             auxes.iter().any(|a| a["name"] == "extra_aux"),
             "upserted auxiliary must appear in the response model"
+        );
+    }
+
+    // ---- AC7.3: format preservation on write-back ----
+
+    #[test]
+    fn ac7_3_sdai_json_format_preserved_after_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sd-ai-simple.sd.json"
+        );
+        let dest = dir.path().join("model.sd.json");
+        std::fs::copy(fixture, &dest).unwrap();
+
+        call_tool(serde_json::json!({
+            "projectPath": dest.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_aux", "equation": "42" }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(
+            saved.get("variables").is_some(),
+            "SD-AI file must retain top-level 'variables' key after edit, got: {}",
+            serde_json::to_string_pretty(&saved).unwrap()
+        );
+        assert!(
+            saved.get("models").is_none(),
+            "SD-AI file must not gain a 'models' key after edit"
+        );
+    }
+
+    #[test]
+    fn ac7_3_native_json_format_preserved_after_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+
+        call_tool(serde_json::json!({
+            "projectPath": path.to_str().unwrap(),
+            "operations": [{
+                "upsertAuxiliary": { "name": "new_aux", "equation": "42" }
+            }]
+        }))
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            saved.get("models").is_some(),
+            "native JSON must retain top-level 'models' key after edit"
+        );
+        assert!(
+            saved.get("variables").is_none(),
+            "native JSON must not gain a 'variables' key after edit"
         );
     }
 }
