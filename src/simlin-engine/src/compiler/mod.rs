@@ -15,13 +15,19 @@ use std::sync::Arc;
 
 use crate::ast::{ArrayView, Ast, Loc};
 use crate::bytecode::CompiledModule;
-use crate::common::{Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{Canonical, CanonicalElementName, Ident, Result};
+#[cfg(test)]
+use crate::common::{Error, ErrorCode, ErrorKind};
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+#[cfg(test)]
 use crate::model::ModelStage1;
+#[cfg(test)]
 use crate::project::Project;
+use crate::sim_err;
 use crate::variable::Variable;
-use crate::vm::{IMPLICIT_VAR_COUNT, ModuleKey};
-use crate::{Error, sim_err};
+#[cfg(test)]
+use crate::vm::IMPLICIT_VAR_COUNT;
+use crate::vm::ModuleKey;
 
 // Re-exports for crate-internal API
 pub(crate) use self::context::{Context, ContextCore, VariableMetadata};
@@ -2236,26 +2242,28 @@ pub(crate) struct VarInitial {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[allow(dead_code)]
 pub struct Module {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) inputs: HashSet<Ident<Canonical>>,
     pub(crate) n_slots: usize,
     pub(crate) n_temps: usize,
     pub(crate) temp_sizes: Vec<usize>,
+    #[allow(dead_code)]
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_initials_by_var: Vec<VarInitial>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: VariableOffsetMap,
+    #[allow(dead_code)]
     pub(crate) runlist_order: Vec<Ident<Canonical>>,
     pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: Vec<Dimension>,
     pub(crate) dimensions_ctx: DimensionsContext,
+    #[allow(dead_code)]
     pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn calc_module_model_map(
     project: &Project,
     model_name: &Ident<Canonical>,
@@ -2290,7 +2298,7 @@ pub(crate) fn calc_module_model_map(
     all_models
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn build_metadata<'p>(
     project: &'p Project,
     model_name: &Ident<Canonical>,
@@ -2427,7 +2435,7 @@ pub(crate) fn build_metadata<'p>(
     all_offsets.insert(model_name.clone(), offsets);
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn calc_n_slots(
     all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>>,
     model_name: &Ident<Canonical>,
@@ -2437,7 +2445,13 @@ fn calc_n_slots(
     metadata.values().map(|v| v.size).sum()
 }
 
-#[allow(dead_code)]
+impl Module {
+    pub fn compile(&self) -> Result<CompiledModule> {
+        Compiler::new(self).compile()
+    }
+}
+
+#[cfg(test)]
 impl Module {
     pub(crate) fn new(
         project: &Project,
@@ -2545,8 +2559,8 @@ impl Module {
                     .ast
                     .iter()
                     .filter_map(|expr| {
-                        if let Expr::AssignCurr(off, _) = expr {
-                            Some(*off)
+                        if let &Expr::AssignCurr(off, _) = expr {
+                            Some(off)
                         } else {
                             None
                         }
@@ -2632,10 +2646,6 @@ impl Module {
             dimensions_ctx: project.dimensions_ctx.clone(),
             module_refs,
         })
-    }
-
-    pub fn compile(&self) -> Result<CompiledModule> {
-        Compiler::new(self).compile()
     }
 }
 

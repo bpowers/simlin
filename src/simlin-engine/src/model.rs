@@ -713,7 +713,6 @@ pub(crate) fn resolve_module_input<'a>(
     }
 }
 
-#[allow(dead_code)]
 pub fn enumerate_modules<T>(
     models: &HashMap<&str, &ModelStage1>,
     main_model_name: &str,
@@ -739,7 +738,6 @@ where
     Ok(modules)
 }
 
-#[allow(dead_code)]
 pub(crate) fn enumerate_modules_inner<T>(
     models: &HashMap<&str, &ModelStage1>,
     model_name: &str,
