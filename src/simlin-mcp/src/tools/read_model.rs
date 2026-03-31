@@ -418,6 +418,139 @@ mod tests {
         );
     }
 
+    // ---- AC6.4: loop names set via EditModel appear in ReadModel output ----
+
+    #[test]
+    fn ac6_4_loop_names_surface_in_read_model() {
+        let edit_tool = super::super::edit_model::tool();
+
+        // Build a logistic growth model with UIDs on variables so that
+        // SetLoopName can resolve variable names to UIDs for loop_metadata.
+        let model_json = serde_json::json!({
+            "name": "loop-name-test",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 100.0,
+                "dt": "1",
+                "saveStep": 1.0,
+                "method": "euler",
+                "timeUnits": ""
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{
+                    "uid": 1,
+                    "name": "population",
+                    "initialEquation": "5",
+                    "inflows": ["net_birth_rate"],
+                    "outflows": []
+                }],
+                "flows": [{
+                    "uid": 2,
+                    "name": "net_birth_rate",
+                    "equation": "fractional_growth_rate * population"
+                }],
+                "auxiliaries": [
+                    { "uid": 3, "name": "maximum_growth_rate", "equation": ".12" },
+                    { "uid": 4, "name": "carrying_capacity", "equation": "1000" },
+                    {
+                        "uid": 5,
+                        "name": "fractional_growth_rate",
+                        "equation": "maximum_growth_rate * (1 - fraction_of_carrying_capacity_used)"
+                    },
+                    {
+                        "uid": 6,
+                        "name": "fraction_of_carrying_capacity_used",
+                        "equation": "population/carrying_capacity"
+                    }
+                ]
+            }]
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("loop-name.simlin.json");
+        std::fs::write(
+            &file_path,
+            serde_json::to_string_pretty(&model_json).unwrap(),
+        )
+        .unwrap();
+        let path_str = file_path.to_str().unwrap();
+
+        // Step 1: ReadModel to discover loops and their variables.
+        let initial_output = call_tool(serde_json::json!({ "projectPath": path_str })).unwrap();
+        let loops = initial_output["loopDominance"]
+            .as_array()
+            .expect("loopDominance must be present");
+        assert!(
+            !loops.is_empty(),
+            "logistic growth model must produce at least one feedback loop"
+        );
+
+        // Pick the first discovered loop and note its variables.
+        let first_loop = &loops[0];
+        let loop_vars: Vec<String> = first_loop["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            first_loop["name"].is_null(),
+            "loop should not have a name before SetLoopName"
+        );
+
+        // Step 2: EditModel with SetLoopName to name the loop.
+        // The variables list in LoopSummary includes duplicates (first var
+        // repeated at end to close the cycle), so deduplicate for the
+        // SetLoopName call which just needs the participating variables.
+        let unique_vars: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            loop_vars
+                .into_iter()
+                .filter(|v| seen.insert(v.clone()))
+                .collect()
+        };
+        let loop_name = "Growth Feedback";
+        let edit_result = edit_tool.call(serde_json::json!({
+            "projectPath": path_str,
+            "operations": [{
+                "setLoopName": {
+                    "variables": unique_vars,
+                    "name": loop_name,
+                    "description": "reinforcing growth loop"
+                }
+            }]
+        }));
+        assert!(
+            edit_result.is_ok(),
+            "EditModel SetLoopName must succeed: {:?}",
+            edit_result.err()
+        );
+
+        // Step 3: ReadModel the same file and verify the loop name surfaces.
+        let final_output = call_tool(serde_json::json!({ "projectPath": path_str })).unwrap();
+        let final_loops = final_output["loopDominance"]
+            .as_array()
+            .expect("loopDominance must be present after naming");
+
+        let named_loop = final_loops
+            .iter()
+            .find(|l| l["name"].as_str() == Some(loop_name));
+        assert!(
+            named_loop.is_some(),
+            "ReadModel output must contain a loop named '{}' after SetLoopName; \
+             found loops: {:?}",
+            loop_name,
+            final_loops
+                .iter()
+                .map(|l| format!(
+                    "id={}, name={:?}, vars={:?}",
+                    l["loopId"], l["name"], l["variables"]
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
     // ---- AC7.4: unrecognized JSON returns descriptive error ----
 
     #[test]
