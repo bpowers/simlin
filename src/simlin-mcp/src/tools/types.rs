@@ -237,4 +237,64 @@ mod tests {
         assert_eq!(output.variable_name.as_deref(), Some("bad"));
         assert_eq!(output.kind, "variable");
     }
+
+    /// Verifies that `ErrorOutput::from` produces the same snake_case code
+    /// strings as `ErrorCode`'s `Display` impl, which is the authoritative
+    /// source shared with pysimlin (via libsimlin's `SimlinErrorCode`).
+    ///
+    /// Both MCP and pysimlin derive their error codes from `ErrorCode`.  MCP
+    /// uses `Display` directly; pysimlin maps through `SimlinErrorCode` integer
+    /// values with matching semantics.  This test locks down the string
+    /// representation for the error codes most commonly encountered during
+    /// model editing, ensuring the MCP `code` field stays aligned.
+    #[test]
+    fn error_code_strings_align_with_pysimlin() {
+        use simlin_engine::common::ErrorCode;
+        use simlin_engine::errors::{FormattedError, FormattedErrorKind};
+
+        let cases: Vec<(ErrorCode, &str)> = vec![
+            (ErrorCode::NoError, "no_error"),
+            (ErrorCode::DoesNotExist, "does_not_exist"),
+            (ErrorCode::InvalidToken, "invalid_token"),
+            (ErrorCode::UnrecognizedEof, "unrecognized_eof"),
+            (ErrorCode::UnrecognizedToken, "unrecognized_token"),
+            (ErrorCode::ExtraToken, "extra_token"),
+            (ErrorCode::UnknownBuiltin, "unknown_builtin"),
+            (ErrorCode::BadBuiltinArgs, "bad_builtin_args"),
+            (ErrorCode::EmptyEquation, "empty_equation"),
+            (ErrorCode::NotSimulatable, "not_simulatable"),
+            (ErrorCode::CircularDependency, "circular_dependency"),
+            (ErrorCode::DuplicateVariable, "duplicate_variable"),
+            (ErrorCode::UnknownDependency, "unknown_dependency"),
+            (ErrorCode::VariablesHaveErrors, "variables_have_errors"),
+            (ErrorCode::UnitMismatch, "unit_mismatch"),
+            (ErrorCode::Generic, "generic"),
+        ];
+
+        for (code, expected_str) in &cases {
+            // Verify Display impl produces the expected snake_case string
+            assert_eq!(
+                code.to_string(),
+                *expected_str,
+                "ErrorCode::{code:?} Display mismatch"
+            );
+
+            // Verify ErrorOutput::from uses Display for the code field
+            let fe = FormattedError {
+                code: *code,
+                message: None,
+                model_name: None,
+                variable_name: None,
+                start_offset: 0,
+                end_offset: 0,
+                kind: FormattedErrorKind::Variable,
+                unit_error_kind: None,
+            };
+            let output = ErrorOutput::from(&fe);
+            assert_eq!(
+                output.code, *expected_str,
+                "ErrorOutput.code for {code:?} should match Display"
+            );
+        }
+    }
 }
