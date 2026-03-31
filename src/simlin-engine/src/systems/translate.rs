@@ -10,7 +10,7 @@
 //! chained modules where each module's `available` references the
 //! previous module's `remaining` output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::canonicalize;
 use crate::common::Result;
@@ -481,6 +481,40 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
             uid: None,
             compat: Compat::default(),
         }));
+    }
+
+    // Create standalone max aux variables for stocks that have a non-infinite
+    // max but are not flow destinations. The flow-processing loop above only
+    // creates `dest_capacity` aux variables for destination stocks; source-only
+    // and flow-less stocks with a max would lose that information on round-trip.
+    {
+        let dest_stocks_with_capacity: HashSet<String> = deferred_capacities
+            .iter()
+            .filter(|dc| dc.dest_max_expr.is_some())
+            .map(|dc| dc.dest_canon.clone())
+            .collect();
+
+        for stock in &model.stocks {
+            if stock.max == Expr::Inf {
+                continue;
+            }
+            let stock_canon = canon(&stock.name);
+            if dest_stocks_with_capacity.contains(&stock_canon) {
+                continue;
+            }
+            let max_aux_ident = format!("{stock_canon}_max");
+            let equation = stock.max.to_equation_string();
+            variables.push(Variable::Aux(Aux {
+                ident: max_aux_ident,
+                equation: Equation::Scalar(equation),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: Compat::default(),
+            }));
+        }
     }
 
     // Convert stock builders into datamodel stocks and prepend them

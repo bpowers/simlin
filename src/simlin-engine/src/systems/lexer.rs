@@ -463,7 +463,8 @@ fn parse_expr(tokens: &[Token], line_num: usize) -> Result<(Expr, &[Token]), Lex
     Ok((left, rest))
 }
 
-/// Parse an atom: literal, reference, or parenthesized expression.
+/// Parse an atom: literal, reference, parenthesized expression, or
+/// unary minus (negation of the following atom as `-1 * atom`).
 fn parse_atom(tokens: &[Token], line_num: usize) -> Result<(Expr, &[Token]), LexError> {
     match tokens.first() {
         Some(Token::Int(n)) => Ok((Expr::Int(*n), &tokens[1..])),
@@ -479,6 +480,16 @@ fn parse_atom(tokens: &[Token], line_num: usize) -> Result<(Expr, &[Token]), Lex
                     message: "unclosed parenthesis in formula".to_owned(),
                 }),
             }
+        }
+        Some(Token::Op(BinOp::Sub)) => {
+            // Unary minus: negate the following atom as `-1 * atom`.
+            // The tokenizer already handles `-<digit>` as a negative literal,
+            // so this branch covers `-<identifier>` and `-(<expr>)`.
+            let (inner, rest) = parse_atom(&tokens[1..], line_num)?;
+            Ok((
+                Expr::BinOp(Box::new(Expr::Int(-1)), BinOp::Mul, Box::new(inner)),
+                rest,
+            ))
         }
         Some(tok) => Err(LexError {
             line: line_num,
@@ -505,3 +516,102 @@ impl std::fmt::Display for LexError {
 }
 
 impl std::error::Error for LexError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::systems::ast::BinOp;
+
+    #[test]
+    fn unary_minus_identifier() {
+        // -x should produce BinOp(Int(0), Sub, Ref("x")) or equivalent negation
+        let expr = parse_formula("-x", 1).unwrap();
+        // The negation of an identifier should parse without error and
+        // produce a multiplication by -1
+        assert_eq!(
+            expr,
+            Expr::BinOp(
+                Box::new(Expr::Int(-1)),
+                BinOp::Mul,
+                Box::new(Expr::Ref("x".to_owned())),
+            )
+        );
+    }
+
+    #[test]
+    fn unary_minus_parenthesized_expression() {
+        // -(a + b) should parse as negation of (a + b)
+        let expr = parse_formula("-(a + b)", 1).unwrap();
+        assert_eq!(
+            expr,
+            Expr::BinOp(
+                Box::new(Expr::Int(-1)),
+                BinOp::Mul,
+                Box::new(Expr::Paren(Box::new(Expr::BinOp(
+                    Box::new(Expr::Ref("a".to_owned())),
+                    BinOp::Add,
+                    Box::new(Expr::Ref("b".to_owned())),
+                )))),
+            )
+        );
+    }
+
+    #[test]
+    fn binary_minus_still_works() {
+        // a - b should still parse as subtraction
+        let expr = parse_formula("a - b", 1).unwrap();
+        assert_eq!(
+            expr,
+            Expr::BinOp(
+                Box::new(Expr::Ref("a".to_owned())),
+                BinOp::Sub,
+                Box::new(Expr::Ref("b".to_owned())),
+            )
+        );
+    }
+
+    #[test]
+    fn unary_minus_number_still_works() {
+        // -5 should still produce Int(-5)
+        let expr = parse_formula("-5", 1).unwrap();
+        assert_eq!(expr, Expr::Int(-5));
+    }
+
+    #[test]
+    fn unary_minus_after_operator() {
+        // a + -b should parse as a + (-1 * b)
+        let expr = parse_formula("a + -b", 1).unwrap();
+        assert_eq!(
+            expr,
+            Expr::BinOp(
+                Box::new(Expr::Ref("a".to_owned())),
+                BinOp::Add,
+                Box::new(Expr::BinOp(
+                    Box::new(Expr::Int(-1)),
+                    BinOp::Mul,
+                    Box::new(Expr::Ref("b".to_owned())),
+                )),
+            )
+        );
+    }
+
+    #[test]
+    fn unary_minus_inf() {
+        // -inf should parse as negation of inf
+        let expr = parse_formula("-inf", 1).unwrap();
+        assert_eq!(
+            expr,
+            Expr::BinOp(Box::new(Expr::Int(-1)), BinOp::Mul, Box::new(Expr::Inf),)
+        );
+    }
+
+    #[test]
+    fn double_negation() {
+        // --5 should parse as -1 * (-5) = 5
+        let expr = parse_formula("--5", 1).unwrap();
+        assert_eq!(
+            expr,
+            Expr::BinOp(Box::new(Expr::Int(-1)), BinOp::Mul, Box::new(Expr::Int(-5)),)
+        );
+    }
+}

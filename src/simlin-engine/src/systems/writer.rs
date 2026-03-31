@@ -714,6 +714,18 @@ fn find_stock_max(
         let max_part = &cap_eq[..pattern_idx];
         return Some(reverse_rewrite_equation(max_part, reverse_rewrites));
     }
+
+    // Fallback: check for a standalone `{stock}_max` aux created by the
+    // translator for stocks that have a non-infinite max but are not flow
+    // destinations (source-only or flow-less stocks).
+    let max_aux_ident = format!("{}_max", stock.ident);
+    if let Some(Variable::Aux(a)) = var_by_ident.get(max_aux_ident.as_str())
+        && let Equation::Scalar(eq) = &a.equation
+    {
+        let eq = eq.replace("inf()", "inf");
+        return Some(reverse_rewrite_equation(&eq, reverse_rewrites));
+    }
+
     None
 }
 
@@ -999,6 +1011,29 @@ mod tests {
     ///
     /// D(0, A - B) produces dest_capacity = "a - b - d". When querying
     /// B's max, the writer must not match this module (it targets D, not B).
+    /// Stock max is preserved when the stock is a source (not a flow destination).
+    /// Round-trip: `A(10, 20) > B @ 1` should preserve max=20 on stock A.
+    #[test]
+    fn source_only_stock_max_preserved() {
+        let input = "A(10, 20) > B @ 1\n";
+        let output = roundtrip_write(input);
+        assert!(
+            output.contains("a(10, 20)"),
+            "should preserve max on source-only stock: {output}"
+        );
+    }
+
+    /// Stock max on a stock with no flows at all is preserved.
+    #[test]
+    fn stock_only_with_max_preserved() {
+        let input = "A(10, 20)\n";
+        let output = roundtrip_write(input);
+        assert!(
+            output.contains("a(10, 20)"),
+            "should preserve max on stock-only declaration: {output}"
+        );
+    }
+
     #[test]
     fn find_stock_max_does_not_match_wrong_stock() {
         // B has no max, D has max = A - B
