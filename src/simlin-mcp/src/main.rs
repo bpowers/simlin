@@ -82,8 +82,8 @@ mod tests {
     #[test]
     fn instructions_include_set_loop_name() {
         assert!(
-            INSTRUCTIONS.contains("SetLoopName"),
-            "instructions.md must mention SetLoopName"
+            INSTRUCTIONS.contains("setLoopName"),
+            "instructions.md must mention setLoopName"
         );
         assert!(
             INSTRUCTIONS.contains("variables"),

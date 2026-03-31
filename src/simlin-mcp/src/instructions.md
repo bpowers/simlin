@@ -110,9 +110,9 @@ ReadModel returns loop analysis data from the Loops That Matter (LTM) algorithm:
   - `startTime`, `endTime`: Time range
   - `dominantLoops`: Names of the loops that dominate during this period
 
-### Naming loops with SetLoopName
+### Naming loops with setLoopName
 
-Loops are discovered automatically but start unnamed. Use `SetLoopName` in EditModel to assign meaningful names:
+Loops are discovered automatically but start unnamed. Use `setLoopName` in EditModel to assign meaningful names:
 
 ```json
 {
