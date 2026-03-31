@@ -126,6 +126,19 @@ pub struct RemoveVariableInput {
     pub name: String,
 }
 
+/// Assign a human-readable name to a feedback loop identified by its
+/// participating variables.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLoopNameInput {
+    /// Variable names that form the loop (order does not matter).
+    pub variables: Vec<String>,
+    /// Human-readable name for the loop.
+    pub name: String,
+    /// Optional description of the loop's behavior.
+    pub description: Option<String>,
+}
+
 /// An edit operation on a model.
 ///
 /// Serde's default externally-tagged representation produces JSON like:
@@ -137,6 +150,7 @@ pub enum EditOperation {
     UpsertFlow(UpsertFlowInput),
     UpsertAuxiliary(UpsertAuxiliaryInput),
     RemoveVariable(RemoveVariableInput),
+    SetLoopName(SetLoopNameInput),
 }
 
 /// Input for the `EditModel` tool.
@@ -451,6 +465,11 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
         EditOperation::RemoveVariable(r) => {
             simlin_engine::ModelOperation::DeleteVariable { ident: r.name }
         }
+        EditOperation::SetLoopName(input) => simlin_engine::ModelOperation::SetLoopName {
+            variables: input.variables,
+            name: input.name,
+            description: input.description,
+        },
     }
 }
 
@@ -553,11 +572,49 @@ mod tests {
             "upsertFlow",
             "upsertAuxiliary",
             "removeVariable",
+            "setLoopName",
         ] {
             assert!(
                 schema_str.contains(variant),
                 "schema should contain {variant}"
             );
+        }
+    }
+
+    #[test]
+    fn schema_set_loop_name_has_expected_fields() {
+        let t = tool();
+        let schema = t.input_schema();
+        let schema_str = serde_json::to_string(&schema).unwrap();
+
+        // SetLoopNameInput must expose variables, name, and description
+        for field in ["variables", "\"name\"", "description"] {
+            assert!(
+                schema_str.contains(field),
+                "SetLoopName schema should contain field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_set_loop_name_operation() {
+        let op = EditOperation::SetLoopName(SetLoopNameInput {
+            variables: vec!["population".into(), "births".into()],
+            name: "Growth Loop".into(),
+            description: Some("reinforcing growth".into()),
+        });
+        let model_op = convert_operation(op);
+        match model_op {
+            simlin_engine::ModelOperation::SetLoopName {
+                variables,
+                name,
+                description,
+            } => {
+                assert_eq!(variables, vec!["population", "births"]);
+                assert_eq!(name, "Growth Loop");
+                assert_eq!(description.as_deref(), Some("reinforcing growth"));
+            }
+            _ => panic!("expected SetLoopName variant"),
         }
     }
 
