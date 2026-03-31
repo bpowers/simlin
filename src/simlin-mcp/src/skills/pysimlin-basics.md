@@ -3,7 +3,7 @@
 Install the Python bindings for the Simlin simulation engine:
 
 ```
-pip install simlin==0.6.2
+pip install simlin=={PYSIMLIN_VERSION}
 ```
 
 ## Loading Models

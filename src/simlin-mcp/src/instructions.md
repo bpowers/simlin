@@ -158,7 +158,7 @@ EditModel rejects edits that introduce new compilation errors -- the response wi
 For running simulations, parameter sweeps, scenario analysis, and detailed loop dominance analysis beyond what the MCP tools provide, use the pysimlin Python package:
 
 ```
-pip install simlin==0.6.2
+pip install simlin=={PYSIMLIN_VERSION}
 ```
 
 pysimlin provides a full simulation API with pandas DataFrame results, parameter overrides, and programmatic access to loop importance time series. See the skill resources (`simlin://skills/pysimlin-basics`, `simlin://skills/scenario-analysis`, `simlin://skills/loop-dominance`) for detailed usage guides.

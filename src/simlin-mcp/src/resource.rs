@@ -41,7 +41,7 @@ static RESOURCES: &[ResourceEntry] = &[
             ),
             mime_type: Some("text/markdown"),
         },
-        content: include_str!("skills/pysimlin-basics.md"),
+        content: include_str!(concat!(env!("OUT_DIR"), "/pysimlin-basics.md")),
     },
     ResourceEntry {
         metadata: Resource {
