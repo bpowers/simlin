@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   validate:
     name: Validate version
@@ -94,7 +97,7 @@ jobs:
 
       - name: Install cargo-zigbuild
         if: matrix.use-zigbuild
-        run: cargo install --locked cargo-zigbuild@0.22
+        run: cargo install --locked cargo-zigbuild@0.22.1
 
       - name: Build (zigbuild)
         if: matrix.use-zigbuild

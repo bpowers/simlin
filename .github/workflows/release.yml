@@ -6,6 +6,9 @@ on:
       - 'pysimlin-v*'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-wheels:
     name: Build wheels
