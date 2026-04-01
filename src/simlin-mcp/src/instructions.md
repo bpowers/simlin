@@ -64,31 +64,6 @@ Variables use XMILE equation syntax. Key functions and their behavior:
 | `SUM(array)`, `MEAN(array)` | Array aggregation |
 | `UNIFORM(min, max, seed)` | Random uniform distribution |
 
-### Vensim function name mapping
-
-If translating from Vensim equations, these names differ in XMILE/Simlin:
-
-| Vensim | XMILE (Simlin) |
-|--------|----------------|
-| `SMOOTH(input, delay)` | `SMTH1(input, delay)` |
-| `SMOOTHI(input, delay, init)` | `SMTH1(input, delay, init)` |
-| `SMOOTH3(input, delay)` | `SMTH3(input, delay)` |
-| `SMOOTH3I(input, delay, init)` | `SMTH3(input, delay, init)` |
-| `DELAY FIXED(input, delay, init)` | `DELAY(input, delay, init)` |
-| `ZIDZ(a, b)` | `SAFEDIV(a, b)` |
-| `XIDZ(a, b, x)` | `SAFEDIV(a, b, x)` |
-| `INITIAL(x)` | `INIT(x)` |
-| `ACTIVE INITIAL(active, init)` | `INIT(active)` |
-| `INTEG(rate, init)` | Stock with `initialEquation` (not a function) |
-| `IF THEN ELSE(c, t, f)` | `IF c THEN t ELSE f` |
-| `VMAX(a, b)` | `MAX(a, b)` |
-| `VMIN(a, b)` | `MIN(a, b)` |
-| `ELMCOUNT(arr)` | `SIZE(arr)` |
-| `RANDOM UNIFORM(min, max, seed)` | `UNIFORM(min, max, seed)` |
-| `:AND:`, `:OR:`, `:NOT:` | `AND`, `OR`, `NOT` |
-
-Vensim uses spaces in variable names; XMILE uses underscores. Variable names are case-insensitive.
-
 ## Modeling conventions
 
 - **Stocks** accumulate over time. They use `initialEquation` (not `equation`) to set the starting value. The stock's rate of change is determined by its inflows and outflows.
@@ -164,3 +139,20 @@ pip install pysimlin=={PYSIMLIN_VERSION}
 ```
 
 pysimlin provides a full simulation API with pandas DataFrame results, parameter overrides, and programmatic access to loop importance time series. See the skill resources (`simlin://skills/pysimlin-basics`, `simlin://skills/scenario-analysis`, `simlin://skills/loop-dominance`) for detailed usage guides.
+
+Imported in Python as `simlin`:
+
+```python
+import simlin
+
+model = simlin.load("population.stmx")
+run = model.run()
+print(run.results["population"].iloc[-1])
+```
+
+The server also exposes skill resources around how to use the Python library:
+
+- `simlin://skills/pysimlin-basics` -- Loading models, simulation, DataFrame access
+- `simlin://skills/scenario-analysis` -- Parameter sweeps and intervention analysis
+- `simlin://skills/loop-dominance` -- Feedback loop analysis and visualization
+- `simlin://skills/vensim-equation-syntax` -- Vensim-to-XMILE function mapping

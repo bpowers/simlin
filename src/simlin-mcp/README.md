@@ -51,13 +51,6 @@ npx @simlin/mcp@latest
 
 ## Skill resources
 
-The server also exposes skill resources that teach AI assistants how to use the Python library:
-
-- `simlin://skills/pysimlin-basics` -- Loading models, simulation, DataFrame access
-- `simlin://skills/scenario-analysis` -- Parameter sweeps and intervention analysis
-- `simlin://skills/loop-dominance` -- Feedback loop analysis and visualization
-- `simlin://skills/vensim-equation-syntax` -- Vensim-to-XMILE function mapping
-
 The PyPI package is `pysimlin`:
 
 ```sh
@@ -73,6 +66,13 @@ model = simlin.load("population.stmx")
 run = model.run()
 print(run.results["population"].iloc[-1])
 ```
+
+The server also exposes skill resources around how to use the Python library:
+
+- `simlin://skills/pysimlin-basics` -- Loading models, simulation, DataFrame access
+- `simlin://skills/scenario-analysis` -- Parameter sweeps and intervention analysis
+- `simlin://skills/loop-dominance` -- Feedback loop analysis and visualization
+- `simlin://skills/vensim-equation-syntax` -- Vensim-to-XMILE function mapping
 
 ## License
 
