@@ -1504,4 +1504,117 @@ mod tests {
         assert!(rels[0].reasoning.is_none());
         assert!(rels[0].polarity_reasoning.is_none());
     }
+
+    // -- generate_relationships tests (Task 2: stock-flow filtering, ordering, empty) --
+
+    #[test]
+    fn test_generate_relationships_filters_stock_flow_structural_edges() {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            // structural: inflow -> stock
+            (
+                ("births".into(), "population".into()),
+                LinkPolarity::Positive,
+            ),
+            // structural: outflow -> stock
+            (
+                ("deaths".into(), "population".into()),
+                LinkPolarity::Negative,
+            ),
+            // equation-derived: stock referenced in flow equation
+            (
+                ("population".into(), "deaths".into()),
+                LinkPolarity::Positive,
+            ),
+            // equation-derived
+            (
+                ("death_rate".into(), "deaths".into()),
+                LinkPolarity::Positive,
+            ),
+        ]);
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("population", "1000", &["births"], &["deaths"], None),
+                x_flow("births", "population * 0.1", None),
+                x_flow("deaths", "population * death_rate", None),
+                x_aux("death_rate", "0.01", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+
+        // AC3.1: structural inflow edge filtered
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.from == "births" && r.to == "population"),
+            "structural inflow edge should be filtered"
+        );
+        // AC3.2: structural outflow edge filtered
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.from == "deaths" && r.to == "population"),
+            "structural outflow edge should be filtered"
+        );
+        // AC3.3: equation-derived stock->flow edge preserved
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "population" && r.to == "deaths"),
+            "equation-derived edge from stock to flow should be present"
+        );
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "death_rate" && r.to == "deaths"),
+            "equation-derived edge should be present"
+        );
+        assert_eq!(rels.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_relationships_deterministic_ordering() {
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            (("Z".into(), "out".into()), LinkPolarity::Positive),
+            (("A".into(), "out".into()), LinkPolarity::Positive),
+            (("M".into(), "out".into()), LinkPolarity::Negative),
+            (("A".into(), "mid".into()), LinkPolarity::Positive),
+        ]);
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("A", "1", None),
+                x_aux("M", "2", None),
+                x_aux("Z", "3", None),
+                x_aux("mid", "A", None),
+                x_aux("out", "A + M + Z", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+        assert_eq!(rels.len(), 4);
+
+        let keys: Vec<(&str, &str)> = rels
+            .iter()
+            .map(|r| (r.from.as_str(), r.to.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![("A", "mid"), ("A", "out"), ("M", "out"), ("Z", "out")]
+        );
+    }
+
+    #[test]
+    fn test_generate_relationships_empty_model() {
+        use crate::testutils::x_model;
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::new();
+        let model = x_model("main", vec![]);
+
+        let rels = generate_relationships(&polarities, &model);
+        assert!(rels.is_empty());
+    }
 }
