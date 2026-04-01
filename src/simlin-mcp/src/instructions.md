@@ -4,7 +4,7 @@ Simlin is a system dynamics modeling tool. This server exposes tools for reading
 
 ## Tools
 
-- **ReadModel**: Read a model file and return a JSON snapshot with loop dominance analysis. Accepts `projectPath` (file path) and optional `modelName` (defaults to "main").
+- **ReadModel**: Read a model file and return a JSON snapshot with Loops That Matter (loop dominance) analysis. Accepts `projectPath` (file path) and optional `modelName` (defaults to "main").
 - **EditModel**: Apply operations to an existing model. Operations are applied in order; the result includes a refreshed snapshot with loop analysis. Supports `dryRun: true` to preview without writing.
 - **CreateModel**: Create a new empty `.simlin.json` model file at a given path with optional `simSpecs`.
 
