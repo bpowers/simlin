@@ -15,7 +15,7 @@ use crate::tool::TypedTool;
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateModelInput {
-    /// Path where the new `.simlin.json` file should be created.
+    /// Path where the new `.sd.json` file should be created.
     pub project_path: String,
 
     /// Optional simulation specifications.  If omitted, defaults are
@@ -60,12 +60,12 @@ fn handle_create_model(input: CreateModelInput) -> anyhow::Result<serde_json::Va
     });
 
     // Derive the project name from the filename stem, stripping the
-    // `.simlin.json` double-extension when present.
+    // `.sd.json` double-extension when present.
     let project_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .map(|n| {
-            n.strip_suffix(".simlin.json")
+            n.strip_suffix(".sd.json")
                 .unwrap_or_else(|| n.strip_suffix(".json").unwrap_or(n))
                 .to_string()
         })
@@ -147,7 +147,7 @@ mod tests {
     fn test_create_model_success_default_specs() {
         let t = tool();
         let dir = tempfile::tempdir().unwrap();
-        let project_path = dir.path().join("my-model.simlin.json");
+        let project_path = dir.path().join("my-model.sd.json");
 
         let result = t
             .call(serde_json::json!({
@@ -182,7 +182,7 @@ mod tests {
     fn test_create_model_custom_sim_specs() {
         let t = tool();
         let dir = tempfile::tempdir().unwrap();
-        let project_path = dir.path().join("custom.simlin.json");
+        let project_path = dir.path().join("custom.sd.json");
 
         let result = t
             .call(serde_json::json!({
@@ -216,7 +216,7 @@ mod tests {
     fn test_create_model_already_exists() {
         let t = tool();
         let dir = tempfile::tempdir().unwrap();
-        let project_path = dir.path().join("existing.simlin.json");
+        let project_path = dir.path().join("existing.sd.json");
         std::fs::write(&project_path, "{}").unwrap();
 
         let result = t.call(serde_json::json!({

@@ -43,30 +43,28 @@ npx @simlin/mcp@latest
 
 ### Supported file formats
 
-| Format | Extensions | Read | Edit |
-|--------|-----------|------|------|
-| XMILE | `.stmx`, `.xmile`, `.xml` | Yes | Yes |
-| Native JSON | `.simlin.json` | Yes | Yes |
-| Vensim | `.mdl` | Yes | No (import only) |
+| Format                  | Extensions                | Read | Edit |
+|-------------------------|---------------------------|------|------|
+| XMILE                   | `.stmx`, `.xmile`, `.xml` | Yes | Yes |
+| JSON (Simlin and SD-AI) | `.sd.json`, `.json`       | Yes | Yes |
+| Vensim                  | `.mdl`                    | Yes | No (import only) |
 
 ## Skill resources
 
-The server also exposes skill resources that teach AI assistants how to use the Python simulation library:
+The server also exposes skill resources that teach AI assistants how to use the Python library:
 
 - `simlin://skills/pysimlin-basics` -- Loading models, simulation, DataFrame access
 - `simlin://skills/scenario-analysis` -- Parameter sweeps and intervention analysis
 - `simlin://skills/loop-dominance` -- Feedback loop analysis and visualization
 - `simlin://skills/vensim-equation-syntax` -- Vensim-to-XMILE function mapping
 
-## Python library
-
-For running simulations, parameter sweeps, and programmatic analysis, install the companion Python package:
+The PyPI package is `pysimlin`:
 
 ```sh
 pip install pysimlin
 ```
 
-The PyPI package is `pysimlin`, imported in Python as `simlin`:
+Imported in Python as `simlin`:
 
 ```python
 import simlin

@@ -268,7 +268,7 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("broken.simlin.json");
+        let file_path = dir.path().join("broken.sd.json");
         std::fs::write(&file_path, broken_json.to_string()).unwrap();
 
         let output =
@@ -315,7 +315,7 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("broken-errors.simlin.json");
+        let file_path = dir.path().join("broken-errors.sd.json");
         std::fs::write(&file_path, broken_json.to_string()).unwrap();
 
         let output =
@@ -354,7 +354,7 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("error-fields.simlin.json");
+        let file_path = dir.path().join("error-fields.sd.json");
         std::fs::write(&file_path, broken_json.to_string()).unwrap();
 
         let output =
@@ -476,7 +476,7 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("loop-name.simlin.json");
+        let file_path = dir.path().join("loop-name.sd.json");
         std::fs::write(
             &file_path,
             serde_json::to_string_pretty(&model_json).unwrap(),
@@ -613,7 +613,7 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("multi.simlin.json");
+        let file_path = dir.path().join("multi.sd.json");
         std::fs::write(
             &file_path,
             serde_json::to_string_pretty(&project_json).unwrap(),

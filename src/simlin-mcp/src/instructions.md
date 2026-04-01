@@ -6,7 +6,9 @@ Simlin is a system dynamics modeling tool. This server exposes tools for reading
 
 - **ReadModel**: Read a model file and return a JSON snapshot with Loops That Matter (loop dominance) analysis. Accepts `projectPath` (file path) and optional `modelName` (defaults to "main").
 - **EditModel**: Apply operations to an existing model. Operations are applied in order; the result includes a refreshed snapshot with loop analysis. Supports `dryRun: true` to preview without writing.
-- **CreateModel**: Create a new empty `.simlin.json` model file at a given path with optional `simSpecs`.
+- **CreateModel**: Create a new empty `.sd.json` model file at a given path with optional `simSpecs`.
+
+CRITICAL: this is new software -- `ReadModel` and `CreateModel` are safe, but ONLY use `EditModel` on models in version-controlled projects or newly created models, otherwise we risk corrupting important user files without a clear recovery mechanism.  If a user tells you to edit a non-version-controlled model please explain the risks (we may lose charts and other visual UI elements, and may not handle conveyors or other advanced Stella features correctly), and only if they are OK with the risks proceed.
 
 ### EditModel operations
 
@@ -25,14 +27,14 @@ Simlin is a system dynamics modeling tool. This server exposes tools for reading
 
 ## File format support
 
-| Format | Extensions | Read | Edit/Create |
-|--------|-----------|------|-------------|
-| XMILE | `.stmx`, `.xmile`, `.xml` | Yes | Yes |
-| Native JSON | `.simlin.json`, `.sd.json` (with `models` key) | Yes | Yes |
-| SD-AI JSON | `.sd.json` (with `variables` key) | Yes | Yes |
-| Vensim | `.mdl` | Yes (import only) | No |
+| Format | Extensions                                 | Read | Edit/Create |
+|--------|--------------------------------------------|------|-------------|
+| XMILE | `.stmx`, `.xmile`, `.xml`                  | Yes | Yes |
+| Native JSON | `.sd.json`, `.sd.json` (with `models` key) | Yes | Yes |
+| SD-AI JSON | `.json` (with `variables` key)             | Yes | Yes |
+| Vensim | `.mdl`                                     | Yes (import only) | No |
 
-Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, then CreateModel to start a new `.simlin.json` file you can edit.
+Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, then CreateModel to start a new `.sd.json` file you can edit.
 
 ## Equation syntax
 
@@ -116,7 +118,7 @@ Loops are discovered automatically but start unnamed. Use `setLoopName` in EditM
 
 ```json
 {
-  "projectPath": "model.simlin.json",
+  "projectPath": "model.sd.json",
   "operations": [
     {
       "setLoopName": {

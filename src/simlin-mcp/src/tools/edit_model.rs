@@ -202,7 +202,7 @@ pub fn tool() -> TypedTool<EditModelInput> {
              default to empty. Use ReadModel first to get current state, then \
              include all fields you want to preserve. \
              Note: Vensim .mdl files are read-only -- use ReadModel to inspect them, \
-             then CreateModel to start a new .simlin.json file you can edit.",
+             then CreateModel to start a new .sd.json file you can edit.",
         handler: handle_edit_model,
     }
 }
@@ -218,7 +218,7 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
     if ext == "mdl" {
         anyhow::bail!(
             "Vensim .mdl files are read-only. Use ReadModel to inspect a .mdl file, \
-             then CreateModel to start a new .simlin.json file you can edit."
+             then CreateModel to start a new .sd.json file you can edit."
         );
     }
 
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn ac3_11_missing_file_returns_error() {
         let result = call_tool(serde_json::json!({
-            "projectPath": "/nonexistent/model.simlin.json",
+            "projectPath": "/nonexistent/model.sd.json",
             "operations": [{ "upsertAuxiliary": { "name": "x", "equation": "1" } }]
         }));
         assert!(result.is_err());
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn ac3_4_upsert_stock() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         // Define the flows referenced by the stock so the model compiles.
         let result = call_tool(serde_json::json!({
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn ac3_5_upsert_flow_and_auxiliary() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         // Define the stock that flows reference so the model compiles.
         let result = call_tool(serde_json::json!({
@@ -804,7 +804,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // First add a variable
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
         call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
             "operations": [{ "upsertAuxiliary": { "name": "temp_var", "equation": "42" } }]
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn ac3_7_sim_specs_applied_before_variables() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn ac3_8_response_shape() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn project_path_in_output_for_json_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn ac3_9_dry_run_does_not_write() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let original_contents = std::fs::read_to_string(&path).unwrap();
 
@@ -1003,7 +1003,7 @@ mod tests {
     #[test]
     fn upsert_stock_is_full_replacement() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         // Create a stock with inflows, outflows, units, documentation, and
         // the flows it references so the model compiles.
@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn failed_analysis_does_not_mutate_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let original_contents = std::fs::read_to_string(&path).unwrap();
 
@@ -1125,7 +1125,7 @@ mod tests {
     #[test]
     fn edit_regenerates_diagram_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         // Add a stock with a flow -- should produce a diagram with view elements.
         call_tool(serde_json::json!({
@@ -1193,7 +1193,7 @@ mod tests {
                 }]
             }]
         });
-        let path = write_model(dir.path(), "model.simlin.json", &project_with_views);
+        let path = write_model(dir.path(), "model.sd.json", &project_with_views);
 
         // Edit only simSpecs -- views should be preserved as-is.
         call_tool(serde_json::json!({
@@ -1264,7 +1264,7 @@ mod tests {
                 }]
             }]
         });
-        let path = write_model(dir.path(), "model.simlin.json", &project_with_views);
+        let path = write_model(dir.path(), "model.sd.json", &project_with_views);
 
         // A SetLoopName-only edit must not modify the diagram.
         call_tool(serde_json::json!({
@@ -1299,7 +1299,7 @@ mod tests {
     #[test]
     fn dry_run_does_not_regenerate_diagram_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -1386,7 +1386,7 @@ mod tests {
                 }]
             }]
         });
-        let path = write_model(dir.path(), "model.simlin.json", &project_with_layout);
+        let path = write_model(dir.path(), "model.sd.json", &project_with_layout);
 
         // Add a new auxiliary -- this triggers sync_diagram with a
         // ModelPatch, exercising the incremental layout path.
@@ -1548,7 +1548,7 @@ mod tests {
     #[test]
     fn ac7_3_native_json_format_preserved_after_edit() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -1614,7 +1614,7 @@ mod tests {
     #[test]
     fn e2e_native_json_edit_roundtrip_adds_variable() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -1713,7 +1713,7 @@ mod tests {
     #[test]
     fn ac2_3_project_path_equals_input_for_native_json() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -1743,7 +1743,7 @@ mod tests {
         assert_eq!(result["projectPath"], dest.to_str().unwrap());
     }
 
-    // ---- AC2.5: no .simlin.json sidecar created for XMILE edits ----
+    // ---- AC2.5: no .sd.json sidecar created for XMILE edits ----
 
     #[test]
     fn ac2_5_no_sidecar_created_for_stmx_edit() {
@@ -1763,10 +1763,10 @@ mod tests {
         }))
         .unwrap();
 
-        let sidecar = dir.path().join("logistic_growth.simlin.json");
+        let sidecar = dir.path().join("logistic_growth.sd.json");
         assert!(
             !sidecar.exists(),
-            "no .simlin.json sidecar must be created when editing a .stmx file"
+            "no .sd.json sidecar must be created when editing a .stmx file"
         );
     }
 
@@ -1775,7 +1775,7 @@ mod tests {
     #[test]
     fn ac3_4_edit_with_compilation_error_returns_is_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -1798,7 +1798,7 @@ mod tests {
     #[test]
     fn ac3_5_structured_error_includes_error_details() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let result = call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn ac3_6_file_not_modified_when_edit_has_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         let original_contents = std::fs::read_to_string(&path).unwrap();
 
@@ -1951,7 +1951,7 @@ mod tests {
         // exist) should still accept a new, unrelated valid auxiliary. Pre-
         // existing errors must not block further edits.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_model(dir.path(), "model.simlin.json", &minimal_project_json());
+        let path = write_model(dir.path(), "model.sd.json", &minimal_project_json());
 
         // Introduce a broken variable by writing it directly to the file,
         // bypassing EditModel's gate.
@@ -2028,7 +2028,7 @@ mod tests {
                 ]
             }]
         });
-        let path = dir.path().join("model.simlin.json");
+        let path = dir.path().join("model.sd.json");
         std::fs::write(&path, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
 
         // Introduce a second error -- should be rejected since error count increases.
@@ -2296,7 +2296,7 @@ mod tests {
                 }]
             }]
         });
-        let path = write_model(dir.path(), "swap.simlin.json", &model_json);
+        let path = write_model(dir.path(), "swap.sd.json", &model_json);
 
         // Edit that fixes the births error (by giving it a valid equation)
         // but introduces a new error on a different variable.
