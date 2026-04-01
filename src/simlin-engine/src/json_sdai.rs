@@ -415,29 +415,6 @@ impl SdaiModel {
             )
         })
     }
-
-    /// Remove relationships that reference variables not present in the model.
-    ///
-    /// After variable additions or removals, the externally-sourced
-    /// relationships may contain stale entries. This filters them to only
-    /// retain relationships where both `from` and `to` name a variable
-    /// that currently exists.
-    pub fn filter_stale_relationships(&mut self) {
-        if let Some(ref mut rels) = self.relationships {
-            let var_names: std::collections::HashSet<&str> = self
-                .variables
-                .iter()
-                .map(|v| match v {
-                    Variable::Stock(s) => s.name.as_str(),
-                    Variable::Flow(f) => f.name.as_str(),
-                    Variable::Variable(a) => a.name.as_str(),
-                })
-                .collect();
-            rels.retain(|r| {
-                var_names.contains(r.from.as_str()) && var_names.contains(r.to.as_str())
-            });
-        }
-    }
 }
 
 /// Generate relationships from pre-computed equation dependency polarities.
@@ -1241,77 +1218,6 @@ mod tests {
         let project: datamodel::Project = model.into();
         assert_eq!(project.models.len(), 1);
         assert_eq!(project.models[0].variables.len(), 3);
-    }
-
-    #[test]
-    fn filter_stale_relationships_removes_references_to_absent_vars() {
-        let mut model = SdaiModel {
-            variables: vec![
-                Variable::Variable(AuxiliaryFields {
-                    name: "A".to_string(),
-                    equation: Some("10".to_string()),
-                    documentation: None,
-                    units: None,
-                    graphical_function: None,
-                    uid: None,
-                }),
-                Variable::Variable(AuxiliaryFields {
-                    name: "C".to_string(),
-                    equation: Some("A + 1".to_string()),
-                    documentation: None,
-                    units: None,
-                    graphical_function: None,
-                    uid: None,
-                }),
-            ],
-            relationships: Some(vec![
-                Relationship {
-                    reasoning: None,
-                    from: "A".to_string(),
-                    to: "B".to_string(),
-                    polarity: Polarity::Positive,
-                    polarity_reasoning: None,
-                },
-                Relationship {
-                    reasoning: None,
-                    from: "B".to_string(),
-                    to: "C".to_string(),
-                    polarity: Polarity::Positive,
-                    polarity_reasoning: None,
-                },
-                Relationship {
-                    reasoning: None,
-                    from: "A".to_string(),
-                    to: "C".to_string(),
-                    polarity: Polarity::Positive,
-                    polarity_reasoning: None,
-                },
-            ]),
-            specs: None,
-            views: None,
-            loop_metadata: vec![],
-        };
-
-        model.filter_stale_relationships();
-
-        let rels = model.relationships.unwrap();
-        assert_eq!(rels.len(), 1);
-        assert_eq!(rels[0].from, "A");
-        assert_eq!(rels[0].to, "C");
-    }
-
-    #[test]
-    fn filter_stale_relationships_noop_when_none() {
-        let mut model = SdaiModel {
-            variables: vec![],
-            relationships: None,
-            specs: None,
-            views: None,
-            loop_metadata: vec![],
-        };
-
-        model.filter_stale_relationships();
-        assert!(model.relationships.is_none());
     }
 
     #[test]
