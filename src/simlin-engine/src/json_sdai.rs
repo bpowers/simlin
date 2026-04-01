@@ -21,7 +21,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use std::collections::{HashMap, HashSet};
+
 use crate::datamodel;
+use crate::ltm::LinkPolarity;
 
 fn is_none<T>(val: &Option<T>) -> bool {
     val.is_none()
@@ -435,6 +438,50 @@ impl SdaiModel {
             });
         }
     }
+}
+
+/// Generate relationships from pre-computed equation dependency polarities.
+///
+/// Takes the polarity map produced by `compute_link_polarities()` and the
+/// datamodel, filters out stock-flow structural edges (which the SD-AI
+/// conformance evaluator generates independently), and maps remaining
+/// equation-derived edges to `Relationship` values with computed polarity.
+pub fn generate_relationships(
+    polarities: &HashMap<(String, String), LinkPolarity>,
+    model: &datamodel::Model,
+) -> Vec<Relationship> {
+    // Stock-flow structural edges are excluded because the conformance
+    // evaluator generates them itself via makeRelationshipsFromStocks().
+    let mut stock_flow_edges: HashSet<(&str, &str)> = HashSet::new();
+    for var in &model.variables {
+        if let datamodel::Variable::Stock(stock) = var {
+            for inflow in &stock.inflows {
+                stock_flow_edges.insert((inflow.as_str(), stock.ident.as_str()));
+            }
+            for outflow in &stock.outflows {
+                stock_flow_edges.insert((outflow.as_str(), stock.ident.as_str()));
+            }
+        }
+    }
+
+    let mut relationships: Vec<Relationship> = polarities
+        .iter()
+        .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.as_str(), to.as_str())))
+        .map(|((from, to), polarity)| Relationship {
+            reasoning: None,
+            from: from.clone(),
+            to: to.clone(),
+            polarity: match polarity {
+                LinkPolarity::Positive => Polarity::Positive,
+                LinkPolarity::Negative => Polarity::Negative,
+                LinkPolarity::Unknown => Polarity::Unknown,
+            },
+            polarity_reasoning: None,
+        })
+        .collect();
+
+    relationships.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    relationships
 }
 
 // Conversions FROM datamodel types TO SDAI types
@@ -1311,5 +1358,150 @@ mod tests {
         assert_eq!(from_owned.specs, from_ref.specs);
         assert_eq!(from_owned.views, from_ref.views);
         assert_eq!(from_owned.loop_metadata, from_ref.loop_metadata);
+    }
+
+    // -- generate_relationships tests (Task 1: equation deps + polarity) --
+
+    #[test]
+    fn test_generate_relationships_basic_equation_deps() {
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            (("A".into(), "C".into()), LinkPolarity::Positive),
+            (("B".into(), "C".into()), LinkPolarity::Positive),
+        ]);
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("A", "10", None),
+                x_aux("B", "20", None),
+                x_aux("C", "A + B", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+        assert_eq!(rels.len(), 2);
+        assert!(rels.iter().any(|r| r.from == "A" && r.to == "C"));
+        assert!(rels.iter().any(|r| r.from == "B" && r.to == "C"));
+        for r in &rels {
+            assert!(r.reasoning.is_none());
+            assert!(r.polarity_reasoning.is_none());
+        }
+    }
+
+    #[test]
+    fn test_generate_relationships_flow_referencing_stock() {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            (
+                ("population".into(), "deaths".into()),
+                LinkPolarity::Positive,
+            ),
+            (
+                ("death_rate".into(), "deaths".into()),
+                LinkPolarity::Positive,
+            ),
+        ]);
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("population", "1000", &[], &["deaths"], None),
+                x_flow("deaths", "population * death_rate", None),
+                x_aux("death_rate", "0.01", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+        assert_eq!(rels.len(), 2);
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "population" && r.to == "deaths")
+        );
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "death_rate" && r.to == "deaths")
+        );
+    }
+
+    #[test]
+    fn test_generate_relationships_no_equation_no_relationships() {
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> =
+            HashMap::from([(("A".into(), "C".into()), LinkPolarity::Positive)]);
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("A", "10", None),
+                x_aux("B", "", None),
+                x_aux("C", "A", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+        assert!(!rels.iter().any(|r| r.to == "B"));
+    }
+
+    #[test]
+    fn test_generate_relationships_positive_polarity() {
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            (("A".into(), "C".into()), LinkPolarity::Positive),
+            (("B".into(), "C".into()), LinkPolarity::Positive),
+        ]);
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("A", "10", None),
+                x_aux("B", "20", None),
+                x_aux("C", "A + B", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+        for r in &rels {
+            assert_eq!(r.polarity, Polarity::Positive);
+        }
+    }
+
+    #[test]
+    fn test_generate_relationships_mixed_polarity() {
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            (("A".into(), "C".into()), LinkPolarity::Positive),
+            (("B".into(), "C".into()), LinkPolarity::Negative),
+        ]);
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("A", "10", None),
+                x_aux("B", "20", None),
+                x_aux("C", "A - B", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+        let a_rel = rels.iter().find(|r| r.from == "A").unwrap();
+        let b_rel = rels.iter().find(|r| r.from == "B").unwrap();
+        assert_eq!(a_rel.polarity, Polarity::Positive);
+        assert_eq!(b_rel.polarity, Polarity::Negative);
+    }
+
+    #[test]
+    fn test_generate_relationships_unknown_polarity() {
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> =
+            HashMap::from([(("X".into(), "Y".into()), LinkPolarity::Unknown)]);
+        let model = x_model("main", vec![x_aux("X", "10", None), x_aux("Y", "X", None)]);
+
+        let rels = generate_relationships(&polarities, &model);
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].polarity, Polarity::Unknown);
+        assert!(rels[0].reasoning.is_none());
+        assert!(rels[0].polarity_reasoning.is_none());
     }
 }
