@@ -67,7 +67,7 @@ The primary compilation path uses salsa tracked functions for fine-grained incre
 - **`src/vdf.rs`** - Vensim VDF (binary data file) parser. Parses all structural elements (sections, records, name/slot/offset tables, data blocks). Model-guided name-to-OT mapping via `build_section6_guided_ot_map()` uses section-6 OT class codes to identify contiguous stock/non-stock blocks, classifies variables using the parsed model, and assigns OT indices by alphabetical sort within each block. See `docs/design/vdf.md` for the format specification and reverse-engineering history.
 - **`src/systems/`** - Systems format (`.txt`) parser, translator, and writer. A line-oriented notation for stock-and-flow models with implicit flow typing (Rate, Conversion, Leak). Pipeline: `lexer.rs` -> `parser.rs` -> `ast.rs` (IR) -> `translate.rs` (to `datamodel::Project`). Each systems flow becomes a stdlib module instance (`systems_rate`, `systems_leak`, or `systems_conversion`), with chained `available`/`remaining` wiring for multi-outflow stocks. `writer.rs` reconstructs `.txt` format from a translated `datamodel::Project` by inspecting module structure. Public API: `systems::parse()`, `systems::translate::translate()`, `systems::project_to_systems()`
 - **`src/json.rs`** - JSON serialization matching Go `sd` package schema
-- **`src/json_sdai.rs`** - JSON schema for AI metadata augmentation
+- **`src/json_sdai.rs`** - JSON schema for AI metadata augmentation. `generate_relationships()` derives `Relationship` entries from pre-computed equation dependency polarities (via `compute_link_polarities`), filtering out stock-flow structural edges and sorting deterministically
 - **`src/serde.rs`** - Generic serde utilities
 
 ## Unit analysis
