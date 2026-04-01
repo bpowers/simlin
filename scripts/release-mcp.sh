@@ -40,7 +40,9 @@ echo "Running cargo test -p simlin-mcp ..."
 cargo test -p simlin-mcp
 
 # Update the first version = "..." line in [package] section of Cargo.toml
-sed -i '0,/^version = ".*"/{s/^version = ".*"/version = "'"$VERSION"'"/}' "$MCP_DIR/Cargo.toml"
+awk -v ver="$VERSION" '!done && /^version = "/ { $0 = "version = \"" ver "\""; done=1 } 1' \
+  "$MCP_DIR/Cargo.toml" > "$MCP_DIR/Cargo.toml.tmp"
+mv "$MCP_DIR/Cargo.toml.tmp" "$MCP_DIR/Cargo.toml"
 
 # Refresh Cargo.lock to reflect the new simlin-mcp version
 cargo check -p simlin-mcp --quiet
