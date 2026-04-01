@@ -2,6 +2,8 @@
 
 Simlin uses the Loops That Matter (LTM) algorithm to identify which feedback loops drive model behavior over time. Loop dominance analysis is enabled by default when you call `model.run()`.
 
+> **Prerequisites:** Install the Python package with `pip install pysimlin` (see the `simlin://skills/pysimlin-basics` resource for full setup details). The Python module is imported as `simlin`.
+
 ## Getting Loops from a Run
 
 ```python

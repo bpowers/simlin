@@ -2,6 +2,8 @@
 
 Use `model.run(overrides={...})` to explore how parameter changes affect model behavior.
 
+> **Prerequisites:** Install the Python package with `pip install pysimlin` (see the `simlin://skills/pysimlin-basics` resource for full setup details). The Python module is imported as `simlin`.
+
 ## Parameter Sweeps
 
 Vary a single parameter across a range and collect results:
