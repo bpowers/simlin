@@ -2,29 +2,40 @@
   "name": "@simlin/engine",
   "version": "2.0.0",
   "description": "an engine for building, running and analyzing system dynamics models",
-  "repository": "http://github.com/bpowers/simlin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bpowers/simlin.git",
+    "directory": "src/engine"
+  },
   "author": {
     "name": "Bobby Powers",
     "email": "bobbypowers@gmail.com"
   },
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "lib/index.js",
   "browser": "lib.browser/index.js",
   "types": "lib/index.d.ts",
   "exports": {
     ".": {
+      "types": "./lib/index.d.ts",
       "module": "./lib.browser/index.js",
       "node": "./lib/index.js"
     },
     "./internal/wasm": {
+      "types": "./lib/internal/wasm.node.d.ts",
       "module": "./lib.browser/internal/wasm.browser.js",
       "node": "./lib/internal/wasm.node.js"
     },
     "./internal/backend-factory": {
+      "types": "./lib/backend-factory.node.d.ts",
       "module": "./lib.browser/backend-factory.browser.js",
       "node": "./lib/backend-factory.node.js"
     },
     "./*": {
+      "types": "./lib/*.d.ts",
       "module": "./lib.browser/*.js",
       "node": "./lib/*.js"
     }
@@ -33,7 +44,8 @@
   "files": [
     "lib",
     "lib.browser",
-    "core"
+    "core/libsimlin.wasm",
+    "src"
   ],
   "devDependencies": {
     "@types/jest": "^30.0.0",

@@ -124,7 +124,7 @@ importers:
   src/core:
     dependencies:
       '@simlin/engine':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../engine
     devDependencies:
       '@types/jest':
@@ -185,10 +185,10 @@ importers:
         specifier: ^1.2.8
         version: 1.2.8(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@simlin/core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../core
       '@simlin/engine':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../engine
       clsx:
         specifier: ^2.1.1
@@ -202,12 +202,6 @@ importers:
       katex:
         specifier: ^0.16.28
         version: 0.16.38
-      react:
-        specifier: ^19.2.4
-        version: 19.2.4
-      react-dom:
-        specifier: ^19.2.4
-        version: 19.2.4(react@19.2.4)
       slate:
         specifier: ^0.123.0
         version: 0.123.0
@@ -272,6 +266,12 @@ importers:
       prettier:
         specifier: ^3.8.1
         version: 3.8.1
+      react:
+        specifier: ^19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.2.4
+        version: 19.2.4(react@19.2.4)
       ts-jest:
         specifier: ^29.4.6
         version: 29.4.6(@babel/core@7.29.0)(@jest/transform@30.3.0)(@jest/types@30.3.0)(babel-jest@30.3.0(@babel/core@7.29.0))(jest-util@30.3.0)(jest@30.3.0(@types/node@25.4.0)(ts-node@10.9.2(@types/node@25.4.0)(typescript@5.9.3)))(typescript@5.9.3)
