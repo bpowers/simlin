@@ -429,21 +429,31 @@ pub fn generate_relationships(
 ) -> Vec<Relationship> {
     // Stock-flow structural edges are excluded because the conformance
     // evaluator generates them itself via makeRelationshipsFromStocks().
-    let mut stock_flow_edges: HashSet<(&str, &str)> = HashSet::new();
+    // Identifiers are canonicalized so that mixed-case names in the datamodel
+    // (e.g. stock "Population" with inflow "Births") correctly match the
+    // lowercase canonical keys produced by compute_link_polarities().
+    let mut stock_flow_edges: HashSet<(String, String)> = HashSet::new();
     for var in &model.variables {
         if let datamodel::Variable::Stock(stock) = var {
+            let stock_ident = crate::common::canonicalize(&stock.ident).into_owned();
             for inflow in &stock.inflows {
-                stock_flow_edges.insert((inflow.as_str(), stock.ident.as_str()));
+                stock_flow_edges.insert((
+                    crate::common::canonicalize(inflow).into_owned(),
+                    stock_ident.clone(),
+                ));
             }
             for outflow in &stock.outflows {
-                stock_flow_edges.insert((outflow.as_str(), stock.ident.as_str()));
+                stock_flow_edges.insert((
+                    crate::common::canonicalize(outflow).into_owned(),
+                    stock_ident.clone(),
+                ));
             }
         }
     }
 
     let mut relationships: Vec<Relationship> = polarities
         .iter()
-        .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.as_str(), to.as_str())))
+        .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.clone(), to.clone())))
         .map(|((from, to), polarity)| Relationship {
             reasoning: None,
             from: from.clone(),
@@ -1522,5 +1532,67 @@ mod tests {
 
         let rels = generate_relationships(&polarities, &model);
         assert!(rels.is_empty());
+    }
+
+    #[test]
+    fn test_generate_relationships_filters_mixed_case_stock_flow_edges() {
+        // compute_link_polarities() returns canonical (lowercase) keys.  The
+        // datamodel may preserve original casing (e.g. "Population", "Births").
+        // Verify that structural edges are filtered regardless of casing in the
+        // datamodel, so mixed-case names do not leak into the output.
+        use crate::testutils::{x_flow, x_model, x_stock};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            // structural inflow edge (canonical keys from compute_link_polarities)
+            (
+                ("births".into(), "population".into()),
+                LinkPolarity::Positive,
+            ),
+            // structural outflow edge
+            (
+                ("deaths".into(), "population".into()),
+                LinkPolarity::Negative,
+            ),
+            // equation-derived: stock appears in flow equation
+            (
+                ("population".into(), "deaths".into()),
+                LinkPolarity::Positive,
+            ),
+        ]);
+
+        // Datamodel uses mixed-case names, matching the SD-AI JSON as received.
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("Population", "1000", &["Births"], &["Deaths"], None),
+                x_flow("Births", "Population * 0.1", None),
+                x_flow("Deaths", "Population * 0.02", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+
+        // Both structural edges must be filtered despite the case mismatch
+        // between the datamodel identifiers and the canonical polarity map keys.
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.from == "births" && r.to == "population"),
+            "structural inflow edge should be filtered even with mixed-case datamodel names"
+        );
+        assert!(
+            !rels
+                .iter()
+                .any(|r| r.from == "deaths" && r.to == "population"),
+            "structural outflow edge should be filtered even with mixed-case datamodel names"
+        );
+
+        // The equation-derived edge must survive filtering.
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "population" && r.to == "deaths"),
+            "equation-derived edge from stock to flow should be present"
+        );
+        assert_eq!(rels.len(), 1);
     }
 }
