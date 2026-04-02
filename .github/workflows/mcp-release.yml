@@ -132,8 +132,6 @@ jobs:
         with:
           node-version: '22'
 
-      - run: npm install -g npm@latest
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts/
@@ -215,8 +213,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - run: npm install -g npm@latest
 
       - name: Update wrapper version
         working-directory: src/simlin-mcp
