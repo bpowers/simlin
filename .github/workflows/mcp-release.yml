@@ -9,9 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   validate:
     name: Validate version
@@ -130,7 +127,7 @@ jobs:
       # conflicts with npm's OIDC provenance flow.  Trusted publishing handles auth.
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - uses: actions/download-artifact@v4
         with:
@@ -212,7 +209,7 @@ jobs:
       # Intentionally omit registry-url: trusted publishing handles auth (see publish-platform)
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Update wrapper version
         working-directory: src/simlin-mcp
