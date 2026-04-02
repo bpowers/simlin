@@ -427,6 +427,17 @@ pub fn generate_relationships(
     polarities: &HashMap<(String, String), LinkPolarity>,
     model: &datamodel::Model,
 ) -> Vec<Relationship> {
+    // Map canonical identifiers back to authored variable names so the
+    // relationships array matches the names in the variables array.
+    let canonical_to_authored: HashMap<String, &str> = model
+        .variables
+        .iter()
+        .map(|v| {
+            let authored = v.get_ident();
+            (crate::common::canonicalize(authored).into_owned(), authored)
+        })
+        .collect();
+
     // Stock-flow structural edges are excluded because the conformance
     // evaluator generates them itself via makeRelationshipsFromStocks().
     // Identifiers are canonicalized so that mixed-case names in the datamodel
@@ -453,11 +464,20 @@ pub fn generate_relationships(
 
     let mut relationships: Vec<Relationship> = polarities
         .iter()
+        // Implicit compiler nodes (from SMOOTH/DELAY expansion) have
+        // $-prefixed names and must not appear in the output.
+        .filter(|((from, to), _)| !from.starts_with('$') && !to.starts_with('$'))
         .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.clone(), to.clone())))
         .map(|((from, to), polarity)| Relationship {
             reasoning: None,
-            from: from.clone(),
-            to: to.clone(),
+            from: canonical_to_authored
+                .get(from)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| from.clone()),
+            to: canonical_to_authored
+                .get(to)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| to.clone()),
             polarity: match polarity {
                 LinkPolarity::Positive => Polarity::Positive,
                 LinkPolarity::Negative => Polarity::Negative,
@@ -1535,6 +1555,100 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_relationships_filters_implicit_compiler_nodes() {
+        // SMOOTH/DELAY builtins synthesize implicit variables with $⁚-prefixed
+        // names (e.g. $⁚x⁚0⁚smth1). These appear in the polarity map from
+        // compute_link_polarities() but must not leak into the output because
+        // they have no corresponding entry in the variables array.
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            // real equation-derived edge
+            (("a".into(), "c".into()), LinkPolarity::Positive),
+            // implicit compiler node as source
+            (
+                ("$\u{205A}x\u{205A}0\u{205A}smth1".into(), "c".into()),
+                LinkPolarity::Positive,
+            ),
+            // implicit compiler node as target
+            (
+                ("a".into(), "$\u{205A}x\u{205A}0\u{205A}arg1".into()),
+                LinkPolarity::Positive,
+            ),
+            // both implicit
+            (
+                (
+                    "$\u{205A}y\u{205A}0\u{205A}smth1".into(),
+                    "$\u{205A}y\u{205A}0\u{205A}arg1".into(),
+                ),
+                LinkPolarity::Positive,
+            ),
+        ]);
+
+        let model = x_model(
+            "main",
+            vec![x_aux("a", "10", None), x_aux("c", "SMTH1(a, 5)", None)],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+
+        assert_eq!(
+            rels.len(),
+            1,
+            "only the real equation-derived edge should survive; got {:?}",
+            rels
+        );
+        assert_eq!(rels[0].from, "a");
+        assert_eq!(rels[0].to, "c");
+    }
+
+    #[test]
+    fn test_generate_relationships_uses_authored_variable_names() {
+        // compute_link_polarities() returns canonical (lowercase) keys, but the
+        // output relationships should use the authored variable names from the
+        // model so they match the names in the variables array.
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            (
+                ("birth_rate".into(), "births".into()),
+                LinkPolarity::Positive,
+            ),
+            (
+                ("population".into(), "births".into()),
+                LinkPolarity::Positive,
+            ),
+        ]);
+
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("Population", "1000", None),
+                x_aux("Birth Rate", "0.03", None),
+                x_aux("Births", "Population * Birth Rate", None),
+            ],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+
+        assert_eq!(rels.len(), 2);
+        // Relationships should use authored names from the model, not
+        // canonical keys from the polarity map.
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "Birth Rate" && r.to == "Births"),
+            "expected authored name 'Birth Rate' and 'Births', got {:?}",
+            rels
+        );
+        assert!(
+            rels.iter()
+                .any(|r| r.from == "Population" && r.to == "Births"),
+            "expected authored name 'Population' and 'Births', got {:?}",
+            rels
+        );
+    }
+
+    #[test]
     fn test_generate_relationships_filters_mixed_case_stock_flow_edges() {
         // compute_link_polarities() returns canonical (lowercase) keys.  The
         // datamodel may preserve original casing (e.g. "Population", "Births").
@@ -1577,21 +1691,22 @@ mod tests {
         assert!(
             !rels
                 .iter()
-                .any(|r| r.from == "births" && r.to == "population"),
+                .any(|r| r.from == "Births" && r.to == "Population"),
             "structural inflow edge should be filtered even with mixed-case datamodel names"
         );
         assert!(
             !rels
                 .iter()
-                .any(|r| r.from == "deaths" && r.to == "population"),
+                .any(|r| r.from == "Deaths" && r.to == "Population"),
             "structural outflow edge should be filtered even with mixed-case datamodel names"
         );
 
-        // The equation-derived edge must survive filtering.
+        // The equation-derived edge must survive filtering, with authored names.
         assert!(
             rels.iter()
-                .any(|r| r.from == "population" && r.to == "deaths"),
-            "equation-derived edge from stock to flow should be present"
+                .any(|r| r.from == "Population" && r.to == "Deaths"),
+            "equation-derived edge should use authored names; got {:?}",
+            rels
         );
         assert_eq!(rels.len(), 1);
     }

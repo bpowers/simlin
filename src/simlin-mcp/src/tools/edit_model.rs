@@ -2399,9 +2399,9 @@ mod tests {
             relationships.len(),
             relationships
         );
-        // Polarity map keys are canonicalized (lowercase) identifiers.
-        assert_eq!(relationships[0]["from"], "a");
-        assert_eq!(relationships[0]["to"], "c");
+        // Relationships now use authored variable names from the model.
+        assert_eq!(relationships[0]["from"], "A");
+        assert_eq!(relationships[0]["to"], "C");
         assert_eq!(relationships[0]["polarity"], "+");
     }
 }
