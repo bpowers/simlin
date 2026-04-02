@@ -464,26 +464,24 @@ pub fn generate_relationships(
 
     let mut relationships: Vec<Relationship> = polarities
         .iter()
-        // Implicit compiler nodes (from SMOOTH/DELAY expansion) have
-        // $-prefixed names and must not appear in the output.
-        .filter(|((from, to), _)| !from.starts_with('$') && !to.starts_with('$'))
         .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.clone(), to.clone())))
-        .map(|((from, to), polarity)| Relationship {
-            reasoning: None,
-            from: canonical_to_authored
-                .get(from)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| from.clone()),
-            to: canonical_to_authored
-                .get(to)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| to.clone()),
-            polarity: match polarity {
-                LinkPolarity::Positive => Polarity::Positive,
-                LinkPolarity::Negative => Polarity::Negative,
-                LinkPolarity::Unknown => Polarity::Unknown,
-            },
-            polarity_reasoning: None,
+        // Only include edges where both endpoints are declared model
+        // variables.  This excludes simulator builtins (TIME, DT) and
+        // implicit compiler nodes ($-prefixed SMOOTH/DELAY expansions).
+        .filter_map(|((from, to), polarity)| {
+            let authored_from = canonical_to_authored.get(from)?;
+            let authored_to = canonical_to_authored.get(to)?;
+            Some(Relationship {
+                reasoning: None,
+                from: authored_from.to_string(),
+                to: authored_to.to_string(),
+                polarity: match polarity {
+                    LinkPolarity::Positive => Polarity::Positive,
+                    LinkPolarity::Negative => Polarity::Negative,
+                    LinkPolarity::Unknown => Polarity::Unknown,
+                },
+                polarity_reasoning: None,
+            })
         })
         .collect();
 
@@ -1302,9 +1300,11 @@ mod tests {
     fn test_generate_relationships_basic_equation_deps() {
         use crate::testutils::{x_aux, x_model};
 
+        // Polarity map uses canonical (lowercase) keys, as returned by
+        // compute_link_polarities(). Model variables use authored names.
         let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
-            (("A".into(), "C".into()), LinkPolarity::Positive),
-            (("B".into(), "C".into()), LinkPolarity::Positive),
+            (("a".into(), "c".into()), LinkPolarity::Positive),
+            (("b".into(), "c".into()), LinkPolarity::Positive),
         ]);
         let model = x_model(
             "main",
@@ -1384,8 +1384,8 @@ mod tests {
         use crate::testutils::{x_aux, x_model};
 
         let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
-            (("A".into(), "C".into()), LinkPolarity::Positive),
-            (("B".into(), "C".into()), LinkPolarity::Positive),
+            (("a".into(), "c".into()), LinkPolarity::Positive),
+            (("b".into(), "c".into()), LinkPolarity::Positive),
         ]);
         let model = x_model(
             "main",
@@ -1407,8 +1407,8 @@ mod tests {
         use crate::testutils::{x_aux, x_model};
 
         let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
-            (("A".into(), "C".into()), LinkPolarity::Positive),
-            (("B".into(), "C".into()), LinkPolarity::Negative),
+            (("a".into(), "c".into()), LinkPolarity::Positive),
+            (("b".into(), "c".into()), LinkPolarity::Negative),
         ]);
         let model = x_model(
             "main",
@@ -1431,7 +1431,7 @@ mod tests {
         use crate::testutils::{x_aux, x_model};
 
         let polarities: HashMap<(String, String), LinkPolarity> =
-            HashMap::from([(("X".into(), "Y".into()), LinkPolarity::Unknown)]);
+            HashMap::from([(("x".into(), "y".into()), LinkPolarity::Unknown)]);
         let model = x_model("main", vec![x_aux("X", "10", None), x_aux("Y", "X", None)]);
 
         let rels = generate_relationships(&polarities, &model);
@@ -1514,10 +1514,10 @@ mod tests {
         use crate::testutils::{x_aux, x_model};
 
         let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
-            (("Z".into(), "out".into()), LinkPolarity::Positive),
-            (("A".into(), "out".into()), LinkPolarity::Positive),
-            (("M".into(), "out".into()), LinkPolarity::Negative),
-            (("A".into(), "mid".into()), LinkPolarity::Positive),
+            (("z".into(), "out".into()), LinkPolarity::Positive),
+            (("a".into(), "out".into()), LinkPolarity::Positive),
+            (("m".into(), "out".into()), LinkPolarity::Negative),
+            (("a".into(), "mid".into()), LinkPolarity::Positive),
         ]);
         let model = x_model(
             "main",
@@ -1555,11 +1555,45 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_relationships_filters_undeclared_variables() {
+        // compute_link_polarities() can return edges involving variables not
+        // present in the model: simulator builtins (TIME, DT) and implicit
+        // compiler nodes from SMOOTH/DELAY expansion ($⁚-prefixed names).
+        // Only relationships where both endpoints are declared model
+        // variables should appear in the output.
+        use crate::testutils::{x_aux, x_model};
+
+        let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
+            // real equation-derived edge (both endpoints in model)
+            (("a".into(), "c".into()), LinkPolarity::Positive),
+            // TIME builtin as source (not a declared variable)
+            (("time".into(), "c".into()), LinkPolarity::Positive),
+            // DT builtin as source
+            (("dt".into(), "c".into()), LinkPolarity::Positive),
+        ]);
+
+        let model = x_model(
+            "main",
+            vec![x_aux("a", "10", None), x_aux("c", "a + TIME", None)],
+        );
+
+        let rels = generate_relationships(&polarities, &model);
+
+        assert_eq!(
+            rels.len(),
+            1,
+            "only the edge between declared variables should survive; got {:?}",
+            rels
+        );
+        assert_eq!(rels[0].from, "a");
+        assert_eq!(rels[0].to, "c");
+    }
+
+    #[test]
     fn test_generate_relationships_filters_implicit_compiler_nodes() {
         // SMOOTH/DELAY builtins synthesize implicit variables with $⁚-prefixed
-        // names (e.g. $⁚x⁚0⁚smth1). These appear in the polarity map from
-        // compute_link_polarities() but must not leak into the output because
-        // they have no corresponding entry in the variables array.
+        // names. These are not declared model variables so they must be filtered
+        // by the same model-membership guard that handles TIME/DT.
         use crate::testutils::{x_aux, x_model};
 
         let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
