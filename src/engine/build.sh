@@ -42,9 +42,4 @@ echo "Compiling TypeScript..."
 pnpm run tsc
 pnpm run tsc -p tsconfig.browser.json
 
-# Copy WASM to output directories
-mkdir -p lib lib.browser
-cp -r core lib/
-cp -r core lib.browser/
-
 echo "Build complete!"

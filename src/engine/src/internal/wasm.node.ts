@@ -38,7 +38,7 @@ export function isNode(): boolean {
 
 async function getDefaultNodeWasmPath(): Promise<string> {
   const path = await import('node:path');
-  return path.join(__dirname, '..', 'core', 'libsimlin.wasm');
+  return path.join(__dirname, '..', '..', 'core', 'libsimlin.wasm');
 }
 
 function getDefaultBrowserWasmUrl(): string {
