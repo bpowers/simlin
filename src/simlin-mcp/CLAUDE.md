@@ -2,7 +2,7 @@
 
 MCP (Model Context Protocol) server exposing the Simlin simulation engine as tools for AI assistants.
 
-<!-- Last reviewed: 2026-03-31 -->
+<!-- Last reviewed: 2026-04-01 -->
 
 ## Architecture
 
@@ -35,6 +35,7 @@ Applies operations to an existing model file. Operations: `UpsertStock`, `Upsert
 
 Key behaviors:
 - **Format-aware write-back**: Detects source format on open (`SourceFormat::Xmile`, `NativeJson`, `SdaiJson`) and writes back in the same format. `.mdl` files are parsed as XMILE internally but are read-only; EditModel rejects them with a clear error message
+- **SD-AI relationships**: For SdaiJson write-back, relationships are generated from equation dependency polarity analysis (`compute_link_polarities` + `generate_relationships`), not preserved from the input file. Stock-flow structural edges are excluded (the SD-AI conformance evaluator generates those independently)
 - **Atomic writes**: Uses `simlin_engine::io::atomic_write` for crash-safe file output
 - **Error gate**: After patch application, runs compilation diagnostics. If errors are detected, returns a structured error response with `ErrorOutput` details instead of writing to disk
 - **Diagram sync**: After successful variable operations (non-dry-run), regenerates layout via incremental or full layout depending on existing view state

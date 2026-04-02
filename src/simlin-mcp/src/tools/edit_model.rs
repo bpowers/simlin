@@ -321,14 +321,19 @@ fn handle_edit_model(input: EditModelInput) -> anyhow::Result<serde_json::Value>
             }
             super::SourceFormat::SdaiJson => {
                 let mut sdai_model = simlin_engine::json_sdai::SdaiModel::from(&project);
-                // The relationships field is not captured in datamodel::Project,
-                // so re-parse the original content to retrieve it and avoid
-                // silently dropping it on write-back.
-                if let Ok(original) =
-                    serde_json::from_str::<simlin_engine::json_sdai::SdaiModel>(&contents)
+                let canonical_name = simlin_engine::canonicalize(&model_name).into_owned();
+                if let Some(source_model) = source_project.models(&db).get(&canonical_name).copied()
                 {
-                    sdai_model.relationships = original.relationships;
-                    sdai_model.filter_stale_relationships();
+                    let polarities = simlin_engine::db::compute_link_polarities(
+                        &db,
+                        source_model,
+                        source_project,
+                    );
+                    if let Some(dm_model) = project.get_model(&model_name) {
+                        sdai_model.relationships = Some(
+                            simlin_engine::json_sdai::generate_relationships(&polarities, dm_model),
+                        );
+                    }
                 }
                 serde_json::to_string_pretty(&sdai_model)?.into_bytes()
             }
@@ -2048,7 +2053,7 @@ mod tests {
         );
     }
 
-    // ---- Issue 4: SD-AI relationships field preserved on write-back ----
+    // ---- SD-AI relationships generated from equation polarities ----
 
     fn sdai_fixture_with_relationships() -> serde_json::Value {
         serde_json::json!({
@@ -2080,10 +2085,13 @@ mod tests {
     }
 
     #[test]
-    fn sdai_relationships_preserved_after_edit() {
-        // The relationships field is metadata not captured in datamodel::Project.
-        // EditModel must re-attach it from the original content on write-back to
-        // avoid silently discarding it.
+    fn sdai_relationships_generated_after_edit() {
+        // Relationships are now generated from equation dependency analysis,
+        // not preserved from the input file.  The fixture stock has no
+        // inflows/outflows in the SD-AI JSON, so there are no stock-flow
+        // structural edges to filter.  The only equation-derived dependency
+        // is `births = population * 0.03`, yielding one relationship:
+        // population -> births with positive polarity.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("model.sd.json");
         std::fs::write(
@@ -2105,12 +2113,26 @@ mod tests {
 
         let relationships = saved
             .get("relationships")
-            .expect("relationships field must be preserved in the saved SD-AI file after an edit");
+            .expect("relationships must be generated in the saved SD-AI file after an edit");
         let rels = relationships.as_array().unwrap();
-        assert_eq!(rels.len(), 1, "original relationship must be preserved");
-        assert_eq!(rels[0]["from"], "births");
-        assert_eq!(rels[0]["to"], "population");
+        assert_eq!(
+            rels.len(),
+            1,
+            "exactly one equation-derived relationship expected"
+        );
+        assert_eq!(rels[0]["from"], "population");
+        assert_eq!(rels[0]["to"], "births");
         assert_eq!(rels[0]["polarity"], "+");
+
+        // AC4.2: no reasoning or polarityReasoning fields in generated output
+        assert!(
+            rels[0].get("reasoning").is_none(),
+            "generated relationships must not include reasoning"
+        );
+        assert!(
+            rels[0].get("polarityReasoning").is_none(),
+            "generated relationships must not include polarityReasoning"
+        );
     }
 
     #[test]
@@ -2328,14 +2350,14 @@ mod tests {
         );
     }
 
-    // ---- Issue #431: RemoveVariable filters stale SD-AI relationships ----
+    // ---- SD-AI relationships reflect current equations after variable removal ----
 
     #[test]
-    fn remove_variable_filters_stale_sdai_relationships() {
+    fn sdai_relationships_reflect_current_equations_after_remove() {
         let dir = tempfile::tempdir().unwrap();
 
-        // SD-AI model with three independent variables and relationships.
-        // C depends on A (not B), so removing B won't break C's equation.
+        // SD-AI model with three auxiliaries. C depends on A (not B),
+        // so removing B leaves only the A -> C equation dependency.
         let sdai_json = serde_json::json!({
             "variables": [
                 { "type": "variable", "name": "A", "equation": "10" },
@@ -2356,8 +2378,8 @@ mod tests {
         let path = dir.path().join("rel-test.sd.json");
         std::fs::write(&path, serde_json::to_string_pretty(&sdai_json).unwrap()).unwrap();
 
-        // Remove variable B. After the edit, relationships referencing B
-        // must be filtered out of the saved file.
+        // After removing B, generate_relationships produces only the
+        // equation-derived A -> C edge.
         call_tool(serde_json::json!({
             "projectPath": path.to_str().unwrap(),
             "operations": [{ "removeVariable": { "name": "B" } }]
@@ -2370,7 +2392,6 @@ mod tests {
             .as_array()
             .expect("relationships must be present");
 
-        // Only A->C should remain; A->B and B->C reference the removed variable.
         assert_eq!(
             relationships.len(),
             1,
@@ -2378,7 +2399,9 @@ mod tests {
             relationships.len(),
             relationships
         );
+        // Relationships now use authored variable names from the model.
         assert_eq!(relationships[0]["from"], "A");
         assert_eq!(relationships[0]["to"], "C");
+        assert_eq!(relationships[0]["polarity"], "+");
     }
 }
