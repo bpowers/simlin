@@ -560,14 +560,14 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
 
 /// Returns the non-infinite stocks from a `SystemsModel` in declaration
 /// order, as `(original_name, canonical_ident)` pairs. Matches the Python
-/// `systems` behavior where `stock.show` is `False` for infinite stocks.
-/// Both bracket-syntax infinite stocks (`[A]`) and stocks with explicit
-/// inf initial values (`A(inf)`) are excluded.
+/// `systems` behavior where `stock.show` is `False` for bracket-syntax
+/// infinite stocks (`[A]`). Stocks with explicit inf initial values
+/// (`A(inf)`) are still shown -- only the bracket syntax sets `show=False`.
 pub fn visible_stocks(model: &SystemsModel) -> Vec<(String, String)> {
     model
         .stocks
         .iter()
-        .filter(|s| !s.is_infinite && s.initial != Expr::Inf)
+        .filter(|s| !s.is_infinite)
         .map(|s| (s.name.clone(), canon(&s.name)))
         .collect()
 }
