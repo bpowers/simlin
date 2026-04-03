@@ -684,6 +684,8 @@ fn main() {
             let ref_path = reference.to_string_lossy();
             let reference_data = if ref_path.ends_with(".dat") {
                 load_dat(&ref_path).unwrap()
+            } else if ref_path.ends_with(".csv") {
+                load_csv(&ref_path, b',').unwrap()
             } else {
                 load_csv(&ref_path, b'\t').unwrap()
             };

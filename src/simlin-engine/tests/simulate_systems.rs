@@ -260,6 +260,22 @@ fn visible_stocks_all_when_no_infinite() {
     assert_eq!(visible.len(), 4);
 }
 
+/// Stocks declared with `A(inf)` initial value (not bracket syntax) are
+/// semantically infinite and should also be excluded from visible output.
+#[test]
+fn visible_stocks_excludes_inf_initial() {
+    let contents = "A(inf) > B @ 5\nB > C @ 3";
+    let systems_model = simlin_engine::systems::parse(contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let names: Vec<&str> = visible.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, &["B", "C"]);
+    assert!(
+        !visible.iter().any(|(n, _)| n == "A"),
+        "A(inf) should be excluded"
+    );
+}
+
 /// Verify that `open_systems()` (the production entry point used by
 /// libsimlin and the app) works for all valid models.
 #[test]
