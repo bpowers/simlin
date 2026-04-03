@@ -76,9 +76,10 @@ jobs:
 
       - name: Pack tarballs
         run: |
-          cd src/engine && pnpm pack --pack-destination ../../tarballs
-          cd ../core && pnpm pack --pack-destination ../../tarballs
-          cd ../diagram && pnpm pack --pack-destination ../../tarballs
+          mkdir -p tarballs
+          (cd src/engine && pnpm pack --pack-destination ../../tarballs)
+          (cd src/core && pnpm pack --pack-destination ../../tarballs)
+          (cd src/diagram && pnpm pack --pack-destination ../../tarballs)
 
       - name: Upload tarballs
         uses: actions/upload-artifact@v4

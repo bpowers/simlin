@@ -67,6 +67,9 @@ done
 
 echo "All 3 package.json files agree on version $VERSION"
 
+echo "Building packages..."
+pnpm --filter @simlin/engine --filter @simlin/core --filter @simlin/diagram build
+
 echo "Running tests..."
 pnpm --filter @simlin/engine --filter @simlin/core --filter @simlin/diagram test
 
