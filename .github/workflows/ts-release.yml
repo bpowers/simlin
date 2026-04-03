@@ -51,7 +51,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        run: rustup show
+        run: |
+          rustup show
+          rustup target add wasm32-unknown-unknown
 
       - name: Install wasm-opt
         run: |
@@ -110,6 +112,7 @@ jobs:
 
       - name: Publish @simlin/engine
         env:
+          # Empty token prevents ambient .npmrc interference; OIDC handles auth
           NODE_AUTH_TOKEN: ''
         run: |
           VERSION="${{ needs.validate.outputs.version }}"

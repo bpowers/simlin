@@ -36,9 +36,7 @@
     "lib.browser",
     "*.ts",
     "*.tsx",
-    "*.css",
-    "components",
-    "drawing"
+    "*.css"
   ],
   "peerDependencies": {
     "react": "^19.0.0",
