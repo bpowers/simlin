@@ -251,6 +251,11 @@ pub struct Vm {
     // RK scratch space: [saved_stocks(N) | accumulator(N)].
     // Allocated once in new(), empty for Euler.
     rk_scratch: Vec<f64>,
+    // True after the first prev_values snapshot has been taken.
+    // Used to set use_prev_fallback in EvalState so that LoadPrev
+    // returns the fallback during the initial timestep even when
+    // RK stages advance TIME away from INITIAL_TIME.
+    prev_values_valid: bool,
 }
 
 #[derive(Clone)]
@@ -327,6 +332,12 @@ struct EvalState<'a> {
     // Snapshot of curr[] taken after stocks but before the time advance
     // each timestep; used by LoadPrev in the following iteration.
     prev_values: &'a mut [f64],
+    // When true, LoadPrev always uses the fallback value regardless of
+    // TIME vs INITIAL_TIME.  Set during the initial timestep before
+    // prev_values has been populated, cleared after the first snapshot.
+    // This prevents RK intermediate stages (which advance TIME to trial
+    // points) from reading zeroed prev_values instead of the fallback.
+    use_prev_fallback: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -444,11 +455,9 @@ fn collect_constant_info(
     result
 }
 
-/// Collect absolute offsets of all stock variables (including submodule
-/// internals like SMOOTH/DELAY stocks) by scanning the stock-phase bytecode.
-///
-/// `AssignNext` and `BinOpAssignNext` in stock bytecode always target stock
-/// slots. `EvalModule` recurses into child modules at their declared offset.
+/// Collect absolute offsets of all stock variables by scanning stock-phase
+/// bytecode. Recurses into child modules via `EvalModule` to capture
+/// submodule internals (SMOOTH/DELAY stocks).
 fn collect_stock_offsets(
     modules: &HashMap<ModuleKey, CompiledModule>,
     key: &ModuleKey,
@@ -476,6 +485,9 @@ fn collect_stock_offsets(
             _ => {}
         }
     }
+    // Defensive dedup: duplicates would cause double-counted derivatives.
+    offsets.sort_unstable();
+    offsets.dedup();
     offsets
 }
 
@@ -579,6 +591,7 @@ impl Vm {
             prev_values: vec![0.0; n_slots].into_boxed_slice(),
             stock_offsets,
             rk_scratch,
+            prev_values_valid: false,
         })
     }
 
@@ -624,10 +637,18 @@ impl Vm {
             broadcast_stack: &mut self.broadcast_stack,
             initial_values: &self.initial_values,
             prev_values: &mut self.prev_values,
+            // True until prev_values has been populated by the first
+            // timestep's snapshot.  RK stages advance TIME, which would
+            // cause LoadPrev to read zeroed prev_values instead of using
+            // the fallback.  Tracked in Vm::prev_values_valid so that
+            // segmented run_to() calls don't reset it.
+            use_prev_fallback: !self.prev_values_valid,
         };
 
         // Macro for the save/advance logic shared by all integration methods.
         // Placed here because it captures local variables from run_to.
+        // NOTE: contains `break` that exits the enclosing `loop` in each
+        // integration method arm -- the caller must be inside a loop.
         macro_rules! save_advance {
             ($data:expr) => {{
                 self.step_accum += 1;
@@ -676,6 +697,8 @@ impl Vm {
                     next,
                 );
                 state.prev_values.copy_from_slice(curr);
+                state.use_prev_fallback = false;
+                self.prev_values_valid = true;
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
 
                 save_advance!(data);
@@ -815,6 +838,8 @@ impl Vm {
                     // Snapshot AFTER re-eval so PREVIOUS() in the next timestep
                     // sees the correct state at time t.
                     state.prev_values.copy_from_slice(curr);
+                    state.use_prev_fallback = false;
+                    self.prev_values_valid = true;
 
                     save_advance!(data);
                 }
@@ -897,6 +922,8 @@ impl Vm {
                         next,
                     );
                     state.prev_values.copy_from_slice(curr);
+                    state.use_prev_fallback = false;
+                    self.prev_values_valid = true;
 
                     save_advance!(data);
                 }
@@ -947,6 +974,11 @@ impl Vm {
 
     pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
         self.offsets.get(ident).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stock_offsets(&self) -> &[usize] {
+        &self.stock_offsets
     }
 
     /// Returns whether a given absolute data-buffer offset corresponds to a
@@ -1053,6 +1085,7 @@ impl Vm {
         self.iter_stack.clear();
         self.broadcast_stack.clear();
         self.rk_scratch.fill(0.0);
+        self.prev_values_valid = false;
     }
 
     /// Apply an override for a constant at the given absolute offset.
@@ -1165,6 +1198,9 @@ impl Vm {
             // LoadPrev chooses its fallback when TIME == INITIAL_TIME, so a
             // fresh zeroed prev_values buffer is sufficient here.
             prev_values: &mut self.prev_values,
+            // During initials TIME == INITIAL_TIME, so the flag is redundant,
+            // but set it for consistency.
+            use_prev_fallback: true,
         };
 
         Self::eval_initials(
@@ -1329,6 +1365,7 @@ impl Vm {
         let mut broadcast_stack = &mut *state.broadcast_stack;
         let initial_values = state.initial_values;
         let mut prev_values = &mut *state.prev_values;
+        let use_prev_fallback = state.use_prev_fallback;
 
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
@@ -1359,11 +1396,15 @@ impl Vm {
                     stack.push(curr[module_off + *off as usize]);
                 }
                 // LoadPrev pops the caller-provided fallback and uses it when
-                // TIME == INITIAL_TIME; otherwise it reads from prev_values.
+                // TIME == INITIAL_TIME or when use_prev_fallback is set
+                // (RK stages advance TIME to trial points before prev_values
+                // has been populated); otherwise it reads from prev_values.
                 Opcode::LoadPrev { off } => {
                     let fallback = stack.pop();
                     let abs_off = module_off + *off as usize;
-                    let value = if crate::float::approx_eq(curr[TIME_OFF], curr[INITIAL_TIME_OFF]) {
+                    let value = if use_prev_fallback
+                        || crate::float::approx_eq(curr[TIME_OFF], curr[INITIAL_TIME_OFF])
+                    {
                         fallback
                     } else {
                         prev_values[abs_off]
@@ -1435,6 +1476,7 @@ impl Vm {
                         broadcast_stack,
                         initial_values,
                         prev_values,
+                        use_prev_fallback,
                     };
                     match part {
                         StepPart::Initials => {
@@ -1481,6 +1523,7 @@ impl Vm {
                         broadcast_stack: bs,
                         initial_values: _,
                         prev_values: pv,
+                        use_prev_fallback: _,
                     } = child_state;
                     stack = s;
                     temp_storage = ts;

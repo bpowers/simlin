@@ -498,3 +498,115 @@ fn rk4_with_init_builtin() {
         );
     }
 }
+
+// ── PREVIOUS fallback during initial timestep ─────────────────────
+
+#[test]
+fn rk4_previous_fallback_at_initial_timestep() {
+    // PREVIOUS(s, 99) should return 99 (the fallback) during the
+    // entire initial timestep, including RK intermediate stages.
+    // With s(0)=0 and inflow=PREVIOUS(s,99), the flow is 99 at
+    // t=0 for ALL stages, so s(1) = 0 + 99*1 = 99.
+    let tp = TestProject::new("rk4_prev_fallback")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .with_sim_method(datamodel::SimMethod::RungeKutta4)
+        .flow("inflow", "PREVIOUS(s, 99)", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+    let compiled = build_compiled(&tp);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+
+    let series = vm.get_series(&Ident::new("s")).unwrap();
+    assert!(
+        (series[1] - 99.0).abs() < 1e-10,
+        "RK4: s(1) = {}, expected 99 (fallback should apply to all stages at t=0)",
+        series[1]
+    );
+}
+
+#[test]
+fn rk2_previous_fallback_at_initial_timestep() {
+    let tp = TestProject::new("rk2_prev_fallback")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .with_sim_method(datamodel::SimMethod::RungeKutta2)
+        .flow("inflow", "PREVIOUS(s, 99)", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+    let compiled = build_compiled(&tp);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+
+    let series = vm.get_series(&Ident::new("s")).unwrap();
+    assert!(
+        (series[1] - 99.0).abs() < 1e-10,
+        "RK2: s(1) = {}, expected 99 (fallback should apply to all stages at t=0)",
+        series[1]
+    );
+}
+
+// ── SMOOTH submodule stock test ───────────────────────────────────
+
+#[test]
+fn rk4_smooth_submodule_stocks_integrated() {
+    // SMOOTH(input, delay) creates an internal stock. Verify that
+    // RK4 applies to the internal stock by checking accuracy vs Euler.
+    // Use time-varying input so SMOOTH actually does integration work
+    // (constant input = constant output, no dynamics to compare)
+    let euler_tp = TestProject::new("euler_smooth")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .with_sim_method(datamodel::SimMethod::Euler)
+        .aux("input", "TIME * 10", None)
+        .aux("smoothed", "SMTH1(input, 3)", None)
+        .stock("s", "0", &[], &[], None); // need a stock to be simulatable
+
+    let rk4_tp = TestProject::new("rk4_smooth")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .with_sim_method(datamodel::SimMethod::RungeKutta4)
+        .aux("input", "TIME * 10", None)
+        .aux("smoothed", "SMTH1(input, 3)", None)
+        .stock("s", "0", &[], &[], None);
+
+    let mut euler_vm = Vm::new(build_compiled(&euler_tp)).unwrap();
+    euler_vm.run_to_end().unwrap();
+    let euler_smooth = euler_vm.get_series(&Ident::new("smoothed")).unwrap();
+
+    let mut rk4_vm = Vm::new(build_compiled(&rk4_tp)).unwrap();
+    // Verify that stock_offsets includes the SMOOTH internal stock
+    assert!(
+        rk4_vm.stock_offsets().len() > 1,
+        "RK4 should find SMOOTH's internal stock too, found {} stock offsets",
+        rk4_vm.stock_offsets().len(),
+    );
+    rk4_vm.run_to_end().unwrap();
+    let rk4_smooth = rk4_vm.get_series(&Ident::new("smoothed")).unwrap();
+
+    // With time-varying input (TIME*10), SMOOTH creates real dynamics.
+    // Use a fine-dt Euler run as reference to verify RK4 is more accurate.
+    let ref_tp = TestProject::new_with_specs(
+        "ref_smooth",
+        datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(0.01),
+            save_step: Some(datamodel::Dt::Dt(1.0)),
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+    )
+    .aux("input", "TIME * 10", None)
+    .aux("smoothed", "SMTH1(input, 3)", None)
+    .stock("s", "0", &[], &[], None);
+
+    let mut ref_vm = Vm::new(build_compiled(&ref_tp)).unwrap();
+    ref_vm.run_to_end().unwrap();
+    let ref_smooth = ref_vm.get_series(&Ident::new("smoothed")).unwrap();
+
+    let ref_final = *ref_smooth.last().unwrap();
+    let euler_err = (euler_smooth.last().unwrap() - ref_final).abs();
+    let rk4_err = (rk4_smooth.last().unwrap() - ref_final).abs();
+    assert!(
+        rk4_err < euler_err,
+        "RK4 smooth error ({rk4_err}) should be less than Euler ({euler_err})"
+    );
+}

@@ -76,7 +76,6 @@ impl TestProject {
     }
 
     /// Set the integration method
-    #[allow(dead_code)]
     pub fn with_sim_method(mut self, method: datamodel::SimMethod) -> Self {
         self.sim_specs.sim_method = method;
         self
