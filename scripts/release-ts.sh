@@ -69,13 +69,16 @@ done
 
 echo "All 3 package.json files agree on version $VERSION"
 
+# Update lockfile to reflect new workspace versions
+pnpm install
+
 echo "Building packages..."
 pnpm --filter @simlin/engine --filter @simlin/core --filter @simlin/diagram build
 
 echo "Running tests..."
 pnpm --filter @simlin/engine --filter @simlin/core --filter @simlin/diagram test
 
-git add "${PACKAGE_FILES[@]}"
+git add "${PACKAGE_FILES[@]}" pnpm-lock.yaml
 git commit -m "ts: release $VERSION"
 git tag "ts-v$VERSION"
 

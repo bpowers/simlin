@@ -20,6 +20,10 @@
   "main": "lib",
   "types": "lib/index.d.ts",
   "exports": {
+    "./*.css": {
+      "browser": "./lib.browser/*.css",
+      "node": "./lib/*.css"
+    },
     "./*": {
       "types": "./lib/*.d.ts",
       "browser": "./lib.browser/*.js",
