@@ -34,8 +34,8 @@ fi
 
 cd "$REPO_ROOT"
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "error: working tree is dirty -- commit or stash changes first" >&2
+if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is dirty or has untracked files -- commit or stash changes first" >&2
   exit 1
 fi
 
