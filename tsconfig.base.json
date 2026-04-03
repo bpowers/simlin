@@ -11,6 +11,7 @@
     "jsx": "react",
     "moduleResolution": "node",
     "declaration": true,
+    "declarationMap": true,
     "removeComments": true,
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,

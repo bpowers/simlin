@@ -20,7 +20,7 @@ let sharedBackend: EngineBackend | null = null;
 let sharedWorker: Worker | null = null;
 
 function createWorkerBackend(): WorkerBackend {
-  const worker = new Worker(new URL('./engine-worker.ts', import.meta.url), {
+  const worker = new Worker(new URL('./engine-worker.js', import.meta.url), {
     type: 'module',
   });
   sharedWorker = worker;

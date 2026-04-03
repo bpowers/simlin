@@ -1,0 +1,181 @@
+name: TypeScript npm Release
+
+on:
+  push:
+    tags:
+      - 'ts-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract and validate version
+        id: version
+        run: |
+          ENGINE_VERSION=$(jq -r .version src/engine/package.json)
+          CORE_VERSION=$(jq -r .version src/core/package.json)
+          DIAGRAM_VERSION=$(jq -r .version src/diagram/package.json)
+
+          echo "engine: $ENGINE_VERSION, core: $CORE_VERSION, diagram: $DIAGRAM_VERSION"
+
+          if [ "$ENGINE_VERSION" != "$CORE_VERSION" ] || [ "$ENGINE_VERSION" != "$DIAGRAM_VERSION" ]; then
+            echo "::error::Version mismatch: engine=$ENGINE_VERSION core=$CORE_VERSION diagram=$DIAGRAM_VERSION"
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/ts-v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#ts-v}"
+            echo "Tag version: $TAG_VERSION"
+            if [ "$TAG_VERSION" != "$ENGINE_VERSION" ]; then
+              echo "::error::Tag version ($TAG_VERSION) does not match package.json ($ENGINE_VERSION)"
+              exit 1
+            fi
+          fi
+
+          echo "version=$ENGINE_VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and test
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-opt
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binaryen
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm build
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Pack tarballs
+        run: |
+          mkdir -p tarballs
+          (cd src/engine && pnpm pack --pack-destination ../../tarballs)
+          (cd src/core && pnpm pack --pack-destination ../../tarballs)
+          (cd src/diagram && pnpm pack --pack-destination ../../tarballs)
+
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarballs
+          path: tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-engine:
+    name: Publish @simlin/engine
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/ts-v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarballs
+          path: tarballs/
+
+      # Intentionally omit registry-url: trusted publishing handles auth (OIDC)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Publish @simlin/engine
+        env:
+          # Empty token prevents ambient .npmrc interference; OIDC handles auth
+          NODE_AUTH_TOKEN: ''
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          if npm view "@simlin/engine@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/engine@$VERSION, skipping"
+          else
+            npm publish tarballs/simlin-engine-"$VERSION".tgz --provenance --access public
+          fi
+
+  publish-core:
+    name: Publish @simlin/core
+    needs: [validate, build, publish-engine]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/ts-v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarballs
+          path: tarballs/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Publish @simlin/core
+        env:
+          NODE_AUTH_TOKEN: ''
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          if npm view "@simlin/core@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/core@$VERSION, skipping"
+          else
+            npm publish tarballs/simlin-core-"$VERSION".tgz --provenance --access public
+          fi
+
+  publish-diagram:
+    name: Publish @simlin/diagram
+    needs: [validate, build, publish-core]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/ts-v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarballs
+          path: tarballs/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Publish @simlin/diagram
+        env:
+          NODE_AUTH_TOKEN: ''
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          if npm view "@simlin/diagram@$VERSION" version > /dev/null 2>&1; then
+            echo "Already published @simlin/diagram@$VERSION, skipping"
+          else
+            npm publish tarballs/simlin-diagram-"$VERSION".tgz --provenance --access public
+          fi
