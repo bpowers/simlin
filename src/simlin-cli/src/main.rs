@@ -22,7 +22,7 @@ use simlin_engine::db::{
 };
 use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
-use simlin_engine::{load_csv, load_dat, open_systems, open_vensim, open_xmile, to_mdl, to_xmile};
+use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmile};
 
 mod gen_stdlib;
 mod vdf_dump;
@@ -166,8 +166,14 @@ fn resolve_input_format(input: &InputArgs) -> InputFormat {
     }
 }
 
+/// Visible stock metadata for systems format: (original_name, canonical_ident)
+/// pairs in declaration order.
+type VisibleStocks = Vec<(String, String)>;
+
 /// Load a model file, dispatching on format. Exits on error.
-fn open_model(input: &InputArgs) -> DatamodelProject {
+/// For systems format, also returns the visible stocks list (declaration
+/// order, original names) for filtered output.
+fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
     let format = resolve_input_format(input);
     let file_path = input
         .path
@@ -175,29 +181,36 @@ fn open_model(input: &InputArgs) -> DatamodelProject {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/dev/stdin".to_string());
 
-    let result = match format {
+    let (result, visible) = match format {
         InputFormat::Vensim => {
             let contents = std::fs::read_to_string(&file_path).unwrap();
-            open_vensim(&contents)
+            (open_vensim(&contents), None)
         }
         InputFormat::Protobuf => {
             let file = File::open(&file_path).unwrap();
             let mut reader = BufReader::new(file);
-            open_binary(&mut reader)
+            (open_binary(&mut reader), None)
         }
         InputFormat::Xmile => {
             let file = File::open(&file_path).unwrap();
             let mut reader = BufReader::new(file);
-            open_xmile(&mut reader)
+            (open_xmile(&mut reader), None)
         }
         InputFormat::Systems => {
             let contents = std::fs::read_to_string(&file_path).unwrap();
-            open_systems(&contents)
+            let systems_model = simlin_engine::systems::parse(&contents)
+                .unwrap_or_else(|e| die!("model '{}' parse error: {}", &file_path, e));
+            let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+            let project = simlin_engine::systems::translate::translate(
+                &systems_model,
+                simlin_engine::systems::translate::DEFAULT_ROUNDS,
+            );
+            (project, Some(visible))
         }
     };
 
     match result {
-        Ok(project) => project,
+        Ok(project) => (project, visible),
         Err(err) => die!("model '{}' error: {}", &file_path, err),
     }
 }
@@ -225,29 +238,32 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
     Ok(project)
 }
 
-/// Print TSV output filtered to only the specified visible variable names.
-/// Matches the Python `systems` package behavior of showing only non-infinite
-/// stocks. Variables not in `visible` (internal scaffolding like modules,
-/// rate/capacity auxes, drain variables) are omitted from the output.
-fn print_filtered_tsv(results: &Results, visible: &std::collections::HashSet<String>) {
+/// Print TSV output filtered to only the visible stocks, in declaration
+/// order with original (non-canonicalized) names. Matches the Python
+/// `systems` package behavior.
+fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
     use simlin_engine::common::{Canonical, Ident};
 
-    let offset_name_map: std::collections::HashMap<usize, &Ident<Canonical>> =
-        results.offsets.iter().map(|(k, v)| (*v, k)).collect();
+    // Map canonical ident -> offset in the results data
+    let ident_to_offset: std::collections::HashMap<&str, usize> = results
+        .offsets
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
 
-    // Collect (offset, name) pairs for visible variables, sorted by offset
-    // to maintain stable column ordering. Always include time (offset 0).
-    let mut columns: Vec<(usize, &str)> = Vec::new();
-    for i in 0..results.step_size {
-        if let Some(name) = offset_name_map.get(&i)
-            && (i == 0 || visible.contains(name.as_str()))
-        {
-            columns.push((i, name.as_str()));
+    // Build (display_name, data_offset) pairs: time first, then visible
+    // stocks in declaration order using original names.
+    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
+    let time_offset = results.offsets.get(&time_ident).copied().unwrap_or(0);
+    let mut columns: Vec<(&str, usize)> = vec![("time", time_offset)];
+    for (original_name, canonical_ident) in visible {
+        if let Some(&offset) = ident_to_offset.get(canonical_ident.as_str()) {
+            columns.push((original_name.as_str(), offset));
         }
     }
 
     // Header
-    for (col_idx, (_, name)) in columns.iter().enumerate() {
+    for (col_idx, (name, _)) in columns.iter().enumerate() {
         if col_idx > 0 {
             print!("\t");
         }
@@ -260,7 +276,7 @@ fn print_filtered_tsv(results: &Results, visible: &std::collections::HashSet<Str
         if row[0] > results.specs.stop {
             break;
         }
-        for (col_idx, (offset, _)) in columns.iter().enumerate() {
+        for (col_idx, (_, offset)) in columns.iter().enumerate() {
             if col_idx > 0 {
                 print!("\t");
             }
@@ -526,13 +542,11 @@ fn main() {
             no_output,
             ltm,
         } => {
-            let format = resolve_input_format(&input);
-            let project = open_model(&input);
+            let (project, visible) = open_model(&input);
             let results = simulate(&project, ltm);
             if !no_output {
-                if matches!(format, InputFormat::Systems) {
-                    let visible = simlin_engine::systems::translate::visible_stocks(&project);
-                    print_filtered_tsv(&results, &visible);
+                if let Some(visible) = &visible {
+                    print_filtered_tsv(&results, visible);
                 } else {
                     results.print_tsv();
                 }
@@ -544,7 +558,7 @@ fn main() {
             model_only,
             output,
         } => {
-            let project = open_model(&input);
+            let (project, _) = open_model(&input);
 
             let buf: Vec<u8> = match to {
                 OutputFormat::Xmile => match to_xmile(&project) {
@@ -584,7 +598,7 @@ fn main() {
             output_file.write_all(&buf).unwrap();
         }
         Command::Equations { input, output } => {
-            let project = open_model(&input);
+            let (project, _) = open_model(&input);
             print_equations(&project, output);
         }
         Command::Debug {
@@ -592,7 +606,7 @@ fn main() {
             reference,
             ltm,
         } => {
-            let project = open_model(&input);
+            let (project, _) = open_model(&input);
             let ref_path = reference.to_string_lossy();
             let reference_data = if ref_path.ends_with(".dat") {
                 load_dat(&ref_path).unwrap()

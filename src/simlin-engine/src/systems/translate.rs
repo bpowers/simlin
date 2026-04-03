@@ -558,22 +558,15 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     })
 }
 
-/// Returns the set of user-visible stock idents from a systems format
-/// project. Matches the Python `systems` behavior where `stock.show`
-/// is `False` for infinite stocks: only non-infinite stocks are included.
-pub fn visible_stocks(project: &Project) -> HashSet<String> {
-    let Some(main_model) = project.get_model("main") else {
-        return HashSet::new();
-    };
-    main_model
-        .variables
+/// Returns the non-infinite stocks from a `SystemsModel` in declaration
+/// order, as `(original_name, canonical_ident)` pairs. Matches the Python
+/// `systems` behavior where `stock.show` is `False` for infinite stocks.
+pub fn visible_stocks(model: &SystemsModel) -> Vec<(String, String)> {
+    model
+        .stocks
         .iter()
-        .filter_map(|v| match v {
-            Variable::Stock(s) if s.equation != Equation::Scalar("inf()".to_string()) => {
-                Some(s.ident.clone())
-            }
-            _ => None,
-        })
+        .filter(|s| !s.is_infinite)
+        .map(|s| (s.name.clone(), canon(&s.name)))
         .collect()
 }
 
