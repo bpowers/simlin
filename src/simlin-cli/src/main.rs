@@ -242,8 +242,6 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
 /// order with original (non-canonicalized) names. Matches the Python
 /// `systems` package behavior.
 fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
-    use simlin_engine::common::{Canonical, Ident};
-
     // Map canonical ident -> offset in the results data
     let ident_to_offset: std::collections::HashMap<&str, usize> = results
         .offsets
@@ -251,11 +249,8 @@ fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
         .map(|(k, v)| (k.as_str(), *v))
         .collect();
 
-    // Build (display_name, data_offset) pairs: time first, then visible
-    // stocks in declaration order using original names.
-    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
-    let time_offset = results.offsets.get(&time_ident).copied().unwrap_or(0);
-    let mut columns: Vec<(&str, usize)> = vec![("time", time_offset)];
+    // Time is always at offset 0 in the engine's results layout.
+    let mut columns: Vec<(&str, usize)> = vec![("time", 0)];
     for (original_name, canonical_ident) in visible {
         if let Some(&offset) = ident_to_offset.get(canonical_ident.as_str()) {
             columns.push((original_name.as_str(), offset));
@@ -293,20 +288,17 @@ fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible
     use simlin_engine::common::{Canonical, Ident};
 
     // Build columns: (display_name, sim_offset, ref_offset) triples.
-    // time is always first; visible stocks follow in declaration order.
-    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
-    let time_sim = results.offsets.get(&time_ident).copied().unwrap_or(0);
-    let time_ref = reference.offsets.get(&time_ident).copied();
-
+    // Time is always at offset 0 in the engine's results layout.
     struct Col<'a> {
         name: &'a str,
         sim_off: usize,
         ref_off: Option<usize>,
     }
+    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
     let mut columns: Vec<Col> = vec![Col {
         name: "time",
-        sim_off: time_sim,
-        ref_off: time_ref,
+        sim_off: 0,
+        ref_off: reference.offsets.get(&time_ident).copied(),
     }];
     for (original_name, canonical_ident) in visible {
         let ident = Ident::<Canonical>::from_str_unchecked(canonical_ident);
@@ -615,11 +607,7 @@ fn main() {
             let (project, visible) = open_model(&input);
             let results = simulate(&project, ltm);
             if !no_output {
-                // LTM adds synthetic analysis variables that the user
-                // explicitly requested -- don't filter those away.
-                if let Some(visible) = &visible
-                    && !ltm
-                {
+                if let Some(visible) = &visible {
                     print_filtered_tsv(&results, visible);
                 } else {
                     results.print_tsv();
@@ -690,9 +678,7 @@ fn main() {
                 load_csv(&ref_path, b'\t').unwrap()
             };
             let results = simulate(&project, ltm);
-            if let Some(visible) = &visible
-                && !ltm
-            {
+            if let Some(visible) = &visible {
                 print_filtered_tsv_comparison(&results, &reference_data, visible);
             } else {
                 results.print_tsv_comparison(Some(&reference_data));
