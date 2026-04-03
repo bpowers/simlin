@@ -10,8 +10,6 @@ Provides protobuf-based data structures (`Project`, `Model`, `Variable`, `Equati
 npm install @simlin/core
 ```
 
-**Peer dependency**: `@simlin/engine` must be installed alongside this package.
-
 ## Subpath Imports
 
 ```ts

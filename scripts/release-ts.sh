@@ -34,6 +34,12 @@ fi
 
 cd "$REPO_ROOT"
 
+CURRENT_BRANCH="$(git branch --show-current)"
+if [ "$CURRENT_BRANCH" != "main" ]; then
+  echo "error: releases must be tagged from the main branch (currently on '$CURRENT_BRANCH')" >&2
+  exit 1
+fi
+
 if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git status --porcelain)" ]; then
   echo "error: working tree is dirty or has untracked files -- commit or stash changes first" >&2
   exit 1
@@ -52,10 +58,6 @@ for f in "${PACKAGE_FILES[@]}"; do
   mv "$f.tmp" "$f"
 done
 
-# Update lockfile to reflect new versions
-echo "Running pnpm install..."
-pnpm install --no-frozen-lockfile
-
 # Verify all three package.json files agree on version
 for f in "${PACKAGE_FILES[@]}"; do
   file_version="$(jq -r '.version' "$f")"
@@ -73,7 +75,7 @@ pnpm --filter @simlin/engine --filter @simlin/core --filter @simlin/diagram buil
 echo "Running tests..."
 pnpm --filter @simlin/engine --filter @simlin/core --filter @simlin/diagram test
 
-git add "${PACKAGE_FILES[@]}" pnpm-lock.yaml
+git add "${PACKAGE_FILES[@]}"
 git commit -m "ts: release $VERSION"
 git tag "ts-v$VERSION"
 

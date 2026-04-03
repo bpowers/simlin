@@ -50,7 +50,7 @@
     "lib",
     "lib.module"
   ],
-  "peerDependencies": {
+  "dependencies": {
     "@simlin/engine": "workspace:^"
   },
   "devDependencies": {
