@@ -286,6 +286,76 @@ fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
     }
 }
 
+/// Print TSV comparison output filtered to only the visible stocks.
+/// Each timestep produces two rows: "reference" and "simlin", showing
+/// the reference and simulation values side by side for visible stocks only.
+fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible: &VisibleStocks) {
+    use simlin_engine::common::{Canonical, Ident};
+
+    // Build columns: (display_name, sim_offset, ref_offset) triples.
+    // time is always first; visible stocks follow in declaration order.
+    let time_ident = Ident::<Canonical>::from_str_unchecked("time");
+    let time_sim = results.offsets.get(&time_ident).copied().unwrap_or(0);
+    let time_ref = reference.offsets.get(&time_ident).copied();
+
+    struct Col<'a> {
+        name: &'a str,
+        sim_off: usize,
+        ref_off: Option<usize>,
+    }
+    let mut columns: Vec<Col> = vec![Col {
+        name: "time",
+        sim_off: time_sim,
+        ref_off: time_ref,
+    }];
+    for (original_name, canonical_ident) in visible {
+        let ident = Ident::<Canonical>::from_str_unchecked(canonical_ident);
+        if let Some(&sim_off) = results.offsets.get(&ident) {
+            let ref_off = reference.offsets.get(&ident).copied();
+            columns.push(Col {
+                name: original_name.as_str(),
+                sim_off,
+                ref_off,
+            });
+        }
+    }
+
+    // Header
+    print!("series\t");
+    for (i, col) in columns.iter().enumerate() {
+        if i > 0 {
+            print!("\t");
+        }
+        print!("{}", col.name);
+    }
+    println!();
+
+    // Data rows
+    for (row, ref_row) in results.iter().zip(reference.iter()) {
+        if row[0] > results.specs.stop {
+            break;
+        }
+        print!("reference\t");
+        for (i, col) in columns.iter().enumerate() {
+            if i > 0 {
+                print!("\t");
+            }
+            if let Some(off) = col.ref_off {
+                print!("{}", ref_row[off]);
+            }
+        }
+        println!();
+        print!("simlin\t");
+        for (i, col) in columns.iter().enumerate() {
+            if i > 0 {
+                print!("\t");
+            }
+            print!("{}", row[col.sim_off]);
+        }
+        println!();
+    }
+}
+
 fn print_formatted_error(error: &FormattedError) {
     if matches!(
         error.kind,
@@ -545,7 +615,11 @@ fn main() {
             let (project, visible) = open_model(&input);
             let results = simulate(&project, ltm);
             if !no_output {
-                if let Some(visible) = &visible {
+                // LTM adds synthetic analysis variables that the user
+                // explicitly requested -- don't filter those away.
+                if let Some(visible) = &visible
+                    && !ltm
+                {
                     print_filtered_tsv(&results, visible);
                 } else {
                     results.print_tsv();
@@ -606,7 +680,7 @@ fn main() {
             reference,
             ltm,
         } => {
-            let (project, _) = open_model(&input);
+            let (project, visible) = open_model(&input);
             let ref_path = reference.to_string_lossy();
             let reference_data = if ref_path.ends_with(".dat") {
                 load_dat(&ref_path).unwrap()
@@ -614,7 +688,13 @@ fn main() {
                 load_csv(&ref_path, b'\t').unwrap()
             };
             let results = simulate(&project, ltm);
-            results.print_tsv_comparison(Some(&reference_data));
+            if let Some(visible) = &visible
+                && !ltm
+            {
+                print_filtered_tsv_comparison(&results, &reference_data, visible);
+            } else {
+                results.print_tsv_comparison(Some(&reference_data));
+            }
         }
     }
 }
