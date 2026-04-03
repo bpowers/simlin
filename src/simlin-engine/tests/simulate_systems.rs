@@ -11,10 +11,30 @@
 mod test_helpers;
 
 use simlin_engine::Vm;
-use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::db::{
+    SimlinDb, compile_project_incremental, sync_from_datamodel, sync_from_datamodel_incremental,
+};
 use simlin_engine::load_csv;
 
 use test_helpers::ensure_results;
+
+/// All valid systems format test models.
+const ALL_VALID_MODELS: &[&str] = &[
+    "../../test/systems-format/hiring.txt",
+    "../../test/systems-format/links.txt",
+    "../../test/systems-format/maximums.txt",
+    "../../test/systems-format/projects.txt",
+    "../../test/systems-format/extended_syntax.txt",
+    "../../test/systems-format/cross_stock.txt",
+    "../../test/systems-format/dest_cap_order.txt",
+    "../../test/systems-format/infinity.txt",
+    "../../test/systems-format/formula_deps.txt",
+    "../../test/systems-format/standalone_stocks.txt",
+];
+
+// ---------------------------------------------------------------------------
+// Simulation tests: parse, translate, compile, simulate, compare CSV
+// ---------------------------------------------------------------------------
 
 /// Parse a systems format file, simulate it via the VM, and compare
 /// results against expected CSV output.
@@ -95,4 +115,114 @@ fn simulates_extended_syntax() {
         "../../test/systems-format/extended_syntax_output.csv",
         5,
     );
+}
+
+#[test]
+fn simulates_dest_cap_order() {
+    simulate_systems_file(
+        "../../test/systems-format/dest_cap_order.txt",
+        "../../test/systems-format/dest_cap_order_output.csv",
+        5,
+    );
+}
+
+#[test]
+fn simulates_infinity() {
+    simulate_systems_file(
+        "../../test/systems-format/infinity.txt",
+        "../../test/systems-format/infinity_output.csv",
+        5,
+    );
+}
+
+#[test]
+fn simulates_formula_deps() {
+    simulate_systems_file(
+        "../../test/systems-format/formula_deps.txt",
+        "../../test/systems-format/formula_deps_output.csv",
+        0,
+    );
+}
+
+#[test]
+fn simulates_standalone_stocks() {
+    simulate_systems_file(
+        "../../test/systems-format/standalone_stocks.txt",
+        "../../test/systems-format/standalone_stocks_output.csv",
+        3,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Table-driven compilation tests: ensure every valid systems format model
+// can parse, translate, compile, and simulate without errors or diagnostics.
+// ---------------------------------------------------------------------------
+
+/// Parse a systems format file, translate it, compile it, and verify there
+/// are zero compilation diagnostics.
+fn assert_systems_model_compiles(txt_path: &str, rounds: u64) {
+    eprintln!("compile-checking: {txt_path}");
+
+    let contents = std::fs::read_to_string(txt_path)
+        .unwrap_or_else(|e| panic!("failed to read {txt_path}: {e}"));
+    let systems_model = simlin_engine::systems::parse(&contents)
+        .unwrap_or_else(|e| panic!("failed to parse {txt_path}: {e}"));
+    let datamodel_project = simlin_engine::systems::translate::translate(&systems_model, rounds)
+        .unwrap_or_else(|e| panic!("failed to translate {txt_path}: {e}"));
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    if !diagnostics.is_empty() {
+        for diag in &diagnostics {
+            eprintln!("  diagnostic: {:?}", diag);
+        }
+        panic!(
+            "{txt_path}: expected zero diagnostics, got {}",
+            diagnostics.len()
+        );
+    }
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .unwrap_or_else(|e| panic!("VM compilation failed for {txt_path}: {e:?}"));
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {txt_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM execution failed for {txt_path}: {e}"));
+}
+
+/// All valid systems format models compile without diagnostics.
+#[test]
+fn all_valid_models_compile_cleanly() {
+    for path in ALL_VALID_MODELS {
+        assert_systems_model_compiles(path, 10);
+    }
+}
+
+/// Verify that `open_systems()` (the production entry point used by
+/// libsimlin and the app) works for all valid models.
+#[test]
+fn open_systems_entry_point_works() {
+    for path in ALL_VALID_MODELS {
+        let contents =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let project = simlin_engine::open_systems(&contents)
+            .unwrap_or_else(|e| panic!("open_systems failed for {path}: {e}"));
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+
+        let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .collect();
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("  error: {:?}", e);
+            }
+            panic!("{path}: open_systems produced {} errors", errors.len());
+        }
+    }
 }

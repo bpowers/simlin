@@ -1,0 +1,5 @@
+# stock-only declarations with formula dependencies
+A(100)
+B(A)
+C(B*3)
+D(C*B)

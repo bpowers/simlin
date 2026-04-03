@@ -22,7 +22,7 @@ use simlin_engine::db::{
 };
 use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
-use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmile};
+use simlin_engine::{load_csv, load_dat, open_systems, open_vensim, open_xmile, to_mdl, to_xmile};
 
 mod gen_stdlib;
 mod vdf_dump;
@@ -128,7 +128,7 @@ struct InputArgs {
     path: Option<PathBuf>,
 
     /// Input format (auto-detected from file extension when omitted:
-    /// .mdl -> vensim, .pb/.bin -> protobuf, everything else -> xmile)
+    /// .mdl -> vensim, .pb/.bin -> protobuf, .txt -> systems, everything else -> xmile)
     #[arg(long, value_enum)]
     format: Option<InputFormat>,
 }
@@ -138,6 +138,7 @@ enum InputFormat {
     Xmile,
     Vensim,
     Protobuf,
+    Systems,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -160,6 +161,7 @@ fn resolve_input_format(input: &InputArgs) -> InputFormat {
     {
         Some("mdl") => InputFormat::Vensim,
         Some("pb" | "bin") => InputFormat::Protobuf,
+        Some("txt") => InputFormat::Systems,
         _ => InputFormat::Xmile,
     }
 }
@@ -187,6 +189,10 @@ fn open_model(input: &InputArgs) -> DatamodelProject {
             let file = File::open(&file_path).unwrap();
             let mut reader = BufReader::new(file);
             open_xmile(&mut reader)
+        }
+        InputFormat::Systems => {
+            let contents = std::fs::read_to_string(&file_path).unwrap();
+            open_systems(&contents)
         }
     };
 

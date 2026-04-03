@@ -1,0 +1,7 @@
+# stock-only declarations followed by flow lines
+a
+b(2)
+c(3, 5)
+
+a > b @ 1
+b > c @ 2
