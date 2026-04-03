@@ -44,8 +44,7 @@
   "files": [
     "lib",
     "lib.browser",
-    "core/libsimlin.wasm",
-    "src"
+    "core/libsimlin.wasm"
   ],
   "devDependencies": {
     "@types/jest": "^30.0.0",

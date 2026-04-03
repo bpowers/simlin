@@ -33,10 +33,7 @@
   },
   "files": [
     "lib",
-    "lib.browser",
-    "*.ts",
-    "*.tsx",
-    "*.css"
+    "lib.browser"
   ],
   "peerDependencies": {
     "react": "^19.0.0",

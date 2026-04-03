@@ -48,8 +48,7 @@
   "sideEffects": false,
   "files": [
     "lib",
-    "lib.module",
-    "*.ts"
+    "lib.module"
   ],
   "peerDependencies": {
     "@simlin/engine": "workspace:^"
