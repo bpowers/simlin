@@ -558,6 +558,25 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
     })
 }
 
+/// Returns the set of user-visible stock idents from a systems format
+/// project. Matches the Python `systems` behavior where `stock.show`
+/// is `False` for infinite stocks: only non-infinite stocks are included.
+pub fn visible_stocks(project: &Project) -> HashSet<String> {
+    let Some(main_model) = project.get_model("main") else {
+        return HashSet::new();
+    };
+    main_model
+        .variables
+        .iter()
+        .filter_map(|v| match v {
+            Variable::Stock(s) if s.equation != Equation::Scalar("inf()".to_string()) => {
+                Some(s.ident.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Canonicalize a name: lowercase, spaces to underscores.
 fn canon(name: &str) -> String {
     canonicalize(name).into_owned()

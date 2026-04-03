@@ -225,6 +225,51 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
     Ok(project)
 }
 
+/// Print TSV output filtered to only the specified visible variable names.
+/// Matches the Python `systems` package behavior of showing only non-infinite
+/// stocks. Variables not in `visible` (internal scaffolding like modules,
+/// rate/capacity auxes, drain variables) are omitted from the output.
+fn print_filtered_tsv(results: &Results, visible: &std::collections::HashSet<String>) {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let offset_name_map: std::collections::HashMap<usize, &Ident<Canonical>> =
+        results.offsets.iter().map(|(k, v)| (*v, k)).collect();
+
+    // Collect (offset, name) pairs for visible variables, sorted by offset
+    // to maintain stable column ordering. Always include time (offset 0).
+    let mut columns: Vec<(usize, &str)> = Vec::new();
+    for i in 0..results.step_size {
+        if let Some(name) = offset_name_map.get(&i)
+            && (i == 0 || visible.contains(name.as_str()))
+        {
+            columns.push((i, name.as_str()));
+        }
+    }
+
+    // Header
+    for (col_idx, (_, name)) in columns.iter().enumerate() {
+        if col_idx > 0 {
+            print!("\t");
+        }
+        print!("{name}");
+    }
+    println!();
+
+    // Data rows
+    for row in results.iter() {
+        if row[0] > results.specs.stop {
+            break;
+        }
+        for (col_idx, (offset, _)) in columns.iter().enumerate() {
+            if col_idx > 0 {
+                print!("\t");
+            }
+            print!("{}", row[*offset]);
+        }
+        println!();
+    }
+}
+
 fn print_formatted_error(error: &FormattedError) {
     if matches!(
         error.kind,
@@ -481,10 +526,16 @@ fn main() {
             no_output,
             ltm,
         } => {
+            let format = resolve_input_format(&input);
             let project = open_model(&input);
             let results = simulate(&project, ltm);
             if !no_output {
-                results.print_tsv();
+                if matches!(format, InputFormat::Systems) {
+                    let visible = simlin_engine::systems::translate::visible_stocks(&project);
+                    print_filtered_tsv(&results, &visible);
+                } else {
+                    results.print_tsv();
+                }
             }
         }
         Command::Convert {

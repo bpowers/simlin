@@ -200,6 +200,51 @@ fn all_valid_models_compile_cleanly() {
     }
 }
 
+/// Verify that `systems_visible_stocks` returns only user-authored,
+/// non-infinite stocks -- matching the Python `systems` package behavior
+/// where `stock.show == True` excludes infinite stocks.
+#[test]
+fn visible_stocks_excludes_infinite_and_internal() {
+    let contents = std::fs::read_to_string("../../test/systems-format/hiring.txt").unwrap();
+    let project = simlin_engine::open_systems(&contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&project);
+
+    // hiring.txt has 8 stocks: Candidates (infinite), PhoneScreens, Onsites,
+    // Offers, Hires, Employees, Departures, Departed (infinite).
+    // Visible should be the 6 non-infinite ones.
+    assert_eq!(
+        visible.len(),
+        6,
+        "expected 6 visible stocks, got: {:?}",
+        visible
+    );
+    assert!(visible.contains("phonescreens"));
+    assert!(visible.contains("onsites"));
+    assert!(visible.contains("offers"));
+    assert!(visible.contains("hires"));
+    assert!(visible.contains("employees"));
+    assert!(visible.contains("departures"));
+    assert!(
+        !visible.contains("candidates"),
+        "infinite stock should be excluded"
+    );
+    assert!(
+        !visible.contains("departed"),
+        "infinite stock should be excluded"
+    );
+}
+
+/// Verify that visible stocks for a model with no infinite stocks returns all stocks.
+#[test]
+fn visible_stocks_all_when_no_infinite() {
+    let contents = std::fs::read_to_string("../../test/systems-format/formula_deps.txt").unwrap();
+    let project = simlin_engine::open_systems(&contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&project);
+    assert_eq!(visible.len(), 4);
+}
+
 /// Verify that `open_systems()` (the production entry point used by
 /// libsimlin and the app) works for all valid models.
 #[test]
