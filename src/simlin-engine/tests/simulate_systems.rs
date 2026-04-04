@@ -274,6 +274,22 @@ fn visible_stocks_includes_inf_initial() {
     assert_eq!(names, &["A", "B", "C"]);
 }
 
+/// A stock named "Time" has canonical ident "time" which collides with
+/// the synthetic time column. visible_stocks still includes it (it's a
+/// valid non-infinite stock), but consumers must deduplicate.
+#[test]
+fn visible_stocks_includes_time_named_stock() {
+    let contents = "Time(5) > B @ 1";
+    let systems_model = simlin_engine::systems::parse(contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let names: Vec<&str> = visible.iter().map(|(name, _)| name.as_str()).collect();
+    // visible_stocks returns all non-infinite stocks including "Time"
+    assert_eq!(names, &["Time", "B"]);
+    // The CLI's print_filtered_tsv is responsible for deduplicating the
+    // "time" column (offset 0 vs the user stock).
+}
+
 /// Verify that `open_systems()` (the production entry point used by
 /// libsimlin and the app) works for all valid models.
 #[test]
