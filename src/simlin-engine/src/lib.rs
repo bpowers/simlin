@@ -53,6 +53,8 @@ mod project;
 #[path = "project_io.gen.rs"]
 pub mod project_io;
 mod results;
+#[cfg(test)]
+mod rk_integration_tests;
 pub mod serde;
 #[path = "stdlib.gen.rs"]
 mod stdlib;

@@ -13,6 +13,8 @@ pub(crate) const TIME_OFF: usize = 0;
 #[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum Method {
     Euler,
+    RungeKutta2,
+    RungeKutta4,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -46,14 +48,8 @@ impl Specs {
 
         let method = match specs.sim_method {
             SimMethod::Euler => Method::Euler,
-            SimMethod::RungeKutta2 => {
-                eprintln!("warning, simulation requested 'rk2', but only support Euler");
-                Method::Euler
-            }
-            SimMethod::RungeKutta4 => {
-                eprintln!("warning, simulation requested 'rk4', but only support Euler");
-                Method::Euler
-            }
+            SimMethod::RungeKutta2 => Method::RungeKutta2,
+            SimMethod::RungeKutta4 => Method::RungeKutta4,
         };
 
         // Truncation (not round) is correct: for non-divisible save_step
@@ -246,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn specs_from_rk2_warns() {
+    fn specs_from_rk2() {
         let sim_specs = SimSpecs {
             start: 0.0,
             stop: 10.0,
@@ -257,12 +253,11 @@ mod tests {
         };
 
         let specs = Specs::from(&sim_specs);
-        // Falls back to Euler with a warning
-        assert_eq!(specs.method, Method::Euler);
+        assert_eq!(specs.method, Method::RungeKutta2);
     }
 
     #[test]
-    fn specs_from_rk4_warns() {
+    fn specs_from_rk4() {
         let sim_specs = SimSpecs {
             start: 0.0,
             stop: 10.0,
@@ -273,7 +268,7 @@ mod tests {
         };
 
         let specs = Specs::from(&sim_specs);
-        assert_eq!(specs.method, Method::Euler);
+        assert_eq!(specs.method, Method::RungeKutta4);
     }
 
     #[test]

@@ -75,6 +75,12 @@ impl TestProject {
         self
     }
 
+    /// Set the integration method
+    pub fn with_sim_method(mut self, method: datamodel::SimMethod) -> Self {
+        self.sim_specs.sim_method = method;
+        self
+    }
+
     /// Add a custom unit definition
     pub fn unit(mut self, name: &str, equation: Option<&str>) -> Self {
         self.units.push(datamodel::Unit {

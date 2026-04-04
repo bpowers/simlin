@@ -241,9 +241,21 @@ pub struct Vm {
     // Used by LoadInitial opcode to freeze a variable's initial value.
     initial_values: Box<[f64]>,
     // Snapshot of curr[] taken after stocks but before the time advance
-    // each timestep. LoadPrev reads from this buffer after the first
-    // timestep; when TIME == INITIAL_TIME it returns its fallback instead.
+    // each timestep. LoadPrev reads from this buffer once prev_values_valid
+    // is true; before that it returns the per-callsite fallback instead.
     prev_values: Box<[f64]>,
+    // Flat list of absolute stock offsets in the data buffer.
+    // Collected from stock bytecode; includes submodule stocks.
+    // Empty for Euler (no RK scratch needed).
+    stock_offsets: Vec<usize>,
+    // RK scratch space: [saved_stocks(N) | accumulator(N)].
+    // Allocated once in new(), empty for Euler.
+    rk_scratch: Vec<f64>,
+    // True after the first prev_values snapshot has been taken.
+    // Used to set use_prev_fallback in EvalState so that LoadPrev
+    // returns the fallback during the initial timestep even when
+    // RK stages advance TIME away from INITIAL_TIME.
+    prev_values_valid: bool,
 }
 
 #[derive(Clone)]
@@ -320,6 +332,10 @@ struct EvalState<'a> {
     // Snapshot of curr[] taken after stocks but before the time advance
     // each timestep; used by LoadPrev in the following iteration.
     prev_values: &'a mut [f64],
+    // When true, LoadPrev returns the per-callsite fallback instead of
+    // reading prev_values. True until the first prev_values snapshot
+    // has been taken, then false for the rest of the simulation.
+    use_prev_fallback: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -437,6 +453,42 @@ fn collect_constant_info(
     result
 }
 
+/// Collect absolute offsets of all stock variables by scanning stock-phase
+/// bytecode. Recurses into child modules via `EvalModule` to capture
+/// submodule internals (SMOOTH/DELAY stocks).
+fn collect_stock_offsets(
+    modules: &HashMap<ModuleKey, CompiledModule>,
+    key: &ModuleKey,
+    base_off: usize,
+) -> Vec<usize> {
+    let module = match modules.get(key) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+    let mut offsets = Vec::new();
+    for op in module.compiled_stocks.code.iter() {
+        match op {
+            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => {
+                offsets.push(base_off + *off as usize);
+            }
+            Opcode::EvalModule { id, .. } => {
+                let decl = &module.context.modules[*id as usize];
+                let child_key = make_module_key(&decl.model_name, &decl.input_set);
+                offsets.extend(collect_stock_offsets(
+                    modules,
+                    &child_key,
+                    base_off + decl.off,
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Defensive dedup: duplicates would cause double-counted derivatives.
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
 /// Advance a multi-dimensional index in row-major order. Shared by all
 /// vector operation opcodes to iterate over array elements.
 #[inline]
@@ -479,6 +531,15 @@ impl Vm {
         // Allocate temp storage based on context temp info
         let temp_total_size = root_module.context.temp_total_size;
         let temp_storage = vec![0.0; temp_total_size];
+
+        // Collect stock offsets for RK integration (empty for Euler)
+        let stock_offsets = match sim.specs.method {
+            Method::Euler => Vec::new(),
+            Method::RungeKutta2 | Method::RungeKutta4 => {
+                collect_stock_offsets(&sim.modules, &sim.root, 0)
+            }
+        };
+        let rk_scratch = vec![0.0; stock_offsets.len() * 2];
 
         Ok(Vm {
             specs: sim.specs,
@@ -526,6 +587,9 @@ impl Vm {
             original_literals: HashMap::new(),
             initial_values: vec![0.0; n_slots].into_boxed_slice(),
             prev_values: vec![0.0; n_slots].into_boxed_slice(),
+            stock_offsets,
+            rk_scratch,
+            prev_values_valid: false,
         })
     }
 
@@ -547,7 +611,6 @@ impl Vm {
         let save_every = std::cmp::max(1, (save_step / dt).round() as usize);
 
         self.stack.clear();
-        let module_inputs: &[f64] = &[];
         let mut data = self.data.take().unwrap();
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
@@ -557,6 +620,12 @@ impl Vm {
         self.iter_stack.clear();
         self.broadcast_stack.clear();
 
+        // Split RK scratch buffers before borrowing other fields for EvalState.
+        // For Euler these are empty slices (zero cost).
+        let n_stocks = self.stock_offsets.len();
+        let stock_offsets: &[usize] = &self.stock_offsets;
+        let (saved, accum) = self.rk_scratch.split_at_mut(n_stocks);
+
         let mut state = EvalState {
             stack: &mut self.stack,
             temp_storage: &mut self.temp_storage,
@@ -565,58 +634,229 @@ impl Vm {
             broadcast_stack: &mut self.broadcast_stack,
             initial_values: &self.initial_values,
             prev_values: &mut self.prev_values,
+            // Tells LoadPrev to return the fallback until the first
+            // prev_values snapshot is taken.  Tracked in Vm so that
+            // segmented run_to() calls don't reset it.
+            use_prev_fallback: !self.prev_values_valid,
         };
 
-        loop {
-            let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
-            if curr[TIME_OFF] > end {
-                break;
-            }
+        // Macro for the save/advance logic shared by all integration methods.
+        // Placed here because it captures local variables from run_to.
+        // NOTE: contains `break` that exits the enclosing `loop` in each
+        // integration method arm -- the caller must be inside a loop.
+        macro_rules! save_advance {
+            ($data:expr) => {{
+                self.step_accum += 1;
+                let (curr_sa, _) =
+                    borrow_two(&mut $data, n_slots, self.curr_chunk, self.next_chunk);
+                let is_initial_timestep =
+                    (self.curr_chunk == 0) && (curr_sa[TIME_OFF] == spec_start);
+                if self.step_accum != save_every && !is_initial_timestep {
+                    let (curr2, next2) =
+                        borrow_two(&mut $data, n_slots, self.curr_chunk, self.next_chunk);
+                    curr2.copy_from_slice(next2);
+                } else {
+                    self.curr_chunk = self.next_chunk;
+                    if self.next_chunk + 1 >= n_chunks + 2 {
+                        break;
+                    }
+                    self.next_chunk += 1;
+                    self.step_accum = 0;
+                }
+            }};
+        }
 
-            Self::eval(
-                &self.sliced_sim,
-                &mut state,
-                module_flows,
-                0,
-                module_inputs,
-                curr,
-                next,
-            );
-            Self::eval(
-                &self.sliced_sim,
-                &mut state,
-                module_stocks,
-                0,
-                module_inputs,
-                curr,
-                next,
-            );
-            // Snapshot curr[] AFTER stocks but BEFORE the time advance.
-            // PREVIOUS(x) in the next iteration reads from this snapshot,
-            // which contains the post-stock-update values at the current
-            // time. This matches the stdlib module behavior where
-            // PREVIOUS(TIME) returns the previous timestep's time.
-            state.prev_values.copy_from_slice(curr);
-            // Only TIME changes per step; DT, INITIAL_TIME, FINAL_TIME are
-            // invariant and already set in every chunk slot during initials.
-            next[TIME_OFF] = curr[TIME_OFF] + dt;
-
-            self.step_accum += 1;
-            let is_initial_timestep = (self.curr_chunk == 0) && (curr[TIME_OFF] == spec_start);
-            if self.step_accum != save_every && !is_initial_timestep {
-                // copy next into curr
-                let (curr2, next2) =
-                    borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
-                curr2.copy_from_slice(next2);
-            } else {
-                self.curr_chunk = self.next_chunk;
-                if self.next_chunk + 1 >= n_chunks + 2 {
+        match self.specs.method {
+            Method::Euler => loop {
+                let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+                if curr[TIME_OFF] > end {
                     break;
                 }
-                self.next_chunk += 1;
-                self.step_accum = 0;
+
+                Self::eval_step(
+                    &self.sliced_sim,
+                    &mut state,
+                    module_flows,
+                    module_stocks,
+                    curr,
+                    next,
+                );
+                state.prev_values.copy_from_slice(curr);
+                state.use_prev_fallback = false;
+                self.prev_values_valid = true;
+                next[TIME_OFF] = curr[TIME_OFF] + dt;
+
+                save_advance!(data);
+            },
+            Method::RungeKutta4 => {
+                loop {
+                    let (curr, next) =
+                        borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+                    if curr[TIME_OFF] > end {
+                        break;
+                    }
+
+                    let saved_time = curr[TIME_OFF];
+
+                    // Stage 1: evaluate at (t, y)
+                    Self::eval_step(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        module_stocks,
+                        curr,
+                        next,
+                    );
+                    for (i, &off) in stock_offsets.iter().enumerate() {
+                        let s1 = next[off] - curr[off];
+                        saved[i] = curr[off];
+                        accum[i] = s1;
+                        curr[off] = saved[i] + s1 * 0.5;
+                    }
+                    curr[TIME_OFF] = saved_time + dt * 0.5;
+
+                    // Stage 2: evaluate at (t + dt/2, y + s1/2)
+                    Self::eval_step(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        module_stocks,
+                        curr,
+                        next,
+                    );
+                    for (i, &off) in stock_offsets.iter().enumerate() {
+                        let s2 = next[off] - curr[off];
+                        accum[i] += 2.0 * s2;
+                        curr[off] = saved[i] + s2 * 0.5;
+                    }
+
+                    // Stage 3: evaluate at (t + dt/2, y + s2/2)
+                    Self::eval_step(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        module_stocks,
+                        curr,
+                        next,
+                    );
+                    for (i, &off) in stock_offsets.iter().enumerate() {
+                        let s3 = next[off] - curr[off];
+                        accum[i] += 2.0 * s3;
+                        curr[off] = saved[i] + s3;
+                    }
+                    curr[TIME_OFF] = saved_time + dt;
+
+                    // Stage 4: evaluate at (t + dt, y + s3)
+                    Self::eval_step(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        module_stocks,
+                        curr,
+                        next,
+                    );
+                    for (i, &off) in stock_offsets.iter().enumerate() {
+                        let s4 = next[off] - curr[off];
+                        accum[i] += s4;
+                        // Final RK4 combination: y_{n+1} = y_n + (s1 + 2*s2 + 2*s3 + s4) / 6
+                        next[off] = saved[i] + accum[i] / 6.0;
+                        curr[off] = saved[i]; // restore original
+                    }
+
+                    curr[TIME_OFF] = saved_time;
+                    next[TIME_OFF] = saved_time + dt;
+
+                    // Re-evaluate flows (not stocks) with the restored state
+                    // so that curr has correct aux/flow output values.
+                    // Stages 2-4 overwrote them with trial-point evaluations.
+                    // An alternative would be saving/restoring all non-stock
+                    // slots, but that's ~n_slots copies vs one flow eval --
+                    // the re-eval is simpler and the cost is bounded (one
+                    // extra flow eval on top of the 4 stage evals).
+                    Self::eval(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        0,
+                        &[],
+                        curr,
+                        next,
+                    );
+                    // Snapshot AFTER re-eval so PREVIOUS() in the next timestep
+                    // sees the correct state at time t.
+                    state.prev_values.copy_from_slice(curr);
+                    state.use_prev_fallback = false;
+                    self.prev_values_valid = true;
+
+                    save_advance!(data);
+                }
+            }
+            Method::RungeKutta2 => {
+                loop {
+                    let (curr, next) =
+                        borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+                    if curr[TIME_OFF] > end {
+                        break;
+                    }
+
+                    let saved_time = curr[TIME_OFF];
+
+                    // Stage 1: evaluate at (t, y)
+                    Self::eval_step(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        module_stocks,
+                        curr,
+                        next,
+                    );
+                    for (i, &off) in stock_offsets.iter().enumerate() {
+                        let s1 = next[off] - curr[off];
+                        saved[i] = curr[off];
+                        accum[i] = s1;
+                        curr[off] = saved[i] + s1; // full Euler step for trial
+                    }
+                    curr[TIME_OFF] = saved_time + dt;
+
+                    // Stage 2: evaluate at (t + dt, y + s1)
+                    Self::eval_step(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        module_stocks,
+                        curr,
+                        next,
+                    );
+                    for (i, &off) in stock_offsets.iter().enumerate() {
+                        let s2 = next[off] - curr[off];
+                        accum[i] += s2;
+                        // Heun's method: y_{n+1} = y_n + (s1 + s2) / 2
+                        next[off] = saved[i] + accum[i] / 2.0;
+                        curr[off] = saved[i]; // restore original
+                    }
+
+                    curr[TIME_OFF] = saved_time;
+                    next[TIME_OFF] = saved_time + dt;
+
+                    // Re-evaluate flows with restored state (see RK4 comment)
+                    Self::eval(
+                        &self.sliced_sim,
+                        &mut state,
+                        module_flows,
+                        0,
+                        &[],
+                        curr,
+                        next,
+                    );
+                    state.prev_values.copy_from_slice(curr);
+                    state.use_prev_fallback = false;
+                    self.prev_values_valid = true;
+
+                    save_advance!(data);
+                }
             }
         }
+
         self.data = Some(data);
         Ok(())
     }
@@ -661,6 +901,11 @@ impl Vm {
 
     pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
         self.offsets.get(ident).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stock_offsets(&self) -> &[usize] {
+        &self.stock_offsets
     }
 
     /// Returns whether a given absolute data-buffer offset corresponds to a
@@ -766,6 +1011,8 @@ impl Vm {
         self.view_stack.clear();
         self.iter_stack.clear();
         self.broadcast_stack.clear();
+        self.rk_scratch.fill(0.0);
+        self.prev_values_valid = false;
     }
 
     /// Apply an override for a constant at the given absolute offset.
@@ -875,9 +1122,9 @@ impl Vm {
             // During initials, LoadInitial falls back to curr[] (which IS the
             // initial value being computed). The snapshot hasn't been captured yet.
             initial_values: &self.initial_values,
-            // LoadPrev chooses its fallback when TIME == INITIAL_TIME, so a
-            // fresh zeroed prev_values buffer is sufficient here.
             prev_values: &mut self.prev_values,
+            // prev_values hasn't been populated yet during initials.
+            use_prev_fallback: true,
         };
 
         Self::eval_initials(
@@ -995,6 +1242,21 @@ impl Vm {
         }
     }
 
+    /// Evaluate one full integration step: compute all flows/auxes then
+    /// update all stocks.  Used by each RK stage and the Euler loop.
+    #[inline(always)]
+    fn eval_step(
+        sliced_sim: &CompiledSlicedSimulation,
+        state: &mut EvalState<'_>,
+        module_flows: &CompiledModuleSlice,
+        module_stocks: &CompiledModuleSlice,
+        curr: &mut [f64],
+        next: &mut [f64],
+    ) {
+        Self::eval(sliced_sim, state, module_flows, 0, &[], curr, next);
+        Self::eval(sliced_sim, state, module_stocks, 0, &[], curr, next);
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn eval(
@@ -1042,6 +1304,7 @@ impl Vm {
         let mut broadcast_stack = &mut *state.broadcast_stack;
         let initial_values = state.initial_values;
         let mut prev_values = &mut *state.prev_values;
+        let use_prev_fallback = state.use_prev_fallback;
 
         let mut condition = false;
         let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
@@ -1071,15 +1334,18 @@ impl Vm {
                 Opcode::LoadVar { off } => {
                     stack.push(curr[module_off + *off as usize]);
                 }
-                // LoadPrev pops the caller-provided fallback and uses it when
-                // TIME == INITIAL_TIME; otherwise it reads from prev_values.
+                // LoadPrev returns the caller-provided fallback until
+                // prev_values has been populated (i.e., after the first
+                // timestep completes).  The use_prev_fallback flag is the
+                // sole mechanism -- it replaces the old TIME == INITIAL_TIME
+                // check, which broke when RK stages advanced TIME to trial
+                // points before prev_values was initialized.
                 Opcode::LoadPrev { off } => {
                     let fallback = stack.pop();
-                    let abs_off = module_off + *off as usize;
-                    let value = if crate::float::approx_eq(curr[TIME_OFF], curr[INITIAL_TIME_OFF]) {
+                    let value = if use_prev_fallback {
                         fallback
                     } else {
-                        prev_values[abs_off]
+                        prev_values[module_off + *off as usize]
                     };
                     stack.push(value);
                 }
@@ -1148,6 +1414,7 @@ impl Vm {
                         broadcast_stack,
                         initial_values,
                         prev_values,
+                        use_prev_fallback,
                     };
                     match part {
                         StepPart::Initials => {
@@ -1194,6 +1461,7 @@ impl Vm {
                         broadcast_stack: bs,
                         initial_values: _,
                         prev_values: pv,
+                        use_prev_fallback: _,
                     } = child_state;
                     stack = s;
                     temp_storage = ts;
