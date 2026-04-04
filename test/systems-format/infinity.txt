@@ -1,0 +1,3 @@
+# stock with explicit inf max, flow to infinite destination
+pi_a(100, inf) > pi_b @ 10
+pi_b > [pi_c] @ 5

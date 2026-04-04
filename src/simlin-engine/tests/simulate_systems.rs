@@ -11,10 +11,30 @@
 mod test_helpers;
 
 use simlin_engine::Vm;
-use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::db::{
+    SimlinDb, compile_project_incremental, sync_from_datamodel, sync_from_datamodel_incremental,
+};
 use simlin_engine::load_csv;
 
 use test_helpers::ensure_results;
+
+/// All valid systems format test models.
+const ALL_VALID_MODELS: &[&str] = &[
+    "../../test/systems-format/hiring.txt",
+    "../../test/systems-format/links.txt",
+    "../../test/systems-format/maximums.txt",
+    "../../test/systems-format/projects.txt",
+    "../../test/systems-format/extended_syntax.txt",
+    "../../test/systems-format/cross_stock.txt",
+    "../../test/systems-format/dest_cap_order.txt",
+    "../../test/systems-format/infinity.txt",
+    "../../test/systems-format/formula_deps.txt",
+    "../../test/systems-format/standalone_stocks.txt",
+];
+
+// ---------------------------------------------------------------------------
+// Simulation tests: parse, translate, compile, simulate, compare CSV
+// ---------------------------------------------------------------------------
 
 /// Parse a systems format file, simulate it via the VM, and compare
 /// results against expected CSV output.
@@ -95,4 +115,204 @@ fn simulates_extended_syntax() {
         "../../test/systems-format/extended_syntax_output.csv",
         5,
     );
+}
+
+#[test]
+fn simulates_dest_cap_order() {
+    simulate_systems_file(
+        "../../test/systems-format/dest_cap_order.txt",
+        "../../test/systems-format/dest_cap_order_output.csv",
+        5,
+    );
+}
+
+#[test]
+fn simulates_infinity() {
+    simulate_systems_file(
+        "../../test/systems-format/infinity.txt",
+        "../../test/systems-format/infinity_output.csv",
+        5,
+    );
+}
+
+#[test]
+fn simulates_formula_deps() {
+    simulate_systems_file(
+        "../../test/systems-format/formula_deps.txt",
+        "../../test/systems-format/formula_deps_output.csv",
+        0,
+    );
+}
+
+#[test]
+fn simulates_standalone_stocks() {
+    simulate_systems_file(
+        "../../test/systems-format/standalone_stocks.txt",
+        "../../test/systems-format/standalone_stocks_output.csv",
+        3,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Table-driven compilation tests: ensure every valid systems format model
+// can parse, translate, compile, and simulate without errors or diagnostics.
+// ---------------------------------------------------------------------------
+
+/// Parse a systems format file, translate it, compile it, and verify there
+/// are zero compilation diagnostics.
+fn assert_systems_model_compiles(txt_path: &str, rounds: u64) {
+    eprintln!("compile-checking: {txt_path}");
+
+    let contents = std::fs::read_to_string(txt_path)
+        .unwrap_or_else(|e| panic!("failed to read {txt_path}: {e}"));
+    let systems_model = simlin_engine::systems::parse(&contents)
+        .unwrap_or_else(|e| panic!("failed to parse {txt_path}: {e}"));
+    let datamodel_project = simlin_engine::systems::translate::translate(&systems_model, rounds)
+        .unwrap_or_else(|e| panic!("failed to translate {txt_path}: {e}"));
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel_project);
+
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    if !diagnostics.is_empty() {
+        for diag in &diagnostics {
+            eprintln!("  diagnostic: {:?}", diag);
+        }
+        panic!(
+            "{txt_path}: expected zero diagnostics, got {}",
+            diagnostics.len()
+        );
+    }
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .unwrap_or_else(|e| panic!("VM compilation failed for {txt_path}: {e:?}"));
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {txt_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM execution failed for {txt_path}: {e}"));
+}
+
+/// All valid systems format models compile without diagnostics.
+#[test]
+fn all_valid_models_compile_cleanly() {
+    for path in ALL_VALID_MODELS {
+        assert_systems_model_compiles(path, 10);
+    }
+}
+
+/// Verify that `visible_stocks` returns only user-authored, non-infinite
+/// stocks in declaration order with original names -- matching the Python
+/// `systems` package behavior where `stock.show == True` excludes infinite
+/// stocks.
+#[test]
+fn visible_stocks_excludes_infinite_preserves_order() {
+    let contents = std::fs::read_to_string("../../test/systems-format/hiring.txt").unwrap();
+    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+
+    // hiring.txt has 8 stocks: Candidates (infinite), PhoneScreens, Onsites,
+    // Offers, Hires, Employees, Departures, Departed (infinite).
+    // Visible should be the 6 non-infinite ones in declaration order.
+    assert_eq!(
+        visible.len(),
+        6,
+        "expected 6 visible stocks, got: {:?}",
+        visible
+    );
+
+    // Check declaration order and original names are preserved
+    let names: Vec<&str> = visible.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        &[
+            "PhoneScreens",
+            "Onsites",
+            "Offers",
+            "Hires",
+            "Employees",
+            "Departures"
+        ]
+    );
+
+    // Check canonical idents are correct
+    let idents: Vec<&str> = visible.iter().map(|(_, ident)| ident.as_str()).collect();
+    assert_eq!(
+        idents,
+        &[
+            "phonescreens",
+            "onsites",
+            "offers",
+            "hires",
+            "employees",
+            "departures"
+        ]
+    );
+}
+
+/// Verify that visible stocks for a model with no infinite stocks returns all stocks.
+#[test]
+fn visible_stocks_all_when_no_infinite() {
+    let contents = std::fs::read_to_string("../../test/systems-format/formula_deps.txt").unwrap();
+    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    assert_eq!(visible.len(), 4);
+}
+
+/// Stocks declared with `A(inf)` initial value (not bracket syntax) are
+/// still visible -- the Python `systems` package only hides bracket-syntax
+/// `[A]` stocks (which set `show=False`). Explicit `A(inf)` uses
+/// `model.stock()` with `show=True` by default.
+#[test]
+fn visible_stocks_includes_inf_initial() {
+    let contents = "A(inf) > B @ 5\nB > C @ 3";
+    let systems_model = simlin_engine::systems::parse(contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let names: Vec<&str> = visible.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, &["A", "B", "C"]);
+}
+
+/// A stock named "Time" has canonical ident "time" which collides with
+/// the synthetic time column. visible_stocks still includes it (it's a
+/// valid non-infinite stock), but consumers must deduplicate.
+#[test]
+fn visible_stocks_includes_time_named_stock() {
+    let contents = "Time(5) > B @ 1";
+    let systems_model = simlin_engine::systems::parse(contents).unwrap();
+
+    let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
+    let names: Vec<&str> = visible.iter().map(|(name, _)| name.as_str()).collect();
+    // visible_stocks returns all non-infinite stocks including "Time"
+    assert_eq!(names, &["Time", "B"]);
+    // The CLI's print_filtered_tsv is responsible for deduplicating the
+    // "time" column (offset 0 vs the user stock).
+}
+
+/// Verify that `open_systems()` (the production entry point used by
+/// libsimlin and the app) works for all valid models.
+#[test]
+fn open_systems_entry_point_works() {
+    for path in ALL_VALID_MODELS {
+        let contents =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let project = simlin_engine::open_systems(&contents)
+            .unwrap_or_else(|e| panic!("open_systems failed for {path}: {e}"));
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+
+        let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))
+            .collect();
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("  error: {:?}", e);
+            }
+            panic!("{path}: open_systems produced {} errors", errors.len());
+        }
+    }
 }

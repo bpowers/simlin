@@ -25,4 +25,4 @@ Uses [clap](https://docs.rs/clap) derive API. Each subcommand declares exactly t
 
 Commands that read model files (`simulate`, `convert`, `equations`, `debug`) share `InputArgs` via `#[command(flatten)]`:
 - Positional `PATH` (optional for `simulate`, reads stdin)
-- `--format <xmile|vensim|protobuf>` -- auto-detected from file extension when omitted
+- `--format <xmile|vensim|protobuf|systems>` -- auto-detected from file extension when omitted (`.mdl` -> vensim, `.pb`/`.bin` -> protobuf, `.txt` -> systems, everything else -> xmile). Systems format output shows only non-infinite stocks in declaration order.
