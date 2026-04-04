@@ -241,8 +241,8 @@ pub struct Vm {
     // Used by LoadInitial opcode to freeze a variable's initial value.
     initial_values: Box<[f64]>,
     // Snapshot of curr[] taken after stocks but before the time advance
-    // each timestep. LoadPrev reads from this buffer after the first
-    // timestep; when TIME == INITIAL_TIME it returns its fallback instead.
+    // each timestep. LoadPrev reads from this buffer once prev_values_valid
+    // is true; before that it returns the per-callsite fallback instead.
     prev_values: Box<[f64]>,
     // Flat list of absolute stock offsets in the data buffer.
     // Collected from stock bytecode; includes submodule stocks.
@@ -332,11 +332,9 @@ struct EvalState<'a> {
     // Snapshot of curr[] taken after stocks but before the time advance
     // each timestep; used by LoadPrev in the following iteration.
     prev_values: &'a mut [f64],
-    // When true, LoadPrev always uses the fallback value regardless of
-    // TIME vs INITIAL_TIME.  Set during the initial timestep before
-    // prev_values has been populated, cleared after the first snapshot.
-    // This prevents RK intermediate stages (which advance TIME to trial
-    // points) from reading zeroed prev_values instead of the fallback.
+    // When true, LoadPrev returns the per-callsite fallback instead of
+    // reading prev_values. True until the first prev_values snapshot
+    // has been taken, then false for the rest of the simulation.
     use_prev_fallback: bool,
 }
 
@@ -613,7 +611,6 @@ impl Vm {
         let save_every = std::cmp::max(1, (save_step / dt).round() as usize);
 
         self.stack.clear();
-        let module_inputs: &[f64] = &[];
         let mut data = self.data.take().unwrap();
 
         let module_flows = &self.sliced_sim.flow_modules[&self.root];
@@ -637,10 +634,8 @@ impl Vm {
             broadcast_stack: &mut self.broadcast_stack,
             initial_values: &self.initial_values,
             prev_values: &mut self.prev_values,
-            // True until prev_values has been populated by the first
-            // timestep's snapshot.  RK stages advance TIME, which would
-            // cause LoadPrev to read zeroed prev_values instead of using
-            // the fallback.  Tracked in Vm::prev_values_valid so that
+            // Tells LoadPrev to return the fallback until the first
+            // prev_values snapshot is taken.  Tracked in Vm so that
             // segmented run_to() calls don't reset it.
             use_prev_fallback: !self.prev_values_valid,
         };
@@ -678,21 +673,11 @@ impl Vm {
                     break;
                 }
 
-                Self::eval(
+                Self::eval_step(
                     &self.sliced_sim,
                     &mut state,
                     module_flows,
-                    0,
-                    module_inputs,
-                    curr,
-                    next,
-                );
-                Self::eval(
-                    &self.sliced_sim,
-                    &mut state,
                     module_stocks,
-                    0,
-                    module_inputs,
                     curr,
                     next,
                 );
@@ -714,21 +699,11 @@ impl Vm {
                     let saved_time = curr[TIME_OFF];
 
                     // Stage 1: evaluate at (t, y)
-                    Self::eval(
+                    Self::eval_step(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
-                        0,
-                        module_inputs,
-                        curr,
-                        next,
-                    );
-                    Self::eval(
-                        &self.sliced_sim,
-                        &mut state,
                         module_stocks,
-                        0,
-                        module_inputs,
                         curr,
                         next,
                     );
@@ -741,21 +716,11 @@ impl Vm {
                     curr[TIME_OFF] = saved_time + dt * 0.5;
 
                     // Stage 2: evaluate at (t + dt/2, y + s1/2)
-                    Self::eval(
+                    Self::eval_step(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
-                        0,
-                        module_inputs,
-                        curr,
-                        next,
-                    );
-                    Self::eval(
-                        &self.sliced_sim,
-                        &mut state,
                         module_stocks,
-                        0,
-                        module_inputs,
                         curr,
                         next,
                     );
@@ -766,21 +731,11 @@ impl Vm {
                     }
 
                     // Stage 3: evaluate at (t + dt/2, y + s2/2)
-                    Self::eval(
+                    Self::eval_step(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
-                        0,
-                        module_inputs,
-                        curr,
-                        next,
-                    );
-                    Self::eval(
-                        &self.sliced_sim,
-                        &mut state,
                         module_stocks,
-                        0,
-                        module_inputs,
                         curr,
                         next,
                     );
@@ -792,21 +747,11 @@ impl Vm {
                     curr[TIME_OFF] = saved_time + dt;
 
                     // Stage 4: evaluate at (t + dt, y + s3)
-                    Self::eval(
+                    Self::eval_step(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
-                        0,
-                        module_inputs,
-                        curr,
-                        next,
-                    );
-                    Self::eval(
-                        &self.sliced_sim,
-                        &mut state,
                         module_stocks,
-                        0,
-                        module_inputs,
                         curr,
                         next,
                     );
@@ -821,17 +766,19 @@ impl Vm {
                     curr[TIME_OFF] = saved_time;
                     next[TIME_OFF] = saved_time + dt;
 
-                    // Re-evaluate flows with restored state so that curr has
-                    // correct aux/flow output values (stages 2-4 overwrote them
-                    // with trial-point evaluations).  The re-eval also ensures
-                    // PREVIOUS() reads from the PREVIOUS timestep's snapshot
-                    // (not the one we'd otherwise take mid-timestep).
+                    // Re-evaluate flows (not stocks) with the restored state
+                    // so that curr has correct aux/flow output values.
+                    // Stages 2-4 overwrote them with trial-point evaluations.
+                    // An alternative would be saving/restoring all non-stock
+                    // slots, but that's ~n_slots copies vs one flow eval --
+                    // the re-eval is simpler and the cost is bounded (one
+                    // extra flow eval on top of the 4 stage evals).
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
                         0,
-                        module_inputs,
+                        &[],
                         curr,
                         next,
                     );
@@ -855,21 +802,11 @@ impl Vm {
                     let saved_time = curr[TIME_OFF];
 
                     // Stage 1: evaluate at (t, y)
-                    Self::eval(
+                    Self::eval_step(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
-                        0,
-                        module_inputs,
-                        curr,
-                        next,
-                    );
-                    Self::eval(
-                        &self.sliced_sim,
-                        &mut state,
                         module_stocks,
-                        0,
-                        module_inputs,
                         curr,
                         next,
                     );
@@ -882,21 +819,11 @@ impl Vm {
                     curr[TIME_OFF] = saved_time + dt;
 
                     // Stage 2: evaluate at (t + dt, y + s1)
-                    Self::eval(
+                    Self::eval_step(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
-                        0,
-                        module_inputs,
-                        curr,
-                        next,
-                    );
-                    Self::eval(
-                        &self.sliced_sim,
-                        &mut state,
                         module_stocks,
-                        0,
-                        module_inputs,
                         curr,
                         next,
                     );
@@ -911,13 +838,13 @@ impl Vm {
                     curr[TIME_OFF] = saved_time;
                     next[TIME_OFF] = saved_time + dt;
 
-                    // Re-evaluate flows with restored state for correct output
+                    // Re-evaluate flows with restored state (see RK4 comment)
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,
                         module_flows,
                         0,
-                        module_inputs,
+                        &[],
                         curr,
                         next,
                     );
@@ -1195,11 +1122,8 @@ impl Vm {
             // During initials, LoadInitial falls back to curr[] (which IS the
             // initial value being computed). The snapshot hasn't been captured yet.
             initial_values: &self.initial_values,
-            // LoadPrev chooses its fallback when TIME == INITIAL_TIME, so a
-            // fresh zeroed prev_values buffer is sufficient here.
             prev_values: &mut self.prev_values,
-            // During initials TIME == INITIAL_TIME, so the flag is redundant,
-            // but set it for consistency.
+            // prev_values hasn't been populated yet during initials.
             use_prev_fallback: true,
         };
 
@@ -1318,6 +1242,21 @@ impl Vm {
         }
     }
 
+    /// Evaluate one full integration step: compute all flows/auxes then
+    /// update all stocks.  Used by each RK stage and the Euler loop.
+    #[inline(always)]
+    fn eval_step(
+        sliced_sim: &CompiledSlicedSimulation,
+        state: &mut EvalState<'_>,
+        module_flows: &CompiledModuleSlice,
+        module_stocks: &CompiledModuleSlice,
+        curr: &mut [f64],
+        next: &mut [f64],
+    ) {
+        Self::eval(sliced_sim, state, module_flows, 0, &[], curr, next);
+        Self::eval(sliced_sim, state, module_stocks, 0, &[], curr, next);
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn eval(
@@ -1395,19 +1334,18 @@ impl Vm {
                 Opcode::LoadVar { off } => {
                     stack.push(curr[module_off + *off as usize]);
                 }
-                // LoadPrev pops the caller-provided fallback and uses it when
-                // TIME == INITIAL_TIME or when use_prev_fallback is set
-                // (RK stages advance TIME to trial points before prev_values
-                // has been populated); otherwise it reads from prev_values.
+                // LoadPrev returns the caller-provided fallback until
+                // prev_values has been populated (i.e., after the first
+                // timestep completes).  The use_prev_fallback flag is the
+                // sole mechanism -- it replaces the old TIME == INITIAL_TIME
+                // check, which broke when RK stages advanced TIME to trial
+                // points before prev_values was initialized.
                 Opcode::LoadPrev { off } => {
                     let fallback = stack.pop();
-                    let abs_off = module_off + *off as usize;
-                    let value = if use_prev_fallback
-                        || crate::float::approx_eq(curr[TIME_OFF], curr[INITIAL_TIME_OFF])
-                    {
+                    let value = if use_prev_fallback {
                         fallback
                     } else {
-                        prev_values[abs_off]
+                        prev_values[module_off + *off as usize]
                     };
                     stack.push(value);
                 }

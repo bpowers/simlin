@@ -502,6 +502,35 @@ fn rk4_with_init_builtin() {
 // ── PREVIOUS fallback during initial timestep ─────────────────────
 
 #[test]
+fn euler_previous_fallback_at_initial_timestep() {
+    // Verify Euler still uses the fallback at t=0 after the LoadPrev
+    // refactor (use_prev_fallback flag replaces TIME == INITIAL_TIME check).
+    let tp = TestProject::new("euler_prev_fallback")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .with_sim_method(datamodel::SimMethod::Euler)
+        .flow("inflow", "PREVIOUS(s, 99)", None)
+        .stock("s", "0", &["inflow"], &[], None);
+
+    let compiled = build_compiled(&tp);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+
+    let series = vm.get_series(&Ident::new("s")).unwrap();
+    // t=0: PREVIOUS(s, 99) = 99 (fallback). s(1) = 0 + 99 = 99.
+    assert!(
+        (series[1] - 99.0).abs() < 1e-10,
+        "Euler: s(1) = {}, expected 99",
+        series[1]
+    );
+    // t=1: PREVIOUS(s, 99) = 0 (s at t=0). s(2) = 99 + 0 = 99.
+    assert!(
+        (series[2] - 99.0).abs() < 1e-10,
+        "Euler: s(2) = {}, expected 99",
+        series[2]
+    );
+}
+
+#[test]
 fn rk4_previous_fallback_at_initial_timestep() {
     // PREVIOUS(s, 99) should return 99 (the fallback) during the
     // entire initial timestep, including RK intermediate stages.
