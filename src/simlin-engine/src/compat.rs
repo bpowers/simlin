@@ -212,11 +212,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         .map(|(i, r)| {
             // stella outputs the first 'time' column as the time _units_, which is bonkers
             let name = if i == 0 { "time" } else { r };
-            let ident = Ident::<Canonical>::new(name);
-            (
-                Ident::<Canonical>::from_unchecked(ident.to_source_repr()),
-                i,
-            )
+            (Ident::new(name), i)
         })
         .collect();
 

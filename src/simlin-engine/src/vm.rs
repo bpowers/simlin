@@ -4100,10 +4100,10 @@ mod set_value_tests {
         let compiled = crate::db::compile_project_incremental(&db, sync.project, "main").unwrap();
 
         let mut vm = Vm::new(compiled).unwrap();
-        let hares_ident = Ident::<Canonical>::from_unchecked("hares.hares".to_string());
+        let hares_ident = Ident::new("hares.hares");
         assert!(
             vm.get_offset(&hares_ident).is_some(),
-            "hares.hares should exist in offsets"
+            "hares·hares should exist in offsets"
         );
         // Stocks are not simple constants, so set_value should fail
         let err = vm.set_value(&hares_ident, 500.0).unwrap_err();

@@ -5494,6 +5494,7 @@ fn calc_flattened_offsets_incremental(
     sorted_names.sort_unstable();
 
     for ident in &sorted_names {
+        let ident_canonical = Ident::new(ident.as_str());
         let size =
             if let Some(svar) = source_vars.get(ident.as_str()) {
                 if svar.kind(db) == SourceVariableKind::Module {
@@ -5504,14 +5505,11 @@ fn calc_flattened_offsets_incremental(
                     sub_var_names.sort_unstable();
                     for sub_name in &sub_var_names {
                         let (sub_off, sub_size) = sub_offsets[*sub_name];
-                        let ident_canonical = Ident::new(ident.as_str());
-                        let sub_canonical = Ident::new(sub_name.as_str());
                         offsets.insert(
-                            Ident::<Canonical>::from_unchecked(format!(
-                                "{}.{}",
-                                ident_canonical.to_source_repr(),
-                                sub_canonical.to_source_repr()
-                            )),
+                            Ident::join(
+                                &ident_canonical.as_canonical_str(),
+                                &sub_name.as_canonical_str(),
+                            ),
                             (i + sub_off, sub_size),
                         );
                     }
@@ -5527,28 +5525,19 @@ fn calc_flattened_offsets_incremental(
                                 crate::dimensions::SubscriptIterator::new(dims).enumerate()
                             {
                                 let subscript = subscripts.join(",");
-                                let ident_canonical = Ident::new(ident.as_str());
                                 let subscripted_ident = Ident::<Canonical>::from_unchecked(
-                                    format!("{}[{}]", ident_canonical.to_source_repr(), subscript),
+                                    format!("{}[{}]", ident_canonical.as_str(), subscript),
                                 );
                                 offsets.insert(subscripted_ident, (i + j, 1));
                             }
                         }
                     } else {
-                        let ident_canonical = Ident::new(ident.as_str());
-                        offsets.insert(
-                            Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-                            (i, 1),
-                        );
+                        offsets.insert(ident_canonical.clone(), (i, 1));
                     }
                     var_sz
                 }
             } else {
-                let ident_canonical = Ident::new(ident.as_str());
-                offsets.insert(
-                    Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-                    (i, 1),
-                );
+                offsets.insert(ident_canonical.clone(), (i, 1));
                 1
             };
         i += size;
@@ -5572,30 +5561,22 @@ fn calc_flattened_offsets_incremental(
                 sub_var_names.sort_unstable();
                 for sub_name in &sub_var_names {
                     let (sub_off, sub_size) = sub_offsets[*sub_name];
-                    let sub_canonical = Ident::new(sub_name.as_str());
                     offsets.insert(
-                        Ident::<Canonical>::from_unchecked(format!(
-                            "{}.{}",
-                            ident_canonical.to_source_repr(),
-                            sub_canonical.to_source_repr()
-                        )),
+                        Ident::join(
+                            &ident_canonical.as_canonical_str(),
+                            &sub_name.as_canonical_str(),
+                        ),
                         (i + sub_off, sub_size),
                     );
                 }
                 let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
                 i += sub_size;
             } else {
-                offsets.insert(
-                    Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-                    (i, info.size),
-                );
+                offsets.insert(ident_canonical.clone(), (i, info.size));
                 i += info.size;
             }
         } else {
-            offsets.insert(
-                Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
-                (i, info.size),
-            );
+            offsets.insert(ident_canonical.clone(), (i, info.size));
             i += info.size;
         }
     }

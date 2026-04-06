@@ -1559,11 +1559,11 @@ fn test_user_defined_module_ltm_vm() {
     );
 
     // Verify the sub-model's internal variables are present in results
-    // with the module instance prefix (growth_model.varname)
+    // with the module instance prefix (growth_model·varname, canonical middle dot)
     let submodel_vars: Vec<_> = results
         .offsets
         .keys()
-        .filter(|k| k.as_str().starts_with("growth_model."))
+        .filter(|k| k.as_str().starts_with("growth_model\u{00B7}"))
         .collect();
     assert!(
         !submodel_vars.is_empty(),
@@ -1579,7 +1579,7 @@ fn test_user_defined_module_ltm_vm() {
     // Verify the sub-model's internal stock is accessible
     let has_internal_stock = submodel_vars
         .iter()
-        .any(|k| k.as_str() == "growth_model.internal_level");
+        .any(|k| k.as_str() == "growth_model\u{00B7}internal_level");
     assert!(
         has_internal_stock,
         "should be able to access the sub-model's internal stock via qualified name"
@@ -1607,7 +1607,7 @@ fn test_user_defined_module_ltm_vm() {
         .keys()
         .filter(|k| {
             let s = k.as_str();
-            s.starts_with("growth_model.") && s.contains("composite")
+            s.starts_with("growth_model\u{00B7}") && s.contains("composite")
         })
         .collect();
     assert!(
@@ -1617,7 +1617,7 @@ fn test_user_defined_module_ltm_vm() {
         results
             .offsets
             .keys()
-            .filter(|k| k.as_str().starts_with("growth_model."))
+            .filter(|k| k.as_str().starts_with("growth_model\u{00B7}"))
             .map(|k| k.as_str().to_string())
             .collect::<Vec<_>>()
     );
@@ -1877,7 +1877,7 @@ fn test_nested_module_ltm_vm() {
         .keys()
         .filter(|k| {
             let s = k.as_str();
-            s.starts_with("processor.") && s.contains("composite")
+            s.starts_with("processor\u{00B7}") && s.contains("composite")
         })
         .collect();
     assert!(
@@ -1887,7 +1887,7 @@ fn test_nested_module_ltm_vm() {
         results
             .offsets
             .keys()
-            .filter(|k| k.as_str().starts_with("processor."))
+            .filter(|k| k.as_str().starts_with("processor\u{00B7}"))
             .map(|k| k.as_str().to_string())
             .collect::<Vec<_>>()
     );
@@ -1919,7 +1919,7 @@ fn test_nested_module_ltm_vm() {
         .keys()
         .filter(|k| {
             let s = k.as_str();
-            s.starts_with("processor.") && s.contains("link_score") && !s.contains("arg0")
+            s.starts_with("processor\u{00B7}") && s.contains("link_score") && !s.contains("arg0")
         })
         .collect();
     assert!(

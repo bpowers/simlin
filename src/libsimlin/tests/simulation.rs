@@ -1579,3 +1579,85 @@ fn test_mark2_mdl_simulates_through_ffi() {
         simlin_project_unref(proj);
     }
 }
+
+/// Regression test: systems format models use stdlib modules (systems_rate,
+/// systems_conversion, etc.) whose internal variables must be accessible
+/// via getSeries after simulation. The flattened offsets must use canonical
+/// middle-dot separators (e.g. "module·var") so that Ident::new() lookups
+/// match the stored keys.
+#[test]
+fn test_systems_format_module_var_get_series() {
+    let hiring_txt =
+        std::fs::read_to_string("testdata/hiring.txt").expect("hiring.txt fixture must exist");
+    let datamodel = engine::open_systems(&hiring_txt).unwrap();
+
+    // Round-trip through JSON (same path as the web UI: server stores
+    // sd.json, browser opens it via Project.openJson)
+    let json_project: engine::json::Project = (&datamodel).into();
+    let json_bytes = serde_json::to_vec(&json_project).unwrap();
+    let reopened: engine::json::Project = serde_json::from_slice(&json_bytes).unwrap();
+    let reopened_dm: engine::datamodel::Project = reopened.into();
+
+    let proj = open_project_from_datamodel(&reopened_dm);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null(), "sim creation must succeed");
+        assert!(!sim.is_null());
+
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null(), "run_to_end must succeed");
+
+        // Get all var names from the simulation
+        let mut count: usize = 0;
+        simlin_sim_get_var_count(sim, &mut count, &mut err);
+        assert!(err.is_null());
+        assert!(count > 0);
+
+        let mut name_ptrs: Vec<*mut c_char> = vec![ptr::null_mut(); count];
+        let mut written: usize = 0;
+        simlin_sim_get_var_names(sim, name_ptrs.as_mut_ptr(), count, &mut written, &mut err);
+        assert!(err.is_null());
+
+        let mut names: Vec<String> = Vec::with_capacity(written);
+        for &p in &name_ptrs[..written] {
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            names.push(s);
+            simlin_free_string(p);
+        }
+
+        // Every name returned by getVarNames must be retrievable via getSeries.
+        // This was the original bug: module sub-variable names like
+        // "candidates_outflows.actual" were stored with "." in offsets but
+        // looked up with "\u{00B7}" (middle dot) after canonicalization, causing
+        // "series not found" errors.
+        let step_count = 20; // generous buffer
+        let mut buf: Vec<c_double> = vec![0.0; step_count];
+        for name in &names {
+            let c_name = CString::new(name.as_str()).unwrap();
+            let mut out_written: usize = 0;
+            simlin_sim_get_series(
+                sim,
+                c_name.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut out_written,
+                &mut err,
+            );
+            assert!(
+                err.is_null(),
+                "getSeries({name:?}) must succeed (was the canonical offset bug)"
+            );
+            assert!(out_written > 0, "getSeries({name:?}) must return data");
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
