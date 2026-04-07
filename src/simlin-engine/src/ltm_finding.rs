@@ -398,14 +398,15 @@ fn expand_a2a_link_offsets(
 
 /// Get element names from a datamodel::Dimension, canonicalized for use
 /// in element-level identifiers. Named dimensions return their element
-/// names lowercased; indexed dimensions return "0", "1", etc.
+/// names lowercased; indexed dimensions return "1", "2", etc. (1-based,
+/// matching the engine's subscript formatting in `dimensions.rs`).
 fn datamodel_dim_element_names(dim: &datamodel::Dimension) -> Vec<String> {
     match &dim.elements {
         datamodel::DimensionElements::Named(names) => names
             .iter()
             .map(|n| crate::common::canonicalize(n).into_owned())
             .collect(),
-        datamodel::DimensionElements::Indexed(size) => (0..*size).map(|i| i.to_string()).collect(),
+        datamodel::DimensionElements::Indexed(size) => (1..=*size).map(|i| i.to_string()).collect(),
     }
 }
 

@@ -1924,11 +1924,44 @@ fn build_element_level_loops(
             // Cross-element circuits (mixed subscripts or repeated variable
             // names). These circuits reference off-diagonal element edges
             // like population[nyc] → migration_pressure[boston], for which
-            // no dedicated link score variables exist. Skip loop score
-            // generation: the diagonal A2A loops already capture the
-            // primary feedback effects with correct ceteris-paribus scores.
-            // Cross-element coupling effects are secondary and would need
-            // off-diagonal link score generation to be scored properly.
+            // no dedicated link score variables exist.
+            //
+            // Rather than dropping these entirely (which would leave models
+            // with ONLY cross-element feedback with no scored loops), extract
+            // the unique variable-level cycle and create a SCALAR loop that
+            // references existing A2A link score variables. The resulting
+            // loop score uses diagonal link score values as an approximation
+            // (the actual off-diagonal sensitivities may differ).
+            //
+            // Deduplication: strip subscripts and take the shortest unique
+            // cycle. E.g., pop[nyc]→mp[boston]→mo[boston]→pop[boston]→mp[nyc]→
+            // mo[nyc] has stripped sequence pop,mp,mo,pop,mp,mo; the unique
+            // cycle starting at the first repeat is pop→mp→mo.
+            let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
+
+            // Find the shortest unique cycle in the stripped sequence
+            let mut unique_cycle: Vec<Ident<Canonical>> = Vec::new();
+            let mut seen_set = std::collections::HashSet::new();
+            for name in &stripped {
+                if !seen_set.insert(*name) {
+                    break; // found a repeat, cycle is complete
+                }
+                unique_cycle.push(Ident::new(name));
+            }
+
+            if unique_cycle.len() >= 2 {
+                let links = var_graph.circuit_to_links(&unique_cycle);
+                let stocks = var_graph.find_stocks_in_loop(&unique_cycle);
+                let polarity = var_graph.calculate_polarity(&links);
+
+                all_loops.push(Loop {
+                    id: String::new(),
+                    links,
+                    stocks,
+                    polarity,
+                    dimensions: vec![], // scalar: approximate cross-element score
+                });
+            }
         } else {
             // Mixed or scalar group: each circuit becomes its own scalar loop.
             for circuit in circuits_in_group {
@@ -2143,22 +2176,28 @@ pub fn model_ltm_variables(
 
         // Same-dimension A2A: both have identical dimension(s).
         // Scalar-to-arrayed: source is scalar, target is arrayed.
-        // In both cases the link score gets the target's dimensions.
+        // Partial-collapse: source has more dimensions than target, but all
+        //   target dimensions are present in the source (e.g., source[D1,D2]
+        //   -> target[D1]). The link score gets the target's (shared) dims.
         //
         // NOTE: When from_dims == to_dims and the dependency is CrossElement
         // (e.g., `share[R] = population[R] / SUM(population[*])`), this
         // creates only N diagonal link scores (one per element). Off-diagonal
         // link scores (e.g., population[boston] -> share[nyc]) are not
-        // generated. The diagonal scores correctly capture the total
-        // ceteris-paribus sensitivity including cross-element effects
-        // through the reducer. Cross-element circuits (detected by
-        // build_element_level_loops when variable names repeat in the
-        // stripped sequence) are classified as mixed/scalar loops, where
-        // off-diagonal edges will have zero link scores. This is an
-        // acceptable approximation: the primary diagonal loops have correct
-        // scores, and secondary cross-element loops are discovered but
-        // ranked lower due to missing off-diagonal scores.
-        if from_dims.is_empty() || from_dims == *to_dims {
+        // generated. Cross-element circuits are detected by
+        // build_element_level_loops and scored approximately using
+        // variable-level link references.
+        //
+        // Check whether the target's dimensions are a subset of (or equal
+        // to) the source's dimensions. This handles same-dimension A2A,
+        // scalar-to-arrayed, and partial-collapse patterns.
+        let to_is_subset_of_from = from_dims.is_empty()
+            || from_dims == *to_dims
+            || to_dims
+                .iter()
+                .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()));
+
+        if to_is_subset_of_from {
             // Map canonical dimension names back to their original
             // datamodel names for correct equation parsing.
             to_dims
