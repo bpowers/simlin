@@ -10,6 +10,8 @@
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
 //! - model_causal_edges, model_element_causal_edges, model_loop_circuits,
 //!   model_cycle_partitions
+//! - model_element_loop_circuits, model_element_cycle_partitions
+//!   (element-level loop and partition analysis)
 //! - model_detected_loops (matches LTM augmentation loop IDs)
 //! - reconstruct_model_variables, reconstruct_single_variable
 
@@ -1087,6 +1089,89 @@ pub fn model_cycle_partitions(
 ) -> CyclePartitionsResult {
     let edges_result = model_causal_edges(db, model, project);
     let graph = causal_graph_from_edges(edges_result);
+    let cp = graph.compute_cycle_partitions();
+    CyclePartitionsResult {
+        partitions: cp
+            .partitions
+            .into_iter()
+            .map(|p| p.into_iter().map(|s| s.to_string()).collect())
+            .collect(),
+        stock_partition: cp
+            .stock_partition
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    }
+}
+
+/// Construct a lightweight CausalGraph from an ElementCausalEdgesResult.
+///
+/// Same conversion as `causal_graph_from_edges` but uses element-level edges
+/// and stocks. Variables and module_graphs are empty -- suitable for circuit
+/// finding and SCC computation but not for polarity analysis.
+pub(crate) fn causal_graph_from_element_edges(
+    result: &ElementCausalEdgesResult,
+) -> crate::ltm::CausalGraph {
+    use crate::common::{Canonical, Ident};
+    use std::collections::HashSet;
+
+    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
+        .edges
+        .iter()
+        .map(|(from, tos)| {
+            (
+                Ident::new(from),
+                tos.iter().map(|t| Ident::new(t)).collect(),
+            )
+        })
+        .collect();
+    let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    crate::ltm::CausalGraph {
+        edges,
+        stocks,
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    }
+}
+
+/// Find all elementary loop circuits in a model's element-level causal graph.
+///
+/// For models with arrayed variables, this finds element-specific loops
+/// (e.g., `population[NYC] -> births[NYC] -> population[NYC]`) and
+/// cross-element loops (e.g., `population[NYC] -> migration -> population[Boston]`).
+/// For scalar models, results are identical to `model_loop_circuits`.
+#[salsa::tracked(returns(ref))]
+pub fn model_element_loop_circuits(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> LoopCircuitsResult {
+    let element_edges = model_element_causal_edges(db, model, project);
+    let graph = causal_graph_from_element_edges(element_edges);
+    let circuits = graph.find_circuit_node_lists();
+    LoopCircuitsResult {
+        circuits: circuits
+            .into_iter()
+            .map(|c| c.into_iter().map(|n| n.to_string()).collect())
+            .collect(),
+    }
+}
+
+/// Compute stock-to-stock cycle partitions at element granularity.
+///
+/// Element-level stocks like `population[NYC]` and `population[Boston]`
+/// may be in the same partition (connected through cross-element feedback
+/// like migration) or different partitions (if no cross-element feedback
+/// exists). For scalar models, identical to `model_cycle_partitions`.
+#[salsa::tracked(returns(ref))]
+pub fn model_element_cycle_partitions(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> CyclePartitionsResult {
+    let element_edges = model_element_causal_edges(db, model, project);
+    let graph = causal_graph_from_element_edges(element_edges);
     let cp = graph.compute_cycle_partitions();
     CyclePartitionsResult {
         partitions: cp
