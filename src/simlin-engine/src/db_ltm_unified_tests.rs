@@ -277,7 +277,7 @@ fn test_model_ltm_variables_a2a_same_dimension_link_scores() {
     for ls in &link_scores {
         assert_eq!(
             ls.dimensions,
-            vec!["region".to_string()],
+            vec!["Region".to_string()],
             "link score '{}' should have Region dimension, got {:?}",
             ls.name,
             ls.dimensions
@@ -321,7 +321,7 @@ fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
 
     assert_eq!(
         gf_births_ls.dimensions,
-        vec!["region".to_string()],
+        vec!["Region".to_string()],
         "scalar-to-arrayed link score should carry target's dimensions"
     );
 }

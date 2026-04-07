@@ -1831,6 +1831,7 @@ pub fn model_ltm_variables(
     // dimensions, the link score inherits the target's dimensions so
     // that per-element scores are computed via the A2A expansion.
     let source_vars = model.variables(db);
+    let dm_dims = project_datamodel_dims(db, project);
 
     /// Determine the dimensions a link score should carry.
     ///
@@ -1838,12 +1839,18 @@ pub fn model_ltm_variables(
     /// same-dimension A2A or scalar-to-arrayed. Returns empty for
     /// scalar edges, module-involved links (modules are scalar nodes),
     /// and arrayed-to-scalar edges (cross-dimensional, Phase 5).
+    ///
+    /// The returned names use the original datamodel casing (e.g.,
+    /// "Region" not "region") because `parse_ltm_equation` feeds them
+    /// into `Equation::ApplyToAll`, which `get_dimensions` resolves by
+    /// exact string match against the project's datamodel dimensions.
     fn link_score_dimensions(
         db: &dyn Db,
         source_vars: &HashMap<String, super::SourceVariable>,
         from: &str,
         to: &str,
         project: SourceProject,
+        dm_dims: &[crate::datamodel::Dimension],
     ) -> Vec<String> {
         let to_sv = match source_vars.get(to) {
             Some(sv) => sv,
@@ -1870,7 +1877,19 @@ pub fn model_ltm_variables(
         // Scalar-to-arrayed: source is scalar, target is arrayed.
         // In both cases the link score gets the target's dimensions.
         if from_dims.is_empty() || from_dims == *to_dims {
-            to_dims.iter().map(|d| d.name().to_string()).collect()
+            // Map canonical dimension names back to their original
+            // datamodel names for correct equation parsing.
+            to_dims
+                .iter()
+                .map(|d| {
+                    let canonical = d.name();
+                    dm_dims
+                        .iter()
+                        .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                        .map(|dm| dm.name().to_string())
+                        .unwrap_or_else(|| canonical.to_string())
+                })
+                .collect()
         } else {
             // Cross-dimensional (arrayed-to-scalar, or mismatched
             // dimensions) is handled in Phase 5. Leave scalar for now.
@@ -1884,7 +1903,8 @@ pub fn model_ltm_variables(
                 let link_id = LtmLinkId::new(db, from.clone(), to.clone());
                 if let Some(mut lsv) = link_score_equation_text(db, link_id, model, project).clone()
                 {
-                    lsv.dimensions = link_score_dimensions(db, source_vars, from, to, project);
+                    lsv.dimensions =
+                        link_score_dimensions(db, source_vars, from, to, project, dm_dims);
                     vars.push(lsv);
                 }
             }
@@ -1905,6 +1925,7 @@ pub fn model_ltm_variables(
                             link.from.as_str(),
                             link.to.as_str(),
                             project,
+                            dm_dims,
                         );
                         vars.push(lsv);
                     }

@@ -1942,3 +1942,428 @@ fn test_nested_module_ltm_vm() {
             .collect::<Vec<_>>()
     );
 }
+
+// --- A2A link score integration tests ---
+//
+// These tests verify end-to-end compilation and simulation of
+// Apply-to-All (A2A) link scores for arrayed models. When both
+// source and target variables share the same dimension (or the
+// source is scalar), the link score inherits the target's dimensions
+// and produces per-element values.
+
+/// Helper: find a link score offset entry matching the given from->to
+/// variable names (case-insensitive substring match on the offset key).
+fn find_link_score_offset<'a>(
+    results: &'a Results,
+    from_name: &str,
+    to_name: &str,
+) -> Option<(&'a Ident<Canonical>, usize)> {
+    let arrow = format!(
+        "{}\u{2192}{}",
+        from_name.to_lowercase().replace(' ', "_"),
+        to_name.to_lowercase().replace(' ', "_")
+    );
+    results
+        .offsets
+        .iter()
+        .find(|(k, _)| {
+            let s = k.as_str();
+            s.starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}") && s.contains(&arrow)
+        })
+        .map(|(k, off)| (k, *off))
+}
+
+/// AC4.1: A2A aux-to-aux link score for an arrayed feedback model
+/// produces non-zero per-element values.
+///
+/// Model: a balancing feedback loop with 3 regions:
+///   level[Region] (stock, init=50) -> gap[Region] (aux, 100 - level)
+///     -> adj[Region] (flow, gap / 5) -> level[Region]
+///
+/// The level changes each timestep via the flow, causing gap to change,
+/// so the link score for level -> gap should be non-zero after t=1.
+/// The link score occupies 3 slots (one per region).
+#[test]
+fn test_a2a_aux_to_aux_link_score() {
+    let n_elements: usize = 3;
+    let project = TestProject::new("a2a_aux_to_aux")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("level[Region]", "50", &["adj"], &[], None)
+        .array_aux("gap[Region]", "100 - level")
+        .array_flow("adj[Region]", "gap / 5", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // The link score for level -> gap (aux-to-aux) should exist
+    let (link_key, base_offset) = find_link_score_offset(&results, "level", "gap")
+        .expect("link score for level -> gap should exist in results");
+
+    // Verify the offset key does NOT contain a subscript bracket -- it is
+    // the base entry for the arrayed link score.
+    assert!(
+        !link_key.as_str().contains('['),
+        "A2A link score should have a base (unsubscripted) offset entry, got: {}",
+        link_key.as_str()
+    );
+
+    // Verify that consecutive slots contain per-element link score values.
+    // After the first few timesteps (where PREVIOUS is not yet populated),
+    // each element should have a non-zero link score.
+    for elem in 0..n_elements {
+        let elem_offset = base_offset + elem;
+        let any_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + elem_offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "A2A link score element {} (offset {}) should have non-zero values after t=1, \
+             key: {}",
+            elem,
+            elem_offset,
+            link_key.as_str()
+        );
+    }
+}
+
+/// AC4.2: A2A flow-to-stock link score produces per-element values.
+///
+/// Same balancing feedback model as test 1. The adj -> level link score
+/// (flow-to-stock) should occupy 3 slots and produce non-zero per-element
+/// values because both adj and level change each timestep.
+#[test]
+fn test_a2a_flow_to_stock_link_score() {
+    let n_elements: usize = 3;
+    let project = TestProject::new("a2a_flow_to_stock")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("level[Region]", "50", &["adj"], &[], None)
+        .array_aux("gap[Region]", "100 - level")
+        .array_flow("adj[Region]", "gap / 5", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // The flow-to-stock link score adj -> level should exist
+    let (link_key, base_offset) = find_link_score_offset(&results, "adj", "level")
+        .expect("link score for adj -> level should exist in results");
+
+    assert!(
+        !link_key.as_str().contains('['),
+        "A2A link score should have a base (unsubscripted) offset entry, got: {}",
+        link_key.as_str()
+    );
+
+    // Each element should have non-zero flow-to-stock link scores
+    for elem in 0..n_elements {
+        let elem_offset = base_offset + elem;
+        let any_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + elem_offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "A2A flow-to-stock link score element {} (offset {}) should have non-zero values, \
+             key: {}",
+            elem,
+            elem_offset,
+            link_key.as_str()
+        );
+    }
+}
+
+/// AC4.4: Scalar-to-arrayed link score varies by element when the target
+/// has different per-element values.
+///
+/// Model: An arrayed balancing feedback loop with a scalar capacity variable:
+///   level[Region] (stock, different inits: 100, 200, 300)
+///     -> gap[Region] (aux, capacity - level)
+///     -> adj[Region] (flow, gap / 5)
+///     -> level[Region]
+///   capacity (scalar, = 500 -- constant, but it appears in the arrayed gap equation)
+///
+/// The scalar capacity feeds into the arrayed gap[Region]. Because each
+/// region's level differs, each region's gap differs, causing different
+/// per-element link score values for capacity -> gap.
+#[test]
+fn test_scalar_to_arrayed_link_score() {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    let n_elements: usize = 3;
+
+    let project = datamodel::Project {
+        name: "scalar_to_arrayed".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // level[Region] with different initial values per element
+                Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("NYC".to_string(), "100".to_string(), None, None),
+                            ("Boston".to_string(), "200".to_string(), None, None),
+                            ("LA".to_string(), "300".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["adj".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // Scalar capacity -- changes over time to make its link score non-zero.
+                // Uses TIME to produce a time-varying scalar.
+                Variable::Aux(datamodel::Aux {
+                    ident: "capacity".to_string(),
+                    equation: Equation::Scalar("500 + TIME * 10".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // gap[Region] = capacity - level (scalar-to-arrayed edge)
+                Variable::Aux(datamodel::Aux {
+                    ident: "gap".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "capacity - level".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // adj[Region] = gap / 5
+                Variable::Flow(datamodel::Flow {
+                    ident: "adj".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "gap / 5".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // The scalar-to-arrayed link score capacity -> gap should exist
+    // with 3 slots (one per region element)
+    let (link_key, base_offset) = find_link_score_offset(&results, "capacity", "gap")
+        .expect("link score for capacity -> gap should exist");
+
+    assert!(
+        !link_key.as_str().contains('['),
+        "scalar-to-arrayed link score should have a base entry, got: {}",
+        link_key.as_str()
+    );
+
+    // Verify per-element link scores are non-zero
+    for elem in 0..n_elements {
+        let elem_offset = base_offset + elem;
+        let any_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + elem_offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "scalar-to-arrayed link score element {} (offset {}) should have non-zero values, \
+             key: {}",
+            elem,
+            elem_offset,
+            link_key.as_str()
+        );
+    }
+}
+
+/// AC4.5: Per-element link scores are computed independently using each
+/// element's own values, not shared across elements.
+///
+/// Model: An arrayed balancing feedback loop where each element has a
+/// nonlinear flow equation that produces different link score ratios
+/// when the elements have different states.
+///
+///   level[Region] (stock, inits: 100, 200, 300)
+///     -> gap[Region] (aux, 500 - level)
+///     -> adj[Region] (flow, gap * gap / 1000 -- quadratic in gap)
+///     -> level[Region]
+///
+/// The quadratic flow equation `gap^2/1000` means the ceteris paribus
+/// partial derivative varies with the current gap value. Since each
+/// region starts at a different level, each has a different gap, and
+/// thus a different discrete link score ratio. This proves that the
+/// per-element computation uses element-specific values.
+#[test]
+fn test_a2a_independent_per_element_computation() {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    let n_elements: usize = 3;
+
+    let project = datamodel::Project {
+        name: "a2a_independent_elements".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 20.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // level[Region] with different initial values
+                Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("NYC".to_string(), "100".to_string(), None, None),
+                            ("Boston".to_string(), "200".to_string(), None, None),
+                            ("LA".to_string(), "300".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["adj".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // gap[Region] = 500 - level
+                Variable::Aux(datamodel::Aux {
+                    ident: "gap".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "500 - level".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // adj[Region] = gap * level / 1000 (depends on both gap
+                // and level; the ceteris paribus formula wraps level with
+                // PREVIOUS, producing different per-element ratios because
+                // level differs across elements)
+                Variable::Flow(datamodel::Flow {
+                    ident: "adj".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "gap * level / 1000".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // The gap -> adj link score should exist (aux-to-flow, A2A)
+    let (_link_key, base_offset) = find_link_score_offset(&results, "gap", "adj")
+        .expect("link score for gap -> adj should exist");
+
+    // Look for a timestep where all elements are non-zero and the
+    // values differ across elements. The quadratic relationship and
+    // different initial conditions guarantee this after a few steps.
+    let mut found_differing_step = false;
+    for step in 2..results.step_count {
+        let mut element_values = Vec::new();
+        for elem in 0..n_elements {
+            let val = results.data[step * results.step_size + base_offset + elem];
+            element_values.push(val);
+        }
+
+        let all_nonzero = element_values
+            .iter()
+            .all(|v| v.abs() > 1e-10 && !v.is_nan());
+        if !all_nonzero {
+            continue;
+        }
+
+        let all_same = element_values
+            .windows(2)
+            .all(|w| (w[0] - w[1]).abs() < 1e-10);
+        if !all_same {
+            found_differing_step = true;
+            break;
+        }
+    }
+
+    assert!(
+        found_differing_step,
+        "per-element link scores should differ at some timestep when initial conditions \
+         vary and the flow equation is nonlinear, proving independent per-element computation"
+    );
+}

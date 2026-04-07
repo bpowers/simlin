@@ -4803,20 +4803,43 @@ pub fn assemble_module(
         for ltm_var in &ltm_vars.vars {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
-            // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId)
+            // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId).
             // The link_score prefix is always "$⁚ltm⁚link_score⁚" (fixed length).
+            //
+            // The salsa-cached compile_ltm_var_fragment reads from
+            // link_score_equation_text which returns empty dimensions (dimensions
+            // are set later in model_ltm_variables). For A2A link scores (non-empty
+            // dimensions), we must use compile_ltm_equation_fragment directly with
+            // the ltm_var's dimensions so the equation gets compiled with the correct
+            // A2A expansion.
             const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
             let fragment_result = if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
-                let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
-                let arrow_pos = suffix.find('\u{2192}');
-                if let Some(arrow) = arrow_pos {
-                    let from_name = &suffix[..arrow];
-                    let to_name = &suffix[arrow + '\u{2192}'.len_utf8()..];
-                    let link_id = LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
-                    compile_ltm_var_fragment(db, link_id, model, project)
-                        .as_ref()
-                        .cloned()
+                if ltm_var.dimensions.is_empty() {
+                    // Scalar link score: use the salsa-cached per-link fragment.
+                    let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
+                    let arrow_pos = suffix.find('\u{2192}');
+                    if let Some(arrow) = arrow_pos {
+                        let from_name = &suffix[..arrow];
+                        let to_name = &suffix[arrow + '\u{2192}'.len_utf8()..];
+                        let link_id =
+                            LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
+                        compile_ltm_var_fragment(db, link_id, model, project)
+                            .as_ref()
+                            .cloned()
+                    } else {
+                        compile_ltm_equation_fragment(
+                            db,
+                            &ltm_var.name,
+                            &ltm_var.equation,
+                            &ltm_var.dimensions,
+                            model,
+                            project,
+                        )
+                    }
                 } else {
+                    // A2A link score: compile directly with the correct dimensions
+                    // from model_ltm_variables. Cannot use the salsa-cached path
+                    // because link_score_equation_text returns empty dimensions.
                     compile_ltm_equation_fragment(
                         db,
                         &ltm_var.name,
