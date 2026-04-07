@@ -5,6 +5,9 @@
 import { ModuleViewElement, AuxViewElement, LinkViewElement, ViewElement } from '@simlin/core/datamodel';
 
 import { moduleContains, moduleBounds, ModuleWidth, ModuleHeight } from '../drawing/Module';
+import { StockWidth, StockHeight } from '../drawing/Stock';
+import { AuxRadius } from '../drawing/default';
+import { labelRadii } from '../drawing/common';
 
 // Helper to create test module elements
 function makeModule(uid: number, x: number, y: number, labelSide: string = 'bottom'): ModuleViewElement {
@@ -255,5 +258,40 @@ describe('moduleBounds', () => {
     const mod = makeModule(1, 100, 200, 'right');
     const bounds = moduleBounds(mod);
     expect(bounds.right).toBeGreaterThan(100 + ModuleWidth / 2);
+  });
+});
+
+describe('labelRadii', () => {
+  it('returns AuxRadius for aux elements', () => {
+    const { rw, rh } = labelRadii('aux');
+    expect(rw).toBe(AuxRadius);
+    expect(rh).toBe(AuxRadius);
+  });
+
+  it('returns AuxRadius for flow elements', () => {
+    const { rw, rh } = labelRadii('flow');
+    expect(rw).toBe(AuxRadius);
+    expect(rh).toBe(AuxRadius);
+  });
+
+  it('returns stock dimensions for stock elements', () => {
+    const { rw, rh } = labelRadii('stock');
+    expect(rw).toBe(StockWidth / 2);
+    expect(rh).toBe(StockHeight / 2);
+  });
+
+  it('returns module dimensions for module elements', () => {
+    const { rw, rh } = labelRadii('module');
+    expect(rw).toBe(ModuleWidth / 2);
+    expect(rh).toBe(ModuleHeight / 2);
+  });
+
+  it('module radii differ from aux radii', () => {
+    // This is the core bug: modules were using AuxRadius (9)
+    // instead of ModuleWidth/2 (27.5) and ModuleHeight/2 (22.5)
+    const modRadii = labelRadii('module');
+    const auxRadii = labelRadii('aux');
+    expect(modRadii.rw).not.toBe(auxRadii.rw);
+    expect(modRadii.rh).not.toBe(auxRadii.rh);
   });
 });

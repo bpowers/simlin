@@ -107,6 +107,25 @@ export const distance = (a: Point, b: Point): number => {
   return Math.sqrt(square(dx) + square(dy));
 };
 
+import { AuxRadius, StockWidth, StockHeight, ModuleWidth, ModuleHeight } from './default';
+
+/**
+ * Returns the half-width and half-height used to position a label
+ * relative to an element's center. Each element type has its own
+ * visual bounds: stocks and modules are rectangles with distinct
+ * dimensions; everything else (aux, flow) uses the aux circle radius.
+ */
+export function labelRadii(elementType: string): { rw: number; rh: number } {
+  switch (elementType) {
+    case 'stock':
+      return { rw: StockWidth / 2, rh: StockHeight / 2 };
+    case 'module':
+      return { rw: ModuleWidth / 2, rh: ModuleHeight / 2 };
+    default:
+      return { rw: AuxRadius, rh: AuxRadius };
+  }
+}
+
 export function screenToCanvasPoint(x: number, y: number, zoom: number): Point {
   const canvas = new DOMPoint(x, y).matrixTransform(
     new DOMMatrix([
