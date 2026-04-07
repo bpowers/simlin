@@ -333,13 +333,31 @@ fn generate_stock_to_flow_equation(
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
 
-    // Get the flow equation text
-    let flow_equation = match flow_var {
-        Variable::Var {
-            eqn: Some(Equation::Scalar(eq)),
-            ..
-        } => eq.clone(),
-        _ => "0".to_string(),
+    // Get the flow equation text.  Prefer the AST when available because
+    // it handles both Scalar and ApplyToAll (arrayed) equations, whereas
+    // the raw `eqn` field only covers Scalar.  Without this, arrayed flows
+    // fall through to "0" and produce a zero link score.
+    use crate::ast::Ast;
+
+    let flow_equation = if let Some(ast) = flow_var.ast() {
+        match ast {
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
+            _ => match flow_var {
+                Variable::Var {
+                    eqn: Some(Equation::Scalar(eq)),
+                    ..
+                } => eq.clone(),
+                _ => "0".to_string(),
+            },
+        }
+    } else {
+        match flow_var {
+            Variable::Var {
+                eqn: Some(Equation::Scalar(eq)),
+                ..
+            } => eq.clone(),
+            _ => "0".to_string(),
+        }
     };
 
     // Get dependencies of the flow variable

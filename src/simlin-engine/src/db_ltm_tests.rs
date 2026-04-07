@@ -4,7 +4,9 @@
 
 use super::compile_ltm_equation_fragment;
 use crate::datamodel;
-use crate::db::{SimlinDb, compute_layout, sync_from_datamodel};
+use crate::db::{
+    LtmLinkId, SimlinDb, compute_layout, link_score_equation_text, sync_from_datamodel,
+};
 use crate::test_common::TestProject;
 
 fn phase_sym_load_prev_names(
@@ -319,5 +321,51 @@ fn test_a2a_ltm_previous_per_element() {
         store_offsets,
         vec![0, 1, 2],
         "store offsets should match the 3 region elements"
+    );
+}
+
+/// AC4.3: Regression test for the stock-to-flow link score bug where
+/// `generate_stock_to_flow_equation` only matched `Equation::Scalar`
+/// and fell through to "0" for `Equation::ApplyToAll` (arrayed flows).
+///
+/// This test verifies that the link score equation for a stock-to-flow
+/// edge in an arrayed model contains real population references, not
+/// just "0".
+#[test]
+fn test_stock_to_flow_link_score_handles_apply_to_all() {
+    let project = TestProject::new("s2f_a2a_regression")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    // The stock-to-flow direction: population -> births
+    let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
+    let lsv = link_score_equation_text(&db, link_id, source_model, sync.project);
+
+    let lsv = lsv
+        .as_ref()
+        .expect("stock-to-flow link score should be generated for arrayed model");
+
+    // Before the fix, the equation would contain only "0" terms because
+    // the flow_equation was "0" (ApplyToAll fell through the Scalar-only
+    // match arm). After the fix, the equation should reference the actual
+    // flow equation contents (which include "population").
+    assert!(
+        lsv.equation.contains("population"),
+        "stock-to-flow link score equation should reference 'population', \
+         but got: {}",
+        lsv.equation
+    );
+    assert!(
+        !lsv.equation
+            .starts_with("if (TIME = INITIAL_TIME) then 0 else if")
+            || lsv.equation.contains("population"),
+        "link score equation should not use a trivial '0' partial equation"
     );
 }
