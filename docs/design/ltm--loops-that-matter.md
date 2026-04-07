@@ -29,8 +29,8 @@ is controlled by two flags on `SourceProject`:
 Every model -- root, stdlib, and user-defined -- receives identical LTM treatment
 via `model_ltm_variables`. The function auto-detects sub-model behavior by
 checking for input ports with causal pathways to the output, and generates
-pathway and composite scores for such models. LTM currently does not support
-array/subscripted variables.
+pathway and composite scores for such models. Array/subscripted variables are
+supported via element-level graph expansion (see "Array Support" below).
 
 ## Key Data Structures
 
@@ -498,13 +498,99 @@ After all timesteps are processed:
 4. Assign deterministic polarity-based IDs (`r1`, `b1`, etc.)
 5. Re-sort by score descending for callers
 
+## Array Support
+
+LTM extends to arrayed (subscripted) variables by operating on an element-level
+causal graph. Variable-level edges are expanded to element-level edges, loops
+are detected at element granularity, and link/loop scores are generated per
+element.
+
+### Element-Level Causal Graph
+
+`model_element_causal_edges` (salsa tracked, `db_analysis.rs`) expands the
+variable-level graph from `model_causal_edges` into per-element edges. Each
+variable-level edge is classified by inspecting the target variable's `Expr2`
+AST for how the source appears:
+
+| Source | Target | Classification | Edge expansion |
+|--------|--------|----------------|----------------|
+| scalar | scalar | -- | `from -> to` (unchanged) |
+| scalar | arrayed | Broadcast | `from -> to[d]` for each element d |
+| arrayed | scalar | Reduction | `from[d] -> to` for each element d |
+| arrayed | arrayed | SameElement | `from[d] -> to[d]` per shared element |
+| arrayed | arrayed | CrossElement | `from[d] -> to[e]` for all d, e |
+
+**SameElement** applies when the source is referenced with non-wildcard
+subscripts or as a bare variable in an A2A equation. **CrossElement** applies
+when the source appears inside a wildcard subscript (e.g., `SUM(x[*])`).
+Structural flow-to-stock edges are always classified as SameElement.
+
+Stock names are similarly expanded: `population` with dimension `Region`
+becomes `population[NYC]`, `population[Boston]`, etc. When no variables in
+a model are arrayed, the element graph is identical to the variable graph
+(zero overhead).
+
+### Link Score Classification
+
+Three categories of element-level link scores:
+
+**A2A same-dimension** and **scalar-to-arrayed**: The standard ceteris-paribus
+link score equation is generated once with dimensions on the `LtmSyntheticVar`.
+The simulation engine evaluates it per element automatically via A2A expansion.
+These appear in results as a single variable occupying N slots (one per element).
+
+**Arrayed-to-scalar (cross-dimensional)**: When an arrayed source feeds a scalar
+target through a reducing function, the link represents how each source element
+contributes to the scalar output. `classify_reducer` in `ltm_augment.rs` walks
+the target's AST to find the reducing builtin and classify it:
+
+| Reducer kind | Functions | Equation strategy |
+|-------------|-----------|-------------------|
+| Linear | SUM, MEAN | Algebraic shortcut: partial = `PREVIOUS(target) + (source[d] - PREVIOUS(source[d]))` (divided by N for MEAN) |
+| Nonlinear | MIN, MAX, STDDEV, RANK | Explicit expansion: reconstruct the reducer with all elements except the current one wrapped in `PREVIOUS()` |
+| Constant | SIZE | Output depends only on dimension cardinality; link score is always 0 |
+
+`generate_element_to_scalar_equation` produces N separate scalar link score
+variables (one per source element), each with its own equation isolating that
+element's contribution.
+
+### Loop Scores
+
+Element-level circuits from `model_element_loop_circuits` are grouped by their
+variable-level node sequence (strip subscripts, join) to distinguish A2A loops
+from mixed loops:
+
+**A2A loops**: All circuits in a group have the same variable-level structure
+and every node carries a subscript. These are collapsed into a single `Loop`
+with a shared ID (e.g., `r1`) and `dimensions` populated from the underlying
+variables. Loop score and relative loop score equations are generated with those
+dimensions, producing N result slots (one per element) with per-element
+dominance profiles.
+
+**Mixed loops**: Circuits containing scalar nodes or with inconsistent
+variable-level structures. Each circuit becomes its own scalar `Loop` with a
+unique ID. This handles cross-element feedback paths (e.g.,
+`population[NYC] -> migration -> population[Boston] -> migration -> population[NYC]`).
+
+### Discovery Mode
+
+When `ltm_discovery_mode = true`, element-level discovery proceeds as:
+
+1. `model_ltm_variables` generates link score variables for all edges. A2A link
+   scores occupy N slots; cross-dimensional scores are N separate scalar
+   variables.
+2. Post-simulation, `discover_loops_with_graph` receives the `LtmSyntheticVar`
+   list and datamodel dimensions. `parse_link_offsets` expands A2A link score
+   slots into per-element edges: for each A2A link score at offset O with
+   dimension of size N, it emits N `LinkOffset` entries at offsets O, O+1, ...,
+   O+N-1 with element-subscripted from/to names.
+3. The `SearchGraph` is built from these element-level link offsets. Element-level
+   stocks (expanded from `model_element_causal_edges`) serve as DFS starting
+   points.
+4. Discovered element-level loops are grouped and classified identically to
+   exhaustive mode via `build_element_level_loops`.
+
 ## Current Limitations
-
-### Array Variables
-
-The LTM compilation path skips models containing array (subscripted) variables.
-Extending LTM to arrays would require element-wise link score computation and a
-strategy for reporting aggregate scores.
 
 ### Euler Integration Only
 
