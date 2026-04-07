@@ -4409,18 +4409,126 @@ pub fn incremental_layout(
         }
     }
 
-    // Compute flow attachments for new flows by classifying sides
-    // for each stock connected to a new flow.
+    // Compute flow attachments for new flows AND for all flows on
+    // stocks that are affected by new chain/side flow changes.  This
+    // ensures that existing preserved flows get reclassified when a
+    // sibling chain flow is added.
     let mut incr_flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
+    let mut affected_stocks: HashSet<String> = HashSet::new();
+
     for flow_ident in &new_elements.new_flows {
         let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
         if let Some(stock) = from_stock {
-            let sides = classify_flow_sides(stock, &metadata);
-            incr_flow_attachments.extend(sides);
+            affected_stocks.insert(stock.to_string());
         }
         if let Some(stock) = to_stock {
-            let sides = classify_flow_sides(stock, &metadata);
-            incr_flow_attachments.extend(sides);
+            affected_stocks.insert(stock.to_string());
+        }
+    }
+
+    for stock in &affected_stocks {
+        let sides = classify_flow_sides(stock, &metadata);
+        incr_flow_attachments.extend(sides);
+    }
+
+    // Check if any existing (preserved) flows need to change sides.
+    // If classify_flow_sides assigns Bottom/Top to a flow that is
+    // currently horizontal (or Right/Left to one that is vertical),
+    // delete and rebuild it so its geometry matches.
+    let mut flows_to_rebuild: Vec<String> = Vec::new();
+    for (flow_ident, attachment) in &incr_flow_attachments {
+        // Skip flows that are new (they'll be created below)
+        if new_elements.new_flows.contains(flow_ident) {
+            continue;
+        }
+        // Check if this flow exists and has mismatched orientation
+        if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
+            let existing = state.elements.iter().find(|e| {
+                if let ViewElement::Flow(f) = e {
+                    f.uid == uid
+                } else {
+                    false
+                }
+            });
+            if let Some(ViewElement::Flow(f)) = existing {
+                let orientation = compute_flow_orientation(&f.points);
+                let needs_vertical = matches!(
+                    attachment.side,
+                    StockAttachSide::Bottom | StockAttachSide::Top
+                );
+                let is_vertical = matches!(orientation, FlowOrientation::Vertical);
+                if needs_vertical != is_vertical {
+                    flows_to_rebuild.push(flow_ident.clone());
+                }
+            }
+        }
+    }
+
+    // Delete and rebuild flows that need to change orientation
+    for flow_ident in &flows_to_rebuild {
+        let saved_display = state
+            .display_names
+            .get(&canonicalize(flow_ident).into_owned())
+            .cloned();
+        state.apply_deletion(flow_ident);
+        if let Some(display) = saved_display {
+            state
+                .display_names
+                .insert(canonicalize(flow_ident).into_owned(), display);
+        }
+    }
+
+    // Compute positions for rebuilt flows based on their attachment info
+    for flow_ident in &flows_to_rebuild {
+        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+        if let Some(attachment) = incr_flow_attachments.get(flow_ident) {
+            let stock_ident = from_stock.or(to_stock);
+            if let Some(stock) = stock_ident {
+                let stock_uid = state.get_or_alloc_uid(stock);
+                if let Some(&stock_pos) = state.positions.get(&stock_uid) {
+                    let pos = match attachment.side {
+                        StockAttachSide::Bottom => {
+                            let x_offset = stock_pos.x - config.stock_width / 2.0
+                                + config.stock_width * attachment.offset;
+                            Position::new(
+                                x_offset,
+                                stock_pos.y
+                                    + config.stock_height / 2.0
+                                    + config.horizontal_spacing / 2.0,
+                            )
+                        }
+                        StockAttachSide::Top => {
+                            let x_offset = stock_pos.x - config.stock_width / 2.0
+                                + config.stock_width * attachment.offset;
+                            Position::new(
+                                x_offset,
+                                stock_pos.y
+                                    - config.stock_height / 2.0
+                                    - config.horizontal_spacing / 2.0,
+                            )
+                        }
+                        _ => {
+                            // Right/Left: use existing horizontal position
+                            Position::new(
+                                stock_pos.x
+                                    + config.stock_width / 2.0
+                                    + config.horizontal_spacing / 2.0,
+                                stock_pos.y,
+                            )
+                        }
+                    };
+                    let uid = state.get_or_alloc_uid(flow_ident);
+                    create_flow_view_element(
+                        &mut state,
+                        &config,
+                        &metadata,
+                        flow_ident,
+                        uid,
+                        pos,
+                        &incr_flow_attachments,
+                    )?;
+                }
+            }
         }
     }
 
