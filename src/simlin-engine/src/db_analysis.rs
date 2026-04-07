@@ -902,6 +902,25 @@ pub fn model_element_causal_edges(
         dims
     };
 
+    // Build a set of structural flow->stock edges so we can skip AST
+    // classification for them. Stock equations contain only the initial
+    // value, so the flow name never appears in the stock's AST. Without
+    // this check, classification defaults to Scalar, which produces
+    // incorrect all-to-all expansion for arrayed stocks.
+    let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
+    for (stock_name, source_var) in source_vars.iter() {
+        if source_var.kind(db) == super::SourceVariableKind::Stock {
+            for flow in source_var
+                .inflows(db)
+                .iter()
+                .chain(source_var.outflows(db).iter())
+            {
+                let canonical_flow = canonicalize(flow).into_owned();
+                structural_flow_to_stock.insert((canonical_flow, stock_name.clone()));
+            }
+        }
+    }
+
     // Expand each variable-level edge to element-level edges
     for (from_name, to_set) in &variable_edges.edges {
         let from_dims = lookup_dims(from_name, &mut dim_cache);
@@ -917,18 +936,29 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // Classify the dependency to determine expansion pattern.
-            // Reconstruct the target variable's lowered AST so we can
-            // inspect how the source appears in the equation.
-            let dep_kind = match reconstruct_single_variable(db, model, project, to_name) {
-                Some(target_var) => {
-                    let source_is_arrayed = !from_dims.is_empty();
-                    classify_element_dependency(&target_var, from_name, source_is_arrayed)
-                }
-                None => {
-                    // If we can't reconstruct the variable (shouldn't happen
-                    // for well-formed models), default to Scalar
-                    ElementDependencyKind::Scalar
+            // Structural flow->stock edges use SameElement when both are
+            // arrayed. The stock's equation is just the initial value, so
+            // the flow name never appears in the AST; AST-based
+            // classification would incorrectly default to Scalar.
+            let dep_kind = if structural_flow_to_stock
+                .contains(&(from_name.clone(), to_name.clone()))
+                && !from_dims.is_empty()
+                && !to_dims.is_empty()
+            {
+                ElementDependencyKind::SameElement
+            } else {
+                // Classify the dependency by inspecting the target's AST
+                // to determine how the source appears in the equation.
+                match reconstruct_single_variable(db, model, project, to_name) {
+                    Some(target_var) => {
+                        let source_is_arrayed = !from_dims.is_empty();
+                        classify_element_dependency(&target_var, from_name, source_is_arrayed)
+                    }
+                    None => {
+                        // If we can't reconstruct the variable (shouldn't happen
+                        // for well-formed models), default to Scalar
+                        ElementDependencyKind::Scalar
+                    }
                 }
             };
 
@@ -1343,3 +1373,7 @@ mod classify_element_dependency_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "db_element_graph_tests.rs"]
+mod db_element_graph_tests;
