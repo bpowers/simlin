@@ -492,7 +492,9 @@ pub(crate) enum ReducerKind {
 /// Collect element names from a dimension as owned strings.
 ///
 /// For `Dimension::Named`, returns the canonical element names.
-/// For `Dimension::Indexed`, returns zero-based index strings ("0", "1", ...).
+/// For `Dimension::Indexed`, returns one-based index strings ("1", "2", ...).
+/// The engine uses 1-based indexing for indexed dimensions (see
+/// `dimensions.rs` `SubscriptIterator` which formats as `elem + 1`).
 pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
     match dim {
         crate::dimensions::Dimension::Named(_, named) => named
@@ -501,7 +503,7 @@ pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec
             .map(|e| e.as_str().to_string())
             .collect(),
         crate::dimensions::Dimension::Indexed(_, size) => {
-            (0..*size).map(|i| i.to_string()).collect()
+            (1..=*size).map(|i| i.to_string()).collect()
         }
     }
 }
@@ -887,9 +889,11 @@ mod tests {
 
     #[test]
     fn test_dimension_element_names_indexed() {
+        // Indexed dimensions use 1-based indexing to match the engine's
+        // subscript formatting (see dimensions.rs SubscriptIterator).
         let dim = make_indexed_dimension("Index", 4);
         let names = dimension_element_names(&dim);
-        assert_eq!(names, vec!["0", "1", "2", "3"]);
+        assert_eq!(names, vec!["1", "2", "3", "4"]);
     }
 
     #[test]

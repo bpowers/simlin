@@ -1743,6 +1743,29 @@ fn strip_subscript(name: &str) -> &str {
     }
 }
 
+/// Compute the cartesian product of element name lists as comma-joined
+/// subscript strings.
+///
+/// For a single dimension `[["nyc", "boston"]]`, returns `["nyc", "boston"]`.
+/// For two dimensions `[["nyc", "boston"], ["adult", "child"]]`, returns
+/// `["nyc,adult", "nyc,child", "boston,adult", "boston,child"]`.
+fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
+    if dim_element_lists.is_empty() {
+        return vec![];
+    }
+    let mut result: Vec<String> = dim_element_lists[0].clone();
+    for dim_elements in &dim_element_lists[1..] {
+        let mut expanded = Vec::with_capacity(result.len() * dim_elements.len());
+        for existing in &result {
+            for elem in dim_elements {
+                expanded.push(format!("{existing},{elem}"));
+            }
+        }
+        result = expanded;
+    }
+    result
+}
+
 /// Build `Loop` structs from element-level circuits, grouping
 /// pure-dimension circuits into shared A2A loops and keeping mixed
 /// circuits as individual scalar loops.
@@ -1812,10 +1835,15 @@ fn build_element_level_loops(
         //    pop[boston]->share[nyc] has pop and share each twice).
         //
         // 2. Mixed subscripts: nodes in a circuit have different element
-        //    subscripts (e.g., pop[nyc]->mp[boston]->mi[nyc]->pop[nyc]
-        //    has subscripts nyc,boston,nyc — not uniform). A genuine A2A
-        //    circuit visits each variable at the SAME element
-        //    (pop[nyc]->births[nyc]->pop[nyc], all nyc).
+        //    subscripts at shared dimensions. A genuine A2A circuit visits
+        //    each variable at the SAME element in shared dimensions
+        //    (pop[nyc]->births[nyc]->pop[nyc], all nyc). Cross-element
+        //    circuits visit different elements (pop[nyc]->mp[boston]->...).
+        //
+        //    Partial-collapse loops are NOT cross-element: source[a,x]->
+        //    target[a] has subscripts "a,x" and "a" which differ in length
+        //    but share the same element "a" on the shared dimension. We
+        //    compare only the first element (leading shared dimension).
         let is_cross_element = if all_subscripted {
             // Check 1: repeated variable names
             let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
@@ -1824,20 +1852,24 @@ fn build_element_level_loops(
             if has_repeated {
                 true
             } else {
-                // Check 2: verify ALL circuits in the group have uniform
-                // subscripts (all nodes use the same subscript). If any
-                // circuit has mixed subscripts, the group is cross-element.
+                // Check 2: compare the leading (first) subscript element
+                // across all nodes. Nodes with partial-collapse dimensions
+                // have fewer subscript components (e.g., "a" vs "a,x"), but
+                // the leading element is shared. If leading elements differ,
+                // it's a genuine cross-element circuit.
                 circuits_in_group.iter().any(|circuit| {
-                    let subscripts: Vec<&str> = circuit
+                    let leading_elements: Vec<&str> = circuit
                         .iter()
                         .filter_map(|n| {
                             let start = n.find('[')?;
                             let end = n.rfind(']')?;
-                            Some(&n[start + 1..end])
+                            let subscript = &n[start + 1..end];
+                            // Take the first comma-separated component
+                            Some(subscript.split(',').next().unwrap_or(subscript))
                         })
                         .collect();
-                    // Check if all subscripts are identical
-                    subscripts.windows(2).any(|w| w[0] != w[1])
+                    // If leading elements differ, it's cross-element
+                    leading_elements.windows(2).any(|w| w[0] != w[1])
                 })
             }
         } else {
@@ -2203,7 +2235,16 @@ pub fn model_ltm_variables(
             return Some(vec![]);
         }
 
-        let elements = crate::ltm_augment::dimension_element_names(&from_dims[0]);
+        // Compute the cartesian product of all source dimensions to get
+        // per-element subscripts. For a single dimension, this is just the
+        // element names. For multi-dimensional sources (e.g., x[Region,Age]),
+        // this produces tuples like "nyc,adult", "nyc,child", etc.
+        let dim_element_lists: Vec<Vec<String>> = from_dims
+            .iter()
+            .map(crate::ltm_augment::dimension_element_names)
+            .collect();
+        let elements = cartesian_subscripts(&dim_element_lists);
+
         let mut cross_vars = Vec::with_capacity(elements.len());
         for element in &elements {
             let var_name = format!(
