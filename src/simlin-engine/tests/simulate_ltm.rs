@@ -10,9 +10,11 @@ use std::result::Result as StdResult;
 
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{
-    DetectedLoop, DetectedLoopPolarity, SimlinDb, compile_project_incremental,
-    model_cycle_partitions, model_detected_loops, set_project_ltm_discovery_mode,
-    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
+    DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_from_element_edges,
+    compile_project_incremental, model_cycle_partitions, model_detected_loops,
+    model_element_causal_edges, model_element_loop_circuits, model_ltm_variables,
+    project_datamodel_dims, set_project_ltm_discovery_mode, set_project_ltm_enabled,
+    sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding};
@@ -3303,5 +3305,350 @@ fn test_mixed_loop_scalar_per_element_scores() {
     assert!(
         any_nonzero,
         "At least one loop score should be non-zero in the mixed model"
+    );
+}
+
+// ============================================================================
+// AC7: Discovery mode on element-level graph
+//
+// These tests verify that discovery mode operates on the element-level graph,
+// finding element-specific loops post-simulation using strongest-path DFS
+// from element-level stocks.
+// ============================================================================
+
+/// Run the full element-level discovery pipeline for an arrayed model.
+///
+/// This mirrors the pipeline in `analysis.rs::run_ltm_pipeline` but is
+/// callable from integration tests. It:
+/// 1. Compiles with LTM discovery mode enabled
+/// 2. Simulates to get link score results
+/// 3. Builds an element-level CausalGraph
+/// 4. Calls `discover_loops_with_graph` with LTM var metadata and dims
+///    so that A2A link scores are expanded into per-element edges
+fn discover_loops_element_level(
+    project: &simlin_engine::datamodel::Project,
+) -> Vec<ltm_finding::FoundLoop> {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("compilation should succeed");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Build element-level causal graph
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model = sync
+        .project
+        .models(&db)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist in salsa DB");
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let causal_graph = causal_graph_from_element_edges(element_edges);
+
+    let stocks: Vec<Ident<Canonical>> =
+        element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    // Get LTM variable metadata and project dimensions for A2A expansion
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+
+    ltm_finding::discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm_vars.vars,
+        dm_dims,
+    )
+    .expect("discover_loops_with_graph should succeed")
+}
+
+/// AC7.1: Discovery mode on an arrayed model finds element-specific loops.
+///
+/// Model: population[Region] (stock, 3 regions) with a simple reinforcing
+/// feedback loop: population -> birth_rate -> births -> population.
+/// Each region has the same equation structure but different initial
+/// conditions, so per-element link scores differ.
+///
+/// Verifies that discovery mode finds one loop per region element,
+/// each containing element-specific variables like `population[nyc]`,
+/// `births[nyc]`, etc.
+#[test]
+fn test_discovery_element_specific_loops() {
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("discovery_elem_loops")
+        .with_sim_time(0.0, 20.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        // population[Region] stock with different initial values
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        // birth_rate[Region] depends on population (creates feedback)
+        .array_aux("birth_rate[Region]", "population * 0.02")
+        // births[Region] = birth_rate
+        .array_flow("births[Region]", "birth_rate", None)
+        .build_datamodel();
+
+    let found = discover_loops_element_level(&project);
+
+    // With 3 regions and the same feedback structure, discovery should
+    // find 3 element-specific loops (one per region). Each loop has the
+    // structure: population[region] -> birth_rate[region] -> births[region]
+    // -> population[region].
+    assert_eq!(
+        found.len(),
+        3,
+        "Discovery should find 3 element-specific loops (one per region), found {}. \
+         Loops: {:?}",
+        found.len(),
+        found
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|link| format!("{} -> {}", link.from.as_str(), link.to.as_str()))
+                .collect::<Vec<_>>()
+                .join(", "))
+            .collect::<Vec<_>>()
+    );
+
+    // Each loop should contain element-subscripted variables (e.g., `population[nyc]`)
+    let regions = ["nyc", "boston", "la"];
+    for region in &regions {
+        let has_region_loop = found.iter().any(|l| {
+            l.loop_info
+                .links
+                .iter()
+                .any(|link| link.from.as_str().contains(region))
+        });
+        assert!(
+            has_region_loop,
+            "Should find an element-specific loop for region '{}'. Found loops: {:?}",
+            region,
+            found
+                .iter()
+                .map(|l| l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|link| link.from.as_str().to_string())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // All discovered loops should have non-zero average scores
+    for fl in &found {
+        assert!(
+            fl.avg_abs_score > 0.0,
+            "Loop {} should have non-zero avg_abs_score, got {}",
+            fl.loop_info.id,
+            fl.avg_abs_score
+        );
+    }
+}
+
+/// AC7.3: Discovery mode cross-validates with exhaustive mode on a small
+/// arrayed model. Both modes should find the same element-level loops.
+///
+/// Uses the same population/birth_rate/births model as test 1. The
+/// exhaustive mode (via `model_element_loop_circuits`) finds all
+/// element-level circuits structurally, and discovery mode should find
+/// the same loops post-simulation.
+#[test]
+fn test_discovery_cross_validates_with_exhaustive_arrayed() {
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("discovery_xval")
+        .with_sim_time(0.0, 20.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_aux("birth_rate[Region]", "population * 0.02")
+        .array_flow("births[Region]", "birth_rate", None)
+        .build_datamodel();
+
+    // Exhaustive mode: find all element-level circuits structurally
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let exhaustive_circuits = model_element_loop_circuits(&db, source_model, sync.project);
+
+    // Discovery mode: find loops post-simulation
+    let found = discover_loops_element_level(&project);
+
+    // Both modes should find the same number of loops
+    assert_eq!(
+        found.len(),
+        exhaustive_circuits.circuits.len(),
+        "Discovery ({}) should find the same number of loops as exhaustive ({}) \
+         for a small arrayed model. \
+         Exhaustive circuits: {:?}. \
+         Discovery loops: {:?}",
+        found.len(),
+        exhaustive_circuits.circuits.len(),
+        exhaustive_circuits.circuits,
+        found
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|link| link.from.as_str().to_string())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+
+    // Verify that every exhaustive circuit's node set appears in
+    // the discovery results
+    for circuit in &exhaustive_circuits.circuits {
+        let mut exhaustive_nodes: Vec<String> = circuit.clone();
+        exhaustive_nodes.sort();
+
+        let found_match = found.iter().any(|f| {
+            let mut found_nodes: Vec<String> = f
+                .loop_info
+                .links
+                .iter()
+                .map(|l| l.from.as_str().to_string())
+                .collect();
+            found_nodes.sort();
+            found_nodes == exhaustive_nodes
+        });
+
+        assert!(
+            found_match,
+            "Exhaustive circuit {} not found in discovery results. \
+             Discovery found: {:?}",
+            circuit.join(" -> "),
+            found
+                .iter()
+                .map(|l| l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|link| link.from.as_str().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> "))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// AC7.2: Discovery mode's 0.1% contribution threshold filters
+/// unimportant element-level loops.
+///
+/// Model: population[Region] with 2 regions connected by cross-element
+/// migration feedback (SUM-based), putting them in the same partition.
+/// One region has a strong per-element reinforcing loop (high birth
+/// rate), and the other has a negligibly weak one (near-zero birth
+/// rate). The threshold filter compares each loop's score against the
+/// partition-scoped total, filtering the weak one.
+///
+/// Cross-element feedback (migration) ensures both regions are in the
+/// same SCC partition. Without it, each region would be an independent
+/// partition and the weak loop would have 100% contribution within its
+/// own partition (never filtered).
+#[test]
+fn test_discovery_threshold_filters_negligible_loops() {
+    use simlin_engine::test_common::TestProject;
+
+    // Two regions: "Strong" has normal feedback, "Weak" has near-zero.
+    // Migration connects them (cross-element feedback via SUM) so they
+    // share the same cycle partition.
+    let project = TestProject::new("discovery_threshold")
+        .with_sim_time(0.0, 20.0, 1.0)
+        .named_dimension("Region", &["Strong", "Weak"])
+        .array_stock(
+            "population[Region]",
+            "1000",
+            &["births", "migration"],
+            &[],
+            None,
+        )
+        // birth_rate: Strong = 0.1 (10% growth), Weak = 0.0000001 (effectively zero)
+        .array_with_ranges(
+            "birth_rate[Region]",
+            vec![("Strong", "0.1"), ("Weak", "0.0000001")],
+        )
+        // births[Region] = population * birth_rate (per-element feedback)
+        .array_flow("births[Region]", "population * birth_rate", None)
+        // Cross-element migration: uses SUM to create a cross-element
+        // dependency so both regions land in the same cycle partition.
+        // migration[r] = SUM(population[*]) * 0.001 - population * 0.001
+        .scalar_aux("total_pop", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_pop * 0.001 - population * 0.001",
+            None,
+        )
+        .build_datamodel();
+
+    let found = discover_loops_element_level(&project);
+
+    // Discovery should find loops. The "Strong" region's per-element
+    // loop should always be present because it has significant feedback.
+    assert!(!found.is_empty(), "Discovery should find at least one loop");
+
+    // The Strong region loop should be present
+    let has_strong = found.iter().any(|l| {
+        l.loop_info
+            .links
+            .iter()
+            .any(|link| link.from.as_str().contains("strong"))
+    });
+    assert!(
+        has_strong,
+        "The strong region's loop should be retained. Found: {:?}",
+        found
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|link| link.from.as_str().to_string())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+
+    // The Weak region's per-element birth loop should be filtered
+    // because its contribution is ~0.0000001/0.1 = 0.0001% of the
+    // partition total, well below the 0.1% threshold.
+    //
+    // We check specifically for the births-related weak loop. The
+    // cross-element migration loops may or may not be present depending
+    // on their relative strength; we only care about the per-element
+    // births loop for the weak region.
+    let weak_births_loop =
+        found.iter().any(|l| {
+            // A loop is the "weak births loop" if it contains births[weak]
+            // and population[weak] but NOT total_pop (which would make it
+            // a cross-element migration loop instead).
+            let has_weak_births = l.loop_info.links.iter().any(|link| {
+                link.from.as_str() == "births[weak]" || link.to.as_str() == "births[weak]"
+            });
+            let has_total_pop =
+                l.loop_info.links.iter().any(|link| {
+                    link.from.as_str() == "total_pop" || link.to.as_str() == "total_pop"
+                });
+            has_weak_births && !has_total_pop
+        });
+    assert!(
+        !weak_births_loop,
+        "The weak region's per-element births loop should be filtered by \
+         the 0.1%% threshold. Found loops: {:?}",
+        found
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|link| format!("{} -> {}", link.from.as_str(), link.to.as_str()))
+                .collect::<Vec<_>>()
+                .join(", "))
+            .collect::<Vec<_>>()
     );
 }

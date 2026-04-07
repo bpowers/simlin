@@ -1109,7 +1109,7 @@ pub fn model_cycle_partitions(
 /// Same conversion as `causal_graph_from_edges` but uses element-level edges
 /// and stocks. Variables and module_graphs are empty -- suitable for circuit
 /// finding and SCC computation but not for polarity analysis.
-pub(crate) fn causal_graph_from_element_edges(
+pub fn causal_graph_from_element_edges(
     result: &ElementCausalEdgesResult,
 ) -> crate::ltm::CausalGraph {
     use crate::common::{Canonical, Ident};
