@@ -1634,6 +1634,12 @@ fn reorder_attachments_by_position(
 
         for (flow_ident, att) in attachments.iter() {
             let (from, to) = metadata.connected_stocks(flow_ident);
+            // Skip stock-to-stock flows: their attachment side depends on
+            // which stock classified them last, so including them would
+            // count them on the wrong side of one stock.
+            if from.is_some() && to.is_some() {
+                continue;
+            }
             let connected =
                 from.is_some_and(|s| s == stock_ident) || to.is_some_and(|s| s == stock_ident);
             if !connected {
@@ -4625,9 +4631,17 @@ pub fn incremental_layout(
     for op in &patch.ops {
         if let crate::patch::ModelOperation::DeleteVariable { ident } = op {
             let canonical = canonicalize(ident).into_owned();
+            // Match by UID rather than display name: labels go through
+            // format_label_with_line_breaks which strips quoting, so
+            // canonicalizing the label back can produce a different ident
+            // for names like "a.b".
+            let deleted_uid = match state.uid_manager.get_uid(&canonical) {
+                Some(uid) => uid,
+                None => continue,
+            };
             for elem in &old_view.elements {
                 if let ViewElement::Flow(f) = elem
-                    && canonicalize(&f.name) == canonical
+                    && f.uid == deleted_uid
                 {
                     for pt in &f.points {
                         if let Some(uid) = pt.attached_to_uid
@@ -4666,6 +4680,15 @@ pub fn incremental_layout(
         if new_elements.new_flows.contains(flow_ident) {
             continue;
         }
+        // Skip stock-to-stock (chain) flows entirely: their pipe geometry
+        // is determined by both stock positions and ignores the attachment
+        // offset.  Rebuilding them via attachment_based_flow_position (which
+        // only knows one stock) would place the valve beside one stock
+        // instead of between the pair.
+        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+        if from_stock.is_some() && to_stock.is_some() {
+            continue;
+        }
         // Check if this flow exists and has mismatched orientation or offset
         if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
             let existing = state.elements.iter().find(|e| {
@@ -4687,14 +4710,6 @@ pub fn incremental_layout(
                 } else {
                     // Orientation matches but the offset may have changed
                     // (e.g. a sibling was added/removed on the same face).
-                    // Skip stock-to-stock flows: their pipe geometry ignores
-                    // the attachment offset, so rebuilding them is unnecessary
-                    // and would place the valve off-center.
-                    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
-                    let is_stock_to_stock = from_stock.is_some() && to_stock.is_some();
-                    if is_stock_to_stock {
-                        continue;
-                    }
                     let stock_name = from_stock.or(to_stock);
                     if let Some(sn) = stock_name
                         && let Some(stock_uid) = state.uid_manager.get_uid(sn)
