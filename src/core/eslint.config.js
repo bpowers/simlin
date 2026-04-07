@@ -7,5 +7,6 @@ module.exports = createConfig({
     'lib/',
     'lib.browser/',
     'lib.module/',
+    'tests/',
   ],
 });

@@ -134,3 +134,4 @@ exclude_lines = [
 [tool.setuptools_scm]
 root = "../.."
 tag_regex = "^pysimlin-v(?P<version>.+)$"
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "pysimlin-v*"]

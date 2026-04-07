@@ -1,0 +1,1243 @@
+{
+    "name": "systems",
+    "simSpecs": {
+        "startTime": 0,
+        "endTime": 10
+    },
+    "models": [
+        {
+            "name": "main",
+            "stocks": [
+                {
+                    "name": "candidates",
+                    "initialEquation": "inf()",
+                    "inflows": [],
+                    "outflows": [
+                        "candidates_to_phonescreens"
+                    ]
+                },
+                {
+                    "name": "departed",
+                    "initialEquation": "inf()",
+                    "inflows": [
+                        "departures_to_departed"
+                    ],
+                    "outflows": []
+                },
+                {
+                    "name": "departures",
+                    "initialEquation": "0",
+                    "inflows": [
+                        "employees_to_departures"
+                    ],
+                    "outflows": [
+                        "departures_to_departed",
+                        "departures_to_departed_waste"
+                    ]
+                },
+                {
+                    "name": "employees",
+                    "initialEquation": "5",
+                    "inflows": [
+                        "hires_to_employees"
+                    ],
+                    "outflows": [
+                        "employees_to_departures"
+                    ]
+                },
+                {
+                    "name": "hires",
+                    "initialEquation": "0",
+                    "inflows": [
+                        "offers_to_hires"
+                    ],
+                    "outflows": [
+                        "hires_to_employees",
+                        "hires_to_employees_waste"
+                    ]
+                },
+                {
+                    "name": "offers",
+                    "initialEquation": "0",
+                    "inflows": [
+                        "onsites_to_offers"
+                    ],
+                    "outflows": [
+                        "offers_to_hires",
+                        "offers_to_hires_waste"
+                    ]
+                },
+                {
+                    "name": "onsites",
+                    "initialEquation": "0",
+                    "inflows": [
+                        "phonescreens_to_onsites"
+                    ],
+                    "outflows": [
+                        "onsites_to_offers",
+                        "onsites_to_offers_waste"
+                    ]
+                },
+                {
+                    "name": "phonescreens",
+                    "initialEquation": "0",
+                    "inflows": [
+                        "candidates_to_phonescreens"
+                    ],
+                    "outflows": [
+                        "phonescreens_to_onsites",
+                        "phonescreens_to_onsites_waste"
+                    ]
+                }
+            ],
+            "flows": [
+                {
+                    "name": "candidates_to_phonescreens",
+                    "equation": "candidates_outflows.actual"
+                },
+                {
+                    "name": "departures_to_departed",
+                    "equation": "departures_outflows.outflow"
+                },
+                {
+                    "name": "departures_to_departed_waste",
+                    "equation": "departures_outflows.waste"
+                },
+                {
+                    "name": "employees_to_departures",
+                    "equation": "employees_outflows.actual"
+                },
+                {
+                    "name": "hires_to_employees",
+                    "equation": "hires_outflows.outflow"
+                },
+                {
+                    "name": "hires_to_employees_waste",
+                    "equation": "hires_outflows.waste"
+                },
+                {
+                    "name": "offers_to_hires",
+                    "equation": "offers_outflows.outflow"
+                },
+                {
+                    "name": "offers_to_hires_waste",
+                    "equation": "offers_outflows.waste"
+                },
+                {
+                    "name": "onsites_to_offers",
+                    "equation": "onsites_outflows.outflow"
+                },
+                {
+                    "name": "onsites_to_offers_waste",
+                    "equation": "onsites_outflows.waste"
+                },
+                {
+                    "name": "phonescreens_to_onsites",
+                    "equation": "phonescreens_outflows.outflow"
+                },
+                {
+                    "name": "phonescreens_to_onsites_waste",
+                    "equation": "phonescreens_outflows.waste"
+                }
+            ],
+            "auxiliaries": [
+                {
+                    "name": "candidates_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "candidates_outflows_requested",
+                    "equation": "25"
+                },
+                {
+                    "name": "departures_drained_2",
+                    "equation": "departures - departures_to_departed - departures_to_departed_waste"
+                },
+                {
+                    "name": "departures_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "departures_outflows_rate",
+                    "equation": "1.0"
+                },
+                {
+                    "name": "employees_drained_1",
+                    "equation": "employees - employees_to_departures"
+                },
+                {
+                    "name": "employees_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "employees_outflows_rate",
+                    "equation": "0.1"
+                },
+                {
+                    "name": "hires_drained_2",
+                    "equation": "hires - hires_to_employees - hires_to_employees_waste"
+                },
+                {
+                    "name": "hires_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "hires_outflows_rate",
+                    "equation": "1.0"
+                },
+                {
+                    "name": "offers_drained_2",
+                    "equation": "offers - offers_to_hires - offers_to_hires_waste"
+                },
+                {
+                    "name": "offers_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "offers_outflows_rate",
+                    "equation": "0.5"
+                },
+                {
+                    "name": "onsites_drained_2",
+                    "equation": "onsites - onsites_to_offers - onsites_to_offers_waste"
+                },
+                {
+                    "name": "onsites_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "onsites_outflows_rate",
+                    "equation": "0.5"
+                },
+                {
+                    "name": "phonescreens_drained_2",
+                    "equation": "phonescreens - phonescreens_to_onsites - phonescreens_to_onsites_waste"
+                },
+                {
+                    "name": "phonescreens_outflows_dest_capacity",
+                    "equation": "inf()"
+                },
+                {
+                    "name": "phonescreens_outflows_rate",
+                    "equation": "0.5"
+                }
+            ],
+            "modules": [
+                {
+                    "name": "candidates_outflows",
+                    "modelName": "stdlib⁚systems_rate",
+                    "references": [
+                        {
+                            "src": "candidates",
+                            "dst": "candidates_outflows.available"
+                        },
+                        {
+                            "src": "candidates_outflows_requested",
+                            "dst": "candidates_outflows.requested"
+                        },
+                        {
+                            "src": "candidates_outflows_dest_capacity",
+                            "dst": "candidates_outflows.dest_capacity"
+                        }
+                    ]
+                },
+                {
+                    "name": "departures_outflows",
+                    "modelName": "stdlib⁚systems_conversion",
+                    "references": [
+                        {
+                            "src": "departures",
+                            "dst": "departures_outflows.available"
+                        },
+                        {
+                            "src": "departures_outflows_rate",
+                            "dst": "departures_outflows.rate"
+                        },
+                        {
+                            "src": "departures_outflows_dest_capacity",
+                            "dst": "departures_outflows.dest_capacity"
+                        }
+                    ]
+                },
+                {
+                    "name": "employees_outflows",
+                    "modelName": "stdlib⁚systems_leak",
+                    "references": [
+                        {
+                            "src": "employees",
+                            "dst": "employees_outflows.available"
+                        },
+                        {
+                            "src": "employees_outflows_rate",
+                            "dst": "employees_outflows.rate"
+                        },
+                        {
+                            "src": "employees_outflows_dest_capacity",
+                            "dst": "employees_outflows.dest_capacity"
+                        }
+                    ]
+                },
+                {
+                    "name": "hires_outflows",
+                    "modelName": "stdlib⁚systems_conversion",
+                    "references": [
+                        {
+                            "src": "hires",
+                            "dst": "hires_outflows.available"
+                        },
+                        {
+                            "src": "hires_outflows_rate",
+                            "dst": "hires_outflows.rate"
+                        },
+                        {
+                            "src": "hires_outflows_dest_capacity",
+                            "dst": "hires_outflows.dest_capacity"
+                        }
+                    ]
+                },
+                {
+                    "name": "offers_outflows",
+                    "modelName": "stdlib⁚systems_conversion",
+                    "references": [
+                        {
+                            "src": "offers",
+                            "dst": "offers_outflows.available"
+                        },
+                        {
+                            "src": "offers_outflows_rate",
+                            "dst": "offers_outflows.rate"
+                        },
+                        {
+                            "src": "offers_outflows_dest_capacity",
+                            "dst": "offers_outflows.dest_capacity"
+                        }
+                    ]
+                },
+                {
+                    "name": "onsites_outflows",
+                    "modelName": "stdlib⁚systems_conversion",
+                    "references": [
+                        {
+                            "src": "onsites",
+                            "dst": "onsites_outflows.available"
+                        },
+                        {
+                            "src": "onsites_outflows_rate",
+                            "dst": "onsites_outflows.rate"
+                        },
+                        {
+                            "src": "onsites_outflows_dest_capacity",
+                            "dst": "onsites_outflows.dest_capacity"
+                        }
+                    ]
+                },
+                {
+                    "name": "phonescreens_outflows",
+                    "modelName": "stdlib⁚systems_conversion",
+                    "references": [
+                        {
+                            "src": "phonescreens",
+                            "dst": "phonescreens_outflows.available"
+                        },
+                        {
+                            "src": "phonescreens_outflows_rate",
+                            "dst": "phonescreens_outflows.rate"
+                        },
+                        {
+                            "src": "phonescreens_outflows_dest_capacity",
+                            "dst": "phonescreens_outflows.dest_capacity"
+                        }
+                    ]
+                }
+            ],
+            "views": [
+                {
+                    "elements": [
+                        {
+                            "labelSide": "bottom",
+                            "name": "candidates",
+                            "type": "stock",
+                            "uid": 1,
+                            "x": 50,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "phonescreens",
+                            "type": "stock",
+                            "uid": 2,
+                            "x": 195,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "onsites",
+                            "type": "stock",
+                            "uid": 3,
+                            "x": 340,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "offers",
+                            "type": "stock",
+                            "uid": 4,
+                            "x": 485,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "hires",
+                            "type": "stock",
+                            "uid": 5,
+                            "x": 630,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "employees",
+                            "type": "stock",
+                            "uid": 6,
+                            "x": 775,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "departures",
+                            "type": "stock",
+                            "uid": 7,
+                            "x": 920,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "departed",
+                            "type": "stock",
+                            "uid": 8,
+                            "x": 1065,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "candidates_to\nphonescreens",
+                            "points": [
+                                {
+                                    "attachedToUid": 1,
+                                    "x": 72.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 2,
+                                    "x": 172.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 9,
+                            "x": 122.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "phonescreens\nto_onsites",
+                            "points": [
+                                {
+                                    "attachedToUid": 2,
+                                    "x": 217.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 3,
+                                    "x": 317.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 10,
+                            "x": 267.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "flowUid": 11,
+                            "type": "cloud",
+                            "uid": 12,
+                            "x": 317.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "phonescreens_to\nonsites_waste",
+                            "points": [
+                                {
+                                    "attachedToUid": 2,
+                                    "x": 217.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 12,
+                                    "x": 317.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 11,
+                            "x": 267.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "onsites\nto_offers",
+                            "points": [
+                                {
+                                    "attachedToUid": 3,
+                                    "x": 362.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 4,
+                                    "x": 462.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 13,
+                            "x": 412.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "flowUid": 14,
+                            "type": "cloud",
+                            "uid": 15,
+                            "x": 462.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "onsites_to\noffers_waste",
+                            "points": [
+                                {
+                                    "attachedToUid": 3,
+                                    "x": 362.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 15,
+                                    "x": 462.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 14,
+                            "x": 412.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "offers\nto_hires",
+                            "points": [
+                                {
+                                    "attachedToUid": 4,
+                                    "x": 507.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 5,
+                                    "x": 607.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 16,
+                            "x": 557.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "flowUid": 17,
+                            "type": "cloud",
+                            "uid": 18,
+                            "x": 607.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "offers_to\nhires_waste",
+                            "points": [
+                                {
+                                    "attachedToUid": 4,
+                                    "x": 507.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 18,
+                                    "x": 607.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 17,
+                            "x": 557.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "hires_to\nemployees",
+                            "points": [
+                                {
+                                    "attachedToUid": 5,
+                                    "x": 652.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 6,
+                                    "x": 752.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 19,
+                            "x": 702.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "flowUid": 20,
+                            "type": "cloud",
+                            "uid": 21,
+                            "x": 752.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "hires_to\nemployees_waste",
+                            "points": [
+                                {
+                                    "attachedToUid": 5,
+                                    "x": 652.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 21,
+                                    "x": 752.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 20,
+                            "x": 702.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "employees_to\ndepartures",
+                            "points": [
+                                {
+                                    "attachedToUid": 6,
+                                    "x": 797.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 7,
+                                    "x": 897.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 22,
+                            "x": 847.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "departures\nto_departed",
+                            "points": [
+                                {
+                                    "attachedToUid": 7,
+                                    "x": 942.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 8,
+                                    "x": 1042.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 23,
+                            "x": 992.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "flowUid": 24,
+                            "type": "cloud",
+                            "uid": 25,
+                            "x": 1042.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "departures_to\ndeparted_waste",
+                            "points": [
+                                {
+                                    "attachedToUid": 7,
+                                    "x": 942.5,
+                                    "y": 330.87651796974694
+                                },
+                                {
+                                    "attachedToUid": 25,
+                                    "x": 1042.5,
+                                    "y": 330.87651796974694
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 24,
+                            "x": 992.5,
+                            "y": 330.8765179697469
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "departures\ndrained_2",
+                            "type": "aux",
+                            "uid": 26,
+                            "x": 791.5779076696781,
+                            "y": 167.20847773626213
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "employees\ndrained_1",
+                            "type": "aux",
+                            "uid": 27,
+                            "x": 819.8184907122459,
+                            "y": 368.9541984679592
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "hires\ndrained_2",
+                            "type": "aux",
+                            "uid": 28,
+                            "x": 730.8842940665238,
+                            "y": 416.9023598878437
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "offers\ndrained_2",
+                            "type": "aux",
+                            "uid": 29,
+                            "x": 515.0688608875575,
+                            "y": 233.9783327835112
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "onsites\ndrained_2",
+                            "type": "aux",
+                            "uid": 30,
+                            "x": 361.1676979828518,
+                            "y": 279.03263939034224
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "phonescreens\ndrained_2",
+                            "type": "aux",
+                            "uid": 31,
+                            "x": 215.49527031050468,
+                            "y": 366.8139816169597
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "departures\noutflows_rate",
+                            "type": "aux",
+                            "uid": 32,
+                            "x": 758.2144355313235,
+                            "y": 236.94613553671144
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "employees\noutflows_rate",
+                            "type": "aux",
+                            "uid": 33,
+                            "x": 940.8561688677052,
+                            "y": 518.0643785827699
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "hires\noutflows_rate",
+                            "type": "aux",
+                            "uid": 34,
+                            "x": 618.8646068645849,
+                            "y": 497.9699748230993
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "offers\noutflows_rate",
+                            "type": "aux",
+                            "uid": 35,
+                            "x": 529.6913443513097,
+                            "y": 400.8127158355392
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "onsites\noutflows_rate",
+                            "type": "aux",
+                            "uid": 36,
+                            "x": 349.3346100702512,
+                            "y": 551.4437471199665
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "phonescreens\noutflows_rate",
+                            "type": "aux",
+                            "uid": 37,
+                            "x": 263.8771562845981,
+                            "y": 502.4762141368766
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "candidates\noutflows_requested",
+                            "type": "aux",
+                            "uid": 38,
+                            "x": 432.4310678633891,
+                            "y": 50
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "departures_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 39,
+                            "x": 721.6865379035346,
+                            "y": 513.4408385606
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "employees_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 40,
+                            "x": 814.8355693723306,
+                            "y": 520.1152374203305
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "hires_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 41,
+                            "x": 671.9164091019302,
+                            "y": 472.7979106547217
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "offers_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 42,
+                            "x": 474.7337601656763,
+                            "y": 183.23021835359577
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "onsites_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 43,
+                            "x": 415.33894051663594,
+                            "y": 281.3072512139052
+                        },
+                        {
+                            "labelSide": "right",
+                            "name": "phonescreens_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 44,
+                            "x": 421.9797451423805,
+                            "y": 530.3495587592993
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "candidates_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 45,
+                            "x": 442.7719874310668,
+                            "y": 448.73455135391583
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "candidates\noutflows",
+                            "type": "module",
+                            "uid": 46,
+                            "x": 423.7618792143175,
+                            "y": 369.29568333395184
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "phonescreens\noutflows",
+                            "type": "module",
+                            "uid": 47,
+                            "x": 278.8120220704832,
+                            "y": 421.0675530528851
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "onsites\noutflows",
+                            "type": "module",
+                            "uid": 48,
+                            "x": 381.866789759587,
+                            "y": 466.5469079212507
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "offers\noutflows",
+                            "type": "module",
+                            "uid": 49,
+                            "x": 522.2827228759872,
+                            "y": 290.026163635499
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "hires\noutflows",
+                            "type": "module",
+                            "uid": 50,
+                            "x": 662.2401231127079,
+                            "y": 403.5968955731037
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "employees\noutflows",
+                            "type": "module",
+                            "uid": 51,
+                            "x": 864.1878807538342,
+                            "y": 435.3009715433798
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "departures\noutflows",
+                            "type": "module",
+                            "uid": 52,
+                            "x": 887.9143042796012,
+                            "y": 360.6448606108072
+                        },
+                        {
+                            "arc": 25.868849103946413,
+                            "fromUid": 1,
+                            "toUid": 46,
+                            "type": "link",
+                            "uid": 53
+                        },
+                        {
+                            "fromUid": 45,
+                            "toUid": 46,
+                            "type": "link",
+                            "uid": 54
+                        },
+                        {
+                            "fromUid": 38,
+                            "toUid": 46,
+                            "type": "link",
+                            "uid": 55
+                        },
+                        {
+                            "arc": -152.73244280113852,
+                            "fromUid": 46,
+                            "toUid": 9,
+                            "type": "link",
+                            "uid": 56
+                        },
+                        {
+                            "fromUid": 7,
+                            "toUid": 26,
+                            "type": "link",
+                            "uid": 57
+                        },
+                        {
+                            "fromUid": 23,
+                            "toUid": 26,
+                            "type": "link",
+                            "uid": 58
+                        },
+                        {
+                            "fromUid": 24,
+                            "toUid": 26,
+                            "type": "link",
+                            "uid": 59
+                        },
+                        {
+                            "arc": 167.37686937882833,
+                            "fromUid": 7,
+                            "toUid": 52,
+                            "type": "link",
+                            "uid": 60
+                        },
+                        {
+                            "fromUid": 39,
+                            "toUid": 52,
+                            "type": "link",
+                            "uid": 61
+                        },
+                        {
+                            "fromUid": 32,
+                            "toUid": 52,
+                            "type": "link",
+                            "uid": 62
+                        },
+                        {
+                            "arc": 4.111998030559262,
+                            "fromUid": 52,
+                            "toUid": 23,
+                            "type": "link",
+                            "uid": 63
+                        },
+                        {
+                            "arc": 4.111998030559262,
+                            "fromUid": 52,
+                            "toUid": 24,
+                            "type": "link",
+                            "uid": 64
+                        },
+                        {
+                            "fromUid": 6,
+                            "toUid": 27,
+                            "type": "link",
+                            "uid": 65
+                        },
+                        {
+                            "fromUid": 22,
+                            "toUid": 27,
+                            "type": "link",
+                            "uid": 66
+                        },
+                        {
+                            "arc": 54.49280527322473,
+                            "fromUid": 6,
+                            "toUid": 51,
+                            "type": "link",
+                            "uid": 67
+                        },
+                        {
+                            "fromUid": 40,
+                            "toUid": 51,
+                            "type": "link",
+                            "uid": 68
+                        },
+                        {
+                            "fromUid": 33,
+                            "toUid": 51,
+                            "type": "link",
+                            "uid": 69
+                        },
+                        {
+                            "arc": -92.23073303459208,
+                            "fromUid": 51,
+                            "toUid": 22,
+                            "type": "link",
+                            "uid": 70
+                        },
+                        {
+                            "fromUid": 5,
+                            "toUid": 28,
+                            "type": "link",
+                            "uid": 71
+                        },
+                        {
+                            "fromUid": 19,
+                            "toUid": 28,
+                            "type": "link",
+                            "uid": 72
+                        },
+                        {
+                            "fromUid": 20,
+                            "toUid": 28,
+                            "type": "link",
+                            "uid": 73
+                        },
+                        {
+                            "arc": 75.48565739398819,
+                            "fromUid": 5,
+                            "toUid": 50,
+                            "type": "link",
+                            "uid": 74
+                        },
+                        {
+                            "fromUid": 41,
+                            "toUid": 50,
+                            "type": "link",
+                            "uid": 75
+                        },
+                        {
+                            "fromUid": 34,
+                            "toUid": 50,
+                            "type": "link",
+                            "uid": 76
+                        },
+                        {
+                            "arc": -50.43842171308248,
+                            "fromUid": 50,
+                            "toUid": 19,
+                            "type": "link",
+                            "uid": 77
+                        },
+                        {
+                            "arc": -50.43842171308248,
+                            "fromUid": 50,
+                            "toUid": 20,
+                            "type": "link",
+                            "uid": 78
+                        },
+                        {
+                            "fromUid": 4,
+                            "toUid": 29,
+                            "type": "link",
+                            "uid": 79
+                        },
+                        {
+                            "fromUid": 16,
+                            "toUid": 29,
+                            "type": "link",
+                            "uid": 80
+                        },
+                        {
+                            "fromUid": 17,
+                            "toUid": 29,
+                            "type": "link",
+                            "uid": 81
+                        },
+                        {
+                            "arc": -55.77557571776311,
+                            "fromUid": 4,
+                            "toUid": 49,
+                            "type": "link",
+                            "uid": 82
+                        },
+                        {
+                            "fromUid": 42,
+                            "toUid": 49,
+                            "type": "link",
+                            "uid": 83
+                        },
+                        {
+                            "fromUid": 35,
+                            "toUid": 49,
+                            "type": "link",
+                            "uid": 84
+                        },
+                        {
+                            "arc": 31.665623230266327,
+                            "fromUid": 49,
+                            "toUid": 16,
+                            "type": "link",
+                            "uid": 85
+                        },
+                        {
+                            "arc": 31.665623230266327,
+                            "fromUid": 49,
+                            "toUid": 17,
+                            "type": "link",
+                            "uid": 86
+                        },
+                        {
+                            "fromUid": 3,
+                            "toUid": 30,
+                            "type": "link",
+                            "uid": 87
+                        },
+                        {
+                            "fromUid": 13,
+                            "toUid": 30,
+                            "type": "link",
+                            "uid": 88
+                        },
+                        {
+                            "fromUid": 14,
+                            "toUid": 30,
+                            "type": "link",
+                            "uid": 89
+                        },
+                        {
+                            "arc": 79.74427261438218,
+                            "fromUid": 3,
+                            "toUid": 48,
+                            "type": "link",
+                            "uid": 90
+                        },
+                        {
+                            "fromUid": 43,
+                            "toUid": 48,
+                            "type": "link",
+                            "uid": 91
+                        },
+                        {
+                            "fromUid": 36,
+                            "toUid": 48,
+                            "type": "link",
+                            "uid": 92
+                        },
+                        {
+                            "arc": -71.229483934008,
+                            "fromUid": 48,
+                            "toUid": 13,
+                            "type": "link",
+                            "uid": 93
+                        },
+                        {
+                            "arc": -71.229483934008,
+                            "fromUid": 48,
+                            "toUid": 14,
+                            "type": "link",
+                            "uid": 94
+                        },
+                        {
+                            "fromUid": 2,
+                            "toUid": 31,
+                            "type": "link",
+                            "uid": 95
+                        },
+                        {
+                            "fromUid": 10,
+                            "toUid": 31,
+                            "type": "link",
+                            "uid": 96
+                        },
+                        {
+                            "fromUid": 11,
+                            "toUid": 31,
+                            "type": "link",
+                            "uid": 97
+                        },
+                        {
+                            "arc": 52.234004858684166,
+                            "fromUid": 2,
+                            "toUid": 47,
+                            "type": "link",
+                            "uid": 98
+                        },
+                        {
+                            "fromUid": 44,
+                            "toUid": 47,
+                            "type": "link",
+                            "uid": 99
+                        },
+                        {
+                            "fromUid": 37,
+                            "toUid": 47,
+                            "type": "link",
+                            "uid": 100
+                        },
+                        {
+                            "arc": -89.25026768168811,
+                            "fromUid": 47,
+                            "toUid": 10,
+                            "type": "link",
+                            "uid": 101
+                        },
+                        {
+                            "arc": -89.25026768168811,
+                            "fromUid": 47,
+                            "toUid": 11,
+                            "type": "link",
+                            "uid": 102
+                        }
+                    ],
+                    "kind": "stock_flow",
+                    "viewBox": {
+                        "x": -230.2063936610595,
+                        "y": -127.75926300448828,
+                        "width": 939,
+                        "height": 660
+                    },
+                    "zoom": 1.0493971300464895
+                }
+            ]
+        }
+    ]
+}

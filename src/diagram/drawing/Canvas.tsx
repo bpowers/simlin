@@ -45,7 +45,7 @@ import { EditableLabel } from './EditableLabel';
 import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
 import { applyGroupMovement } from '../group-movement';
 import { Group, groupBounds, GroupProps } from './Group';
-import { Module, moduleBounds, ModuleProps } from './Module';
+import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { shouldShowVariableDetails } from './pointer-utils';
@@ -384,6 +384,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isTarget = cloudContains(element, pointer);
     } else if (element.type === 'stock') {
       isTarget = stockContains(element, pointer);
+    } else if (element.type === 'module') {
+      isTarget = moduleContains(element, pointer);
     } else if (element.type === 'aux') {
       isTarget = auxContains(element, pointer);
     } else if (element.type === 'flow') {
@@ -451,7 +453,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       }
     }
 
-    return element.type === 'flow' || element.type === 'aux';
+    return element.type === 'flow' || element.type === 'aux' || element.type === 'module';
   }
 
   aux(element: AuxViewElement): React.ReactElement {
@@ -500,14 +502,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   module(element: ModuleViewElement) {
+    const variable = this.props.model.variables.get(element.ident);
+    const hasWarning = variable ? variableHasError(variable) : false;
     const isSelected = this.isSelected(element);
     const props: ModuleProps = {
       element,
       isSelected,
+      isEditingName: isSelected && this.state.isEditingName,
+      isValidTarget: this.isValidTarget(element),
+      onSelection: this.handleSetSelection,
+      onLabelDrag: this.handleLabelDrag,
+      hasWarning,
     };
 
     if (this.computeBounds) {
-      this.elementBounds.push(moduleBounds(props));
+      this.elementBounds.push(moduleBounds(element));
     }
     return <Module key={element.uid} {...props} />;
   }
@@ -546,7 +555,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const isDraggingLink = isMovingArrow && isSelected;
     if (isDraggingLink && this.selectionCenterOffset) {
       const validTarget = this.cachedElements.find((e: ViewElement) => {
-        if (e.type !== 'aux' && e.type !== 'flow') {
+        if (e.type !== 'aux' && e.type !== 'flow' && e.type !== 'module') {
           return false;
         }
         return this.isValidTarget(e) || false;
