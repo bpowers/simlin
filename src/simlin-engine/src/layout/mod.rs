@@ -4755,6 +4755,17 @@ pub fn incremental_layout(
         }
     }
 
+    // Save old positions before deletion so we have a fallback if
+    // attachment_based_flow_position can't resolve the stock UID
+    // (e.g. imported views with quoted identifiers).
+    let old_flow_positions: HashMap<String, Position> = flows_to_rebuild
+        .iter()
+        .filter_map(|ident| {
+            let uid = state.uid_manager.get_uid(ident)?;
+            state.positions.get(&uid).map(|&pos| (ident.clone(), pos))
+        })
+        .collect();
+
     // Delete and rebuild flows that need to change orientation or offset
     for flow_ident in &flows_to_rebuild {
         let saved_display = state
@@ -4769,15 +4780,18 @@ pub fn incremental_layout(
         }
     }
 
-    // Compute positions for rebuilt flows based on their attachment info
+    // Compute positions for rebuilt flows based on their attachment info,
+    // falling back to the old position if the stock UID lookup fails.
     for flow_ident in &flows_to_rebuild {
-        if let Some(pos) = attachment_based_flow_position(
+        let pos = attachment_based_flow_position(
             &state,
             &config,
             &metadata,
             flow_ident,
             &incr_flow_attachments,
-        ) {
+        )
+        .or_else(|| old_flow_positions.get(flow_ident).copied());
+        if let Some(pos) = pos {
             let uid = state.get_or_alloc_uid(flow_ident);
             create_flow_view_element(
                 &mut state,
