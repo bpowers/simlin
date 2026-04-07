@@ -2188,16 +2188,25 @@ pub fn model_ltm_variables(
         // build_element_level_loops and scored approximately using
         // variable-level link references.
         //
-        // Check whether the target's dimensions are a subset of (or equal
-        // to) the source's dimensions. This handles same-dimension A2A,
-        // scalar-to-arrayed, and partial-collapse patterns.
-        let to_is_subset_of_from = from_dims.is_empty()
+        // Check whether this edge should use the target's dimensions for
+        // the link score. This covers:
+        // - Same-dimension A2A: from_dims == to_dims
+        // - Scalar-to-arrayed: from_dims is empty
+        // - Partial-collapse: to_dims ⊆ from_dims (e.g., [D1,D2]→[D1])
+        // - Broadcast: from_dims ⊆ to_dims (e.g., [D1]→[D1,D2])
+        //
+        // In all these cases, the link score inherits the target's
+        // dimensions so per-element values are computed via A2A expansion.
+        let dims_compatible = from_dims.is_empty()
             || from_dims == *to_dims
             || to_dims
                 .iter()
-                .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()));
+                .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()))
+            || from_dims
+                .iter()
+                .all(|fd| to_dims.iter().any(|td| td.name() == fd.name()));
 
-        if to_is_subset_of_from {
+        if dims_compatible {
             // Map canonical dimension names back to their original
             // datamodel names for correct equation parsing.
             to_dims
