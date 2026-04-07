@@ -4620,12 +4620,22 @@ pub fn incremental_layout(
     // old view. This handles patches that only emit DeleteVariable without
     // UpdateStockFlows -- the remaining sibling flows still need to be
     // reclassified.
-    let stock_uid_to_ident: HashMap<i32, String> = state
-        .elements
+    // Build UID-to-ident map from the model's stock variables rather than
+    // from view element labels, since labels go through
+    // format_label_with_line_breaks and may not round-trip through
+    // canonicalize for quoted names like "a.b".
+    let stock_uid_to_ident: HashMap<i32, String> = model
+        .variables
         .iter()
-        .filter_map(|e| match e {
-            ViewElement::Stock(s) => Some((s.uid, canonicalize(&s.name).into_owned())),
-            _ => None,
+        .filter_map(|v| {
+            if !matches!(v, datamodel::Variable::Stock(_)) {
+                return None;
+            }
+            let canonical = canonicalize(v.get_ident()).into_owned();
+            state
+                .uid_manager
+                .get_uid(&canonical)
+                .map(|uid| (uid, canonical))
         })
         .collect();
     for op in &patch.ops {
@@ -4782,8 +4792,12 @@ pub fn incremental_layout(
     }
 
     if new_elements.is_empty() {
-        // No new elements: resnap rebuilt flows, diff connectors/clouds, polish
-        resnap_flow_endpoints(&mut state, &config);
+        // No new elements: only resnap if flows were actually rebuilt,
+        // to avoid rewriting imported/manual flow geometry on patches
+        // that only change equations or documentation.
+        if !flows_to_rebuild.is_empty() {
+            resnap_flow_endpoints(&mut state, &config);
+        }
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
         optimize_labels(&mut state, model, &metadata);
