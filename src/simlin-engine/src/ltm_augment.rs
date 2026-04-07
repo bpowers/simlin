@@ -333,13 +333,31 @@ fn generate_stock_to_flow_equation(
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
 
-    // Get the flow equation text
-    let flow_equation = match flow_var {
-        Variable::Var {
-            eqn: Some(Equation::Scalar(eq)),
-            ..
-        } => eq.clone(),
-        _ => "0".to_string(),
+    // Get the flow equation text.  Prefer the AST when available because
+    // it handles both Scalar and ApplyToAll (arrayed) equations, whereas
+    // the raw `eqn` field only covers Scalar.  Without this, arrayed flows
+    // fall through to "0" and produce a zero link score.
+    use crate::ast::Ast;
+
+    let flow_equation = if let Some(ast) = flow_var.ast() {
+        match ast {
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
+            _ => match flow_var {
+                Variable::Var {
+                    eqn: Some(Equation::Scalar(eq)),
+                    ..
+                } => eq.clone(),
+                _ => "0".to_string(),
+            },
+        }
+    } else {
+        match flow_var {
+            Variable::Var {
+                eqn: Some(Equation::Scalar(eq)),
+                ..
+            } => eq.clone(),
+            _ => "0".to_string(),
+        }
     };
 
     // Get dependencies of the flow variable
@@ -450,4 +468,880 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
             ..datamodel::Compat::default()
         },
     })
+}
+
+/// Classification of array-reducing builtins for cross-dimensional link score generation.
+///
+/// When an arrayed variable feeds a scalar target through a reducing function,
+/// each element gets its own scalar link score. The reducer kind determines
+/// the equation generation strategy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReducerKind {
+    /// SUM, MEAN: partial derivative is algebraically simple.
+    /// SUM: partial = PREVIOUS(target) + (source[d] - PREVIOUS(source[d]))
+    /// MEAN: same as SUM but divided by the number of elements.
+    Linear,
+    /// MIN, MAX, STDDEV, RANK: must enumerate all elements explicitly,
+    /// wrapping all elements except the current one in PREVIOUS.
+    Nonlinear,
+    /// SIZE: output is constant (depends only on dimension cardinality).
+    /// Link score is always 0; skip generation entirely.
+    Constant,
+}
+
+/// Collect element names from a dimension as owned strings.
+///
+/// For `Dimension::Named`, returns the canonical element names.
+/// For `Dimension::Indexed`, returns one-based index strings ("1", "2", ...).
+/// The engine uses 1-based indexing for indexed dimensions (see
+/// `dimensions.rs` `SubscriptIterator` which formats as `elem + 1`).
+pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
+    match dim {
+        crate::dimensions::Dimension::Named(_, named) => named
+            .elements
+            .iter()
+            .map(|e| e.as_str().to_string())
+            .collect(),
+        crate::dimensions::Dimension::Indexed(_, size) => {
+            (1..=*size).map(|i| i.to_string()).collect()
+        }
+    }
+}
+
+/// Examine the target variable's Expr2 AST to find the array-reducing function
+/// applied to the source variable and classify it.
+///
+/// Walks the Expr2 tree looking for `Expr2::App(builtin, ...)` nodes where
+/// the builtin is an array reducer and the argument references the source
+/// variable (identified by canonical name). Returns the `ReducerKind`, the
+/// uppercase function name (e.g., "SUM", "MIN"), and whether the reducer is
+/// the top-level expression (`is_bare`).
+///
+/// When `is_bare` is false, the reducer is nested inside other arithmetic
+/// (e.g., `2 * SUM(population[*])`). Callers should fall back to the
+/// delta-ratio approach for nested reducers, because the algebraic shortcut
+/// ignores the surrounding arithmetic and produces wrong link scores.
+///
+/// Returns `None` if no reducing builtin is found for the given source.
+pub(crate) fn classify_reducer(
+    target_var: &Variable,
+    source_ident: &str,
+) -> Option<(ReducerKind, &'static str, bool)> {
+    use crate::ast::Ast;
+
+    let ast = target_var.ast()?;
+    let expr = match ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => expr,
+        // For arrayed targets with per-element equations, check the default
+        // expression if available.
+        Ast::Arrayed(_, _, default_expr, _) => default_expr.as_ref()?,
+    };
+
+    classify_reducer_in_expr(expr, source_ident, true)
+}
+
+/// Recursively search an Expr2 tree for a reducing builtin applied to
+/// the source variable.
+///
+/// `is_top_level` tracks whether we are still at the root of the expression
+/// tree. When `true` and the reducer is found at this node, `is_bare` in the
+/// result is `true`. Once we recurse into sub-expressions (Op1, Op2, If,
+/// non-reducer App arguments), `is_top_level` becomes `false` so any reducer
+/// found deeper is correctly flagged as nested.
+fn classify_reducer_in_expr(
+    expr: &crate::ast::Expr2,
+    source_ident: &str,
+    is_top_level: bool,
+) -> Option<(ReducerKind, &'static str, bool)> {
+    use crate::ast::Expr2;
+
+    match expr {
+        Expr2::App(builtin, _, _) => {
+            // Check if this builtin is a reducer whose argument references
+            // the source variable.
+            if let Some((kind, name)) = classify_builtin_if_references_source(builtin, source_ident)
+            {
+                return Some((kind, name, is_top_level));
+            }
+            // Even if this particular App node isn't the reducer we want,
+            // recurse into its arguments to find nested reducers.
+            // Any reducer found inside a non-reducer App is nested.
+            let mut result = None;
+            builtin.for_each_expr_ref(|sub_expr| {
+                if result.is_none() {
+                    result = classify_reducer_in_expr(sub_expr, source_ident, false);
+                }
+            });
+            result
+        }
+        Expr2::Op1(_, inner, _, _) => classify_reducer_in_expr(inner, source_ident, false),
+        Expr2::Op2(_, lhs, rhs, _, _) => classify_reducer_in_expr(lhs, source_ident, false)
+            .or_else(|| classify_reducer_in_expr(rhs, source_ident, false)),
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            classify_reducer_in_expr(cond, source_ident, false)
+                .or_else(|| classify_reducer_in_expr(then_e, source_ident, false))
+                .or_else(|| classify_reducer_in_expr(else_e, source_ident, false))
+        }
+        Expr2::Var(..) | Expr2::Const(..) | Expr2::Subscript(..) => None,
+    }
+}
+
+/// Check if a BuiltinFn is an array reducer and its argument references the
+/// source variable. Returns the `(ReducerKind, function_name)` if so.
+fn classify_builtin_if_references_source(
+    builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
+    source_ident: &str,
+) -> Option<(ReducerKind, &'static str)> {
+    use crate::builtins::BuiltinFn;
+
+    let canonical_source = canonicalize(source_ident);
+
+    match builtin {
+        BuiltinFn::Sum(arg) => {
+            if expr_references_var(arg, canonical_source.as_ref()) {
+                Some((ReducerKind::Linear, "SUM"))
+            } else {
+                None
+            }
+        }
+        BuiltinFn::Mean(args) => {
+            if args
+                .iter()
+                .any(|a| expr_references_var(a, canonical_source.as_ref()))
+            {
+                Some((ReducerKind::Linear, "MEAN"))
+            } else {
+                None
+            }
+        }
+        // Single-arg MIN/MAX (no second argument) is the array reducer form.
+        BuiltinFn::Min(arg, None) => {
+            if expr_references_var(arg, canonical_source.as_ref()) {
+                Some((ReducerKind::Nonlinear, "MIN"))
+            } else {
+                None
+            }
+        }
+        BuiltinFn::Max(arg, None) => {
+            if expr_references_var(arg, canonical_source.as_ref()) {
+                Some((ReducerKind::Nonlinear, "MAX"))
+            } else {
+                None
+            }
+        }
+        BuiltinFn::Stddev(arg) => {
+            if expr_references_var(arg, canonical_source.as_ref()) {
+                Some((ReducerKind::Nonlinear, "STDDEV"))
+            } else {
+                None
+            }
+        }
+        BuiltinFn::Rank(arg, _) => {
+            if expr_references_var(arg, canonical_source.as_ref()) {
+                Some((ReducerKind::Nonlinear, "RANK"))
+            } else {
+                None
+            }
+        }
+        BuiltinFn::Size(arg) => {
+            if expr_references_var(arg, canonical_source.as_ref()) {
+                Some((ReducerKind::Constant, "SIZE"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Check if an Expr2 references a variable with the given canonical name,
+/// either directly (Var) or via subscript (Subscript).
+fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
+    use crate::ast::Expr2;
+
+    match expr {
+        Expr2::Var(ident, _, _) => ident.as_str() == canonical_name,
+        Expr2::Subscript(ident, _, _, _) => ident.as_str() == canonical_name,
+        Expr2::App(builtin, _, _) => {
+            let mut found = false;
+            builtin.for_each_expr_ref(|sub_expr| {
+                if !found {
+                    found = expr_references_var(sub_expr, canonical_name);
+                }
+            });
+            found
+        }
+        Expr2::Op1(_, inner, _, _) => expr_references_var(inner, canonical_name),
+        Expr2::Op2(_, lhs, rhs, _, _) => {
+            expr_references_var(lhs, canonical_name) || expr_references_var(rhs, canonical_name)
+        }
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            expr_references_var(cond, canonical_name)
+                || expr_references_var(then_e, canonical_name)
+                || expr_references_var(else_e, canonical_name)
+        }
+        Expr2::Const(..) => false,
+    }
+}
+
+/// Generate a per-element link score equation for an arrayed-to-scalar edge.
+///
+/// For element `current_element` of source variable `source_var_name`,
+/// produces the partial equation where ONLY `source[current_element]` varies
+/// while all other elements are held at PREVIOUS values.
+///
+/// `reducer_kind` determines the generation strategy:
+/// - `Linear`: algebraic shortcut (SUM/MEAN) avoids enumerating all elements
+/// - `Nonlinear`: explicit element expansion with selective PREVIOUS wrapping
+/// - `Constant`: caller should skip generation (SIZE always produces 0)
+///
+/// `reducer_name` is the uppercase function name ("MIN", "MAX", "STDDEV", "RANK")
+/// used for nonlinear reducers when reconstructing the function call.
+///
+/// `is_bare` indicates whether the reducer is the entire target equation (true)
+/// or is nested inside surrounding arithmetic like `2 * SUM(...)` (false).
+/// When false, the algebraic shortcut would produce wrong link scores because
+/// it ignores the surrounding arithmetic. In that case, the delta-ratio
+/// fallback (using the target variable directly) is used instead.
+pub(crate) fn generate_element_to_scalar_equation(
+    source_var_name: &str,
+    target_var_name: &str,
+    current_element: &str,
+    all_elements: &[String],
+    reducer_kind: &ReducerKind,
+    reducer_name: &str,
+    is_bare: bool,
+) -> String {
+    let source_q = quote_ident(source_var_name);
+    let target_q = quote_ident(target_var_name);
+    let source_elem = format!("{source_q}[{current_element}]");
+
+    let partial_eq = match reducer_kind {
+        ReducerKind::Constant => {
+            // SIZE is constant; caller should not generate link scores.
+            // Return a zero equation as a defensive fallback.
+            return "0".to_string();
+        }
+        _ if !is_bare => {
+            // The reducer is nested inside surrounding arithmetic (e.g.,
+            // `2 * SUM(population[*])` or `MAX(SUM(population[*]), 0)`).
+            // The algebraic shortcut would ignore the surrounding expression
+            // and produce wrong link scores. Fall back to the delta-ratio
+            // approach: use the target variable directly, which measures the
+            // ratio of actual target change to source element change. This is
+            // approximate (like STDDEV/RANK) but avoids the wrong-multiplier
+            // bug that the algebraic shortcut would introduce.
+            target_q.to_string()
+        }
+        ReducerKind::Linear => generate_linear_partial(
+            &source_q,
+            &target_q,
+            current_element,
+            all_elements.len(),
+            reducer_name,
+        ),
+        ReducerKind::Nonlinear => generate_nonlinear_partial(
+            &source_q,
+            &target_q,
+            current_element,
+            all_elements,
+            reducer_name,
+        ),
+    };
+
+    // Standard link score formula wrapping the partial equation.
+    let abs_part = format!(
+        "ABS(SAFEDIV(({partial_eq} - PREVIOUS({target_q})), ({target_q} - PREVIOUS({target_q})), 0))"
+    );
+    let sign_part = format!(
+        "SIGN(SAFEDIV(({partial_eq} - PREVIOUS({target_q})), ({source_elem} - PREVIOUS({source_elem})), 0))"
+    );
+
+    format!(
+        "if \
+            (TIME = INITIAL_TIME) \
+            then 0 \
+            else if \
+                (({target_q} - PREVIOUS({target_q})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
+                then 0 \
+                else {abs_part} * {sign_part}"
+    )
+}
+
+/// Generate the partial evaluation for a linear reducer (SUM or MEAN).
+///
+/// SUM: PREVIOUS(target) + (source[elem] - PREVIOUS(source[elem]))
+/// MEAN: PREVIOUS(target) + (source[elem] - PREVIOUS(source[elem])) / N
+fn generate_linear_partial(
+    source_q: &str,
+    target_q: &str,
+    current_element: &str,
+    n_elements: usize,
+    reducer_name: &str,
+) -> String {
+    let delta =
+        format!("({source_q}[{current_element}] - PREVIOUS({source_q}[{current_element}]))");
+
+    match reducer_name.to_uppercase().as_str() {
+        "MEAN" => {
+            format!("PREVIOUS({target_q}) + {delta} / {n_elements}")
+        }
+        // SUM is the default linear case
+        _ => {
+            format!("PREVIOUS({target_q}) + {delta}")
+        }
+    }
+}
+
+/// Generate the partial evaluation for a nonlinear reducer.
+///
+/// For MIN/MAX (binary), nests 2-argument calls to enumerate all elements
+/// with selective PREVIOUS wrapping. For STDDEV/RANK (which only accept
+/// array arguments), falls back to the target variable directly -- the
+/// link score then measures the delta-ratio between the target and the
+/// element, which is the best available approximation when ceteris paribus
+/// decomposition is not expressible in the equation language.
+fn generate_nonlinear_partial(
+    source_q: &str,
+    target_q: &str,
+    current_element: &str,
+    all_elements: &[String],
+    reducer_name: &str,
+) -> String {
+    match reducer_name.to_uppercase().as_str() {
+        "MIN" | "MAX" => {
+            // Nest binary calls: MIN(a, MIN(b, MIN(c, d))) etc.
+            // Each element is either current (live) or wrapped in PREVIOUS.
+            let args: Vec<String> = all_elements
+                .iter()
+                .map(|elem| {
+                    if elem == current_element {
+                        format!("{source_q}[{elem}]")
+                    } else {
+                        format!("PREVIOUS({source_q}[{elem}])")
+                    }
+                })
+                .collect();
+
+            let fn_name = reducer_name.to_uppercase();
+            if args.len() == 1 {
+                return args[0].clone();
+            }
+            // Build nested binary calls from right to left:
+            // MIN(a, MIN(b, c)) for [a, b, c]
+            let mut result = args[args.len() - 1].clone();
+            for arg in args[..args.len() - 1].iter().rev() {
+                result = format!("{fn_name}({arg}, {result})");
+            }
+            result
+        }
+        _ => {
+            // STDDEV, RANK: cannot decompose into per-element scalar
+            // expressions because these builtins only accept array
+            // arguments. Fall back to the target variable itself, which
+            // gives a delta-ratio link score (how much the target
+            // changed relative to how much this element changed).
+            target_q.to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::{CanonicalDimensionName, CanonicalElementName};
+    use crate::dimensions::{Dimension, NamedDimension};
+
+    fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
+        use std::collections::HashMap;
+        let canonical_elements: Vec<CanonicalElementName> = elements
+            .iter()
+            .map(|e| CanonicalElementName::from_raw(e))
+            .collect();
+        let indexed: HashMap<CanonicalElementName, usize> = canonical_elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.clone(), i))
+            .collect();
+        Dimension::Named(
+            CanonicalDimensionName::from_raw(name),
+            NamedDimension {
+                elements: canonical_elements,
+                indexed_elements: indexed,
+                maps_to: None,
+                mappings: vec![],
+            },
+        )
+    }
+
+    fn make_indexed_dimension(name: &str, size: u32) -> Dimension {
+        Dimension::Indexed(CanonicalDimensionName::from_raw(name), size)
+    }
+
+    // -- dimension_element_names tests --
+
+    #[test]
+    fn test_dimension_element_names_named() {
+        let dim = make_named_dimension("Region", &["NYC", "Boston", "LA"]);
+        let names = dimension_element_names(&dim);
+        assert_eq!(names, vec!["nyc", "boston", "la"]);
+    }
+
+    #[test]
+    fn test_dimension_element_names_indexed() {
+        // Indexed dimensions use 1-based indexing to match the engine's
+        // subscript formatting (see dimensions.rs SubscriptIterator).
+        let dim = make_indexed_dimension("Index", 4);
+        let names = dimension_element_names(&dim);
+        assert_eq!(names, vec!["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn test_dimension_element_names_empty() {
+        let dim = make_named_dimension("Empty", &[]);
+        let names = dimension_element_names(&dim);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_dimension_element_names_indexed_zero() {
+        let dim = make_indexed_dimension("Zero", 0);
+        let names = dimension_element_names(&dim);
+        assert!(names.is_empty());
+    }
+
+    // -- ReducerKind tests --
+
+    #[test]
+    fn test_reducer_kind_equality() {
+        assert_eq!(ReducerKind::Linear, ReducerKind::Linear);
+        assert_eq!(ReducerKind::Nonlinear, ReducerKind::Nonlinear);
+        assert_eq!(ReducerKind::Constant, ReducerKind::Constant);
+        assert_ne!(ReducerKind::Linear, ReducerKind::Nonlinear);
+        assert_ne!(ReducerKind::Linear, ReducerKind::Constant);
+        assert_ne!(ReducerKind::Nonlinear, ReducerKind::Constant);
+    }
+
+    #[test]
+    fn test_reducer_kind_clone() {
+        let kind = ReducerKind::Linear;
+        let cloned = kind.clone();
+        assert_eq!(kind, cloned);
+    }
+
+    // -- classify_reducer tests --
+
+    use crate::ast::{Ast, Expr2, IndexExpr2};
+    use crate::builtins::{BuiltinFn, Loc};
+
+    /// Build a Variable::Var with a hand-built Expr2 AST.
+    fn var_with_expr(expr: Expr2) -> Variable {
+        Variable::Var {
+            ident: Ident::new("target"),
+            ast: Some(Ast::Scalar(expr)),
+            init_ast: None,
+            eqn: None,
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        }
+    }
+
+    /// Build an Expr2 representing `var_name[*]` (subscript with wildcard).
+    fn subscript_wildcard(var_name: &str) -> Expr2 {
+        Expr2::Subscript(
+            Ident::new(var_name),
+            vec![IndexExpr2::Wildcard(Loc::default())],
+            None,
+            Loc::default(),
+        )
+    }
+
+    /// Build an Expr2 representing a plain variable reference.
+    fn var_ref(name: &str) -> Expr2 {
+        Expr2::Var(Ident::new(name), None, Loc::default())
+    }
+
+    #[test]
+    fn test_classify_reducer_sum() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_mean() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Mean(vec![inner]), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Linear, "MEAN", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_min() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Min(Box::new(inner), None), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "MIN", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_max() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Max(Box::new(inner), None), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "MAX", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_stddev() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Stddev(Box::new(inner)), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "STDDEV", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_rank() {
+        let inner = subscript_wildcard("population");
+        let direction = Expr2::Const("1".to_string(), 1.0, Loc::default());
+        let expr = Expr2::App(
+            BuiltinFn::Rank(Box::new(inner), Box::new(direction)),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "RANK", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_size() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Size(Box::new(inner)), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Constant, "SIZE", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_no_reducer() {
+        // A plain addition: x + y
+        let expr = Expr2::Op2(
+            crate::ast::BinaryOp::Add,
+            Box::new(var_ref("x")),
+            Box::new(var_ref("y")),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "x");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_classify_reducer_wrong_source() {
+        let inner = subscript_wildcard("population");
+        let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
+        let var = var_with_expr(expr);
+        // Looking for a different source variable
+        let result = classify_reducer(&var, "other_var");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_classify_reducer_nested_in_expression() {
+        // 2 * SUM(population[*]) + 1
+        // Reducer is NOT at the top level, so is_bare should be false.
+        let inner = subscript_wildcard("population");
+        let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
+        let two = Expr2::Const("2".to_string(), 2.0, Loc::default());
+        let one = Expr2::Const("1".to_string(), 1.0, Loc::default());
+        let mul = Expr2::Op2(
+            crate::ast::BinaryOp::Mul,
+            Box::new(two),
+            Box::new(sum_expr),
+            None,
+            Loc::default(),
+        );
+        let expr = Expr2::Op2(
+            crate::ast::BinaryOp::Add,
+            Box::new(mul),
+            Box::new(one),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", false)));
+    }
+
+    #[test]
+    fn test_classify_reducer_nested_in_scalar_max() {
+        // MAX(SUM(population[*]), 0) -- scalar MAX wrapping array SUM
+        // The SUM is nested inside a non-reducer App, so is_bare should be false.
+        let inner = subscript_wildcard("population");
+        let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
+        let zero = Expr2::Const("0".to_string(), 0.0, Loc::default());
+        let expr = Expr2::App(
+            BuiltinFn::Max(Box::new(sum_expr), Some(Box::new(zero))),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", false)));
+    }
+
+    #[test]
+    fn test_classify_reducer_var_ref_no_subscript() {
+        // SUM with a plain var reference (no subscript) should still match
+        let inner = var_ref("population");
+        let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", true)));
+    }
+
+    #[test]
+    fn test_classify_reducer_no_ast() {
+        // Variable without an AST
+        let var: Variable = Variable::Var {
+            ident: Ident::new("target"),
+            ast: None,
+            init_ast: None,
+            eqn: None,
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_classify_reducer_two_arg_min_not_reducer() {
+        // MIN(x, y) with two args is NOT an array reducer
+        let inner1 = var_ref("population");
+        let inner2 = var_ref("threshold");
+        let expr = Expr2::App(
+            BuiltinFn::Min(Box::new(inner1), Some(Box::new(inner2))),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_classify_reducer_two_arg_max_not_reducer() {
+        // MAX(x, y) with two args is NOT an array reducer
+        let inner1 = var_ref("population");
+        let inner2 = var_ref("threshold");
+        let expr = Expr2::App(
+            BuiltinFn::Max(Box::new(inner1), Some(Box::new(inner2))),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, None);
+    }
+
+    // -- generate_element_to_scalar_equation tests --
+
+    #[test]
+    fn test_generate_sum_equation() {
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "total_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        // Should contain the algebraic shortcut
+        assert!(eq.contains("PREVIOUS(total_pop)"), "equation: {eq}");
+        assert!(eq.contains("population[nyc]"), "equation: {eq}");
+        assert!(eq.contains("PREVIOUS(population[nyc])"), "equation: {eq}");
+        // Should not enumerate other elements (algebraic shortcut avoids them)
+        assert!(
+            !eq.contains("[boston]"),
+            "equation should not enumerate boston: {eq}"
+        );
+        assert!(
+            !eq.contains("[la]"),
+            "equation should not enumerate la: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_mean_equation() {
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "avg_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "MEAN",
+            true,
+        );
+        // MEAN divides by N
+        assert!(eq.contains("/ 3"), "equation: {eq}");
+        assert!(eq.contains("PREVIOUS(avg_pop)"), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_min_equation() {
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "min_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Nonlinear,
+            "MIN",
+            true,
+        );
+        // Should enumerate all elements with nested binary MIN calls
+        assert!(eq.contains("population[nyc]"), "equation: {eq}");
+        assert!(
+            eq.contains("PREVIOUS(population[boston])"),
+            "equation: {eq}"
+        );
+        assert!(eq.contains("PREVIOUS(population[la])"), "equation: {eq}");
+        // Nested binary calls: MIN(a, MIN(b, c))
+        assert!(
+            eq.contains(
+                "MIN(population[nyc], MIN(PREVIOUS(population[boston]), PREVIOUS(population[la])))"
+            ),
+            "equation: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_max_equation() {
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "max_pop",
+            "boston",
+            &elements,
+            &ReducerKind::Nonlinear,
+            "MAX",
+            true,
+        );
+        // boston is the current element, so nyc and la are wrapped
+        // Nested binary calls: MAX(a, MAX(b, c))
+        assert!(
+            eq.contains(
+                "MAX(PREVIOUS(population[nyc]), MAX(population[boston], PREVIOUS(population[la])))"
+            ),
+            "equation: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_constant_returns_zero() {
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "size_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Constant,
+            "SIZE",
+            true,
+        );
+        assert_eq!(eq, "0");
+    }
+
+    #[test]
+    fn test_generate_nested_reducer_uses_delta_ratio() {
+        // When the reducer is nested (is_bare=false), the equation should
+        // fall back to the delta-ratio approach (using target directly)
+        // instead of the algebraic shortcut.
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "total_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            false, // nested reducer
+        );
+        // Should NOT use the algebraic shortcut (PREVIOUS(target) + delta)
+        assert!(
+            !eq.contains("PREVIOUS(total_pop) +"),
+            "should not use algebraic shortcut for nested reducer: {eq}"
+        );
+        // Should still have the standard link score wrapping
+        assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+        assert!(eq.contains("SAFEDIV("), "equation: {eq}");
+        // The partial equation uses target directly (delta-ratio approach)
+        assert!(
+            eq.contains("(total_pop - PREVIOUS(total_pop))"),
+            "should use target variable in delta-ratio: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_link_score_wrapping() {
+        let elements = vec!["a".to_string(), "b".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "src",
+            "tgt",
+            "a",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        // Should have initial time guard
+        assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+        // Should have zero-change guards
+        assert!(eq.contains("(tgt - PREVIOUS(tgt)) = 0"), "equation: {eq}");
+        assert!(
+            eq.contains("(src[a] - PREVIOUS(src[a])) = 0"),
+            "equation: {eq}"
+        );
+        // Should have ABS and SIGN parts
+        assert!(eq.contains("ABS(SAFEDIV("), "equation: {eq}");
+        assert!(eq.contains("SIGN(SAFEDIV("), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_special_chars_quoted() {
+        let elements = vec!["nyc".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "$\u{205A}ltm\u{205A}var",
+            "total",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        // Source name with special chars should be quoted
+        assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");
+    }
 }

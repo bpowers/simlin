@@ -249,6 +249,46 @@ impl TestProject {
         self.array_aux_direct(&name, dims, equation, None)
     }
 
+    /// Add an array stock using "name[dims]" notation (apply-to-all equation)
+    pub fn array_stock(
+        mut self,
+        name_with_dims: &str,
+        initial: &str,
+        inflows: &[&str],
+        outflows: &[&str],
+        units: Option<&str>,
+    ) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        self.variables.push(Variable::Stock(datamodel::Stock {
+            ident: name,
+            equation: Equation::ApplyToAll(dims, initial.to_string()),
+            documentation: String::new(),
+            units: units.map(|s| s.to_string()),
+            inflows: inflows.iter().map(|s| s.to_string()).collect(),
+            outflows: outflows.iter().map(|s| s.to_string()).collect(),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
+    /// Add an array flow using "name[dims]" notation (apply-to-all equation)
+    pub fn array_flow(mut self, name_with_dims: &str, equation: &str, units: Option<&str>) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        self.variables.push(Variable::Flow(datamodel::Flow {
+            ident: name,
+            equation: Equation::ApplyToAll(dims, equation.to_string()),
+            documentation: String::new(),
+            units: units.map(|s| s.to_string()),
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
     /// Add an array with different equations for different subscript ranges using "name[dims]" notation
     pub fn array_with_ranges(
         self,
@@ -727,5 +767,62 @@ pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
         (name, dims)
     } else {
         (decl.to_string(), vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_array_stock_and_flow_build() {
+        let project_builder = TestProject::new("test")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+
+        let project = project_builder.build_datamodel();
+        let model = &project.models[0];
+
+        // Verify the stock has ApplyToAll equation with correct dimensions
+        let stock = model
+            .variables
+            .iter()
+            .find(|v| matches!(v, Variable::Stock(s) if s.ident == "population"))
+            .expect("population stock should exist");
+        match stock {
+            Variable::Stock(s) => match &s.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["Region".to_string()]);
+                    assert_eq!(eq, "100");
+                }
+                other => panic!("expected ApplyToAll equation for stock, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+
+        // Verify the flow has ApplyToAll equation with correct dimensions
+        let flow = model
+            .variables
+            .iter()
+            .find(|v| matches!(v, Variable::Flow(f) if f.ident == "births"))
+            .expect("births flow should exist");
+        match flow {
+            Variable::Flow(f) => match &f.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["Region".to_string()]);
+                    assert_eq!(eq, "population * 0.1");
+                }
+                other => panic!("expected ApplyToAll equation for flow, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+
+        // Verify the model compiles without errors via the incremental path
+        let project_builder2 = TestProject::new("test")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+        project_builder2.assert_compiles_incremental();
     }
 }

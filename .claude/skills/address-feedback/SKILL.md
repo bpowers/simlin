@@ -5,6 +5,8 @@ description: Improve the current branch's changes by getting code reviews in a l
 
 You are performing iterative code review and improvement using local review tools.  This skill takes no arguments (if any were given, ignore).  You are operating on the local checkout.  If the current branch is `main`, your task is reviewing the changes between `origin/main..HEAD` (or `master` and `origin/master` respectively if that is the convention in the repo).
 
+IMPORTANT: we have NO time or deadline pressure.  What is important is implementing the best, most principled, maintainable improvements to any problems identified (following CLAUDE.md guidance).
+
 ## Prerequisites (verify before starting)
 
 1. **Feature branch**: Confirm you're NOT on `main`. If you are, checkout a new branch with an appropriate name.
@@ -46,6 +48,8 @@ Then run both reviews and collect their output:
 
 > Use the Skill tool to invoke the "review" skill with argument "<PR_NUMBER>" to review PR #<PR_NUMBER>.
 
+Each of these may take up to 20 minutes to complete.
+Prefer to simply wait for the notification that they are done rather than wasting context polling.
 Wait for the sub-agent to complete and use its returned review output.
 
 ### Step 2: Evaluate feedback

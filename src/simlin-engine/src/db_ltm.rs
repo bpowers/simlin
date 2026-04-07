@@ -51,22 +51,33 @@ pub(super) fn ltm_module_idents(
     module_idents
 }
 
-/// Parse an LTM synthetic variable's equation string as a scalar aux.
+/// Parse an LTM synthetic variable's equation string.
 ///
 /// Creates a transient `datamodel::Variable::Aux`, runs it through
 /// `parse_var` (which invokes `BuiltinVisitor` and
 /// `instantiate_implicit_modules`), and returns the parsed variable plus
 /// any implicit helper/module variables generated while parsing.
+///
+/// When `var_dimensions` is non-empty, the equation is wrapped in
+/// `Equation::ApplyToAll` so the compiler expands it across all
+/// dimension elements. When empty, the equation is scalar (original
+/// behavior).
 pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &str,
+    var_dimensions: &[String],
     dims: &[datamodel::Dimension],
     units_ctx: &crate::units::Context,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
+    let eqn = if var_dimensions.is_empty() {
+        datamodel::Equation::Scalar(equation.to_string())
+    } else {
+        datamodel::Equation::ApplyToAll(var_dimensions.to_vec(), equation.to_string())
+    };
     let dm_var = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize(var_name).into_owned(),
-        equation: datamodel::Equation::Scalar(equation.to_string()),
+        equation: eqn,
         documentation: String::new(),
         units: None,
         gf: None,
@@ -95,12 +106,20 @@ pub(super) fn parse_ltm_equation_for_model_with_ids(
     db: &dyn Db,
     var_name: &str,
     equation: &str,
+    var_dimensions: &[String],
     project: SourceProject,
     module_idents: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
-    parse_ltm_equation(var_name, equation, dims, units_ctx, Some(module_idents))
+    parse_ltm_equation(
+        var_name,
+        equation,
+        var_dimensions,
+        dims,
+        units_ctx,
+        Some(module_idents),
+    )
 }
 
 pub(super) fn parse_ltm_var_with_ids(
@@ -113,6 +132,7 @@ pub(super) fn parse_ltm_var_with_ids(
         db,
         &ltm_var.name,
         &ltm_var.equation,
+        &ltm_var.dimensions,
         project,
         module_idents,
     )
@@ -169,6 +189,7 @@ pub fn model_ltm_implicit_var_info(
         let parsed = parse_ltm_equation(
             &ltm_var.name,
             &ltm_var.equation,
+            &ltm_var.dimensions,
             dims,
             units_ctx,
             Some(&module_idents),
@@ -242,7 +263,14 @@ pub fn compile_ltm_var_fragment(
 ) -> Option<VarFragmentResult> {
     let lsv = link_score_equation_text(db, link_id, model, project).as_ref()?;
 
-    compile_ltm_equation_fragment(db, &lsv.name, &lsv.equation, model, project)
+    compile_ltm_equation_fragment(
+        db,
+        &lsv.name,
+        &lsv.equation,
+        &lsv.dimensions,
+        model,
+        project,
+    )
 }
 
 /// Compile an arbitrary LTM equation string to symbolic bytecodes.
@@ -251,10 +279,15 @@ pub fn compile_ltm_var_fragment(
 /// and the loop/relative score compilation in `assemble_module`. Builds
 /// a mini-context that includes both model variables and implicit vars
 /// synthesized while parsing the LTM equation.
+///
+/// When `var_dimensions` is non-empty, the equation is compiled as
+/// Apply-to-All (A2A), producing bytecodes spanning
+/// `product(dim_lengths)` slots. When empty, the variable is scalar.
 pub(super) fn compile_ltm_equation_fragment(
     db: &dyn Db,
     var_name: &str,
     equation: &str,
+    var_dimensions: &[String],
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
@@ -272,7 +305,14 @@ pub(super) fn compile_ltm_equation_fragment(
     let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
 
-    let parsed = parse_ltm_equation(var_name, equation, dims, units_ctx, Some(&module_idents));
+    let parsed = parse_ltm_equation(
+        var_name,
+        equation,
+        var_dimensions,
+        dims,
+        units_ctx,
+        Some(&module_idents),
+    );
 
     // Check for parse errors
     if parsed
@@ -283,7 +323,9 @@ pub(super) fn compile_ltm_equation_fragment(
         return None;
     }
 
-    // Lower the variable. LTM vars are always scalar auxes.
+    // Lower the variable. Scalar LTM vars produce a plain Var;
+    // A2A LTM vars produce a Var with dimension views that the
+    // compiler's expand_a2a_with_hoisting handles automatically.
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
         models: &models,
@@ -398,16 +440,30 @@ pub(super) fn compile_ltm_equation_fragment(
         );
     }
 
+    // Compute the LTM variable's size from its dimensions.
+    // Scalar vars get size 1; A2A vars get product(dim_lengths).
+    let var_size: usize = if var_dimensions.is_empty() {
+        1
+    } else {
+        var_dimensions
+            .iter()
+            .map(|dim_name| {
+                let canonical = crate::common::CanonicalDimensionName::from_raw(dim_name);
+                dim_context.get(&canonical).map(|d| d.len()).unwrap_or(1)
+            })
+            .product()
+    };
+
     // Add self (the LTM var itself)
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
             offset: mini_offset,
-            size: 1,
+            size: var_size,
             var: &lowered,
         },
     );
-    mini_offset += 1;
+    mini_offset += var_size;
 
     // Collect dependency variable names from the lowered AST
     let dep_idents = if let Some(ast) = lowered.ast() {
@@ -622,6 +678,7 @@ pub(super) fn compile_ltm_equation_fragment(
                         let parent_parsed = parse_ltm_equation(
                             &parent_lsv.name,
                             &parent_lsv.equation,
+                            &parent_lsv.dimensions,
                             dims,
                             units_ctx,
                             Some(&module_idents),
@@ -1673,6 +1730,300 @@ fn find_model_output_ports(
     output_ports.into_iter().collect()
 }
 
+/// Strip the subscript suffix from an element-level node name.
+///
+/// For `"population[nyc]"` returns `"population"`. For `"scalar_var"`
+/// (no bracket) returns the name unchanged. For multi-dimensional
+/// subscripts like `"x[nyc,boston]"` the same rule applies: find last
+/// `[`, truncate there.
+fn strip_subscript(name: &str) -> &str {
+    match name.rfind('[') {
+        Some(pos) => &name[..pos],
+        None => name,
+    }
+}
+
+/// Compute the cartesian product of element name lists as comma-joined
+/// subscript strings.
+///
+/// For a single dimension `[["nyc", "boston"]]`, returns `["nyc", "boston"]`.
+/// For two dimensions `[["nyc", "boston"], ["adult", "child"]]`, returns
+/// `["nyc,adult", "nyc,child", "boston,adult", "boston,child"]`.
+fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
+    if dim_element_lists.is_empty() {
+        return vec![];
+    }
+    let mut result: Vec<String> = dim_element_lists[0].clone();
+    for dim_elements in &dim_element_lists[1..] {
+        let mut expanded = Vec::with_capacity(result.len() * dim_elements.len());
+        for existing in &result {
+            for elem in dim_elements {
+                expanded.push(format!("{existing},{elem}"));
+            }
+        }
+        result = expanded;
+    }
+    result
+}
+
+/// Build `Loop` structs from element-level circuits, grouping
+/// pure-dimension circuits into shared A2A loops and keeping mixed
+/// circuits as individual scalar loops.
+///
+/// Pure-dimension: all circuits in a group have the same variable-level
+/// node sequence (e.g., `[population, births]` for both `[population[nyc],
+/// births[nyc]]` and `[population[boston], births[boston]]`). These share
+/// one loop ID and produce an A2A loop score with dimensions.
+///
+/// Mixed: any circuit containing a scalar node or where the group has
+/// circuits with different variable-level structures. Each gets its own
+/// scalar loop with a unique element-specific ID suffix.
+fn build_element_level_loops(
+    element_circuits: &[Vec<String>],
+    var_graph: &crate::ltm::CausalGraph,
+    source_vars: &HashMap<String, super::SourceVariable>,
+    db: &dyn Db,
+    project: SourceProject,
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<crate::ltm::Loop> {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{Loop, assign_loop_ids};
+
+    // Group element-level circuits by their variable-level node sequence.
+    // The key is the joined stripped names; the value collects all circuits
+    // that share that variable-level structure.
+    let mut groups: HashMap<String, Vec<&Vec<String>>> = HashMap::new();
+    for circuit in element_circuits {
+        let var_level_key: String = circuit
+            .iter()
+            .map(|n| strip_subscript(n))
+            .collect::<Vec<_>>()
+            .join("\x00");
+        groups.entry(var_level_key).or_default().push(circuit);
+    }
+
+    // Sort groups deterministically by their key.
+    let mut sorted_groups: Vec<(String, Vec<&Vec<String>>)> = groups.into_iter().collect();
+    sorted_groups.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut all_loops: Vec<Loop> = Vec::new();
+
+    for (_group_key, circuits_in_group) in &sorted_groups {
+        // Determine if this is a pure-dimension group.
+        //
+        // A group is pure-dimension when:
+        // 1. Every node in every circuit has a subscript (no scalar nodes)
+        // 2. The stripped variable-level sequence has NO repeated variables
+        //    (repeated variables indicate cross-element circuits, e.g.,
+        //    pop[nyc]->share[boston]->...->pop[boston]->share[nyc], where
+        //    "population" appears twice in the stripped sequence)
+        // 3. The group has more than one circuit (multiple elements share
+        //    the same structure), OR has exactly one circuit with subscripted
+        //    nodes (single-element dimension is still A2A)
+        //
+        // When a model has no arrayed variables, circuits won't have
+        // subscripts and each group has exactly one circuit -- they are
+        // scalar loops.
+        let representative = circuits_in_group[0];
+        let all_subscripted = representative.iter().all(|n| n.contains('['));
+
+        // Detect cross-element circuits that should NOT be collapsed
+        // into A2A loops. Two patterns indicate cross-element:
+        //
+        // 1. Repeated variable names: the stripped sequence has a variable
+        //    appearing more than once (e.g., pop[nyc]->share[boston]->
+        //    pop[boston]->share[nyc] has pop and share each twice).
+        //
+        // 2. Mixed subscripts: nodes in a circuit have different element
+        //    subscripts at shared dimensions. A genuine A2A circuit visits
+        //    each variable at the SAME element in shared dimensions
+        //    (pop[nyc]->births[nyc]->pop[nyc], all nyc). Cross-element
+        //    circuits visit different elements (pop[nyc]->mp[boston]->...).
+        //
+        //    Partial-collapse loops are NOT cross-element: source[a,x]->
+        //    target[a] has subscripts "a,x" and "a" which differ in length
+        //    but share the same element "a" on the shared dimension. We
+        //    compare only the first element (leading shared dimension).
+        let is_cross_element = if all_subscripted {
+            // Check 1: repeated variable names
+            let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
+            let mut seen = std::collections::HashSet::new();
+            let has_repeated = stripped.iter().any(|v| !seen.insert(*v));
+            if has_repeated {
+                true
+            } else {
+                // Check 2: compare the leading (first) subscript element
+                // across all nodes. Nodes with partial-collapse dimensions
+                // have fewer subscript components (e.g., "a" vs "a,x"), but
+                // the leading element is shared. If leading elements differ,
+                // it's a genuine cross-element circuit.
+                circuits_in_group.iter().any(|circuit| {
+                    let leading_elements: Vec<&str> = circuit
+                        .iter()
+                        .filter_map(|n| {
+                            let start = n.find('[')?;
+                            let end = n.rfind(']')?;
+                            let subscript = &n[start + 1..end];
+                            // Take the first comma-separated component
+                            Some(subscript.split(',').next().unwrap_or(subscript))
+                        })
+                        .collect();
+                    // If leading elements differ, it's cross-element
+                    leading_elements.windows(2).any(|w| w[0] != w[1])
+                })
+            }
+        } else {
+            false
+        };
+
+        if all_subscripted && !is_cross_element && !representative.is_empty() {
+            // Pure-dimension group: produce a single A2A loop.
+            //
+            // Use the variable-level graph for polarity analysis and stock
+            // detection (the element-level graph has empty variables).
+            let var_level_nodes: Vec<Ident<Canonical>> = representative
+                .iter()
+                .map(|n| Ident::new(strip_subscript(n)))
+                .collect();
+            let links = var_graph.circuit_to_links(&var_level_nodes);
+            let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+            let polarity = var_graph.calculate_polarity(&links);
+
+            // Determine the shared dimension(s) from the subscripts.
+            // Look at the first subscripted node to find which dimensions
+            // it carries, then map canonical dim names to original
+            // datamodel names for equation parsing.
+            let first_var_name = strip_subscript(&representative[0]);
+            let dimensions = source_vars
+                .get(first_var_name)
+                .map(|sv| {
+                    variable_dimensions(db, *sv, project)
+                        .iter()
+                        .map(|d| {
+                            let canonical = d.name();
+                            dm_dims
+                                .iter()
+                                .find(|dm| {
+                                    crate::common::canonicalize(dm.name()).as_ref() == canonical
+                                })
+                                .map(|dm| dm.name().to_string())
+                                .unwrap_or_else(|| canonical.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            all_loops.push(Loop {
+                id: String::new(),
+                links,
+                stocks,
+                polarity,
+                dimensions,
+            });
+        } else if is_cross_element {
+            // Cross-element circuits (mixed subscripts or repeated variable
+            // names). These circuits reference off-diagonal element edges
+            // like population[nyc] → migration_pressure[boston], for which
+            // no dedicated link score variables exist.
+            //
+            // Rather than dropping these entirely (which would leave models
+            // with ONLY cross-element feedback with no scored loops), extract
+            // the unique variable-level cycle and create a SCALAR loop that
+            // references existing A2A link score variables. The resulting
+            // loop score uses diagonal link score values as an approximation
+            // (the actual off-diagonal sensitivities may differ).
+            //
+            // Deduplication: strip subscripts and take the shortest unique
+            // cycle. E.g., pop[nyc]→mp[boston]→mo[boston]→pop[boston]→mp[nyc]→
+            // mo[nyc] has stripped sequence pop,mp,mo,pop,mp,mo; the unique
+            // cycle starting at the first repeat is pop→mp→mo.
+            let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
+
+            // Find the shortest unique cycle in the stripped sequence
+            let mut unique_cycle: Vec<Ident<Canonical>> = Vec::new();
+            let mut seen_set = std::collections::HashSet::new();
+            for name in &stripped {
+                if !seen_set.insert(*name) {
+                    break; // found a repeat, cycle is complete
+                }
+                unique_cycle.push(Ident::new(name));
+            }
+
+            if unique_cycle.len() >= 2 {
+                let links = var_graph.circuit_to_links(&unique_cycle);
+                let stocks = var_graph.find_stocks_in_loop(&unique_cycle);
+                let polarity = var_graph.calculate_polarity(&links);
+
+                all_loops.push(Loop {
+                    id: String::new(),
+                    links,
+                    stocks,
+                    polarity,
+                    dimensions: vec![], // scalar: approximate cross-element score
+                });
+            }
+        } else {
+            // Mixed or scalar group: each circuit becomes its own scalar loop.
+            for circuit in circuits_in_group {
+                // For mixed loops, we can still attempt polarity via the
+                // variable-level graph. Strip subscripts and analyze.
+                let var_level_nodes: Vec<Ident<Canonical>> = circuit
+                    .iter()
+                    .map(|n| Ident::new(strip_subscript(n)))
+                    .collect();
+                let var_links = var_graph.circuit_to_links(&var_level_nodes);
+                let polarity = var_graph.calculate_polarity(&var_links);
+
+                // For the actual loop links, use element-level names so
+                // the link score references match the generated per-element
+                // link score variable names.
+                let element_nodes: Vec<Ident<Canonical>> =
+                    circuit.iter().map(|n| Ident::new(n)).collect();
+
+                // Build element-level links with polarity from var-level analysis.
+                let mut links = Vec::with_capacity(element_nodes.len());
+                for (i, _) in element_nodes.iter().enumerate() {
+                    let from = &element_nodes[i];
+                    let to = &element_nodes[(i + 1) % element_nodes.len()];
+                    // Use the polarity from the corresponding var-level link
+                    let var_link_polarity = if i < var_links.len() {
+                        var_links[i].polarity
+                    } else {
+                        crate::ltm::LinkPolarity::Unknown
+                    };
+                    links.push(crate::ltm::Link {
+                        from: from.clone(),
+                        to: to.clone(),
+                        polarity: var_link_polarity,
+                    });
+                }
+
+                // Find stocks among element-level nodes. We check the
+                // variable-level stock set by stripping subscripts.
+                let stocks: Vec<Ident<Canonical>> = element_nodes
+                    .iter()
+                    .filter(|n| {
+                        let var_name = strip_subscript(n.as_str());
+                        var_graph.stocks.contains(&Ident::new(var_name))
+                    })
+                    .cloned()
+                    .collect();
+
+                all_loops.push(Loop {
+                    id: String::new(),
+                    links,
+                    stocks,
+                    polarity,
+                    dimensions: vec![],
+                });
+            }
+        }
+    }
+
+    assign_loop_ids(&mut all_loops);
+    all_loops
+}
+
 /// Unified LTM variable generation for any model (root or sub-model).
 ///
 /// Auto-detects sub-model behavior by checking for input ports with causal
@@ -1689,14 +2040,14 @@ pub fn model_ltm_variables(
     model: SourceModel,
     project: SourceProject,
 ) -> super::LtmVariablesResult {
-    use crate::common::{Canonical, Ident};
-    use crate::ltm::{CyclePartitions, Loop, assign_loop_ids};
+    use crate::common::Ident;
+    use crate::ltm::{CyclePartitions, Loop};
     use std::collections::HashSet;
 
     use super::{
         LtmLinkId, LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules,
-        generate_max_abs_chain_str, model_causal_edges, model_cycle_partitions,
-        model_loop_circuits, module_input_pathways_from_edges,
+        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
+        model_element_loop_circuits, module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
@@ -1725,38 +2076,45 @@ pub fn model_ltm_variables(
 
     let mut vars = Vec::new();
 
-    // Pre-compute loops for exhaustive mode. Both the link-score
-    // strategy (loop edges only) and loop/relative score generation
-    // share this data, so compute once and reuse.
+    // Fetch source variables and dimension metadata early -- needed by
+    // both loop pre-computation (for dimension lookups) and link score
+    // classification.
+    let source_vars = model.variables(db);
+    let dm_dims = project_datamodel_dims(db, project);
+
+    // Pre-compute loops for exhaustive mode using element-level circuit
+    // detection. Element-level circuits capture per-element feedback
+    // (e.g., population[NYC] -> births[NYC] -> population[NYC]) and
+    // cross-element feedback (e.g., population[NYC] -> migration ->
+    // population[Boston]).
+    //
+    // Pure-dimension loops (all nodes in a group of circuits share the
+    // same variable-level structure, differing only by subscript) produce
+    // a single A2A loop with shared ID. Mixed loops (involving scalar
+    // nodes or cross-element edges) produce individual scalar loops.
+    //
+    // We also need the variable-level graph for polarity analysis since
+    // the element-level graph has no variable data populated.
     let loops: Option<Vec<Loop>> = if !is_discovery {
-        let circuits_result = model_loop_circuits(db, model, project);
+        let circuits_result = model_element_loop_circuits(db, model, project);
         if circuits_result.circuits.is_empty() {
             if !has_input_ports {
                 return LtmVariablesResult { vars: vec![] };
             }
             None
         } else {
-            let graph = causal_graph_with_modules(db, model, project);
+            // Build the variable-level graph with populated variables for
+            // polarity analysis. Element-level graphs have empty variables.
+            let var_graph = causal_graph_with_modules(db, model, project);
 
-            let mut detected: Vec<Loop> = circuits_result
-                .circuits
-                .iter()
-                .map(|circuit_strs| {
-                    let circuit: Vec<Ident<Canonical>> =
-                        circuit_strs.iter().map(|s| Ident::new(s)).collect();
-                    let links = graph.circuit_to_links(&circuit);
-                    let parent_stocks = graph.find_stocks_in_loop(&circuit);
-                    let polarity = graph.calculate_polarity(&links);
-                    Loop {
-                        id: String::new(),
-                        links,
-                        stocks: parent_stocks,
-                        polarity,
-                    }
-                })
-                .collect();
-
-            assign_loop_ids(&mut detected);
+            let detected = build_element_level_loops(
+                &circuits_result.circuits,
+                &var_graph,
+                source_vars,
+                db,
+                project,
+                dm_dims,
+            );
             Some(detected)
         }
     } else {
@@ -1767,12 +2125,214 @@ pub fn model_ltm_variables(
     // Sub-models and discovery mode need scores for ALL edges (pathways
     // reference arbitrary edges). Exhaustive root models only need
     // scores for edges that participate in loops.
+    //
+    // For each link score, classify the edge to determine whether the
+    // score should be arrayed (A2A). When the target variable has
+    // dimensions and either the source is scalar or shares the same
+    // dimensions, the link score inherits the target's dimensions so
+    // that per-element scores are computed via the A2A expansion.
+
+    /// Determine the dimensions a link score should carry.
+    ///
+    /// Returns the target's dimension names when the edge is
+    /// same-dimension A2A or scalar-to-arrayed. Returns empty for
+    /// scalar edges, module-involved links (modules are scalar nodes),
+    /// and arrayed-to-scalar edges (cross-dimensional; handled by
+    /// `try_cross_dimensional_link_scores` which generates N separate
+    /// scalar variables).
+    ///
+    /// The returned names use the original datamodel casing (e.g.,
+    /// "Region" not "region") because `parse_ltm_equation` feeds them
+    /// into `Equation::ApplyToAll`, which `get_dimensions` resolves by
+    /// exact string match against the project's datamodel dimensions.
+    fn link_score_dimensions(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        project: SourceProject,
+        dm_dims: &[crate::datamodel::Dimension],
+    ) -> Vec<String> {
+        let to_sv = match source_vars.get(to) {
+            Some(sv) => sv,
+            // Implicit variables (SMOOTH/DELAY expansions) may not be
+            // in source_vars; treat as scalar.
+            None => return vec![],
+        };
+        // Module variables are scalar nodes in the causal graph.
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return vec![];
+        }
+        let to_dims = variable_dimensions(db, *to_sv, project);
+        if to_dims.is_empty() {
+            return vec![];
+        }
+
+        let from_dims = source_vars
+            .get(from)
+            .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
+            .map(|sv| variable_dimensions(db, *sv, project).clone())
+            .unwrap_or_default();
+
+        // Same-dimension A2A: both have identical dimension(s).
+        // Scalar-to-arrayed: source is scalar, target is arrayed.
+        // Partial-collapse: source has more dimensions than target, but all
+        //   target dimensions are present in the source (e.g., source[D1,D2]
+        //   -> target[D1]). The link score gets the target's (shared) dims.
+        //
+        // NOTE: When from_dims == to_dims and the dependency is CrossElement
+        // (e.g., `share[R] = population[R] / SUM(population[*])`), this
+        // creates only N diagonal link scores (one per element). Off-diagonal
+        // link scores (e.g., population[boston] -> share[nyc]) are not
+        // generated. Cross-element circuits are detected by
+        // build_element_level_loops and scored approximately using
+        // variable-level link references.
+        //
+        // Check whether this edge should use the target's dimensions for
+        // the link score. This covers:
+        // - Same-dimension A2A: from_dims == to_dims
+        // - Scalar-to-arrayed: from_dims is empty
+        // - Partial-collapse: to_dims ⊆ from_dims (e.g., [D1,D2]→[D1])
+        // - Broadcast: from_dims ⊆ to_dims (e.g., [D1]→[D1,D2])
+        //
+        // In all these cases, the link score inherits the target's
+        // dimensions so per-element values are computed via A2A expansion.
+        let dims_compatible = from_dims.is_empty()
+            || from_dims == *to_dims
+            || to_dims
+                .iter()
+                .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()))
+            || from_dims
+                .iter()
+                .all(|fd| to_dims.iter().any(|td| td.name() == fd.name()));
+
+        if dims_compatible {
+            // Map canonical dimension names back to their original
+            // datamodel names for correct equation parsing.
+            to_dims
+                .iter()
+                .map(|d| {
+                    let canonical = d.name();
+                    dm_dims
+                        .iter()
+                        .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                        .map(|dm| dm.name().to_string())
+                        .unwrap_or_else(|| canonical.to_string())
+                })
+                .collect()
+        } else {
+            // Cross-dimensional (arrayed-to-scalar, or mismatched
+            // dimensions). These edges are handled by
+            // try_cross_dimensional_link_scores which generates N
+            // separate scalar variables instead of one arrayed variable.
+            // Return empty here so the normal A2A path is skipped.
+            vec![]
+        }
+    }
+
+    /// Generate per-element link score variables for a cross-dimensional
+    /// (arrayed-to-scalar) edge, or return `None` if the edge is not
+    /// cross-dimensional.
+    ///
+    /// When an arrayed source feeds a scalar target through an
+    /// array-reducing builtin (SUM, MEAN, MIN, MAX, STDDEV, RANK),
+    /// each element gets its own scalar link score variable measuring
+    /// how much varying that single element affects the scalar target
+    /// while holding all other elements at their previous values.
+    ///
+    /// Returns `None` for scalar-to-scalar, A2A (same-dimension), and
+    /// any edge where the reducer cannot be classified. Returns
+    /// `Some(vec![])` for SIZE edges (constant reducer, no scores).
+    fn try_cross_dimensional_link_scores(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        model: SourceModel,
+        project: SourceProject,
+    ) -> Option<Vec<LtmSyntheticVar>> {
+        // Only applies when source is arrayed and target is scalar.
+        let from_sv = source_vars.get(from)?;
+        if from_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let from_dims = variable_dimensions(db, *from_sv, project);
+        if from_dims.is_empty() {
+            return None;
+        }
+
+        let to_sv = source_vars.get(to)?;
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let to_dims = variable_dimensions(db, *to_sv, project);
+        if !to_dims.is_empty() {
+            // Same-dimension A2A or other multi-dimensional case:
+            // not cross-dimensional.
+            return None;
+        }
+
+        // The source is arrayed and the target is scalar. Classify the
+        // reducing function in the target's equation.
+        let to_var = super::reconstruct_single_variable(db, model, project, to)?;
+        let (reducer_kind, reducer_name, is_bare) =
+            crate::ltm_augment::classify_reducer(&to_var, from)?;
+
+        if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
+            // SIZE is constant; link score is always 0. Skip entirely.
+            return Some(vec![]);
+        }
+
+        // Compute the cartesian product of all source dimensions to get
+        // per-element subscripts. For a single dimension, this is just the
+        // element names. For multi-dimensional sources (e.g., x[Region,Age]),
+        // this produces tuples like "nyc,adult", "nyc,child", etc.
+        let dim_element_lists: Vec<Vec<String>> = from_dims
+            .iter()
+            .map(crate::ltm_augment::dimension_element_names)
+            .collect();
+        let elements = cartesian_subscripts(&dim_element_lists);
+
+        let mut cross_vars = Vec::with_capacity(elements.len());
+        for element in &elements {
+            let var_name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                from, element, to
+            );
+            let equation = crate::ltm_augment::generate_element_to_scalar_equation(
+                from,
+                to,
+                element,
+                &elements,
+                &reducer_kind,
+                reducer_name,
+                is_bare,
+            );
+            cross_vars.push(LtmSyntheticVar {
+                name: var_name,
+                equation,
+                dimensions: vec![], // scalar -- one variable per element
+            });
+        }
+        Some(cross_vars)
+    }
+
     if has_input_ports || is_discovery {
         for (from, tos) in &edges_result.edges {
             for to in tos {
+                // Check for cross-dimensional (arrayed-to-scalar) edges first.
+                if let Some(cross_vars) =
+                    try_cross_dimensional_link_scores(db, source_vars, from, to, model, project)
+                {
+                    vars.extend(cross_vars);
+                    continue;
+                }
                 let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                    vars.push(lsv.clone());
+                if let Some(mut lsv) = link_score_equation_text(db, link_id, model, project).clone()
+                {
+                    lsv.dimensions =
+                        link_score_dimensions(db, source_vars, from, to, project, dm_dims);
+                    vars.push(lsv);
                 }
             }
         }
@@ -1782,9 +2342,31 @@ pub fn model_ltm_variables(
             for link in &loop_item.links {
                 let key = (link.from.to_string(), link.to.to_string());
                 if seen_links.insert(key) {
+                    // Check for cross-dimensional (arrayed-to-scalar) edges.
+                    if let Some(cross_vars) = try_cross_dimensional_link_scores(
+                        db,
+                        source_vars,
+                        link.from.as_str(),
+                        link.to.as_str(),
+                        model,
+                        project,
+                    ) {
+                        vars.extend(cross_vars);
+                        continue;
+                    }
                     let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
-                    if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                        vars.push(lsv.clone());
+                    if let Some(mut lsv) =
+                        link_score_equation_text(db, link_id, model, project).clone()
+                    {
+                        lsv.dimensions = link_score_dimensions(
+                            db,
+                            source_vars,
+                            link.from.as_str(),
+                            link.to.as_str(),
+                            project,
+                            dm_dims,
+                        );
+                        vars.push(lsv);
                     }
                 }
             }
@@ -1795,8 +2377,12 @@ pub fn model_ltm_variables(
     // Generated for any model with feedback loops, regardless of whether
     // it also has input ports. A model can be both a reusable sub-model
     // AND have internal loops that need scoring.
+    //
+    // Uses element-level cycle partitions so that cross-element feedback
+    // is detected correctly (e.g., population[NYC] and population[Boston]
+    // in the same partition when connected through migration).
     if let Some(ref detected_loops) = loops {
-        let partitions_result = model_cycle_partitions(db, model, project);
+        let partitions_result = model_element_cycle_partitions(db, model, project);
         let partitions = CyclePartitions {
             partitions: partitions_result
                 .partitions
@@ -1817,9 +2403,23 @@ pub fn model_ltm_variables(
                 Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
                 _ => String::new(),
             };
+            // Carry forward dimensions from the Loop struct for A2A loops.
+            let loop_item = detected_loops
+                .iter()
+                .find(|l| name.as_str().ends_with(&l.id));
+            let dimensions = loop_item
+                .and_then(|l| {
+                    if l.dimensions.is_empty() {
+                        None
+                    } else {
+                        Some(l.dimensions.clone())
+                    }
+                })
+                .unwrap_or_default();
             vars.push(LtmSyntheticVar {
                 name: name.to_string(),
                 equation,
+                dimensions,
             });
         }
     }
@@ -1855,6 +2455,7 @@ pub fn model_ltm_variables(
             vars.push(LtmSyntheticVar {
                 name: path_var_name,
                 equation,
+                dimensions: vec![],
             });
         }
 
@@ -1866,6 +2467,7 @@ pub fn model_ltm_variables(
         vars.push(LtmSyntheticVar {
             name: composite_name,
             equation,
+            dimensions: vec![],
         });
     }
 

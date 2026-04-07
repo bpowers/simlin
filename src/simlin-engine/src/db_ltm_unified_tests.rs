@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::datamodel;
+use crate::test_common::TestProject;
 use crate::testutils::{feedback_loop_project, x_aux, x_model};
 
 #[test]
@@ -239,4 +240,116 @@ fn test_model_ltm_variables_sort_order_respects_dependencies() {
         ltm.vars.iter().any(|v| v.name.contains("composite")),
         "should have composite vars"
     );
+}
+
+/// Verify that link scores for same-dimension A2A edges inherit the
+/// target's dimension names.
+#[test]
+fn test_model_ltm_variables_a2a_same_dimension_link_scores() {
+    use salsa::Setter;
+
+    let project = TestProject::new("a2a_dims_test")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    // Discovery mode generates link scores for ALL edges.
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+
+    // Both population and births share [Region], so the link scores
+    // for population->births and births->population should carry
+    // the Region dimension.
+    let link_scores: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("link_score"))
+        .collect();
+    assert!(!link_scores.is_empty(), "should have link score variables");
+
+    for ls in &link_scores {
+        assert_eq!(
+            ls.dimensions,
+            vec!["Region".to_string()],
+            "link score '{}' should have Region dimension, got {:?}",
+            ls.name,
+            ls.dimensions
+        );
+    }
+}
+
+/// Verify that scalar-to-arrayed edges produce link scores with the
+/// target's dimensions.
+#[test]
+fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
+    use salsa::Setter;
+
+    let project = TestProject::new("scalar_to_arrayed_test")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * growth_factor", None)
+        .scalar_aux("growth_factor", "0.05")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+
+    // growth_factor is scalar, births is arrayed[Region].
+    // The growth_factor->births link score should have Region dims.
+    let gf_births_ls = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("link_score")
+                && v.name.contains("growth_factor")
+                && v.name.contains("births")
+        })
+        .expect("should have growth_factor->births link score");
+
+    assert_eq!(
+        gf_births_ls.dimensions,
+        vec!["Region".to_string()],
+        "scalar-to-arrayed link score should carry target's dimensions"
+    );
+}
+
+/// Verify that scalar models still produce scalar link scores
+/// (empty dimensions).
+#[test]
+fn test_model_ltm_variables_scalar_link_scores_have_empty_dimensions() {
+    let db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, result.project);
+
+    let link_scores: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("link_score"))
+        .collect();
+    assert!(!link_scores.is_empty(), "should have link score variables");
+
+    for ls in &link_scores {
+        assert!(
+            ls.dimensions.is_empty(),
+            "scalar model link score '{}' should have empty dimensions, got {:?}",
+            ls.name,
+            ls.dimensions
+        );
+    }
 }

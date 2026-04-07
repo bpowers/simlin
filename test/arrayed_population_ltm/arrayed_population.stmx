@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>arrayed-population-ltm</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>50</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Region">
+            <elem name="NYC"/>
+            <elem name="Boston"/>
+            <elem name="LA"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <stock name="population">
+                <element subscript="NYC">
+                    <eqn>100</eqn>
+                </element>
+                <element subscript="Boston">
+                    <eqn>200</eqn>
+                </element>
+                <element subscript="LA">
+                    <eqn>300</eqn>
+                </element>
+                <inflow>births</inflow>
+                <outflow>deaths</outflow>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </stock>
+            <flow name="births">
+                <eqn>population * birth_rate</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </flow>
+            <flow name="deaths">
+                <eqn>population * death_rate</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </flow>
+            <aux name="birth_rate">
+                <element subscript="NYC">
+                    <eqn>0.03</eqn>
+                </element>
+                <element subscript="Boston">
+                    <eqn>0.02</eqn>
+                </element>
+                <element subscript="LA">
+                    <eqn>0.01</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <aux name="death_rate">
+                <eqn>0.01</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view page_width="800" page_height="600" view_type="stock_flow">
+                <stock name="population" x="400" y="200" label_side="top"/>
+                <flow name="births" x="300" y="200" label_side="top">
+                    <pts>
+                        <pt x="220" y="200"/>
+                        <pt x="377.5" y="200"/>
+                    </pts>
+                </flow>
+                <flow name="deaths" x="500" y="200" label_side="top">
+                    <pts>
+                        <pt x="422.5" y="200"/>
+                        <pt x="580" y="200"/>
+                    </pts>
+                </flow>
+                <aux name="birth_rate" x="300" y="300" label_side="left"/>
+                <aux name="death_rate" x="500" y="300" label_side="right"/>
+                <connector angle="90">
+                    <from>population</from>
+                    <to>births</to>
+                </connector>
+                <connector angle="90">
+                    <from>birth_rate</from>
+                    <to>births</to>
+                </connector>
+                <connector angle="-90">
+                    <from>population</from>
+                    <to>deaths</to>
+                </connector>
+                <connector angle="90">
+                    <from>death_rate</from>
+                    <to>deaths</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>
