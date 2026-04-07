@@ -2907,3 +2907,193 @@ fn test_layout_two_horizontal_cloud_outflows_spaced() {
         dist,
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2: Adding a second chain outflow must not corrupt the existing chain flow
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_add_second_chain_preserves_first() {
+    // Start with: stock_a -> chain_ab -> stock_b
+    // Add: stock_a -> chain_ac -> stock_c
+    // chain_ab should remain between stock_a and stock_b, not get rebuilt
+    // off-center.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_ab".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_ab".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_ab".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    let old_chain_ab = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "chain_ab" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("chain_ab in old view");
+
+    // Add stock_c and chain_ac
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows.push("chain_ac".to_string());
+        }
+    }
+    model
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock_c".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["chain_ac".to_string()],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "chain_ac".to_string(),
+            equation: datamodel::Equation::Scalar("5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            crate::patch::ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_c".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_ac".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            crate::patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "chain_ac".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            crate::patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_ab".to_string(), "chain_ac".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let new_chain_ab = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "chain_ab" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("chain_ab in new view");
+
+    // chain_ab should still connect stock_a to stock_b -- its endpoints
+    // should reference the same stock UIDs and its valve y should be
+    // near the stocks' y (horizontal).
+    let stock_a = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a");
+    let stock_b = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s),
+            _ => None,
+        })
+        .expect("stock_b");
+
+    // Valve should be between the two stocks
+    let min_x = stock_a.x.min(stock_b.x);
+    let max_x = stock_a.x.max(stock_b.x);
+    assert!(
+        new_chain_ab.x >= min_x - 5.0 && new_chain_ab.x <= max_x + 5.0,
+        "chain_ab valve x ({}) should be between stock_a ({}) and stock_b ({})",
+        new_chain_ab.x,
+        stock_a.x,
+        stock_b.x,
+    );
+
+    // Valve y should be near the stock y (horizontal flow, not offset)
+    assert!(
+        (new_chain_ab.y - stock_a.y).abs() < 5.0,
+        "chain_ab valve y ({}) should be near stock_a y ({}) -- chain flows should not be offset",
+        new_chain_ab.y,
+        stock_a.y,
+    );
+
+    // Endpoints should still reference both stocks
+    assert_eq!(
+        old_chain_ab.points.len(),
+        new_chain_ab.points.len(),
+        "chain_ab should have same number of points"
+    );
+}

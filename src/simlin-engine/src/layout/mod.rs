@@ -4687,9 +4687,14 @@ pub fn incremental_layout(
                 } else {
                     // Orientation matches but the offset may have changed
                     // (e.g. a sibling was added/removed on the same face).
-                    // For vertical flows, check x offset; for horizontal
-                    // flows, check y offset.
+                    // Skip stock-to-stock flows: their pipe geometry ignores
+                    // the attachment offset, so rebuilding them is unnecessary
+                    // and would place the valve off-center.
                     let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+                    let is_stock_to_stock = from_stock.is_some() && to_stock.is_some();
+                    if is_stock_to_stock {
+                        continue;
+                    }
                     let stock_name = from_stock.or(to_stock);
                     if let Some(sn) = stock_name
                         && let Some(stock_uid) = state.uid_manager.get_uid(sn)
