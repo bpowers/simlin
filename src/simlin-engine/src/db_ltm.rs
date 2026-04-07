@@ -1824,12 +1824,68 @@ pub fn model_ltm_variables(
     // Sub-models and discovery mode need scores for ALL edges (pathways
     // reference arbitrary edges). Exhaustive root models only need
     // scores for edges that participate in loops.
+    //
+    // For each link score, classify the edge to determine whether the
+    // score should be arrayed (A2A). When the target variable has
+    // dimensions and either the source is scalar or shares the same
+    // dimensions, the link score inherits the target's dimensions so
+    // that per-element scores are computed via the A2A expansion.
+    let source_vars = model.variables(db);
+
+    /// Determine the dimensions a link score should carry.
+    ///
+    /// Returns the target's dimension names when the edge is
+    /// same-dimension A2A or scalar-to-arrayed. Returns empty for
+    /// scalar edges, module-involved links (modules are scalar nodes),
+    /// and arrayed-to-scalar edges (cross-dimensional, Phase 5).
+    fn link_score_dimensions(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        project: SourceProject,
+    ) -> Vec<String> {
+        let to_sv = match source_vars.get(to) {
+            Some(sv) => sv,
+            // Implicit variables (SMOOTH/DELAY expansions) may not be
+            // in source_vars; treat as scalar.
+            None => return vec![],
+        };
+        // Module variables are scalar nodes in the causal graph.
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return vec![];
+        }
+        let to_dims = variable_dimensions(db, *to_sv, project);
+        if to_dims.is_empty() {
+            return vec![];
+        }
+
+        let from_dims = source_vars
+            .get(from)
+            .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
+            .map(|sv| variable_dimensions(db, *sv, project).clone())
+            .unwrap_or_default();
+
+        // Same-dimension A2A: both have identical dimension(s).
+        // Scalar-to-arrayed: source is scalar, target is arrayed.
+        // In both cases the link score gets the target's dimensions.
+        if from_dims.is_empty() || from_dims == *to_dims {
+            to_dims.iter().map(|d| d.name().to_string()).collect()
+        } else {
+            // Cross-dimensional (arrayed-to-scalar, or mismatched
+            // dimensions) is handled in Phase 5. Leave scalar for now.
+            vec![]
+        }
+    }
+
     if has_input_ports || is_discovery {
         for (from, tos) in &edges_result.edges {
             for to in tos {
                 let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-                if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                    vars.push(lsv.clone());
+                if let Some(mut lsv) = link_score_equation_text(db, link_id, model, project).clone()
+                {
+                    lsv.dimensions = link_score_dimensions(db, source_vars, from, to, project);
+                    vars.push(lsv);
                 }
             }
         }
@@ -1840,8 +1896,17 @@ pub fn model_ltm_variables(
                 let key = (link.from.to_string(), link.to.to_string());
                 if seen_links.insert(key) {
                     let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
-                    if let Some(lsv) = link_score_equation_text(db, link_id, model, project) {
-                        vars.push(lsv.clone());
+                    if let Some(mut lsv) =
+                        link_score_equation_text(db, link_id, model, project).clone()
+                    {
+                        lsv.dimensions = link_score_dimensions(
+                            db,
+                            source_vars,
+                            link.from.as_str(),
+                            link.to.as_str(),
+                            project,
+                        );
+                        vars.push(lsv);
                     }
                 }
             }
