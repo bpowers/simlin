@@ -769,3 +769,60 @@ pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
         (decl.to_string(), vec![])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_array_stock_and_flow_build() {
+        let project_builder = TestProject::new("test")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+
+        let project = project_builder.build_datamodel();
+        let model = &project.models[0];
+
+        // Verify the stock has ApplyToAll equation with correct dimensions
+        let stock = model
+            .variables
+            .iter()
+            .find(|v| matches!(v, Variable::Stock(s) if s.ident == "population"))
+            .expect("population stock should exist");
+        match stock {
+            Variable::Stock(s) => match &s.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["Region".to_string()]);
+                    assert_eq!(eq, "100");
+                }
+                other => panic!("expected ApplyToAll equation for stock, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+
+        // Verify the flow has ApplyToAll equation with correct dimensions
+        let flow = model
+            .variables
+            .iter()
+            .find(|v| matches!(v, Variable::Flow(f) if f.ident == "births"))
+            .expect("births flow should exist");
+        match flow {
+            Variable::Flow(f) => match &f.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["Region".to_string()]);
+                    assert_eq!(eq, "population * 0.1");
+                }
+                other => panic!("expected ApplyToAll equation for flow, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+
+        // Verify the model compiles without errors via the incremental path
+        let project_builder2 = TestProject::new("test")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+        project_builder2.assert_compiles_incremental();
+    }
+}
