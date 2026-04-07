@@ -1838,7 +1838,9 @@ pub fn model_ltm_variables(
     /// Returns the target's dimension names when the edge is
     /// same-dimension A2A or scalar-to-arrayed. Returns empty for
     /// scalar edges, module-involved links (modules are scalar nodes),
-    /// and arrayed-to-scalar edges (cross-dimensional, Phase 5).
+    /// and arrayed-to-scalar edges (cross-dimensional; handled by
+    /// `try_cross_dimensional_link_scores` which generates N separate
+    /// scalar variables).
     ///
     /// The returned names use the original datamodel casing (e.g.,
     /// "Region" not "region") because `parse_ltm_equation` feeds them
@@ -1892,14 +1894,100 @@ pub fn model_ltm_variables(
                 .collect()
         } else {
             // Cross-dimensional (arrayed-to-scalar, or mismatched
-            // dimensions) is handled in Phase 5. Leave scalar for now.
+            // dimensions). These edges are handled by
+            // try_cross_dimensional_link_scores which generates N
+            // separate scalar variables instead of one arrayed variable.
+            // Return empty here so the normal A2A path is skipped.
             vec![]
         }
+    }
+
+    /// Generate per-element link score variables for a cross-dimensional
+    /// (arrayed-to-scalar) edge, or return `None` if the edge is not
+    /// cross-dimensional.
+    ///
+    /// When an arrayed source feeds a scalar target through an
+    /// array-reducing builtin (SUM, MEAN, MIN, MAX, STDDEV, RANK),
+    /// each element gets its own scalar link score variable measuring
+    /// how much varying that single element affects the scalar target
+    /// while holding all other elements at their previous values.
+    ///
+    /// Returns `None` for scalar-to-scalar, A2A (same-dimension), and
+    /// any edge where the reducer cannot be classified. Returns
+    /// `Some(vec![])` for SIZE edges (constant reducer, no scores).
+    fn try_cross_dimensional_link_scores(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        model: SourceModel,
+        project: SourceProject,
+    ) -> Option<Vec<LtmSyntheticVar>> {
+        // Only applies when source is arrayed and target is scalar.
+        let from_sv = source_vars.get(from)?;
+        if from_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let from_dims = variable_dimensions(db, *from_sv, project);
+        if from_dims.is_empty() {
+            return None;
+        }
+
+        let to_sv = source_vars.get(to)?;
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let to_dims = variable_dimensions(db, *to_sv, project);
+        if !to_dims.is_empty() {
+            // Same-dimension A2A or other multi-dimensional case:
+            // not cross-dimensional.
+            return None;
+        }
+
+        // The source is arrayed and the target is scalar. Classify the
+        // reducing function in the target's equation.
+        let to_var = super::reconstruct_single_variable(db, model, project, to)?;
+        let (reducer_kind, reducer_name) = crate::ltm_augment::classify_reducer(&to_var, from)?;
+
+        if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
+            // SIZE is constant; link score is always 0. Skip entirely.
+            return Some(vec![]);
+        }
+
+        let elements = crate::ltm_augment::dimension_element_names(&from_dims[0]);
+        let mut cross_vars = Vec::with_capacity(elements.len());
+        for element in &elements {
+            let var_name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                from, element, to
+            );
+            let equation = crate::ltm_augment::generate_element_to_scalar_equation(
+                from,
+                to,
+                element,
+                &elements,
+                &reducer_kind,
+                reducer_name,
+            );
+            cross_vars.push(LtmSyntheticVar {
+                name: var_name,
+                equation,
+                dimensions: vec![], // scalar -- one variable per element
+            });
+        }
+        Some(cross_vars)
     }
 
     if has_input_ports || is_discovery {
         for (from, tos) in &edges_result.edges {
             for to in tos {
+                // Check for cross-dimensional (arrayed-to-scalar) edges first.
+                if let Some(cross_vars) =
+                    try_cross_dimensional_link_scores(db, source_vars, from, to, model, project)
+                {
+                    vars.extend(cross_vars);
+                    continue;
+                }
                 let link_id = LtmLinkId::new(db, from.clone(), to.clone());
                 if let Some(mut lsv) = link_score_equation_text(db, link_id, model, project).clone()
                 {
@@ -1915,6 +2003,18 @@ pub fn model_ltm_variables(
             for link in &loop_item.links {
                 let key = (link.from.to_string(), link.to.to_string());
                 if seen_links.insert(key) {
+                    // Check for cross-dimensional (arrayed-to-scalar) edges.
+                    if let Some(cross_vars) = try_cross_dimensional_link_scores(
+                        db,
+                        source_vars,
+                        link.from.as_str(),
+                        link.to.as_str(),
+                        model,
+                        project,
+                    ) {
+                        vars.extend(cross_vars);
+                        continue;
+                    }
                     let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
                     if let Some(mut lsv) =
                         link_score_equation_text(db, link_id, model, project).clone()

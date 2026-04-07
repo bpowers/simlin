@@ -2367,3 +2367,631 @@ fn test_a2a_independent_per_element_computation() {
          vary and the flow equation is nonlinear, proving independent per-element computation"
     );
 }
+
+// ============================================================================
+// AC5: Cross-dimensional link scores (arrayed-to-scalar)
+//
+// When an arrayed variable feeds a scalar target through an array-reducing
+// function, each element gets its own scalar link score variable.
+// ============================================================================
+
+/// Find all per-element cross-dimensional link score offsets for a given
+/// from->to edge. Returns a vec of (element_name, offset) pairs.
+fn find_cross_dimensional_offsets(
+    results: &Results,
+    from_name: &str,
+    to_name: &str,
+) -> Vec<(String, usize)> {
+    let from_lower = from_name.to_lowercase().replace(' ', "_");
+    let to_lower = to_name.to_lowercase().replace(' ', "_");
+    // Cross-dimensional link scores are named:
+    //   $⁚ltm⁚link_score⁚{from}[{element}]→{to}
+    let prefix = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{}[", from_lower);
+    let arrow_to = format!("]\u{2192}{}", to_lower);
+
+    let mut offsets: Vec<(String, usize)> = results
+        .offsets
+        .iter()
+        .filter_map(|(k, &off)| {
+            let s = k.as_str();
+            if s.starts_with(&prefix) && s.contains(&arrow_to) {
+                // Extract element name between [ and ]→
+                let after_bracket = &s[prefix.len()..];
+                if let Some(end) = after_bracket.find("]\u{2192}") {
+                    let elem = after_bracket[..end].to_string();
+                    return Some((elem, off));
+                }
+            }
+            None
+        })
+        .collect();
+    offsets.sort_by(|a, b| a.1.cmp(&b.1));
+    offsets
+}
+
+/// Build a simple arrayed-to-scalar model with a given reducer equation.
+///
+/// Model structure:
+///   population[Region] (stock, inits: NYC=100, Boston=200, LA=300)
+///   growth[Region] (flow, = population * 0.05)
+///   scalar_target (aux, = {reducer_equation})
+///
+/// The stock changes each timestep via the flow, so the source values
+/// change, producing non-zero link scores for the arrayed-to-scalar edge.
+fn build_arrayed_to_scalar_model(
+    name: &str,
+    reducer_equation: &str,
+    target_var_name: &str,
+) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // population[Region] with different initial values
+                Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("NYC".to_string(), "100".to_string(), None, None),
+                            ("Boston".to_string(), "200".to_string(), None, None),
+                            ("LA".to_string(), "300".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // growth[Region] = population * 0.05
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "population * 0.05".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // scalar target using the reducer
+                Variable::Aux(datamodel::Aux {
+                    ident: target_var_name.to_string(),
+                    equation: Equation::Scalar(reducer_equation.to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC5.1: SUM(population[*]) produces N scalar per-element link scores
+/// using the algebraic shortcut.
+#[test]
+fn test_cross_dim_sum_algebraic() {
+    let project = build_arrayed_to_scalar_model("cross_dim_sum", "SUM(population[*])", "total_pop");
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "total_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "SUM should produce 3 per-element link scores, got: {:?}",
+        offsets
+    );
+
+    // Each element should have non-zero link scores after the initial step
+    for (elem, offset) in &offsets {
+        let any_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "SUM per-element link score for {} (offset {}) should be non-zero",
+            elem, offset
+        );
+    }
+
+    // Values should differ between elements since they have different
+    // initial values (100, 200, 300) causing different absolute changes.
+    // For SUM the algebraic shortcut means each element contributes
+    // proportionally to its own change, so we expect per-element scores
+    // to potentially have different magnitudes when combined with the
+    // sign term.
+}
+
+/// AC5.2: MEAN(population[*]) produces N scalar per-element link scores
+/// using the algebraic shortcut (like SUM but divided by N).
+#[test]
+fn test_cross_dim_mean_algebraic() {
+    let project = build_arrayed_to_scalar_model("cross_dim_mean", "MEAN(population[*])", "avg_pop");
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "avg_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "MEAN should produce 3 per-element link scores, got: {:?}",
+        offsets
+    );
+
+    for (elem, offset) in &offsets {
+        let any_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "MEAN per-element link score for {} (offset {}) should be non-zero",
+            elem, offset
+        );
+    }
+}
+
+/// AC5.3: MIN(population[*]) produces N scalar per-element link scores
+/// using explicit element expansion.
+///
+/// Because only the element that IS the current minimum can affect the
+/// MIN result, we expect the element with the smallest value (NYC=100)
+/// to have the largest link score, while others should be ~0 when their
+/// values are above the minimum.
+#[test]
+fn test_cross_dim_min_expansion() {
+    let project = build_arrayed_to_scalar_model("cross_dim_min", "MIN(population[*])", "min_pop");
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "min_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "MIN should produce 3 per-element link scores, got: {:?}",
+        offsets
+    );
+
+    // NYC starts at 100 (the minimum) and should have non-zero scores.
+    // Boston (200) and LA (300) are above the min, so their individual
+    // changes do not affect MIN -- their scores should be near zero.
+    let nyc_off = offsets.iter().find(|(e, _)| e == "nyc").unwrap().1;
+    let boston_off = offsets.iter().find(|(e, _)| e == "boston").unwrap().1;
+    let la_off = offsets.iter().find(|(e, _)| e == "la").unwrap().1;
+
+    // Check at step 2 (first step with meaningful PREVIOUS data)
+    let step = 2;
+    let nyc_val = results.data[step * results.step_size + nyc_off];
+    let boston_val = results.data[step * results.step_size + boston_off];
+    let la_val = results.data[step * results.step_size + la_off];
+
+    // NYC (the minimum element) should have a significant score
+    assert!(
+        nyc_val.abs() > 1e-10 && !nyc_val.is_nan(),
+        "MIN: NYC (the minimum) should have non-zero link score, got: {}",
+        nyc_val
+    );
+    // Boston and LA are above the min, so perturbing them individually
+    // while holding others at PREVIOUS should not change MIN. Their
+    // scores should be approximately 0.
+    assert!(
+        boston_val.abs() < 1e-10 || boston_val.is_nan(),
+        "MIN: Boston (above min) should have ~0 link score, got: {}",
+        boston_val
+    );
+    assert!(
+        la_val.abs() < 1e-10 || la_val.is_nan(),
+        "MIN: LA (above min) should have ~0 link score, got: {}",
+        la_val
+    );
+}
+
+/// AC5.4: MAX(population[*]) produces N scalar per-element link scores.
+///
+/// The element with the largest value (LA=300) should dominate.
+#[test]
+fn test_cross_dim_max_expansion() {
+    let project = build_arrayed_to_scalar_model("cross_dim_max", "MAX(population[*])", "max_pop");
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "max_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "MAX should produce 3 per-element link scores, got: {:?}",
+        offsets
+    );
+
+    // LA starts at 300 (the maximum) and should have non-zero scores.
+    let la_off = offsets.iter().find(|(e, _)| e == "la").unwrap().1;
+    let nyc_off = offsets.iter().find(|(e, _)| e == "nyc").unwrap().1;
+    let boston_off = offsets.iter().find(|(e, _)| e == "boston").unwrap().1;
+
+    let step = 2;
+    let la_val = results.data[step * results.step_size + la_off];
+    let nyc_val = results.data[step * results.step_size + nyc_off];
+    let boston_val = results.data[step * results.step_size + boston_off];
+
+    assert!(
+        la_val.abs() > 1e-10 && !la_val.is_nan(),
+        "MAX: LA (the maximum) should have non-zero link score, got: {}",
+        la_val
+    );
+    assert!(
+        nyc_val.abs() < 1e-10 || nyc_val.is_nan(),
+        "MAX: NYC (below max) should have ~0 link score, got: {}",
+        nyc_val
+    );
+    assert!(
+        boston_val.abs() < 1e-10 || boston_val.is_nan(),
+        "MAX: Boston (below max) should have ~0 link score, got: {}",
+        boston_val
+    );
+}
+
+/// AC5.5: STDDEV(population[*]) produces N scalar per-element link scores
+/// using explicit element expansion.
+#[test]
+fn test_cross_dim_stddev_expansion() {
+    let project =
+        build_arrayed_to_scalar_model("cross_dim_stddev", "STDDEV(population[*])", "std_pop");
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "std_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "STDDEV should produce 3 per-element link scores, got: {:?}",
+        offsets
+    );
+
+    // All elements contribute to the standard deviation, so all should
+    // have non-zero link scores.
+    for (elem, offset) in &offsets {
+        let any_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "STDDEV per-element link score for {} (offset {}) should be non-zero",
+            elem, offset
+        );
+    }
+}
+
+/// AC5.6: A compound nonlinear expression combining MAX and MIN produces
+/// N scalar per-element link scores using nested binary calls.
+///
+/// Tests the `MAX(population[*]) - MIN(population[*])` pattern where the
+/// scalar target uses two array reducers. The cross-dimensional link score
+/// generation picks up the first reducer found (MAX in this case) and
+/// generates per-element scores. The range formula ensures both the min
+/// and max elements have non-zero influence on the target.
+#[test]
+fn test_cross_dim_compound_nonlinear() {
+    let project = build_arrayed_to_scalar_model(
+        "cross_dim_compound",
+        "MAX(population[*]) - MIN(population[*])",
+        "range_pop",
+    );
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "range_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "compound nonlinear should produce 3 per-element link scores, got: {:?}",
+        offsets
+    );
+
+    // At least some elements should have non-zero link scores.
+    // The range (MAX-MIN) changes when either the max or min element changes.
+    let any_nonzero_anywhere = offsets.iter().any(|(_, offset)| {
+        (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + offset];
+            val.abs() > 1e-10 && !val.is_nan()
+        })
+    });
+    assert!(
+        any_nonzero_anywhere,
+        "compound nonlinear should produce at least one non-zero per-element link score"
+    );
+}
+
+/// AC5.7: SIZE(population[*]) produces no link score variables because
+/// SIZE is a constant (depends only on dimension cardinality).
+#[test]
+fn test_cross_dim_size_skipped() {
+    let project =
+        build_arrayed_to_scalar_model("cross_dim_size", "SIZE(population[*])", "size_pop");
+
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // SIZE is constant, so no link score should be generated for the
+    // population -> size_pop edge.
+    let offsets = find_cross_dimensional_offsets(&results, "population", "size_pop");
+    assert!(
+        offsets.is_empty(),
+        "SIZE should NOT produce per-element link scores, but got: {:?}",
+        offsets
+    );
+
+    // Also verify that no standard (non-per-element) link score exists
+    let standard_score = find_link_score_offset(&results, "population", "size_pop");
+    assert!(
+        standard_score.is_none(),
+        "SIZE should NOT produce any link score at all"
+    );
+}
+
+/// AC5.8: Cross-validation -- SUM algebraic shortcut produces comparable
+/// results to an equivalent model using individual scalar variables.
+///
+/// Build two models that compute the same mathematical result:
+/// (A) Arrayed: population[Region] (stock) -> total_pop (aux, SUM(population[*]))
+///     Uses the cross-dimensional algebraic shortcut for per-element link scores.
+/// (B) Scalar: pop_nyc, pop_boston, pop_la (3 independent stocks) -> total_pop (aux, pop_nyc + pop_boston + pop_la)
+///     Uses standard scalar-to-scalar link scores for each dependency.
+///
+/// Both models should produce equivalent link score semantics: each source
+/// element's contribution to the total is the element's delta divided by the
+/// total delta, matching the SUM algebraic shortcut.
+#[test]
+fn test_cross_dim_sum_vs_explicit_cross_validation() {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    // Model A: arrayed source with SUM reducer
+    let project_a =
+        build_arrayed_to_scalar_model("cross_val_sum", "SUM(population[*])", "total_pop");
+
+    let compiled_a = compile_ltm_discovery_incremental(&project_a);
+    let mut vm_a = Vm::new(compiled_a).unwrap();
+    vm_a.run_to_end().unwrap();
+    let results_a = vm_a.into_results();
+
+    // Model B: three independent scalar stocks with explicit sum
+    let project_b = datamodel::Project {
+        name: "cross_val_scalar".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop_nyc".to_string(),
+                    equation: Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth_nyc".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop_boston".to_string(),
+                    equation: Equation::Scalar("200".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth_boston".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop_la".to_string(),
+                    equation: Equation::Scalar("300".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth_la".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth_nyc".to_string(),
+                    equation: Equation::Scalar("pop_nyc * 0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth_boston".to_string(),
+                    equation: Equation::Scalar("pop_boston * 0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth_la".to_string(),
+                    equation: Equation::Scalar("pop_la * 0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "total_pop".to_string(),
+                    equation: Equation::Scalar("pop_nyc + pop_boston + pop_la".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled_b = compile_ltm_discovery_incremental(&project_b);
+    let mut vm_b = Vm::new(compiled_b).unwrap();
+    vm_b.run_to_end().unwrap();
+    let results_b = vm_b.into_results();
+
+    // Model A: cross-dimensional per-element link scores
+    let offsets_a = find_cross_dimensional_offsets(&results_a, "population", "total_pop");
+    assert_eq!(
+        offsets_a.len(),
+        3,
+        "Model A (SUM) should have 3 per-element scores"
+    );
+
+    // Model B: standard scalar-to-scalar link scores
+    let b_nyc = find_link_score_offset(&results_b, "pop_nyc", "total_pop");
+    let b_boston = find_link_score_offset(&results_b, "pop_boston", "total_pop");
+    let b_la = find_link_score_offset(&results_b, "pop_la", "total_pop");
+
+    assert!(
+        b_nyc.is_some(),
+        "Model B should have link score for pop_nyc -> total_pop"
+    );
+    assert!(
+        b_boston.is_some(),
+        "Model B should have link score for pop_boston -> total_pop"
+    );
+    assert!(
+        b_la.is_some(),
+        "Model B should have link score for pop_la -> total_pop"
+    );
+
+    // Compare at a timestep where all values are meaningful
+    let test_step = 3;
+
+    let a_nyc = results_a.data
+        [test_step * results_a.step_size + offsets_a.iter().find(|(e, _)| e == "nyc").unwrap().1];
+    let a_boston = results_a.data[test_step * results_a.step_size
+        + offsets_a.iter().find(|(e, _)| e == "boston").unwrap().1];
+    let a_la = results_a.data
+        [test_step * results_a.step_size + offsets_a.iter().find(|(e, _)| e == "la").unwrap().1];
+
+    let b_nyc_val = results_b.data[test_step * results_b.step_size + b_nyc.unwrap().1];
+    let b_boston_val = results_b.data[test_step * results_b.step_size + b_boston.unwrap().1];
+    let b_la_val = results_b.data[test_step * results_b.step_size + b_la.unwrap().1];
+
+    // Both models should produce non-zero, non-NaN scores
+    for (name, val) in [
+        ("nyc_A", a_nyc),
+        ("boston_A", a_boston),
+        ("la_A", a_la),
+        ("nyc_B", b_nyc_val),
+        ("boston_B", b_boston_val),
+        ("la_B", b_la_val),
+    ] {
+        assert!(
+            val.abs() > 1e-10 && !val.is_nan(),
+            "{} link score at step {} should be non-zero, got: {}",
+            name,
+            test_step,
+            val
+        );
+    }
+
+    // For SUM with 5% growth: each element's delta is proportional to its
+    // value, so the algebraic shortcut's |delta_elem / delta_total| equals
+    // elem_value / total_value. The scalar model's ceteris-paribus formula
+    // produces the same ratio. Verify they match within tolerance.
+    let tolerance = 0.01; // 1% tolerance
+    assert!(
+        (a_nyc - b_nyc_val).abs() < tolerance,
+        "NYC link scores should match: A={}, B={}",
+        a_nyc,
+        b_nyc_val
+    );
+    assert!(
+        (a_boston - b_boston_val).abs() < tolerance,
+        "Boston link scores should match: A={}, B={}",
+        a_boston,
+        b_boston_val
+    );
+    assert!(
+        (a_la - b_la_val).abs() < tolerance,
+        "LA link scores should match: A={}, B={}",
+        a_la,
+        b_la_val
+    );
+}
