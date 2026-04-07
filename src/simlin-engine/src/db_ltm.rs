@@ -51,22 +51,33 @@ pub(super) fn ltm_module_idents(
     module_idents
 }
 
-/// Parse an LTM synthetic variable's equation string as a scalar aux.
+/// Parse an LTM synthetic variable's equation string.
 ///
 /// Creates a transient `datamodel::Variable::Aux`, runs it through
 /// `parse_var` (which invokes `BuiltinVisitor` and
 /// `instantiate_implicit_modules`), and returns the parsed variable plus
 /// any implicit helper/module variables generated while parsing.
+///
+/// When `var_dimensions` is non-empty, the equation is wrapped in
+/// `Equation::ApplyToAll` so the compiler expands it across all
+/// dimension elements. When empty, the equation is scalar (original
+/// behavior).
 pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &str,
+    var_dimensions: &[String],
     dims: &[datamodel::Dimension],
     units_ctx: &crate::units::Context,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
+    let eqn = if var_dimensions.is_empty() {
+        datamodel::Equation::Scalar(equation.to_string())
+    } else {
+        datamodel::Equation::ApplyToAll(var_dimensions.to_vec(), equation.to_string())
+    };
     let dm_var = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize(var_name).into_owned(),
-        equation: datamodel::Equation::Scalar(equation.to_string()),
+        equation: eqn,
         documentation: String::new(),
         units: None,
         gf: None,
@@ -95,12 +106,20 @@ pub(super) fn parse_ltm_equation_for_model_with_ids(
     db: &dyn Db,
     var_name: &str,
     equation: &str,
+    var_dimensions: &[String],
     project: SourceProject,
     module_idents: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
-    parse_ltm_equation(var_name, equation, dims, units_ctx, Some(module_idents))
+    parse_ltm_equation(
+        var_name,
+        equation,
+        var_dimensions,
+        dims,
+        units_ctx,
+        Some(module_idents),
+    )
 }
 
 pub(super) fn parse_ltm_var_with_ids(
@@ -113,6 +132,7 @@ pub(super) fn parse_ltm_var_with_ids(
         db,
         &ltm_var.name,
         &ltm_var.equation,
+        &ltm_var.dimensions,
         project,
         module_idents,
     )
@@ -169,6 +189,7 @@ pub fn model_ltm_implicit_var_info(
         let parsed = parse_ltm_equation(
             &ltm_var.name,
             &ltm_var.equation,
+            &ltm_var.dimensions,
             dims,
             units_ctx,
             Some(&module_idents),
@@ -272,7 +293,14 @@ pub(super) fn compile_ltm_equation_fragment(
     let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
 
-    let parsed = parse_ltm_equation(var_name, equation, dims, units_ctx, Some(&module_idents));
+    let parsed = parse_ltm_equation(
+        var_name,
+        equation,
+        &[],
+        dims,
+        units_ctx,
+        Some(&module_idents),
+    );
 
     // Check for parse errors
     if parsed
@@ -622,6 +650,7 @@ pub(super) fn compile_ltm_equation_fragment(
                         let parent_parsed = parse_ltm_equation(
                             &parent_lsv.name,
                             &parent_lsv.equation,
+                            &parent_lsv.dimensions,
                             dims,
                             units_ctx,
                             Some(&module_idents),
