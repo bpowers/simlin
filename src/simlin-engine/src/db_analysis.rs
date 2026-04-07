@@ -8,7 +8,8 @@
 //! - CausalEdgesResult, LoopCircuitsResult, CyclePartitionsResult
 //! - ElementCausalEdgesResult, ElementDependencyKind (element-level graph)
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
-//! - model_causal_edges, model_loop_circuits, model_cycle_partitions
+//! - model_causal_edges, model_element_causal_edges, model_loop_circuits,
+//!   model_cycle_partitions
 //! - model_detected_loops (matches LTM augmentation loop IDs)
 //! - reconstruct_model_variables, reconstruct_single_variable
 
@@ -42,7 +43,6 @@ pub struct CausalEdgesResult {
 /// keep their plain names; arrayed variables use subscript notation
 /// (e.g., `population[NYC]`). Models without arrays produce an element
 /// graph identical to the variable graph.
-#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ElementCausalEdgesResult {
     /// Adjacency list: from_element -> {to_element1, to_element2, ...}
@@ -54,14 +54,12 @@ pub struct ElementCausalEdgesResult {
 /// Format an element-level node name with subscript notation.
 /// For scalar variables, the caller should use the name directly;
 /// this function always appends the subscript.
-#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
 fn format_element_name(var_name: &str, element: &str) -> String {
     format!("{var_name}[{element}]")
 }
 
 /// Format an element-level node name for multi-dimensional arrays.
 /// Returns `name[e1,e2,...]` (e.g., `migration[NYC,Boston]`).
-#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
 fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
     format!("{}[{}]", var_name, elements.join(","))
 }
@@ -73,7 +71,6 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// - `Scalar`: one-to-one or broadcast (no subscripts involved)
 /// - `SameElement`: A2A same-element reference (e.g., `population[Region]`)
 /// - `CrossElement`: reducer over all elements (e.g., `SUM(population[*])`)
-#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ElementDependencyKind {
     /// Scalar reference: source appears as a bare variable with no subscripts
@@ -109,7 +106,6 @@ enum ElementDependencyKind {
 /// wins: CrossElement > SameElement > Scalar.
 ///
 /// Returns `Scalar` as default if the source is not found (defensive).
-#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
 fn classify_element_dependency(
     target_var: &crate::variable::Variable,
     source_ident: &str,
@@ -274,7 +270,6 @@ fn classify_in_expr(
 ///
 /// For `Dimension::Named`, returns the canonical element names.
 /// For `Dimension::Indexed`, returns zero-based index strings ("0", "1", ...).
-#[allow(dead_code)] // called by expand_edge_to_elements; used in Task 4
 fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
     match dim {
         crate::dimensions::Dimension::Named(_, named) => named
@@ -306,7 +301,6 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// every source element connects to every target element (a SUM(x[*])
 /// inside an A2A equation means each source element contributes to the
 /// scalar reduction, which then feeds all target elements).
-#[allow(dead_code)] // infrastructure for model_element_causal_edges (Task 4)
 fn expand_edge_to_elements(
     from_name: &str,
     to_name: &str,
@@ -409,7 +403,6 @@ fn expand_edge_to_elements(
 ///
 /// For a single dimension `[D]` where D = {NYC, Boston}, produces:
 /// `["x[NYC]", "x[Boston]"]`.
-#[allow(dead_code)] // called by expand_edge_to_elements
 fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]) -> Vec<String> {
     if dims.is_empty() {
         return vec![var_name.to_string()];
@@ -453,7 +446,6 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 ///
 /// Example: from[D1,D2] -> to[D1] with SameElement produces
 /// from[d1,d2] -> to[d1] for all (d1,d2).
-#[allow(dead_code)] // called by expand_edge_to_elements
 fn expand_same_element(
     from_name: &str,
     to_name: &str,
@@ -858,6 +850,115 @@ pub fn model_causal_edges(
         edges,
         stocks,
         dynamic_modules,
+    }
+}
+
+/// Build the element-level causal graph for a model.
+///
+/// Expands variable-level edges from `model_causal_edges` into element-level
+/// edges based on each variable's dimensions and the dependency classification
+/// (same-element, cross-element, or scalar). Stock names are similarly expanded
+/// to per-element nodes.
+///
+/// When no variables in the model are arrayed, the element graph is identical
+/// to the variable graph (zero overhead -- edges and stocks are cloned directly).
+#[salsa::tracked(returns(ref))]
+pub fn model_element_causal_edges(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> ElementCausalEdgesResult {
+    let variable_edges = model_causal_edges(db, model, project);
+    let source_vars = model.variables(db);
+
+    // Check if any variable in the model is arrayed. If none are,
+    // short-circuit: the element graph is identical to the variable graph.
+    let any_arrayed = source_vars
+        .values()
+        .any(|sv| !super::variable_dimensions(db, *sv, project).is_empty());
+    if !any_arrayed {
+        return ElementCausalEdgesResult {
+            edges: variable_edges.edges.clone(),
+            stocks: variable_edges.stocks.clone(),
+        };
+    }
+
+    let mut element_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+    // Cache dimension lookups to avoid repeated calls for the same variable
+    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
+
+    let lookup_dims = |name: &str,
+                       cache: &mut HashMap<String, Vec<crate::dimensions::Dimension>>|
+     -> Vec<crate::dimensions::Dimension> {
+        if let Some(dims) = cache.get(name) {
+            return dims.clone();
+        }
+        let dims = source_vars
+            .get(name)
+            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
+            .unwrap_or_default();
+        cache.insert(name.to_string(), dims.clone());
+        dims
+    };
+
+    // Expand each variable-level edge to element-level edges
+    for (from_name, to_set) in &variable_edges.edges {
+        let from_dims = lookup_dims(from_name, &mut dim_cache);
+        for to_name in to_set {
+            let to_dims = lookup_dims(to_name, &mut dim_cache);
+
+            // Fast path: both scalar -> direct edge
+            if from_dims.is_empty() && to_dims.is_empty() {
+                element_edges
+                    .entry(from_name.clone())
+                    .or_default()
+                    .insert(to_name.clone());
+                continue;
+            }
+
+            // Classify the dependency to determine expansion pattern.
+            // Reconstruct the target variable's lowered AST so we can
+            // inspect how the source appears in the equation.
+            let dep_kind = match reconstruct_single_variable(db, model, project, to_name) {
+                Some(target_var) => {
+                    let source_is_arrayed = !from_dims.is_empty();
+                    classify_element_dependency(&target_var, from_name, source_is_arrayed)
+                }
+                None => {
+                    // If we can't reconstruct the variable (shouldn't happen
+                    // for well-formed models), default to Scalar
+                    ElementDependencyKind::Scalar
+                }
+            };
+
+            expand_edge_to_elements(
+                from_name,
+                to_name,
+                &from_dims,
+                &to_dims,
+                dep_kind,
+                &mut element_edges,
+            );
+        }
+    }
+
+    // Expand stock names to element-level
+    let mut element_stocks = BTreeSet::new();
+    for stock_name in &variable_edges.stocks {
+        let stock_dims = lookup_dims(stock_name, &mut dim_cache);
+        if stock_dims.is_empty() {
+            element_stocks.insert(stock_name.clone());
+        } else {
+            for elem_name in cartesian_element_names(stock_name, &stock_dims) {
+                element_stocks.insert(elem_name);
+            }
+        }
+    }
+
+    ElementCausalEdgesResult {
+        edges: element_edges,
+        stocks: element_stocks,
     }
 }
 
