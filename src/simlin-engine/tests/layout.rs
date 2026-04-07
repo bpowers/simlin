@@ -1454,3 +1454,521 @@ fn test_incremental_fallback_to_full_layout() {
         "fallback should produce the same number of elements as full layout"
     );
 }
+
+/// Verify that the hiring model's waste flows do not overlap chain flows.
+///
+/// The hiring model is an aging chain with conversion flows that produce
+/// both a chain flow (stock-to-stock) and a waste flow (stock-to-cloud).
+/// Waste flows must exit from the bottom of their source stock, not from
+/// the right where they would overlap the chain flow.
+#[test]
+fn test_layout_hiring_no_flow_overlap() {
+    use std::collections::HashMap;
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("could not determine repo root");
+    let file_path = repo_root.join("test/systems-format/hiring.txt");
+    let contents = std::fs::read_to_string(&file_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", file_path.display(), e));
+
+    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+    let project = simlin_engine::systems::translate::translate(&systems_model, 10).unwrap();
+
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+
+    // Standard invariants
+    verify_layout(&view, model, "hiring_no_overlap");
+
+    // Build lookup tables
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    let mut flow_positions: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut stock_positions: HashMap<String, (f64, f64)> = HashMap::new();
+
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Flow(f) => {
+                flow_positions.insert(normalize(&f.name), (f.x, f.y));
+            }
+            ViewElement::Stock(s) => {
+                stock_positions.insert(normalize(&s.name), (s.x, s.y));
+            }
+            _ => {}
+        }
+    }
+
+    // Each conversion stock (phonescreens, onsites, offers, hires, departures)
+    // has a chain flow and a waste flow. The waste flow should have a different
+    // y than the chain flow.
+    let waste_chain_pairs = [
+        (
+            "phonescreens_to_onsites",
+            "phonescreens_to_onsites_waste",
+            "phonescreens",
+        ),
+        ("onsites_to_offers", "onsites_to_offers_waste", "onsites"),
+        ("offers_to_hires", "offers_to_hires_waste", "offers"),
+        ("hires_to_employees", "hires_to_employees_waste", "hires"),
+        (
+            "departures_to_departed",
+            "departures_to_departed_waste",
+            "departures",
+        ),
+    ];
+
+    for (chain_name, waste_name, stock_name) in &waste_chain_pairs {
+        let chain_pos = flow_positions
+            .get(*chain_name)
+            .unwrap_or_else(|| panic!("missing flow: {chain_name}"));
+        let waste_pos = flow_positions
+            .get(*waste_name)
+            .unwrap_or_else(|| panic!("missing flow: {waste_name}"));
+        let stock_pos = stock_positions
+            .get(*stock_name)
+            .unwrap_or_else(|| panic!("missing stock: {stock_name}"));
+
+        // Chain flow should be at the same y as its source stock (horizontal)
+        assert!(
+            (chain_pos.1 - stock_pos.1).abs() < 1.0,
+            "{chain_name} y ({}) should be near {stock_name} y ({})",
+            chain_pos.1,
+            stock_pos.1,
+        );
+
+        // Waste flow should be below the stock (perpendicular exit)
+        assert!(
+            waste_pos.1 > stock_pos.1 + 5.0,
+            "{waste_name} y ({}) should be below {stock_name} y ({})",
+            waste_pos.1,
+            stock_pos.1,
+        );
+
+        // Chain and waste flows must not overlap
+        let dist =
+            ((chain_pos.0 - waste_pos.0).powi(2) + (chain_pos.1 - waste_pos.1).powi(2)).sqrt();
+        assert!(
+            dist > 5.0,
+            "{chain_name} ({}, {}) and {waste_name} ({}, {}) should not overlap (dist={dist})",
+            chain_pos.0,
+            chain_pos.1,
+            waste_pos.0,
+            waste_pos.1,
+        );
+    }
+
+    // No two flow elements should share the exact same position
+    let flow_coords: Vec<(String, f64, f64)> = view
+        .elements
+        .iter()
+        .filter_map(|e| {
+            if let ViewElement::Flow(f) = e {
+                Some((normalize(&f.name), f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for i in 0..flow_coords.len() {
+        for j in (i + 1)..flow_coords.len() {
+            let (ref name_i, xi, yi) = flow_coords[i];
+            let (ref name_j, xj, yj) = flow_coords[j];
+            let dist = ((xi - xj).powi(2) + (yi - yj).powi(2)).sqrt();
+            assert!(
+                dist > 1.0,
+                "flows '{name_i}' ({xi}, {yi}) and '{name_j}' ({xj}, {yj}) overlap (dist={dist})"
+            );
+        }
+    }
+}
+
+/// P1: Incrementally adding a waste flow to a stock with an existing chain
+/// flow should position the waste flow below the stock (not overlapping).
+#[test]
+fn test_incremental_add_waste_flow_goes_below() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    // Start with a simple chain: stock_a -> chain_flow -> stock_b
+    let initial_model = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string()],
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = datamodel::Project {
+        name: "main".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![initial_model],
+        source: None,
+        ai_information: None,
+    };
+
+    let old_view = generate_layout(&initial_project, MAIN_MODEL, None).expect("initial layout");
+
+    // Now add waste_flow as a new outflow from stock_a (stock-to-cloud)
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+
+    // Add waste_flow to stock_a's outflows
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows.push("waste_flow".to_string());
+        }
+    }
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "waste_flow".to_string(),
+            equation: datamodel::Equation::Scalar("5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Default::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![
+            ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    let stock_a_pos = new_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Stock(s) = e
+                && normalize(&s.name) == "stock_a"
+            {
+                Some((s.x, s.y))
+            } else {
+                None
+            }
+        })
+        .expect("stock_a should exist");
+
+    let waste_pos = new_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Flow(f) = e
+                && normalize(&f.name) == "waste_flow"
+            {
+                Some((f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .expect("waste_flow should exist");
+
+    let chain_pos = new_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Flow(f) = e
+                && normalize(&f.name) == "chain_flow"
+            {
+                Some((f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .expect("chain_flow should exist");
+
+    // Waste flow should be below the stock, not at the same y as chain flow
+    assert!(
+        waste_pos.1 > stock_a_pos.1 + 5.0,
+        "waste_flow y ({}) should be below stock_a y ({})",
+        waste_pos.1,
+        stock_a_pos.1,
+    );
+
+    // Chain and waste should not overlap
+    let dist = ((chain_pos.0 - waste_pos.0).powi(2) + (chain_pos.1 - waste_pos.1).powi(2)).sqrt();
+    assert!(
+        dist > 5.0,
+        "chain_flow and waste_flow should not overlap (dist={dist})"
+    );
+}
+
+/// P2: When a chain flow is incrementally added to a stock that already has
+/// a cloud outflow on the right, the existing cloud flow should be rebuilt
+/// to exit from the bottom.
+#[test]
+fn test_incremental_add_chain_rebuilds_existing_cloud_flow() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    // Start with stock_a -> waste_flow -> cloud (only outflow, goes right)
+    let initial_model = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["waste_flow".to_string()],
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = datamodel::Project {
+        name: "main".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: Vec::new(),
+        units: Vec::new(),
+        models: vec![initial_model],
+        source: None,
+        ai_information: None,
+    };
+
+    let old_view = generate_layout(&initial_project, MAIN_MODEL, None).expect("initial layout");
+
+    // Verify waste_flow starts on the right (horizontal, same y as stock)
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    let old_stock_pos = old_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Stock(s) = e
+                && normalize(&s.name) == "stock_a"
+            {
+                Some((s.x, s.y))
+            } else {
+                None
+            }
+        })
+        .expect("stock_a in old view");
+    let old_waste_pos = old_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Flow(f) = e
+                && normalize(&f.name) == "waste_flow"
+            {
+                Some((f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .expect("waste_flow in old view");
+    assert!(
+        (old_waste_pos.1 - old_stock_pos.1).abs() < 1.0,
+        "waste_flow should start horizontal (same y as stock)"
+    );
+
+    // Now add stock_b and chain_flow: stock_a -> chain_flow -> stock_b
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+
+    // Update stock_a outflows to include chain_flow
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows.push("chain_flow".to_string());
+        }
+    }
+    model
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock_b".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["chain_flow".to_string()],
+            outflows: vec![],
+            compat: Default::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "chain_flow".to_string(),
+            equation: datamodel::Equation::Scalar("10".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: Default::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = ModelPatch {
+        name: String::new(),
+        ops: vec![
+            ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: Default::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["waste_flow".to_string(), "chain_flow".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, MAIN_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    let new_stock_pos = new_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Stock(s) = e
+                && normalize(&s.name) == "stock_a"
+            {
+                Some((s.x, s.y))
+            } else {
+                None
+            }
+        })
+        .expect("stock_a in new view");
+
+    let new_waste_pos = new_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Flow(f) = e
+                && normalize(&f.name) == "waste_flow"
+            {
+                Some((f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .expect("waste_flow in new view");
+
+    let new_chain_pos = new_view
+        .elements
+        .iter()
+        .find_map(|e| {
+            if let ViewElement::Flow(f) = e
+                && normalize(&f.name) == "chain_flow"
+            {
+                Some((f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .expect("chain_flow in new view");
+
+    // Now waste_flow should have moved to the bottom (different y from stock)
+    assert!(
+        new_waste_pos.1 > new_stock_pos.1 + 5.0,
+        "waste_flow y ({}) should now be below stock_a y ({}) after chain added",
+        new_waste_pos.1,
+        new_stock_pos.1,
+    );
+
+    // Chain and waste should not overlap
+    let dist = ((new_chain_pos.0 - new_waste_pos.0).powi(2)
+        + (new_chain_pos.1 - new_waste_pos.1).powi(2))
+    .sqrt();
+    assert!(
+        dist > 5.0,
+        "chain_flow and waste_flow should not overlap after incremental add (dist={dist})"
+    );
+}
