@@ -11,7 +11,10 @@
 //! Element names in the graph use canonical (lowercased) form because
 //! `dimension_element_names` produces canonical names from `Dimension`.
 
-use super::{model_causal_edges, model_element_causal_edges};
+use super::{
+    model_causal_edges, model_cycle_partitions, model_element_causal_edges,
+    model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
+};
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
 
@@ -296,5 +299,344 @@ fn arrayed_stock_expands_to_element_stock_nodes() {
         "expected 3 element-level stocks, got {}: {:?}",
         result.stocks.len(),
         result.stocks
+    );
+}
+
+// ---- Helpers for loop and partition tests ----
+
+/// Helper: build a TestProject, sync into salsa, and return the
+/// element-level loop circuits result for the "main" model.
+fn element_loop_circuits(project: &TestProject) -> super::LoopCircuitsResult {
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let source_model = sync.models["main"].source;
+    let source_project = sync.project;
+    model_element_loop_circuits(&db, source_model, source_project).clone()
+}
+
+/// Helper: build a TestProject, sync into salsa, and return the
+/// element-level cycle partitions result for the "main" model.
+fn element_cycle_partitions(project: &TestProject) -> super::CyclePartitionsResult {
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let source_model = sync.models["main"].source;
+    let source_project = sync.project;
+    model_element_cycle_partitions(&db, source_model, source_project).clone()
+}
+
+/// Helper: build a TestProject, sync into salsa, and return the
+/// variable-level loop circuits result for the "main" model.
+fn var_loop_circuits(project: &TestProject) -> super::LoopCircuitsResult {
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let source_model = sync.models["main"].source;
+    let source_project = sync.project;
+    model_loop_circuits(&db, source_model, source_project).clone()
+}
+
+/// Helper: build a TestProject, sync into salsa, and return the
+/// variable-level cycle partitions result for the "main" model.
+fn var_cycle_partitions(project: &TestProject) -> super::CyclePartitionsResult {
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let source_model = sync.models["main"].source;
+    let source_project = sync.project;
+    model_cycle_partitions(&db, source_model, source_project).clone()
+}
+
+/// Normalize a circuit for comparison: sort the node list rotation so
+/// the lexicographically smallest node comes first, producing a canonical
+/// representation independent of the starting node chosen by Johnson's
+/// algorithm.
+fn normalize_circuit(mut circuit: Vec<String>) -> Vec<String> {
+    if circuit.is_empty() {
+        return circuit;
+    }
+    // Find the position of the lexicographically smallest node
+    let min_pos = circuit
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    // Rotate so that the smallest node comes first
+    circuit.rotate_left(min_pos);
+    circuit
+}
+
+/// Check that `circuits` contains a circuit matching `expected_nodes`
+/// (after normalization of both).
+fn assert_has_circuit(circuits: &[Vec<String>], expected_nodes: &[&str]) {
+    let expected: Vec<String> = expected_nodes.iter().map(|s| s.to_string()).collect();
+    let normalized_expected = normalize_circuit(expected);
+
+    let normalized_circuits: Vec<Vec<String>> = circuits
+        .iter()
+        .map(|c| normalize_circuit(c.clone()))
+        .collect();
+
+    assert!(
+        normalized_circuits.contains(&normalized_expected),
+        "expected circuit {:?} not found.\nactual circuits: {:?}",
+        normalized_expected,
+        normalized_circuits
+    );
+}
+
+// ---- Test 8: AC3.1 (N element-identical loops for A2A model) ----
+
+/// A model with `population[Region]` (stock, 3 regions) and `births[Region]`
+/// (flow, `population * 0.1`) should produce exactly 3 element-level loops,
+/// one per region. Each loop is a 2-node circuit: `[population[r], births[r]]`.
+///
+/// The same-element A2A feedback means each region's population only connects
+/// to that region's births, so there are no cross-element loops.
+#[test]
+fn a2a_produces_n_element_identical_loops() {
+    let project = TestProject::new("a2a_loops")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None);
+
+    let result = element_loop_circuits(&project);
+
+    // Should find exactly 3 loops (one per region)
+    assert_eq!(
+        result.circuits.len(),
+        3,
+        "expected 3 element-level loops, got {}: {:?}",
+        result.circuits.len(),
+        result.circuits
+    );
+
+    // Each loop should be a 2-node circuit: [population[r], births[r]]
+    assert_has_circuit(&result.circuits, &["population[nyc]", "births[nyc]"]);
+    assert_has_circuit(&result.circuits, &["population[boston]", "births[boston]"]);
+    assert_has_circuit(&result.circuits, &["population[la]", "births[la]"]);
+}
+
+// ---- Test 9: AC3.2 (cross-element loop detection) ----
+
+/// A model with `population[Region]` (stock, 2 regions) and `births[Region]`
+/// (flow, `SUM(population[*]) * 0.01`) should produce both same-element and
+/// cross-element loops.
+///
+/// The SUM(population[*]) creates CrossElement edges, meaning every population
+/// element feeds every births element. Combined with the SameElement stock
+/// inflows (births[r] -> population[r]), this produces:
+///
+/// - 2 same-element loops: [population[nyc], births[nyc]] and
+///   [population[boston], births[boston]]
+/// - 1 cross-element loop: a 4-node circuit through both regions,
+///   e.g., [population[nyc], births[boston], population[boston], births[nyc]]
+#[test]
+fn cross_element_loop_through_sum_reducer() {
+    let project = TestProject::new("cross_element_loop")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "SUM(population[*]) * 0.01", None);
+
+    let result = element_loop_circuits(&project);
+
+    // Should find 3 loops total: 2 same-element + 1 cross-element
+    assert_eq!(
+        result.circuits.len(),
+        3,
+        "expected 3 circuits (2 same-element + 1 cross-element), got {}: {:?}",
+        result.circuits.len(),
+        result.circuits
+    );
+
+    // Same-element loops
+    assert_has_circuit(&result.circuits, &["population[nyc]", "births[nyc]"]);
+    assert_has_circuit(&result.circuits, &["population[boston]", "births[boston]"]);
+
+    // Cross-element loop: 4-node circuit through both regions
+    assert_has_circuit(
+        &result.circuits,
+        &[
+            "population[nyc]",
+            "births[boston]",
+            "population[boston]",
+            "births[nyc]",
+        ],
+    );
+}
+
+// ---- Test 10: AC3.3 (partitions group cross-element stocks) ----
+
+/// When stocks are connected through cross-element feedback (e.g., via
+/// SUM(population[*])), they should be in the SAME partition because they
+/// are mutually reachable through the causal graph.
+#[test]
+fn cross_element_stocks_in_same_partition() {
+    let project = TestProject::new("cross_partition")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "SUM(population[*]) * 0.01", None);
+
+    let result = element_cycle_partitions(&project);
+
+    // Both population elements should be in the same partition
+    let nyc_partition = result
+        .stock_partition
+        .get("population[nyc]")
+        .expect("population[nyc] should be in a partition");
+    let boston_partition = result
+        .stock_partition
+        .get("population[boston]")
+        .expect("population[boston] should be in a partition");
+
+    assert_eq!(
+        nyc_partition, boston_partition,
+        "population[nyc] (partition {nyc_partition}) and population[boston] (partition {boston_partition}) should be in the same partition"
+    );
+
+    // There should be exactly 1 partition containing both stocks
+    assert_eq!(
+        result.partitions.len(),
+        1,
+        "expected 1 partition, got {}: {:?}",
+        result.partitions.len(),
+        result.partitions
+    );
+}
+
+// ---- Test 11: AC3.4 (separate partitions for independent stocks) ----
+
+/// Two independent A2A stock-flow pairs with no cross-element connections
+/// should produce separate partitions. Each element-level stock only
+/// connects to its own flow element, so no stock is reachable from any
+/// other stock.
+#[test]
+fn independent_stocks_in_separate_partitions() {
+    let project = TestProject::new("separate_partitions")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("stock_a[Region]", "100", &["flow_a"], &[], None)
+        .array_flow("flow_a[Region]", "stock_a * 0.1", None)
+        .array_stock("stock_b[Region]", "50", &["flow_b"], &[], None)
+        .array_flow("flow_b[Region]", "stock_b * 0.2", None);
+
+    let result = element_cycle_partitions(&project);
+
+    // All 4 element-level stocks should be in separate partitions because
+    // each element's feedback is independent (SameElement only).
+    assert_eq!(
+        result.partitions.len(),
+        4,
+        "expected 4 partitions (one per element-level stock), got {}: {:?}",
+        result.partitions.len(),
+        result.partitions
+    );
+
+    // Each partition should contain exactly 1 stock
+    for partition in &result.partitions {
+        assert_eq!(
+            partition.len(),
+            1,
+            "each partition should contain exactly 1 stock, got {:?}",
+            partition
+        );
+    }
+
+    // Verify that stock_a elements are in different partitions from stock_b elements
+    let a_nyc = result
+        .stock_partition
+        .get("stock_a[nyc]")
+        .expect("stock_a[nyc] should be in a partition");
+    let a_boston = result
+        .stock_partition
+        .get("stock_a[boston]")
+        .expect("stock_a[boston] should be in a partition");
+    let b_nyc = result
+        .stock_partition
+        .get("stock_b[nyc]")
+        .expect("stock_b[nyc] should be in a partition");
+    let b_boston = result
+        .stock_partition
+        .get("stock_b[boston]")
+        .expect("stock_b[boston] should be in a partition");
+
+    // All four should be different
+    let partitions = [a_nyc, a_boston, b_nyc, b_boston];
+    for i in 0..partitions.len() {
+        for j in (i + 1)..partitions.len() {
+            assert_ne!(
+                partitions[i], partitions[j],
+                "element stocks should each be in separate partitions"
+            );
+        }
+    }
+}
+
+// ---- Test 12: scalar model identity for loops and partitions ----
+
+/// For a model with no arrays, `model_element_loop_circuits` and
+/// `model_element_cycle_partitions` should produce results identical to
+/// `model_loop_circuits` and `model_cycle_partitions`.
+///
+/// This verifies that the element-level analysis adds zero overhead for
+/// scalar models and that the element-level graph is a faithful copy of
+/// the variable-level graph.
+#[test]
+fn scalar_model_loops_and_partitions_identical() {
+    let project = TestProject::new("scalar_loops")
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.1", None)
+        .flow("deaths", "population * 0.05", None)
+        .scalar_const("rate", 0.1);
+
+    // Compare loop circuits
+    let var_circuits = var_loop_circuits(&project);
+    let elem_circuits = element_loop_circuits(&project);
+
+    // Normalize both for comparison (circuit ordering may differ)
+    let mut var_normalized: Vec<Vec<String>> = var_circuits
+        .circuits
+        .into_iter()
+        .map(normalize_circuit)
+        .collect();
+    var_normalized.sort();
+    let mut elem_normalized: Vec<Vec<String>> = elem_circuits
+        .circuits
+        .into_iter()
+        .map(normalize_circuit)
+        .collect();
+    elem_normalized.sort();
+
+    assert_eq!(
+        var_normalized, elem_normalized,
+        "scalar model: element-level circuits should be identical to variable-level circuits"
+    );
+
+    // Compare cycle partitions
+    let var_partitions = var_cycle_partitions(&project);
+    let elem_partitions = element_cycle_partitions(&project);
+
+    // Normalize partition ordering for comparison
+    let mut var_parts: Vec<Vec<String>> = var_partitions.partitions;
+    for p in &mut var_parts {
+        p.sort();
+    }
+    var_parts.sort();
+    let mut elem_parts: Vec<Vec<String>> = elem_partitions.partitions;
+    for p in &mut elem_parts {
+        p.sort();
+    }
+    elem_parts.sort();
+
+    assert_eq!(
+        var_parts, elem_parts,
+        "scalar model: element-level partitions should be identical to variable-level partitions"
+    );
+
+    // stock_partition maps should also be identical
+    assert_eq!(
+        var_partitions.stock_partition, elem_partitions.stock_partition,
+        "scalar model: element-level stock_partition should be identical to variable-level"
     );
 }
