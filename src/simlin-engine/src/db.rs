@@ -1817,10 +1817,14 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
 // ── LTM tracked functions ──────────────────────────────────────────────
 
 /// A single LTM synthetic variable definition (name + equation text).
+///
+/// When `dimensions` is non-empty, this variable is Apply-to-All (A2A)
+/// and occupies `product(dim_lengths)` slots in the layout instead of 1.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct LtmSyntheticVar {
     pub name: String,
     pub equation: String,
+    pub dimensions: Vec<String>,
 }
 
 /// Result of LTM variable generation for a model.
@@ -1963,6 +1967,7 @@ pub fn link_score_equation_text<'db>(
         return Some(LtmSyntheticVar {
             name: var_name,
             equation,
+            dimensions: vec![],
         });
     }
 
@@ -1982,6 +1987,7 @@ pub fn link_score_equation_text<'db>(
     Some(LtmSyntheticVar {
         name: var_name,
         equation,
+        dimensions: vec![],
     })
 }
 

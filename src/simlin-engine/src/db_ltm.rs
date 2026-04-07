@@ -1820,6 +1820,7 @@ pub fn model_ltm_variables(
             vars.push(LtmSyntheticVar {
                 name: name.to_string(),
                 equation,
+                dimensions: vec![],
             });
         }
     }
@@ -1855,6 +1856,7 @@ pub fn model_ltm_variables(
             vars.push(LtmSyntheticVar {
                 name: path_var_name,
                 equation,
+                dimensions: vec![],
             });
         }
 
@@ -1866,6 +1868,7 @@ pub fn model_ltm_variables(
         vars.push(LtmSyntheticVar {
             name: composite_name,
             equation,
+            dimensions: vec![],
         });
     }
 
