@@ -50,7 +50,7 @@ enum WorkItemType {
 }
 
 /// Which edge of a stock a flow attaches to during layout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum StockAttachSide {
     Top,
     Bottom,
@@ -1604,6 +1604,87 @@ fn record_flow_template(state: &mut LayoutState, flow_ident: &str, flow_elem: &v
     state
         .flow_templates
         .insert(flow_ident.to_string(), FlowTemplate { offsets });
+}
+
+/// Re-sort flows on each affected stock's sides by their existing
+/// attachment position rather than alphabetical ident.  This preserves
+/// the visual left-to-right (or top-to-bottom) ordering of imported or
+/// manually-edited flows when a sibling is added or removed.
+///
+/// Only affects flows that already have view elements in `state`;
+/// new flows without positions are placed last (sorted by ident among
+/// themselves).
+fn reorder_attachments_by_position(
+    attachments: &mut HashMap<String, FlowAttachment>,
+    state: &LayoutState,
+    affected_stocks: &HashSet<String>,
+    metadata: &ComputedMetadata,
+) {
+    for stock_ident in affected_stocks {
+        let stock_uid = match state.uid_manager.get_uid(stock_ident) {
+            Some(uid) => uid,
+            None => continue,
+        };
+
+        // Group flows on this stock by side, recording each flow's
+        // existing attachment position (x for Top/Bottom, y for Left/Right).
+        let mut by_side: HashMap<StockAttachSide, Vec<(String, f64)>> = HashMap::new();
+
+        for (flow_ident, att) in attachments.iter() {
+            let (from, to) = metadata.connected_stocks(flow_ident);
+            let connected =
+                from.is_some_and(|s| s == stock_ident) || to.is_some_and(|s| s == stock_ident);
+            if !connected {
+                continue;
+            }
+
+            let pos_key = state
+                .uid_manager
+                .get_uid(flow_ident)
+                .and_then(|uid| {
+                    state.elements.iter().find_map(|e| match e {
+                        ViewElement::Flow(f) if f.uid == uid => f
+                            .points
+                            .iter()
+                            .find(|pt| pt.attached_to_uid == Some(stock_uid))
+                            .map(|pt| match att.side {
+                                StockAttachSide::Bottom | StockAttachSide::Top => pt.x,
+                                StockAttachSide::Left | StockAttachSide::Right => pt.y,
+                            }),
+                        _ => None,
+                    })
+                })
+                .unwrap_or(f64::MAX); // new flows sort last
+
+            by_side
+                .entry(att.side)
+                .or_default()
+                .push((flow_ident.clone(), pos_key));
+        }
+
+        // Re-sort each side group by position and reassign offsets
+        for flows in by_side.values_mut() {
+            if flows.len() <= 1 {
+                continue;
+            }
+            flows.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            let n = flows.len();
+            for (i, (flow_ident, _)) in flows.iter().enumerate() {
+                let offset = if n == 1 {
+                    0.5
+                } else {
+                    (i as f64 + 1.0) / (n as f64 + 1.0)
+                };
+                if let Some(att) = attachments.get_mut(flow_ident) {
+                    att.offset = offset;
+                }
+            }
+        }
+    }
 }
 
 /// Compute the valve position for a flow based on its attachment info and
@@ -4456,6 +4537,16 @@ pub fn incremental_layout(
         incr_flow_attachments.extend(sides);
     }
 
+    // Re-sort flows within each side group by existing position rather
+    // than alphabetical ident, so imported or manually-edited ordering
+    // is preserved when a sibling is added or removed.
+    reorder_attachments_by_position(
+        &mut incr_flow_attachments,
+        &state,
+        &affected_stocks,
+        &metadata,
+    );
+
     // Check if any existing (preserved) flows need to change sides.
     // If classify_flow_sides assigns Bottom/Top to a flow that is
     // currently horizontal (or Right/Left to one that is vertical),
@@ -4582,17 +4673,24 @@ pub fn incremental_layout(
     }
 
     for flow_ident in &new_elements.new_flows {
-        // Use attachment-based position for top/bottom flows so the valve
-        // is correctly placed on the vertical pipe. Fall back to the
-        // generic initial_positions for horizontal (Right/Left) flows.
-        let pos = attachment_based_flow_position(
-            &state,
-            &config,
-            &metadata,
-            flow_ident,
-            &incr_flow_attachments,
-        )
-        .or_else(|| initial_positions.get(flow_ident).copied());
+        // For stock-to-stock (chain) flows, use the generic seed position
+        // which places the valve between the two stocks. For cloud flows
+        // (one unattached end), use attachment-based position so top/bottom
+        // flows get their valve on the correct vertical pipe.
+        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+        let is_stock_to_stock = from_stock.is_some() && to_stock.is_some();
+        let pos = if is_stock_to_stock {
+            initial_positions.get(flow_ident).copied()
+        } else {
+            attachment_based_flow_position(
+                &state,
+                &config,
+                &metadata,
+                flow_ident,
+                &incr_flow_attachments,
+            )
+            .or_else(|| initial_positions.get(flow_ident).copied())
+        };
         if let Some(pos) = pos {
             let uid = state.get_or_alloc_uid(flow_ident);
             create_flow_view_element(
