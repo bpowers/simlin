@@ -2258,3 +2258,103 @@ fn test_patch_then_ltm_sim_compiles_normally() {
         simlin_project_unref(proj);
     }
 }
+
+/// Deleting a module variable from a model with dependent variables (flows
+/// whose equations reference module outputs like `candidates_outflows.actual`)
+/// must not panic.  The patch should apply successfully with `allow_errors`,
+/// and the resulting project should report compilation errors for the
+/// now-dangling references instead of crashing in the compiler.
+#[test]
+fn test_delete_module_variable_does_not_panic() {
+    let json_bytes = include_bytes!("../../../test/hiring.sd.json");
+
+    let proj = unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_json(
+            json_bytes.as_ptr(),
+            json_bytes.len(),
+            SimlinJsonFormat::Native as u32,
+            &mut err,
+        );
+        assert!(!proj.is_null(), "hiring.sd.json must open successfully");
+        assert!(err.is_null());
+        proj
+    };
+
+    // The model should be simulatable before the delete.
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(!sim.is_null(), "hiring model must simulate before delete");
+        assert!(err.is_null());
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+    }
+
+    // Delete a module variable.  Other variables still reference its
+    // outputs (e.g. flow equation `candidates_outflows.actual`), so the
+    // model will have compilation errors -- but the engine must not panic.
+    let patch_json = r#"{
+        "models": [
+            {
+                "name": "main",
+                "ops": [
+                    {
+                        "type": "deleteVariable",
+                        "payload": { "ident": "candidates_outflows" }
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true, // allow_errors -- the dependent variables will have errors
+            &mut collected_errors,
+            &mut out_error,
+        );
+
+        // The patch itself must not return a fatal error (no panic).
+        if !out_error.is_null() {
+            let msg_ptr = simlin_error_get_message(out_error);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("<non-utf8>")
+            } else {
+                "<no message>"
+            };
+            panic!(
+                "delete-module patch must not produce a fatal error, got: {}",
+                msg
+            );
+        }
+
+        // The module should be gone.
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            assert!(
+                model.get_variable("candidates_outflows").is_none(),
+                "module should be deleted"
+            );
+        }
+
+        // There should be collected errors (dangling references), but no panic.
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+
+        simlin_project_unref(proj);
+    }
+}

@@ -374,18 +374,31 @@ impl Context<'_> {
         model: &Ident<Canonical>,
         ident: &Ident<Canonical>,
     ) -> Result<&VariableMetadata<'_>> {
-        let metadata = &self.metadata[model];
+        let metadata = self
+            .metadata
+            .get(model)
+            .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
         if let Some(pos) = ident.as_str().find('\u{00B7}') {
             let submodel_module_name = &ident.as_str()[..pos];
-            let submodel_name = &self.module_models[model]
-                [&Ident::<Canonical>::from_str_unchecked(submodel_module_name)];
+            let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
+            // The module variable may have been deleted while dependent
+            // equations still reference it (e.g. `module.output`).
+            let model_modules = self
+                .module_models
+                .get(model)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            let submodel_name = model_modules
+                .get(&module_key)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
             let submodel_var = &ident.as_str()[pos + '\u{00B7}'.len_utf8()..];
             self.get_submodel_metadata(
                 submodel_name,
                 &Ident::<Canonical>::from_str_unchecked(submodel_var),
             )
         } else {
-            Ok(&metadata[ident])
+            metadata
+                .get(ident)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))
         }
     }
 
@@ -395,15 +408,28 @@ impl Context<'_> {
         ident: &Ident<Canonical>,
         ignore_arrays: bool,
     ) -> Result<usize> {
-        let metadata = &self.metadata[model];
+        let metadata = self
+            .metadata
+            .get(model)
+            .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
         let ident_str = ident.as_str();
         if let Some(pos) = ident_str.find('\u{00B7}') {
             let submodel_module_name = &ident_str[..pos];
-            let submodel_name = &self.module_models[model]
-                [&Ident::<Canonical>::from_str_unchecked(submodel_module_name)];
+            let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
+            // The module variable may have been deleted while dependent
+            // equations still reference it (e.g. `module.output`).
+            let model_modules = self
+                .module_models
+                .get(model)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            let submodel_name = model_modules
+                .get(&module_key)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
             let submodel_var = &ident_str[pos + '\u{00B7}'.len_utf8()..];
-            let submodel_off =
-                metadata[&Ident::<Canonical>::from_str_unchecked(submodel_module_name)].offset;
+            let submodel_off = metadata
+                .get(&module_key)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?
+                .offset;
             Ok(submodel_off
                 + self.get_submodel_offset(
                     submodel_name,
@@ -411,17 +437,20 @@ impl Context<'_> {
                     ignore_arrays,
                 )?)
         } else if !ignore_arrays {
-            if !metadata.contains_key(ident) {
-                return sim_err!(DoesNotExist);
-            }
-            if let Some(dims) = metadata[ident].var.get_dimensions() {
+            let var_meta = metadata
+                .get(ident)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
+            if let Some(dims) = var_meta.var.get_dimensions() {
                 let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
-                Ok(metadata[ident].offset + off)
+                Ok(var_meta.offset + off)
             } else {
-                Ok(metadata[ident].offset)
+                Ok(var_meta.offset)
             }
         } else {
-            Ok(metadata[ident].offset)
+            metadata
+                .get(ident)
+                .map(|m| m.offset)
+                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))
         }
     }
 

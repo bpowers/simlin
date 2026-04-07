@@ -359,7 +359,7 @@
                             "type": "stock",
                             "uid": 1,
                             "x": 50,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "labelSide": "top",
@@ -367,23 +367,23 @@
                             "type": "stock",
                             "uid": 2,
                             "x": 195,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "top",
                             "name": "onsites",
                             "type": "stock",
                             "uid": 3,
                             "x": 340,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "top",
                             "name": "offers",
                             "type": "stock",
                             "uid": 4,
                             "x": 485,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "labelSide": "top",
@@ -391,7 +391,7 @@
                             "type": "stock",
                             "uid": 5,
                             "x": 630,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "labelSide": "top",
@@ -399,15 +399,15 @@
                             "type": "stock",
                             "uid": 6,
                             "x": 775,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "top",
                             "name": "departures",
                             "type": "stock",
                             "uid": 7,
                             "x": 920,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "labelSide": "bottom",
@@ -415,74 +415,74 @@
                             "type": "stock",
                             "uid": 8,
                             "x": 1065,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "top",
                             "name": "candidates_to\nphonescreens",
                             "points": [
                                 {
                                     "attachedToUid": 1,
                                     "x": 72.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 2,
                                     "x": 172.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 9,
                             "x": 122.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "top",
                             "name": "phonescreens\nto_onsites",
                             "points": [
                                 {
                                     "attachedToUid": 2,
                                     "x": 217.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 3,
                                     "x": 317.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 10,
                             "x": 267.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "flowUid": 11,
                             "type": "cloud",
                             "uid": 12,
-                            "x": 317.5,
-                            "y": 330.8765179697469
+                            "x": 195,
+                            "y": 344.18314999823144
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "left",
                             "name": "phonescreens_to\nonsites_waste",
                             "points": [
                                 {
                                     "attachedToUid": 2,
-                                    "x": 217.5,
-                                    "y": 330.87651796974694
+                                    "x": 195,
+                                    "y": 244.1831499982314
                                 },
                                 {
                                     "attachedToUid": 12,
-                                    "x": 317.5,
-                                    "y": 330.87651796974694
+                                    "x": 195,
+                                    "y": 344.18314999823144
                                 }
                             ],
                             "type": "flow",
                             "uid": 11,
-                            "x": 267.5,
-                            "y": 330.8765179697469
+                            "x": 195,
+                            "y": 294.18314999823144
                         },
                         {
                             "labelSide": "bottom",
@@ -491,45 +491,45 @@
                                 {
                                     "attachedToUid": 3,
                                     "x": 362.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 4,
                                     "x": 462.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 13,
                             "x": 412.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "flowUid": 14,
                             "type": "cloud",
                             "uid": 15,
-                            "x": 462.5,
-                            "y": 330.8765179697469
+                            "x": 340,
+                            "y": 344.18314999823144
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "right",
                             "name": "onsites_to\noffers_waste",
                             "points": [
                                 {
                                     "attachedToUid": 3,
-                                    "x": 362.5,
-                                    "y": 330.87651796974694
+                                    "x": 340,
+                                    "y": 244.1831499982314
                                 },
                                 {
                                     "attachedToUid": 15,
-                                    "x": 462.5,
-                                    "y": 330.87651796974694
+                                    "x": 340,
+                                    "y": 344.18314999823144
                                 }
                             ],
                             "type": "flow",
                             "uid": 14,
-                            "x": 412.5,
-                            "y": 330.8765179697469
+                            "x": 340,
+                            "y": 294.18314999823144
                         },
                         {
                             "labelSide": "bottom",
@@ -538,45 +538,45 @@
                                 {
                                     "attachedToUid": 4,
                                     "x": 507.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 5,
                                     "x": 607.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 16,
                             "x": 557.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "flowUid": 17,
                             "type": "cloud",
                             "uid": 18,
-                            "x": 607.5,
-                            "y": 330.8765179697469
+                            "x": 485,
+                            "y": 344.18314999823144
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "right",
                             "name": "offers_to\nhires_waste",
                             "points": [
                                 {
                                     "attachedToUid": 4,
-                                    "x": 507.5,
-                                    "y": 330.87651796974694
+                                    "x": 485,
+                                    "y": 244.1831499982314
                                 },
                                 {
                                     "attachedToUid": 18,
-                                    "x": 607.5,
-                                    "y": 330.87651796974694
+                                    "x": 485,
+                                    "y": 344.18314999823144
                                 }
                             ],
                             "type": "flow",
                             "uid": 17,
-                            "x": 557.5,
-                            "y": 330.8765179697469
+                            "x": 485,
+                            "y": 294.18314999823144
                         },
                         {
                             "labelSide": "top",
@@ -585,65 +585,65 @@
                                 {
                                     "attachedToUid": 5,
                                     "x": 652.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 6,
                                     "x": 752.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 19,
                             "x": 702.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "flowUid": 20,
                             "type": "cloud",
                             "uid": 21,
-                            "x": 752.5,
-                            "y": 330.8765179697469
+                            "x": 630,
+                            "y": 344.18314999823144
                         },
                         {
-                            "labelSide": "top",
+                            "labelSide": "right",
                             "name": "hires_to\nemployees_waste",
                             "points": [
                                 {
                                     "attachedToUid": 5,
-                                    "x": 652.5,
-                                    "y": 330.87651796974694
+                                    "x": 630,
+                                    "y": 244.1831499982314
                                 },
                                 {
                                     "attachedToUid": 21,
-                                    "x": 752.5,
-                                    "y": 330.87651796974694
+                                    "x": 630,
+                                    "y": 344.18314999823144
                                 }
                             ],
                             "type": "flow",
                             "uid": 20,
-                            "x": 702.5,
-                            "y": 330.8765179697469
+                            "x": 630,
+                            "y": 294.18314999823144
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "top",
                             "name": "employees_to\ndepartures",
                             "points": [
                                 {
                                     "attachedToUid": 6,
                                     "x": 797.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 7,
                                     "x": 897.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 22,
                             "x": 847.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "labelSide": "bottom",
@@ -652,264 +652,264 @@
                                 {
                                     "attachedToUid": 7,
                                     "x": 942.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 },
                                 {
                                     "attachedToUid": 8,
                                     "x": 1042.5,
-                                    "y": 330.87651796974694
+                                    "y": 226.6831499982314
                                 }
                             ],
                             "type": "flow",
                             "uid": 23,
                             "x": 992.5,
-                            "y": 330.8765179697469
+                            "y": 226.6831499982314
                         },
                         {
                             "flowUid": 24,
                             "type": "cloud",
                             "uid": 25,
-                            "x": 1042.5,
-                            "y": 330.8765179697469
+                            "x": 920,
+                            "y": 344.18314999823144
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "left",
                             "name": "departures_to\ndeparted_waste",
                             "points": [
                                 {
                                     "attachedToUid": 7,
-                                    "x": 942.5,
-                                    "y": 330.87651796974694
+                                    "x": 920,
+                                    "y": 244.1831499982314
                                 },
                                 {
                                     "attachedToUid": 25,
-                                    "x": 1042.5,
-                                    "y": 330.87651796974694
+                                    "x": 920,
+                                    "y": 344.18314999823144
                                 }
                             ],
                             "type": "flow",
                             "uid": 24,
-                            "x": 992.5,
-                            "y": 330.8765179697469
+                            "x": 920,
+                            "y": 294.18314999823144
                         },
                         {
                             "labelSide": "bottom",
                             "name": "departures\ndrained_2",
                             "type": "aux",
                             "uid": 26,
-                            "x": 791.5779076696781,
-                            "y": 167.20847773626213
+                            "x": 957.694886489909,
+                            "y": 218.8317752997745
                         },
                         {
                             "labelSide": "top",
                             "name": "employees\ndrained_1",
                             "type": "aux",
                             "uid": 27,
-                            "x": 819.8184907122459,
-                            "y": 368.9541984679592
-                        },
-                        {
-                            "labelSide": "top",
-                            "name": "hires\ndrained_2",
-                            "type": "aux",
-                            "uid": 28,
-                            "x": 730.8842940665238,
-                            "y": 416.9023598878437
+                            "x": 821.9960641068236,
+                            "y": 262.08414034382145
                         },
                         {
                             "labelSide": "bottom",
+                            "name": "hires\ndrained_2",
+                            "type": "aux",
+                            "uid": 28,
+                            "x": 660.5746566191805,
+                            "y": 127.9850485754513
+                        },
+                        {
+                            "labelSide": "top",
                             "name": "offers\ndrained_2",
                             "type": "aux",
                             "uid": 29,
-                            "x": 515.0688608875575,
-                            "y": 233.9783327835112
+                            "x": 519.1487985967085,
+                            "y": 244.96324325294245
                         },
                         {
                             "labelSide": "bottom",
                             "name": "onsites\ndrained_2",
                             "type": "aux",
                             "uid": 30,
-                            "x": 361.1676979828518,
-                            "y": 279.03263939034224
+                            "x": 369.5700389346984,
+                            "y": 193.4727526340322
                         },
                         {
                             "labelSide": "top",
                             "name": "phonescreens\ndrained_2",
                             "type": "aux",
                             "uid": 31,
-                            "x": 215.49527031050468,
-                            "y": 366.8139816169597
-                        },
-                        {
-                            "labelSide": "left",
-                            "name": "departures\noutflows_rate",
-                            "type": "aux",
-                            "uid": 32,
-                            "x": 758.2144355313235,
-                            "y": 236.94613553671144
-                        },
-                        {
-                            "labelSide": "right",
-                            "name": "employees\noutflows_rate",
-                            "type": "aux",
-                            "uid": 33,
-                            "x": 940.8561688677052,
-                            "y": 518.0643785827699
+                            "x": 368.6574493522323,
+                            "y": 402.2893877042517
                         },
                         {
                             "labelSide": "bottom",
+                            "name": "departures\noutflows_rate",
+                            "type": "aux",
+                            "uid": 32,
+                            "x": 810.4919534386904,
+                            "y": 380.9057979782685
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "employees\noutflows_rate",
+                            "type": "aux",
+                            "uid": 33,
+                            "x": 588.1050810991261,
+                            "y": 139.76950139608945
+                        },
+                        {
+                            "labelSide": "top",
                             "name": "hires\noutflows_rate",
                             "type": "aux",
                             "uid": 34,
-                            "x": 618.8646068645849,
-                            "y": 497.9699748230993
+                            "x": 763.9139717941714,
+                            "y": 68.43621207371156
                         },
                         {
                             "labelSide": "bottom",
                             "name": "offers\noutflows_rate",
                             "type": "aux",
                             "uid": 35,
-                            "x": 529.6913443513097,
-                            "y": 400.8127158355392
-                        },
-                        {
-                            "labelSide": "bottom",
-                            "name": "onsites\noutflows_rate",
-                            "type": "aux",
-                            "uid": 36,
-                            "x": 349.3346100702512,
-                            "y": 551.4437471199665
-                        },
-                        {
-                            "labelSide": "bottom",
-                            "name": "phonescreens\noutflows_rate",
-                            "type": "aux",
-                            "uid": 37,
-                            "x": 263.8771562845981,
-                            "y": 502.4762141368766
-                        },
-                        {
-                            "labelSide": "top",
-                            "name": "candidates\noutflows_requested",
-                            "type": "aux",
-                            "uid": 38,
-                            "x": 432.4310678633891,
-                            "y": 50
+                            "x": 549.7882811372692,
+                            "y": 407.0626992888325
                         },
                         {
                             "labelSide": "left",
-                            "name": "departures_outflows\ndest_capacity",
+                            "name": "onsites\noutflows_rate",
                             "type": "aux",
-                            "uid": 39,
-                            "x": 721.6865379035346,
-                            "y": 513.4408385606
+                            "uid": 36,
+                            "x": 269.2187578556142,
+                            "y": 398.7699769839573
                         },
                         {
-                            "labelSide": "bottom",
-                            "name": "employees_outflows\ndest_capacity",
+                            "labelSide": "left",
+                            "name": "phonescreens\noutflows_rate",
                             "type": "aux",
-                            "uid": 40,
-                            "x": 814.8355693723306,
-                            "y": 520.1152374203305
-                        },
-                        {
-                            "labelSide": "bottom",
-                            "name": "hires_outflows\ndest_capacity",
-                            "type": "aux",
-                            "uid": 41,
-                            "x": 671.9164091019302,
-                            "y": 472.7979106547217
-                        },
-                        {
-                            "labelSide": "top",
-                            "name": "offers_outflows\ndest_capacity",
-                            "type": "aux",
-                            "uid": 42,
-                            "x": 474.7337601656763,
-                            "y": 183.23021835359577
-                        },
-                        {
-                            "labelSide": "top",
-                            "name": "onsites_outflows\ndest_capacity",
-                            "type": "aux",
-                            "uid": 43,
-                            "x": 415.33894051663594,
-                            "y": 281.3072512139052
+                            "uid": 37,
+                            "x": 118.36269153097057,
+                            "y": 118.35746504537822
                         },
                         {
                             "labelSide": "right",
-                            "name": "phonescreens_outflows\ndest_capacity",
+                            "name": "candidates\noutflows_requested",
                             "type": "aux",
-                            "uid": 44,
-                            "x": 421.9797451423805,
-                            "y": 530.3495587592993
+                            "uid": 38,
+                            "x": 1.0497737220140948,
+                            "y": 453.58203125
                         },
                         {
                             "labelSide": "bottom",
+                            "name": "departures_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 39,
+                            "x": 750.2998850728534,
+                            "y": 407.9170177859944
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "employees_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 40,
+                            "x": 424.4038414664593,
+                            "y": 386.4956842297691
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "hires_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 41,
+                            "x": 636.8726863646401,
+                            "y": 157.43156811783027
+                        },
+                        {
+                            "labelSide": "left",
+                            "name": "offers_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 42,
+                            "x": 442.38330219904344,
+                            "y": 306.7295122327174
+                        },
+                        {
+                            "labelSide": "bottom",
+                            "name": "onsites_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 43,
+                            "x": 393.2028798346715,
+                            "y": 426.6230204277832
+                        },
+                        {
+                            "labelSide": "top",
+                            "name": "phonescreens_outflows\ndest_capacity",
+                            "type": "aux",
+                            "uid": 44,
+                            "x": 179.66566434270885,
+                            "y": 92.35526824386032
+                        },
+                        {
+                            "labelSide": "right",
                             "name": "candidates_outflows\ndest_capacity",
                             "type": "aux",
                             "uid": 45,
-                            "x": 442.7719874310668,
-                            "y": 448.73455135391583
+                            "x": 54.12523703565091,
+                            "y": 422.9002655242862
                         },
                         {
                             "labelSide": "top",
                             "name": "candidates\noutflows",
                             "type": "module",
                             "uid": 46,
-                            "x": 423.7618792143175,
-                            "y": 369.29568333395184
+                            "x": 84.69370533205483,
+                            "y": 359.85352976668264
                         },
                         {
-                            "labelSide": "bottom",
+                            "labelSide": "left",
                             "name": "phonescreens\noutflows",
                             "type": "module",
                             "uid": 47,
-                            "x": 278.8120220704832,
-                            "y": 421.0675530528851
+                            "x": 183.26631977743375,
+                            "y": 156.98631027048475
                         },
                         {
                             "labelSide": "left",
                             "name": "onsites\noutflows",
                             "type": "module",
                             "uid": 48,
-                            "x": 381.866789759587,
-                            "y": 466.5469079212507
+                            "x": 362.3193914366021,
+                            "y": 314.6298646033875
                         },
                         {
-                            "labelSide": "left",
+                            "labelSide": "bottom",
                             "name": "offers\noutflows",
                             "type": "module",
                             "uid": 49,
-                            "x": 522.2827228759872,
-                            "y": 290.026163635499
+                            "x": 526.4887631756511,
+                            "y": 306.39998318341986
                         },
                         {
                             "labelSide": "left",
                             "name": "hires\noutflows",
                             "type": "module",
                             "uid": 50,
-                            "x": 662.2401231127079,
-                            "y": 403.5968955731037
-                        },
-                        {
-                            "labelSide": "bottom",
-                            "name": "employees\noutflows",
-                            "type": "module",
-                            "uid": 51,
-                            "x": 864.1878807538342,
-                            "y": 435.3009715433798
+                            "x": 688.3254734158303,
+                            "y": 181.23812055691977
                         },
                         {
                             "labelSide": "top",
+                            "name": "employees\noutflows",
+                            "type": "module",
+                            "uid": 51,
+                            "x": 671.6118788676544,
+                            "y": 262.19677981001365
+                        },
+                        {
+                            "labelSide": "bottom",
                             "name": "departures\noutflows",
                             "type": "module",
                             "uid": 52,
-                            "x": 887.9143042796012,
-                            "y": 360.6448606108072
+                            "x": 751.3180012735985,
+                            "y": 320.29254144364586
                         },
                         {
-                            "arc": 25.868849103946413,
+                            "arc": -249.78220327003152,
                             "fromUid": 1,
                             "toUid": 46,
                             "type": "link",
@@ -928,7 +928,7 @@
                             "uid": 55
                         },
                         {
-                            "arc": -152.73244280113852,
+                            "arc": -48.540799903227985,
                             "fromUid": 46,
                             "toUid": 9,
                             "type": "link",
@@ -953,7 +953,7 @@
                             "uid": 59
                         },
                         {
-                            "arc": 167.37686937882833,
+                            "arc": 170.9720930909568,
                             "fromUid": 7,
                             "toUid": 52,
                             "type": "link",
@@ -972,14 +972,14 @@
                             "uid": 62
                         },
                         {
-                            "arc": 4.111998030559262,
+                            "arc": -1.212607419418983,
                             "fromUid": 52,
                             "toUid": 23,
                             "type": "link",
                             "uid": 63
                         },
                         {
-                            "arc": 4.111998030559262,
+                            "arc": 11.20131414625006,
                             "fromUid": 52,
                             "toUid": 24,
                             "type": "link",
@@ -998,7 +998,7 @@
                             "uid": 66
                         },
                         {
-                            "arc": 54.49280527322473,
+                            "arc": 170.05067320576993,
                             "fromUid": 6,
                             "toUid": 51,
                             "type": "link",
@@ -1017,7 +1017,7 @@
                             "uid": 69
                         },
                         {
-                            "arc": -92.23073303459208,
+                            "arc": 8.584861825253743,
                             "fromUid": 51,
                             "toUid": 22,
                             "type": "link",
@@ -1042,7 +1042,7 @@
                             "uid": 73
                         },
                         {
-                            "arc": 75.48565739398819,
+                            "arc": -55.515731549478986,
                             "fromUid": 5,
                             "toUid": 50,
                             "type": "link",
@@ -1061,14 +1061,14 @@
                             "uid": 76
                         },
                         {
-                            "arc": -50.43842171308248,
+                            "arc": 56.40103973985543,
                             "fromUid": 50,
                             "toUid": 19,
                             "type": "link",
                             "uid": 77
                         },
                         {
-                            "arc": -50.43842171308248,
+                            "arc": 97.31209477344215,
                             "fromUid": 50,
                             "toUid": 20,
                             "type": "link",
@@ -1093,7 +1093,7 @@
                             "uid": 81
                         },
                         {
-                            "arc": -55.77557571776311,
+                            "arc": 42.50519917492369,
                             "fromUid": 4,
                             "toUid": 49,
                             "type": "link",
@@ -1112,14 +1112,14 @@
                             "uid": 84
                         },
                         {
-                            "arc": 31.665623230266327,
+                            "arc": -58.688170194439365,
                             "fromUid": 49,
                             "toUid": 16,
                             "type": "link",
                             "uid": 85
                         },
                         {
-                            "arc": 31.665623230266327,
+                            "arc": -174.88611906894926,
                             "fromUid": 49,
                             "toUid": 17,
                             "type": "link",
@@ -1144,7 +1144,7 @@
                             "uid": 89
                         },
                         {
-                            "arc": 79.74427261438218,
+                            "arc": 55.75993253308029,
                             "fromUid": 3,
                             "toUid": 48,
                             "type": "link",
@@ -1163,14 +1163,14 @@
                             "uid": 92
                         },
                         {
-                            "arc": -71.229483934008,
+                            "arc": -51.740324077026095,
                             "fromUid": 48,
                             "toUid": 13,
                             "type": "link",
                             "uid": 93
                         },
                         {
-                            "arc": -71.229483934008,
+                            "arc": -146.11020787436664,
                             "fromUid": 48,
                             "toUid": 14,
                             "type": "link",
@@ -1195,7 +1195,7 @@
                             "uid": 97
                         },
                         {
-                            "arc": 52.234004858684166,
+                            "arc": -59.405162456221426,
                             "fromUid": 2,
                             "toUid": 47,
                             "type": "link",
@@ -1214,14 +1214,14 @@
                             "uid": 100
                         },
                         {
-                            "arc": -89.25026768168811,
+                            "arc": 32.481899435704285,
                             "fromUid": 47,
                             "toUid": 10,
                             "type": "link",
                             "uid": 101
                         },
                         {
-                            "arc": -89.25026768168811,
+                            "arc": 105.11170685110474,
                             "fromUid": 47,
                             "toUid": 11,
                             "type": "link",
@@ -1230,12 +1230,12 @@
                     ],
                     "kind": "stock_flow",
                     "viewBox": {
-                        "x": -230.2063936610595,
-                        "y": -127.75926300448828,
-                        "width": 939,
+                        "x": 40.068676064717295,
+                        "y": 24.84193643476384,
+                        "width": 496,
                         "height": 660
                     },
-                    "zoom": 1.0493971300464895
+                    "zoom": 1
                 }
             ]
         }
