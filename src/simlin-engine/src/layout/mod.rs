@@ -1022,9 +1022,11 @@ pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
                     // Determine which face the flow approaches from using
                     // aspect-ratio-normalized comparison of dx vs dy.
                     if half_h * dx.abs() >= half_w * dy.abs() {
-                        // Horizontal approach: snap to left or right edge
+                        // Horizontal approach: snap to left or right edge.
+                        // Preserve the y position (may be off-center for
+                        // multi-flow sides), clamped to stock bounds.
                         pt.x = stock_pos.x + dx.signum() * half_w;
-                        pt.y = stock_pos.y;
+                        pt.y = pt.y.clamp(stock_pos.y - half_h, stock_pos.y + half_h);
                     } else {
                         // Vertical approach: snap to top or bottom edge.
                         // Preserve the x position (may be off-center for
@@ -1718,14 +1720,22 @@ fn attachment_based_flow_position(
                 stock_pos.y - config.stock_height / 2.0 - config.horizontal_spacing / 2.0,
             )
         }
-        StockAttachSide::Right => Position::new(
-            stock_pos.x + config.stock_width / 2.0 + config.horizontal_spacing / 2.0,
-            stock_pos.y,
-        ),
-        StockAttachSide::Left => Position::new(
-            stock_pos.x - config.stock_width / 2.0 - config.horizontal_spacing / 2.0,
-            stock_pos.y,
-        ),
+        StockAttachSide::Right => {
+            let y =
+                stock_pos.y - config.stock_height / 2.0 + config.stock_height * attachment.offset;
+            Position::new(
+                stock_pos.x + config.stock_width / 2.0 + config.horizontal_spacing / 2.0,
+                y,
+            )
+        }
+        StockAttachSide::Left => {
+            let y =
+                stock_pos.y - config.stock_height / 2.0 + config.stock_height * attachment.offset;
+            Position::new(
+                stock_pos.x - config.stock_width / 2.0 - config.horizontal_spacing / 2.0,
+                y,
+            )
+        }
     })
 }
 
@@ -1801,6 +1811,27 @@ fn create_flow_view_element(
                         },
                     ]
                 }
+                Some(FlowAttachment {
+                    side: StockAttachSide::Right,
+                    offset,
+                }) => {
+                    // Horizontal flow exiting to the right, offset along
+                    // the right edge for multi-flow distribution
+                    let attach_y =
+                        from_pos.y - config.stock_height / 2.0 + config.stock_height * offset;
+                    vec![
+                        FlowPoint {
+                            x: from_pos.x + config.stock_width / 2.0,
+                            y: attach_y,
+                            attached_to_uid: Some(from_uid),
+                        },
+                        FlowPoint {
+                            x: pos.x + 50.0,
+                            y: pos.y,
+                            attached_to_uid: None,
+                        },
+                    ]
+                }
                 _ => {
                     // Default: horizontal flow exiting to the right
                     vec![
@@ -1842,6 +1873,27 @@ fn create_flow_view_element(
                         FlowPoint {
                             x: attach_x,
                             y: to_pos.y - config.stock_height / 2.0,
+                            attached_to_uid: Some(to_uid),
+                        },
+                    ]
+                }
+                Some(FlowAttachment {
+                    side: StockAttachSide::Left,
+                    offset,
+                }) => {
+                    // Horizontal flow entering from the left, offset along
+                    // the left edge for multi-flow distribution
+                    let attach_y =
+                        to_pos.y - config.stock_height / 2.0 + config.stock_height * offset;
+                    vec![
+                        FlowPoint {
+                            x: pos.x - 50.0,
+                            y: pos.y,
+                            attached_to_uid: None,
+                        },
+                        FlowPoint {
+                            x: to_pos.x - config.stock_width / 2.0,
+                            y: attach_y,
                             attached_to_uid: Some(to_uid),
                         },
                     ]
@@ -2125,6 +2177,19 @@ fn layout_chain(
                                         + config.horizontal_spacing / 2.0,
                                 )
                             }
+                            Some(FlowAttachment {
+                                side: StockAttachSide::Right,
+                                offset,
+                            }) => {
+                                let y_offset = item.position.y - config.stock_height / 2.0
+                                    + config.stock_height * offset;
+                                Position::new(
+                                    item.position.x
+                                        + config.stock_width / 2.0
+                                        + config.horizontal_spacing / 2.0,
+                                    y_offset,
+                                )
+                            }
                             _ => Position::new(
                                 item.position.x
                                     + config.stock_width / 2.0
@@ -2147,6 +2212,19 @@ fn layout_chain(
                                     item.position.y
                                         - config.stock_height / 2.0
                                         - config.horizontal_spacing / 2.0,
+                                )
+                            }
+                            Some(FlowAttachment {
+                                side: StockAttachSide::Left,
+                                offset,
+                            }) => {
+                                let y_offset = item.position.y - config.stock_height / 2.0
+                                    + config.stock_height * offset;
+                                Position::new(
+                                    item.position.x
+                                        - config.stock_width / 2.0
+                                        - config.horizontal_spacing / 2.0,
+                                    y_offset,
                                 )
                             }
                             _ => Position::new(
@@ -4532,6 +4610,37 @@ pub fn incremental_layout(
         }
     }
 
+    // For deleted flows, find which stocks they were connected to in the
+    // old view. This handles patches that only emit DeleteVariable without
+    // UpdateStockFlows -- the remaining sibling flows still need to be
+    // reclassified.
+    let stock_uid_to_ident: HashMap<i32, String> = state
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some((s.uid, canonicalize(&s.name).into_owned())),
+            _ => None,
+        })
+        .collect();
+    for op in &patch.ops {
+        if let crate::patch::ModelOperation::DeleteVariable { ident } = op {
+            let canonical = canonicalize(ident).into_owned();
+            for elem in &old_view.elements {
+                if let ViewElement::Flow(f) = elem
+                    && canonicalize(&f.name) == canonical
+                {
+                    for pt in &f.points {
+                        if let Some(uid) = pt.attached_to_uid
+                            && let Some(stock_ident) = stock_uid_to_ident.get(&uid)
+                        {
+                            affected_stocks.insert(stock_ident.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for stock in &affected_stocks {
         let sides = classify_flow_sides(stock, &metadata);
         incr_flow_attachments.extend(sides);
@@ -4575,26 +4684,38 @@ pub fn incremental_layout(
                 let is_vertical = matches!(orientation, FlowOrientation::Vertical);
                 if needs_vertical != is_vertical {
                     flows_to_rebuild.push(flow_ident.clone());
-                } else if needs_vertical {
+                } else {
                     // Orientation matches but the offset may have changed
                     // (e.g. a sibling was added/removed on the same face).
-                    // Check if the current attachment x matches the expected
-                    // offset; if not, rebuild.
+                    // For vertical flows, check x offset; for horizontal
+                    // flows, check y offset.
                     let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
                     let stock_name = from_stock.or(to_stock);
                     if let Some(sn) = stock_name
                         && let Some(stock_uid) = state.uid_manager.get_uid(sn)
                         && let Some(&stock_pos) = state.positions.get(&stock_uid)
                     {
-                        let expected_x = stock_pos.x - config.stock_width / 2.0
-                            + config.stock_width * attachment.offset;
-                        let current_x = f
-                            .points
-                            .iter()
-                            .find(|pt| pt.attached_to_uid == Some(stock_uid))
-                            .map(|pt| pt.x);
-                        if let Some(cx) = current_x
-                            && (cx - expected_x).abs() > 0.5
+                        let (expected, current) = if needs_vertical {
+                            let exp = stock_pos.x - config.stock_width / 2.0
+                                + config.stock_width * attachment.offset;
+                            let cur = f
+                                .points
+                                .iter()
+                                .find(|pt| pt.attached_to_uid == Some(stock_uid))
+                                .map(|pt| pt.x);
+                            (exp, cur)
+                        } else {
+                            let exp = stock_pos.y - config.stock_height / 2.0
+                                + config.stock_height * attachment.offset;
+                            let cur = f
+                                .points
+                                .iter()
+                                .find(|pt| pt.attached_to_uid == Some(stock_uid))
+                                .map(|pt| pt.y);
+                            (exp, cur)
+                        };
+                        if let Some(c) = current
+                            && (c - expected).abs() > 0.5
                         {
                             flows_to_rebuild.push(flow_ident.clone());
                         }

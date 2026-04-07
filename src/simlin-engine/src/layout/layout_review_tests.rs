@@ -2715,3 +2715,195 @@ fn test_incremental_redistribute_preserves_visual_order() {
         new_wa_x,
     );
 }
+
+// ---------------------------------------------------------------------------
+// P1: DeleteVariable without UpdateStockFlows must still reclassify siblings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_delete_flow_without_update_stock_flows() {
+    // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_flow -> cloud
+    // Delete chain_flow and stock_b using only DeleteVariable (no UpdateStockFlows).
+    // waste_flow should move back to horizontal.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Build patched model: remove chain_flow and stock_b, update stock_a
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model
+        .variables
+        .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows = vec!["waste_flow".to_string()];
+        }
+    }
+
+    // Patch has ONLY DeleteVariable, no UpdateStockFlows
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            crate::patch::ModelOperation::DeleteVariable {
+                ident: "chain_flow".to_string(),
+            },
+            crate::patch::ModelOperation::DeleteVariable {
+                ident: "stock_b".to_string(),
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let new_stock = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a");
+
+    let new_waste = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
+            _ => None,
+        })
+        .expect("waste_flow");
+
+    // waste_flow should now be horizontal (same y as stock) -- no more chain
+    assert!(
+        (new_waste.y - new_stock.y).abs() < 5.0,
+        "waste_flow y ({}) should be near stock_a y ({}) after chain deleted via DeleteVariable only",
+        new_waste.y,
+        new_stock.y,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Multiple horizontal cloud flows must not overlap
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_layout_two_horizontal_cloud_outflows_spaced() {
+    // Stock with 2 cloud outflows and no chain flow -- both go Right
+    // but should be at different y positions.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["f1".to_string(), "f2".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f1".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f2".to_string(),
+                equation: datamodel::Equation::Scalar("3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let project = test_project(model);
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let f1 = find_flow(&result, "f1").expect("f1");
+    let f2 = find_flow(&result, "f2").expect("f2");
+
+    // Both should be to the right of the stock (horizontal)
+    let stock = find_stock(&result, "a").expect("stock a");
+    assert!(f1.x > stock.x, "f1 should be right of stock");
+    assert!(f2.x > stock.x, "f2 should be right of stock");
+
+    // Their y-positions should differ (distributed along right edge)
+    let dist = ((f1.x - f2.x).powi(2) + (f1.y - f2.y).powi(2)).sqrt();
+    assert!(
+        dist > 1.0,
+        "f1 ({}, {}) and f2 ({}, {}) should not overlap (dist={})",
+        f1.x,
+        f1.y,
+        f2.x,
+        f2.y,
+        dist,
+    );
+}
