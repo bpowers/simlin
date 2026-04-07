@@ -511,14 +511,20 @@ pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec
 ///
 /// Walks the Expr2 tree looking for `Expr2::App(builtin, ...)` nodes where
 /// the builtin is an array reducer and the argument references the source
-/// variable (identified by canonical name). Returns the `ReducerKind` and
-/// the uppercase function name (e.g., "SUM", "MIN") for equation generation.
+/// variable (identified by canonical name). Returns the `ReducerKind`, the
+/// uppercase function name (e.g., "SUM", "MIN"), and whether the reducer is
+/// the top-level expression (`is_bare`).
+///
+/// When `is_bare` is false, the reducer is nested inside other arithmetic
+/// (e.g., `2 * SUM(population[*])`). Callers should fall back to the
+/// delta-ratio approach for nested reducers, because the algebraic shortcut
+/// ignores the surrounding arithmetic and produces wrong link scores.
 ///
 /// Returns `None` if no reducing builtin is found for the given source.
 pub(crate) fn classify_reducer(
     target_var: &Variable,
     source_ident: &str,
-) -> Option<(ReducerKind, &'static str)> {
+) -> Option<(ReducerKind, &'static str, bool)> {
     use crate::ast::Ast;
 
     let ast = target_var.ast()?;
@@ -529,40 +535,51 @@ pub(crate) fn classify_reducer(
         Ast::Arrayed(_, _, default_expr, _) => default_expr.as_ref()?,
     };
 
-    classify_reducer_in_expr(expr, source_ident)
+    classify_reducer_in_expr(expr, source_ident, true)
 }
 
 /// Recursively search an Expr2 tree for a reducing builtin applied to
 /// the source variable.
+///
+/// `is_top_level` tracks whether we are still at the root of the expression
+/// tree. When `true` and the reducer is found at this node, `is_bare` in the
+/// result is `true`. Once we recurse into sub-expressions (Op1, Op2, If,
+/// non-reducer App arguments), `is_top_level` becomes `false` so any reducer
+/// found deeper is correctly flagged as nested.
 fn classify_reducer_in_expr(
     expr: &crate::ast::Expr2,
     source_ident: &str,
-) -> Option<(ReducerKind, &'static str)> {
+    is_top_level: bool,
+) -> Option<(ReducerKind, &'static str, bool)> {
     use crate::ast::Expr2;
 
     match expr {
         Expr2::App(builtin, _, _) => {
             // Check if this builtin is a reducer whose argument references
             // the source variable.
-            if let Some(result) = classify_builtin_if_references_source(builtin, source_ident) {
-                return Some(result);
+            if let Some((kind, name)) = classify_builtin_if_references_source(builtin, source_ident)
+            {
+                return Some((kind, name, is_top_level));
             }
             // Even if this particular App node isn't the reducer we want,
             // recurse into its arguments to find nested reducers.
+            // Any reducer found inside a non-reducer App is nested.
             let mut result = None;
             builtin.for_each_expr_ref(|sub_expr| {
                 if result.is_none() {
-                    result = classify_reducer_in_expr(sub_expr, source_ident);
+                    result = classify_reducer_in_expr(sub_expr, source_ident, false);
                 }
             });
             result
         }
-        Expr2::Op1(_, inner, _, _) => classify_reducer_in_expr(inner, source_ident),
-        Expr2::Op2(_, lhs, rhs, _, _) => classify_reducer_in_expr(lhs, source_ident)
-            .or_else(|| classify_reducer_in_expr(rhs, source_ident)),
-        Expr2::If(cond, then_e, else_e, _, _) => classify_reducer_in_expr(cond, source_ident)
-            .or_else(|| classify_reducer_in_expr(then_e, source_ident))
-            .or_else(|| classify_reducer_in_expr(else_e, source_ident)),
+        Expr2::Op1(_, inner, _, _) => classify_reducer_in_expr(inner, source_ident, false),
+        Expr2::Op2(_, lhs, rhs, _, _) => classify_reducer_in_expr(lhs, source_ident, false)
+            .or_else(|| classify_reducer_in_expr(rhs, source_ident, false)),
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            classify_reducer_in_expr(cond, source_ident, false)
+                .or_else(|| classify_reducer_in_expr(then_e, source_ident, false))
+                .or_else(|| classify_reducer_in_expr(else_e, source_ident, false))
+        }
         Expr2::Var(..) | Expr2::Const(..) | Expr2::Subscript(..) => None,
     }
 }
@@ -678,6 +695,12 @@ fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
 ///
 /// `reducer_name` is the uppercase function name ("MIN", "MAX", "STDDEV", "RANK")
 /// used for nonlinear reducers when reconstructing the function call.
+///
+/// `is_bare` indicates whether the reducer is the entire target equation (true)
+/// or is nested inside surrounding arithmetic like `2 * SUM(...)` (false).
+/// When false, the algebraic shortcut would produce wrong link scores because
+/// it ignores the surrounding arithmetic. In that case, the delta-ratio
+/// fallback (using the target variable directly) is used instead.
 pub(crate) fn generate_element_to_scalar_equation(
     source_var_name: &str,
     target_var_name: &str,
@@ -685,12 +708,29 @@ pub(crate) fn generate_element_to_scalar_equation(
     all_elements: &[String],
     reducer_kind: &ReducerKind,
     reducer_name: &str,
+    is_bare: bool,
 ) -> String {
     let source_q = quote_ident(source_var_name);
     let target_q = quote_ident(target_var_name);
     let source_elem = format!("{source_q}[{current_element}]");
 
     let partial_eq = match reducer_kind {
+        ReducerKind::Constant => {
+            // SIZE is constant; caller should not generate link scores.
+            // Return a zero equation as a defensive fallback.
+            return "0".to_string();
+        }
+        _ if !is_bare => {
+            // The reducer is nested inside surrounding arithmetic (e.g.,
+            // `2 * SUM(population[*])` or `MAX(SUM(population[*]), 0)`).
+            // The algebraic shortcut would ignore the surrounding expression
+            // and produce wrong link scores. Fall back to the delta-ratio
+            // approach: use the target variable directly, which measures the
+            // ratio of actual target change to source element change. This is
+            // approximate (like STDDEV/RANK) but avoids the wrong-multiplier
+            // bug that the algebraic shortcut would introduce.
+            target_q.to_string()
+        }
         ReducerKind::Linear => generate_linear_partial(
             &source_q,
             &target_q,
@@ -705,11 +745,6 @@ pub(crate) fn generate_element_to_scalar_equation(
             all_elements,
             reducer_name,
         ),
-        ReducerKind::Constant => {
-            // SIZE is constant; caller should not generate link scores.
-            // Return a zero equation as a defensive fallback.
-            return "0".to_string();
-        }
     };
 
     // Standard link score formula wrapping the partial equation.
@@ -933,7 +968,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Linear, "SUM")));
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", true)));
     }
 
     #[test]
@@ -942,7 +977,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Mean(vec![inner]), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Linear, "MEAN")));
+        assert_eq!(result, Some((ReducerKind::Linear, "MEAN", true)));
     }
 
     #[test]
@@ -951,7 +986,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Min(Box::new(inner), None), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Nonlinear, "MIN")));
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "MIN", true)));
     }
 
     #[test]
@@ -960,7 +995,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Max(Box::new(inner), None), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Nonlinear, "MAX")));
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "MAX", true)));
     }
 
     #[test]
@@ -969,7 +1004,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Stddev(Box::new(inner)), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Nonlinear, "STDDEV")));
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "STDDEV", true)));
     }
 
     #[test]
@@ -983,7 +1018,7 @@ mod tests {
         );
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Nonlinear, "RANK")));
+        assert_eq!(result, Some((ReducerKind::Nonlinear, "RANK", true)));
     }
 
     #[test]
@@ -992,7 +1027,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Size(Box::new(inner)), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Constant, "SIZE")));
+        assert_eq!(result, Some((ReducerKind::Constant, "SIZE", true)));
     }
 
     #[test]
@@ -1023,6 +1058,7 @@ mod tests {
     #[test]
     fn test_classify_reducer_nested_in_expression() {
         // 2 * SUM(population[*]) + 1
+        // Reducer is NOT at the top level, so is_bare should be false.
         let inner = subscript_wildcard("population");
         let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
         let two = Expr2::Const("2".to_string(), 2.0, Loc::default());
@@ -1043,7 +1079,24 @@ mod tests {
         );
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Linear, "SUM")));
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", false)));
+    }
+
+    #[test]
+    fn test_classify_reducer_nested_in_scalar_max() {
+        // MAX(SUM(population[*]), 0) -- scalar MAX wrapping array SUM
+        // The SUM is nested inside a non-reducer App, so is_bare should be false.
+        let inner = subscript_wildcard("population");
+        let sum_expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
+        let zero = Expr2::Const("0".to_string(), 0.0, Loc::default());
+        let expr = Expr2::App(
+            BuiltinFn::Max(Box::new(sum_expr), Some(Box::new(zero))),
+            None,
+            Loc::default(),
+        );
+        let var = var_with_expr(expr);
+        let result = classify_reducer(&var, "population");
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", false)));
     }
 
     #[test]
@@ -1053,7 +1106,7 @@ mod tests {
         let expr = Expr2::App(BuiltinFn::Sum(Box::new(inner)), None, Loc::default());
         let var = var_with_expr(expr);
         let result = classify_reducer(&var, "population");
-        assert_eq!(result, Some((ReducerKind::Linear, "SUM")));
+        assert_eq!(result, Some((ReducerKind::Linear, "SUM", true)));
     }
 
     #[test]
@@ -1118,6 +1171,7 @@ mod tests {
             &elements,
             &ReducerKind::Linear,
             "SUM",
+            true,
         );
         // Should contain the algebraic shortcut
         assert!(eq.contains("PREVIOUS(total_pop)"), "equation: {eq}");
@@ -1144,6 +1198,7 @@ mod tests {
             &elements,
             &ReducerKind::Linear,
             "MEAN",
+            true,
         );
         // MEAN divides by N
         assert!(eq.contains("/ 3"), "equation: {eq}");
@@ -1160,6 +1215,7 @@ mod tests {
             &elements,
             &ReducerKind::Nonlinear,
             "MIN",
+            true,
         );
         // Should enumerate all elements with nested binary MIN calls
         assert!(eq.contains("population[nyc]"), "equation: {eq}");
@@ -1187,6 +1243,7 @@ mod tests {
             &elements,
             &ReducerKind::Nonlinear,
             "MAX",
+            true,
         );
         // boston is the current element, so nyc and la are wrapped
         // Nested binary calls: MAX(a, MAX(b, c))
@@ -1208,8 +1265,39 @@ mod tests {
             &elements,
             &ReducerKind::Constant,
             "SIZE",
+            true,
         );
         assert_eq!(eq, "0");
+    }
+
+    #[test]
+    fn test_generate_nested_reducer_uses_delta_ratio() {
+        // When the reducer is nested (is_bare=false), the equation should
+        // fall back to the delta-ratio approach (using target directly)
+        // instead of the algebraic shortcut.
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "population",
+            "total_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            false, // nested reducer
+        );
+        // Should NOT use the algebraic shortcut (PREVIOUS(target) + delta)
+        assert!(
+            !eq.contains("PREVIOUS(total_pop) +"),
+            "should not use algebraic shortcut for nested reducer: {eq}"
+        );
+        // Should still have the standard link score wrapping
+        assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+        assert!(eq.contains("SAFEDIV("), "equation: {eq}");
+        // The partial equation uses target directly (delta-ratio approach)
+        assert!(
+            eq.contains("(total_pop - PREVIOUS(total_pop))"),
+            "should use target variable in delta-ratio: {eq}"
+        );
     }
 
     #[test]
@@ -1222,6 +1310,7 @@ mod tests {
             &elements,
             &ReducerKind::Linear,
             "SUM",
+            true,
         );
         // Should have initial time guard
         assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
@@ -1246,6 +1335,7 @@ mod tests {
             &elements,
             &ReducerKind::Linear,
             "SUM",
+            true,
         );
         // Source name with special chars should be quoted
         assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");

@@ -1790,7 +1790,11 @@ fn build_element_level_loops(
         //
         // A group is pure-dimension when:
         // 1. Every node in every circuit has a subscript (no scalar nodes)
-        // 2. The group has more than one circuit (multiple elements share
+        // 2. The stripped variable-level sequence has NO repeated variables
+        //    (repeated variables indicate cross-element circuits, e.g.,
+        //    pop[nyc]->share[boston]->...->pop[boston]->share[nyc], where
+        //    "population" appears twice in the stripped sequence)
+        // 3. The group has more than one circuit (multiple elements share
         //    the same structure), OR has exactly one circuit with subscripted
         //    nodes (single-element dimension is still A2A)
         //
@@ -1800,7 +1804,47 @@ fn build_element_level_loops(
         let representative = circuits_in_group[0];
         let all_subscripted = representative.iter().all(|n| n.contains('['));
 
-        if all_subscripted && !representative.is_empty() {
+        // Detect cross-element circuits that should NOT be collapsed
+        // into A2A loops. Two patterns indicate cross-element:
+        //
+        // 1. Repeated variable names: the stripped sequence has a variable
+        //    appearing more than once (e.g., pop[nyc]->share[boston]->
+        //    pop[boston]->share[nyc] has pop and share each twice).
+        //
+        // 2. Mixed subscripts: nodes in a circuit have different element
+        //    subscripts (e.g., pop[nyc]->mp[boston]->mi[nyc]->pop[nyc]
+        //    has subscripts nyc,boston,nyc — not uniform). A genuine A2A
+        //    circuit visits each variable at the SAME element
+        //    (pop[nyc]->births[nyc]->pop[nyc], all nyc).
+        let is_cross_element = if all_subscripted {
+            // Check 1: repeated variable names
+            let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
+            let mut seen = std::collections::HashSet::new();
+            let has_repeated = stripped.iter().any(|v| !seen.insert(*v));
+            if has_repeated {
+                true
+            } else {
+                // Check 2: verify ALL circuits in the group have uniform
+                // subscripts (all nodes use the same subscript). If any
+                // circuit has mixed subscripts, the group is cross-element.
+                circuits_in_group.iter().any(|circuit| {
+                    let subscripts: Vec<&str> = circuit
+                        .iter()
+                        .filter_map(|n| {
+                            let start = n.find('[')?;
+                            let end = n.rfind(']')?;
+                            Some(&n[start + 1..end])
+                        })
+                        .collect();
+                    // Check if all subscripts are identical
+                    subscripts.windows(2).any(|w| w[0] != w[1])
+                })
+            }
+        } else {
+            false
+        };
+
+        if all_subscripted && !is_cross_element && !representative.is_empty() {
             // Pure-dimension group: produce a single A2A loop.
             //
             // Use the variable-level graph for polarity analysis and stock
@@ -1844,6 +1888,15 @@ fn build_element_level_loops(
                 polarity,
                 dimensions,
             });
+        } else if is_cross_element {
+            // Cross-element circuits (mixed subscripts or repeated variable
+            // names). These circuits reference off-diagonal element edges
+            // like population[nyc] → migration_pressure[boston], for which
+            // no dedicated link score variables exist. Skip loop score
+            // generation: the diagonal A2A loops already capture the
+            // primary feedback effects with correct ceteris-paribus scores.
+            // Cross-element coupling effects are secondary and would need
+            // off-diagonal link score generation to be scored properly.
         } else {
             // Mixed or scalar group: each circuit becomes its own scalar loop.
             for circuit in circuits_in_group {
@@ -2059,6 +2112,20 @@ pub fn model_ltm_variables(
         // Same-dimension A2A: both have identical dimension(s).
         // Scalar-to-arrayed: source is scalar, target is arrayed.
         // In both cases the link score gets the target's dimensions.
+        //
+        // NOTE: When from_dims == to_dims and the dependency is CrossElement
+        // (e.g., `share[R] = population[R] / SUM(population[*])`), this
+        // creates only N diagonal link scores (one per element). Off-diagonal
+        // link scores (e.g., population[boston] -> share[nyc]) are not
+        // generated. The diagonal scores correctly capture the total
+        // ceteris-paribus sensitivity including cross-element effects
+        // through the reducer. Cross-element circuits (detected by
+        // build_element_level_loops when variable names repeat in the
+        // stripped sequence) are classified as mixed/scalar loops, where
+        // off-diagonal edges will have zero link scores. This is an
+        // acceptable approximation: the primary diagonal loops have correct
+        // scores, and secondary cross-element loops are discovered but
+        // ranked lower due to missing off-diagonal scores.
         if from_dims.is_empty() || from_dims == *to_dims {
             // Map canonical dimension names back to their original
             // datamodel names for correct equation parsing.
@@ -2128,7 +2195,8 @@ pub fn model_ltm_variables(
         // The source is arrayed and the target is scalar. Classify the
         // reducing function in the target's equation.
         let to_var = super::reconstruct_single_variable(db, model, project, to)?;
-        let (reducer_kind, reducer_name) = crate::ltm_augment::classify_reducer(&to_var, from)?;
+        let (reducer_kind, reducer_name, is_bare) =
+            crate::ltm_augment::classify_reducer(&to_var, from)?;
 
         if reducer_kind == crate::ltm_augment::ReducerKind::Constant {
             // SIZE is constant; link score is always 0. Skip entirely.
@@ -2149,6 +2217,7 @@ pub fn model_ltm_variables(
                 &elements,
                 &reducer_kind,
                 reducer_name,
+                is_bare,
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,

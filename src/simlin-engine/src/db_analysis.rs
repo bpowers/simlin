@@ -71,17 +71,22 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// When expanding variable-level causal edges to element-level edges,
 /// the dependency kind determines the expansion pattern:
 /// - `Scalar`: one-to-one or broadcast (no subscripts involved)
-/// - `SameElement`: A2A same-element reference (e.g., `population[Region]`)
+/// - `SameElement`: A2A same-element reference (bare `Var` node with array bounds)
 /// - `CrossElement`: reducer over all elements (e.g., `SUM(population[*])`)
+///   or fixed-index reference to a specific element (e.g., `population[Boston]`)
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ElementDependencyKind {
     /// Scalar reference: source appears as a bare variable with no subscripts
     Scalar,
-    /// Same-element A2A reference: source referenced with non-wildcard subscripts.
-    /// In an A2A context, these resolve to the current element automatically.
+    /// Same-element A2A reference: source appears as a bare `Var` node with
+    /// `ArrayBounds` (at the Expr2 level, A2A same-element references are NOT
+    /// lowered to `Subscript` nodes; subscript expansion happens in the Expr3 phase).
     SameElement,
     /// Cross-element reference: source appears with a wildcard subscript
-    /// (e.g., `population[*]` inside a reducer like SUM or MEAN)
+    /// (e.g., `population[*]` inside a reducer like SUM or MEAN), or with a
+    /// non-wildcard explicit subscript (e.g., `population[Boston]`) which is
+    /// a fixed-index reference to a specific element. Both patterns create
+    /// non-diagonal edges in the element graph.
     CrossElement,
 }
 
@@ -90,12 +95,13 @@ enum ElementDependencyKind {
 /// Walks the target variable's lowered AST (`Expr2` level) looking for
 /// references to the source identifier. The classification is:
 /// - `CrossElement` if the source appears inside an `Expr2::Subscript` node
-///   with any `IndexExpr2::Wildcard` index (from `x[*]` syntax)
-/// - `SameElement` if the source appears inside an `Expr2::Subscript` node
-///   with all non-wildcard indices, OR if the source is arrayed and appears
-///   as a bare `Expr2::Var` in an A2A equation context (at Expr2 level,
-///   A2A variable references retain their Var form; subscript expansion
-///   happens later in the Expr3 phase)
+///   with any `IndexExpr2::Wildcard` index (from `x[*]` syntax), OR inside
+///   a `Subscript` with all non-wildcard indices (fixed-index reference like
+///   `source[Boston]` — at the Expr2 level, same-element A2A references stay
+///   as bare `Var` nodes, so explicit `Subscript` nodes are always fixed-index)
+/// - `SameElement` if the source is arrayed and appears as a bare `Expr2::Var`
+///   in an A2A equation context (at Expr2 level, A2A variable references
+///   retain their Var form; subscript expansion happens later in Expr3)
 /// - `Scalar` if the source appears as a bare `Expr2::Var` and is NOT arrayed
 ///
 /// `source_is_arrayed` indicates whether the source variable has dimensions.
@@ -217,10 +223,17 @@ fn classify_in_expr(
                     *result = ElementDependencyKind::CrossElement;
                     return;
                 }
-                // Non-wildcard subscript -> SameElement (upgrades from Scalar)
-                if *result == ElementDependencyKind::Scalar {
-                    *result = ElementDependencyKind::SameElement;
-                }
+                // Non-wildcard explicit subscript (e.g., `source[Boston]`).
+                // At the Expr2 level, same-element A2A references stay as
+                // bare Var nodes (documented in classify_element_dependency);
+                // explicit Subscript nodes with non-wildcard indices are
+                // fixed-index references to specific elements. Classify as
+                // CrossElement because the target depends on a specific
+                // source element, not the corresponding same-index element.
+                // CrossElement expansion creates all NxN edges, which is a
+                // superset of the true dependency; the link scores for
+                // non-referenced source elements will be effectively zero.
+                *result = ElementDependencyKind::CrossElement;
             } else {
                 // The subscripted variable is not our source, but the source
                 // might appear inside the index expressions
@@ -270,19 +283,9 @@ fn classify_in_expr(
 
 /// Collect element names from a dimension as owned strings.
 ///
-/// For `Dimension::Named`, returns the canonical element names.
-/// For `Dimension::Indexed`, returns zero-based index strings ("0", "1", ...).
+/// Delegates to the canonical implementation in `ltm_augment`.
 fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
-    match dim {
-        crate::dimensions::Dimension::Named(_, named) => named
-            .elements
-            .iter()
-            .map(|e| e.as_str().to_string())
-            .collect(),
-        crate::dimensions::Dimension::Indexed(_, size) => {
-            (0..*size).map(|i| i.to_string()).collect()
-        }
-    }
+    crate::ltm_augment::dimension_element_names(dim)
 }
 
 /// Expand a single variable-level edge into element-level edges.
@@ -1455,6 +1458,29 @@ mod classify_element_dependency_tests {
         assert_eq!(
             classify(&project, "births", "growth_factor"),
             ElementDependencyKind::Scalar
+        );
+    }
+
+    #[test]
+    fn fixed_index_reference_is_cross_element() {
+        // relative_pop[Region] = population / population[NYC]
+        // "population" in the denominator has a fixed-index subscript [NYC].
+        // At the Expr2 level, same-element A2A references are bare Var nodes;
+        // explicit Subscript nodes with non-wildcard indices are fixed-index
+        // references. These should be classified as CrossElement, not SameElement,
+        // because the dependency is from a specific source element (NYC) to all
+        // target elements, not diagonal.
+        let project = TestProject::new("fixed_index")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_aux("population[Region]", "100")
+            .array_aux("relative_pop[Region]", "population / population[NYC]");
+
+        // The equation has both a bare Var "population" (SameElement) and a
+        // fixed-index Subscript "population[NYC]" (CrossElement).
+        // CrossElement wins since it's highest priority.
+        assert_eq!(
+            classify(&project, "relative_pop", "population"),
+            ElementDependencyKind::CrossElement
         );
     }
 }
