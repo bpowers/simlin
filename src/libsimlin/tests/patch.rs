@@ -2358,3 +2358,91 @@ fn test_delete_module_variable_does_not_panic() {
         simlin_project_unref(proj);
     }
 }
+
+/// Deleting a variable that is referenced as a module input source (e.g.
+/// stock "candidates" which is wired into module "candidates_outflows" via
+/// `src: "candidates"`) must not panic during module compilation.
+/// The `.unwrap()` on `get_offset` in the `Variable::Module` arm of
+/// `Var::new` would crash if the source variable is missing.
+#[test]
+fn test_delete_module_input_source_does_not_panic() {
+    let json_bytes = include_bytes!("../../../test/hiring.sd.json");
+
+    let proj = unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_json(
+            json_bytes.as_ptr(),
+            json_bytes.len(),
+            SimlinJsonFormat::Native as u32,
+            &mut err,
+        );
+        assert!(!proj.is_null(), "hiring.sd.json must open successfully");
+        assert!(err.is_null());
+        proj
+    };
+
+    // Delete "candidates" -- a stock that is wired as an input to the
+    // module "candidates_outflows" (src: "candidates", dst:
+    // "candidates_outflows.available").  The module still exists, so
+    // compiling it must not panic when resolving the now-missing input.
+    let patch_json = r#"{
+        "models": [
+            {
+                "name": "main",
+                "ops": [
+                    {
+                        "type": "deleteVariable",
+                        "payload": { "ident": "candidates" }
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected_errors,
+            &mut out_error,
+        );
+
+        if !out_error.is_null() {
+            let msg_ptr = simlin_error_get_message(out_error);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("<non-utf8>")
+            } else {
+                "<no message>"
+            };
+            panic!(
+                "delete-input-source patch must not produce a fatal error, got: {}",
+                msg
+            );
+        }
+
+        {
+            let dm = (*proj).datamodel.lock().unwrap();
+            let model = dm.get_model("main").unwrap();
+            assert!(
+                model.get_variable("candidates").is_none(),
+                "candidates should be deleted"
+            );
+            assert!(
+                model.get_variable("candidates_outflows").is_some(),
+                "module should still exist"
+            );
+        }
+
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+
+        simlin_project_unref(proj);
+    }
+}

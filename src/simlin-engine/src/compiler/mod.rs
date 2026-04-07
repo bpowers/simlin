@@ -134,6 +134,73 @@ fn test_fold_flows() {
     assert!(result.is_err(), "Expected error for non-existent flow");
 }
 
+/// Var::new for a module whose input source variable is missing from the
+/// metadata must return an error, not panic.  This guards against the
+/// case where a module's input source is deleted but the module itself
+/// still exists with its original references.
+#[test]
+fn test_module_var_new_missing_input_source_returns_error() {
+    use crate::variable::ModuleInput;
+
+    let inputs = &BTreeSet::new();
+    let module_ident = Ident::new("my_module");
+    let model_name_ident: Ident<Canonical> = Ident::new("sub_model");
+
+    // module_models maps "main" -> { "my_module" -> "sub_model" }
+    let mut module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        HashMap::new();
+    let mut main_modules = HashMap::new();
+    main_modules.insert(module_ident.clone(), model_name_ident.clone());
+    let main_ident = Ident::new("main");
+    module_models.insert(main_ident.clone(), main_modules);
+
+    // The module variable itself (1 slot in the parent model)
+    let module_var = Variable::Module {
+        ident: module_ident.clone(),
+        model_name: model_name_ident,
+        units: None,
+        inputs: vec![ModuleInput {
+            src: Ident::new("missing_source"),
+            dst: Ident::new("available"),
+        }],
+        errors: vec![],
+        unit_errors: vec![],
+    };
+
+    // metadata only contains "my_module" -- NOT "missing_source"
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata<'_>> = HashMap::new();
+    metadata.insert(
+        module_ident.clone(),
+        VariableMetadata {
+            offset: IMPLICIT_VAR_COUNT,
+            size: 1,
+            var: &module_var,
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    metadata2.insert(main_ident.clone(), metadata);
+
+    let dims_ctx = DimensionsContext::default();
+    let ctx = Context::new(
+        ContextCore {
+            dimensions: &[],
+            dimensions_ctx: &dims_ctx,
+            model_name: &main_ident,
+            metadata: &metadata2,
+            module_models: &module_models,
+            inputs,
+        },
+        &module_ident,
+        false,
+    );
+
+    let result = Var::new(&ctx, &module_var);
+    assert!(
+        result.is_err(),
+        "Var::new should return Err when a module input source is missing, not panic"
+    );
+}
+
 #[test]
 fn test_build_stock_update_expr_inflows_only() {
     let inputs = &BTreeSet::new();
@@ -629,8 +696,8 @@ impl Var {
                         inputs.iter().map(|mi| mi.dst.clone()).collect();
                     let inputs: Vec<Expr> = inputs
                         .into_iter()
-                        .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap(), Loc::default()))
-                        .collect();
+                        .map(|mi| Ok(Expr::Var(ctx.get_offset(&mi.src)?, Loc::default())))
+                        .collect::<Result<Vec<_>>>()?;
                     vec![Expr::EvalModule(
                         ident.clone(),
                         model_name.clone(),
