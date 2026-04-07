@@ -49,6 +49,25 @@ enum WorkItemType {
     Flow,
 }
 
+/// Which edge of a stock a flow attaches to during layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StockAttachSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Computed attachment info for a flow: which stock edge and where along it.
+#[derive(Clone, Copy, Debug)]
+struct FlowAttachment {
+    side: StockAttachSide,
+    /// Fractional offset along the edge (0.0 = start, 1.0 = end).
+    /// For top/bottom edges, 0.0 is the left end, 1.0 is the right end.
+    /// For left/right edges, 0.0 is the top end, 1.0 is the bottom end.
+    offset: f64,
+}
+
 /// Result of a single layout generation, used to select the best among parallel attempts.
 struct LayoutResult {
     view: datamodel::StockFlow,
@@ -1379,6 +1398,122 @@ pub fn diff_clouds(state: &mut LayoutState, metadata: &ComputedMetadata) {
     }
 }
 
+/// Classify which stock edge each flow should attach to and compute
+/// even spacing offsets.
+///
+/// When a stock has a chain flow (stock-to-stock) going right, non-chain
+/// outflows (stock-to-cloud) exit from the bottom. Symmetrically, when a
+/// stock has a chain inflow from the left, non-chain inflows enter from
+/// the top. Multiple flows on the same side are distributed using the
+/// `(i+1)/(n+1)` formula (matching the TS editor's `computeFlowOffsets`).
+///
+/// Returns a map from flow ident to its attachment info for all flows
+/// connected to this stock.
+fn classify_flow_sides(
+    stock_ident: &str,
+    metadata: &ComputedMetadata,
+) -> HashMap<String, FlowAttachment> {
+    let mut result = HashMap::new();
+
+    let outflows: Vec<String> = metadata
+        .stock_to_outflows
+        .get(stock_ident)
+        .cloned()
+        .unwrap_or_default();
+    let inflows: Vec<String> = metadata
+        .stock_to_inflows
+        .get(stock_ident)
+        .cloned()
+        .unwrap_or_default();
+
+    // Classify outflows: chain (stock-to-stock) vs side (stock-to-cloud)
+    let mut chain_outflows = Vec::new();
+    let mut side_outflows = Vec::new();
+    for flow in &outflows {
+        let (_, to_stock) = metadata.connected_stocks(flow);
+        if to_stock.is_some() {
+            chain_outflows.push(flow.clone());
+        } else {
+            side_outflows.push(flow.clone());
+        }
+    }
+
+    // Classify inflows: chain (stock-to-stock) vs side (cloud-to-stock)
+    let mut chain_inflows = Vec::new();
+    let mut side_inflows = Vec::new();
+    for flow in &inflows {
+        let (from_stock, _) = metadata.connected_stocks(flow);
+        if from_stock.is_some() {
+            chain_inflows.push(flow.clone());
+        } else {
+            side_inflows.push(flow.clone());
+        }
+    }
+
+    // Outflow placement: if chain outflows exist, side outflows go to Bottom
+    let side_outflow_side = if !chain_outflows.is_empty() {
+        StockAttachSide::Bottom
+    } else {
+        StockAttachSide::Right
+    };
+
+    // Inflow placement: if chain inflows exist, side inflows go to Top
+    let side_inflow_side = if !chain_inflows.is_empty() {
+        StockAttachSide::Top
+    } else {
+        StockAttachSide::Left
+    };
+
+    // Group all outflows by their assigned side
+    let mut right_flows: Vec<String> = Vec::new();
+    let mut bottom_flows: Vec<String> = Vec::new();
+    for flow in &chain_outflows {
+        right_flows.push(flow.clone());
+    }
+    for flow in &side_outflows {
+        match side_outflow_side {
+            StockAttachSide::Bottom => bottom_flows.push(flow.clone()),
+            _ => right_flows.push(flow.clone()),
+        }
+    }
+
+    // Group all inflows by their assigned side
+    let mut left_flows: Vec<String> = Vec::new();
+    let mut top_flows: Vec<String> = Vec::new();
+    for flow in &chain_inflows {
+        left_flows.push(flow.clone());
+    }
+    for flow in &side_inflows {
+        match side_inflow_side {
+            StockAttachSide::Top => top_flows.push(flow.clone()),
+            _ => left_flows.push(flow.clone()),
+        }
+    }
+
+    // Distribute flows within each side group using (i+1)/(n+1)
+    let assign_side = |flows: &mut Vec<String>,
+                       side: StockAttachSide,
+                       result: &mut HashMap<String, FlowAttachment>| {
+        flows.sort(); // deterministic ordering by ident
+        let n = flows.len();
+        for (i, flow) in flows.iter().enumerate() {
+            let offset = if n == 1 {
+                0.5
+            } else {
+                (i as f64 + 1.0) / (n as f64 + 1.0)
+            };
+            result.insert(flow.clone(), FlowAttachment { side, offset });
+        }
+    };
+
+    assign_side(&mut right_flows, StockAttachSide::Right, &mut result);
+    assign_side(&mut bottom_flows, StockAttachSide::Bottom, &mut result);
+    assign_side(&mut left_flows, StockAttachSide::Left, &mut result);
+    assign_side(&mut top_flows, StockAttachSide::Top, &mut result);
+
+    result
+}
+
 /// Pick a starting stock for chain layout. Returns the stock with the
 /// highest flow connectivity (inflows + outflows), breaking ties
 /// alphabetically for determinism.
@@ -1475,12 +1610,14 @@ fn create_flow_view_element(
     flow_ident: &str,
     uid: i32,
     pos: Position,
+    flow_attachments: &HashMap<String, FlowAttachment>,
 ) -> Result<(), String> {
     let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
     let from_stock = from_stock.map(|s| s.to_string());
     let to_stock = to_stock.map(|s| s.to_string());
     let name = state.display_name(flow_ident);
     let formatted = format_label_with_line_breaks(&name);
+    let attachment = flow_attachments.get(flow_ident).copied();
 
     let flow_points = match (from_stock.as_deref(), to_stock.as_deref()) {
         (Some(from), Some(to)) => {
@@ -1516,18 +1653,43 @@ fn create_flow_view_element(
                 .get(&from_uid)
                 .copied()
                 .unwrap_or(Position::new(pos.x - 50.0, pos.y));
-            vec![
-                FlowPoint {
-                    x: from_pos.x + config.stock_width / 2.0,
-                    y: pos.y,
-                    attached_to_uid: Some(from_uid),
-                },
-                FlowPoint {
-                    x: pos.x + 50.0,
-                    y: pos.y,
-                    attached_to_uid: None,
-                },
-            ]
+            match attachment {
+                Some(FlowAttachment {
+                    side: StockAttachSide::Bottom,
+                    offset,
+                }) => {
+                    // Vertical flow exiting from the bottom of the stock
+                    let attach_x =
+                        from_pos.x - config.stock_width / 2.0 + config.stock_width * offset;
+                    vec![
+                        FlowPoint {
+                            x: attach_x,
+                            y: from_pos.y + config.stock_height / 2.0,
+                            attached_to_uid: Some(from_uid),
+                        },
+                        FlowPoint {
+                            x: attach_x,
+                            y: pos.y + 50.0,
+                            attached_to_uid: None,
+                        },
+                    ]
+                }
+                _ => {
+                    // Default: horizontal flow exiting to the right
+                    vec![
+                        FlowPoint {
+                            x: from_pos.x + config.stock_width / 2.0,
+                            y: pos.y,
+                            attached_to_uid: Some(from_uid),
+                        },
+                        FlowPoint {
+                            x: pos.x + 50.0,
+                            y: pos.y,
+                            attached_to_uid: None,
+                        },
+                    ]
+                }
+            }
         }
         (None, Some(to)) => {
             let to_uid = state.get_or_alloc_uid(to);
@@ -1536,18 +1698,43 @@ fn create_flow_view_element(
                 .get(&to_uid)
                 .copied()
                 .unwrap_or(Position::new(pos.x + 50.0, pos.y));
-            vec![
-                FlowPoint {
-                    x: pos.x - 50.0,
-                    y: pos.y,
-                    attached_to_uid: None,
-                },
-                FlowPoint {
-                    x: to_pos.x - config.stock_width / 2.0,
-                    y: pos.y,
-                    attached_to_uid: Some(to_uid),
-                },
-            ]
+            match attachment {
+                Some(FlowAttachment {
+                    side: StockAttachSide::Top,
+                    offset,
+                }) => {
+                    // Vertical flow entering from the top of the stock
+                    let attach_x =
+                        to_pos.x - config.stock_width / 2.0 + config.stock_width * offset;
+                    vec![
+                        FlowPoint {
+                            x: attach_x,
+                            y: pos.y - 50.0,
+                            attached_to_uid: None,
+                        },
+                        FlowPoint {
+                            x: attach_x,
+                            y: to_pos.y - config.stock_height / 2.0,
+                            attached_to_uid: Some(to_uid),
+                        },
+                    ]
+                }
+                _ => {
+                    // Default: horizontal flow entering from the left
+                    vec![
+                        FlowPoint {
+                            x: pos.x - 50.0,
+                            y: pos.y,
+                            attached_to_uid: None,
+                        },
+                        FlowPoint {
+                            x: to_pos.x - config.stock_width / 2.0,
+                            y: pos.y,
+                            attached_to_uid: Some(to_uid),
+                        },
+                    ]
+                }
+            }
         }
         (None, None) => {
             vec![
@@ -1602,6 +1789,7 @@ fn create_view_elements(
     positioned: &HashMap<String, Position>,
     stocks: &[String],
     flows: &[String],
+    flow_attachments: &HashMap<String, FlowAttachment>,
 ) -> Result<(), String> {
     // Create stock view elements
     for stock_ident in stocks {
@@ -1626,7 +1814,15 @@ fn create_view_elements(
     for flow_ident in flows {
         if let Some(&pos) = positioned.get(flow_ident) {
             let uid = state.get_or_alloc_uid(flow_ident);
-            create_flow_view_element(state, config, metadata, flow_ident, uid, pos)?;
+            create_flow_view_element(
+                state,
+                config,
+                metadata,
+                flow_ident,
+                uid,
+                pos,
+                flow_attachments,
+            )?;
         }
     }
 
@@ -1650,9 +1846,18 @@ fn layout_chain(
         Some(s) => s.to_string(),
         None => {
             // Flow-only chain (no stocks). Place flows at base_position.
+            let empty_attachments = HashMap::new();
             for flow_ident in flows {
                 let uid = state.get_or_alloc_uid(flow_ident);
-                create_flow_view_element(state, config, metadata, flow_ident, uid, base_position)?;
+                create_flow_view_element(
+                    state,
+                    config,
+                    metadata,
+                    flow_ident,
+                    uid,
+                    base_position,
+                    &empty_attachments,
+                )?;
             }
             return Ok(());
         }
@@ -1769,23 +1974,55 @@ fn layout_chain(
                             )
                         }
                     }
-                    (Some(_from), None) => {
-                        // Outflow to cloud
-                        Position::new(
-                            item.position.x
-                                + config.stock_width / 2.0
-                                + config.horizontal_spacing / 2.0,
-                            item.position.y,
-                        )
+                    (Some(from), None) => {
+                        // Outflow to cloud: check if it should go downward
+                        let attachment = classify_flow_sides(from, metadata).get(&item.id).copied();
+                        match attachment {
+                            Some(FlowAttachment {
+                                side: StockAttachSide::Bottom,
+                                offset,
+                            }) => {
+                                let x_offset = item.position.x - config.stock_width / 2.0
+                                    + config.stock_width * offset;
+                                Position::new(
+                                    x_offset,
+                                    item.position.y
+                                        + config.stock_height / 2.0
+                                        + config.horizontal_spacing / 2.0,
+                                )
+                            }
+                            _ => Position::new(
+                                item.position.x
+                                    + config.stock_width / 2.0
+                                    + config.horizontal_spacing / 2.0,
+                                item.position.y,
+                            ),
+                        }
                     }
-                    (None, Some(_to)) => {
-                        // Inflow from cloud
-                        Position::new(
-                            item.position.x
-                                - config.stock_width / 2.0
-                                - config.horizontal_spacing / 2.0,
-                            item.position.y,
-                        )
+                    (None, Some(to)) => {
+                        // Inflow from cloud: check if it should come from above
+                        let attachment = classify_flow_sides(to, metadata).get(&item.id).copied();
+                        match attachment {
+                            Some(FlowAttachment {
+                                side: StockAttachSide::Top,
+                                offset,
+                            }) => {
+                                let x_offset = item.position.x - config.stock_width / 2.0
+                                    + config.stock_width * offset;
+                                Position::new(
+                                    x_offset,
+                                    item.position.y
+                                        - config.stock_height / 2.0
+                                        - config.horizontal_spacing / 2.0,
+                                )
+                            }
+                            _ => Position::new(
+                                item.position.x
+                                    - config.stock_width / 2.0
+                                    - config.horizontal_spacing / 2.0,
+                                item.position.y,
+                            ),
+                        }
                     }
                     (None, None) => {
                         // Cloud-to-cloud
@@ -1798,8 +2035,23 @@ fn layout_chain(
         }
     }
 
+    // Compute flow attachment sides for all stocks in this chain
+    let mut flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
+    for stock_ident in stocks {
+        let sides = classify_flow_sides(stock_ident, metadata);
+        flow_attachments.extend(sides);
+    }
+
     // Convert positioned elements to view elements
-    create_view_elements(state, config, metadata, &positioned, stocks, flows)
+    create_view_elements(
+        state,
+        config,
+        metadata,
+        &positioned,
+        stocks,
+        flows,
+        &flow_attachments,
+    )
 }
 
 /// Rebuild flow templates from current view elements.
@@ -4157,10 +4409,33 @@ pub fn incremental_layout(
         }
     }
 
+    // Compute flow attachments for new flows by classifying sides
+    // for each stock connected to a new flow.
+    let mut incr_flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
+    for flow_ident in &new_elements.new_flows {
+        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+        if let Some(stock) = from_stock {
+            let sides = classify_flow_sides(stock, &metadata);
+            incr_flow_attachments.extend(sides);
+        }
+        if let Some(stock) = to_stock {
+            let sides = classify_flow_sides(stock, &metadata);
+            incr_flow_attachments.extend(sides);
+        }
+    }
+
     for flow_ident in &new_elements.new_flows {
         if let Some(&pos) = initial_positions.get(flow_ident) {
             let uid = state.get_or_alloc_uid(flow_ident);
-            create_flow_view_element(&mut state, &config, &metadata, flow_ident, uid, pos)?;
+            create_flow_view_element(
+                &mut state,
+                &config,
+                &metadata,
+                flow_ident,
+                uid,
+                pos,
+                &incr_flow_attachments,
+            )?;
         }
     }
 

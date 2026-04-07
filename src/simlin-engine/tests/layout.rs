@@ -1454,3 +1454,133 @@ fn test_incremental_fallback_to_full_layout() {
         "fallback should produce the same number of elements as full layout"
     );
 }
+
+/// Verify that the hiring model's waste flows do not overlap chain flows.
+///
+/// The hiring model is an aging chain with conversion flows that produce
+/// both a chain flow (stock-to-stock) and a waste flow (stock-to-cloud).
+/// Waste flows must exit from the bottom of their source stock, not from
+/// the right where they would overlap the chain flow.
+#[test]
+fn test_layout_hiring_no_flow_overlap() {
+    use std::collections::HashMap;
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("could not determine repo root");
+    let file_path = repo_root.join("test/systems-format/hiring.txt");
+    let contents = std::fs::read_to_string(&file_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", file_path.display(), e));
+
+    let systems_model = simlin_engine::systems::parse(&contents).unwrap();
+    let project = simlin_engine::systems::translate::translate(&systems_model, 10).unwrap();
+
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+    let model = project.get_model(MAIN_MODEL).unwrap();
+
+    // Standard invariants
+    verify_layout(&view, model, "hiring_no_overlap");
+
+    // Build lookup tables
+    let normalize = |s: &str| -> String { canonicalize(&s.replace('\n', "_")).into_owned() };
+    let mut flow_positions: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut stock_positions: HashMap<String, (f64, f64)> = HashMap::new();
+
+    for elem in &view.elements {
+        match elem {
+            ViewElement::Flow(f) => {
+                flow_positions.insert(normalize(&f.name), (f.x, f.y));
+            }
+            ViewElement::Stock(s) => {
+                stock_positions.insert(normalize(&s.name), (s.x, s.y));
+            }
+            _ => {}
+        }
+    }
+
+    // Each conversion stock (phonescreens, onsites, offers, hires, departures)
+    // has a chain flow and a waste flow. The waste flow should have a different
+    // y than the chain flow.
+    let waste_chain_pairs = [
+        (
+            "phonescreens_to_onsites",
+            "phonescreens_to_onsites_waste",
+            "phonescreens",
+        ),
+        ("onsites_to_offers", "onsites_to_offers_waste", "onsites"),
+        ("offers_to_hires", "offers_to_hires_waste", "offers"),
+        ("hires_to_employees", "hires_to_employees_waste", "hires"),
+        (
+            "departures_to_departed",
+            "departures_to_departed_waste",
+            "departures",
+        ),
+    ];
+
+    for (chain_name, waste_name, stock_name) in &waste_chain_pairs {
+        let chain_pos = flow_positions
+            .get(*chain_name)
+            .unwrap_or_else(|| panic!("missing flow: {chain_name}"));
+        let waste_pos = flow_positions
+            .get(*waste_name)
+            .unwrap_or_else(|| panic!("missing flow: {waste_name}"));
+        let stock_pos = stock_positions
+            .get(*stock_name)
+            .unwrap_or_else(|| panic!("missing stock: {stock_name}"));
+
+        // Chain flow should be at the same y as its source stock (horizontal)
+        assert!(
+            (chain_pos.1 - stock_pos.1).abs() < 1.0,
+            "{chain_name} y ({}) should be near {stock_name} y ({})",
+            chain_pos.1,
+            stock_pos.1,
+        );
+
+        // Waste flow should be below the stock (perpendicular exit)
+        assert!(
+            waste_pos.1 > stock_pos.1 + 5.0,
+            "{waste_name} y ({}) should be below {stock_name} y ({})",
+            waste_pos.1,
+            stock_pos.1,
+        );
+
+        // Chain and waste flows must not overlap
+        let dist =
+            ((chain_pos.0 - waste_pos.0).powi(2) + (chain_pos.1 - waste_pos.1).powi(2)).sqrt();
+        assert!(
+            dist > 5.0,
+            "{chain_name} ({}, {}) and {waste_name} ({}, {}) should not overlap (dist={dist})",
+            chain_pos.0,
+            chain_pos.1,
+            waste_pos.0,
+            waste_pos.1,
+        );
+    }
+
+    // No two flow elements should share the exact same position
+    let flow_coords: Vec<(String, f64, f64)> = view
+        .elements
+        .iter()
+        .filter_map(|e| {
+            if let ViewElement::Flow(f) = e {
+                Some((normalize(&f.name), f.x, f.y))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for i in 0..flow_coords.len() {
+        for j in (i + 1)..flow_coords.len() {
+            let (ref name_i, xi, yi) = flow_coords[i];
+            let (ref name_j, xj, yj) = flow_coords[j];
+            let dist = ((xi - xj).powi(2) + (yi - yj).powi(2)).sqrt();
+            assert!(
+                dist > 1.0,
+                "flows '{name_i}' ({xi}, {yi}) and '{name_j}' ({xj}, {yj}) overlap (dist={dist})"
+            );
+        }
+    }
+}

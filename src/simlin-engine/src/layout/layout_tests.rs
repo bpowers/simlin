@@ -5316,5 +5316,462 @@ fn test_module_output_dep_preserved_with_db_state() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// classify_flow_sides tests
+// ---------------------------------------------------------------------------
+
+/// Helper: build a ComputedMetadata with the given stock/flow topology.
+fn metadata_with_flows(
+    stock_outflows: &[(&str, &[&str])],
+    stock_inflows: &[(&str, &[&str])],
+    flow_to_stocks: &[(&str, Option<&str>, Option<&str>)],
+) -> ComputedMetadata {
+    let mut meta = ComputedMetadata::new_empty();
+    for &(stock, outflows) in stock_outflows {
+        meta.stock_to_outflows.insert(
+            stock.to_string(),
+            outflows.iter().map(|s| s.to_string()).collect(),
+        );
+    }
+    for &(stock, inflows) in stock_inflows {
+        meta.stock_to_inflows.insert(
+            stock.to_string(),
+            inflows.iter().map(|s| s.to_string()).collect(),
+        );
+    }
+    for &(flow, from, to) in flow_to_stocks {
+        meta.flow_to_stocks.insert(
+            flow.to_string(),
+            (from.map(|s| s.to_string()), to.map(|s| s.to_string())),
+        );
+    }
+    meta
+}
+
+#[test]
+fn test_classify_sides_single_outflow_no_chain() {
+    // Stock with one outflow to cloud (no chain flow) -> stays Right
+    let meta = metadata_with_flows(&[("a", &["f1"])], &[], &[("f1", Some("a"), None)]);
+    let sides = classify_flow_sides("a", &meta);
+    let att = sides.get("f1").expect("f1 should have attachment");
+    assert_eq!(att.side, StockAttachSide::Right);
+    assert!((att.offset - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_classify_sides_chain_plus_side_outflow() {
+    // Stock with chain outflow (a->b) + side outflow (a->cloud)
+    let meta = metadata_with_flows(
+        &[("a", &["chain_flow", "waste_flow"])],
+        &[],
+        &[
+            ("chain_flow", Some("a"), Some("b")),
+            ("waste_flow", Some("a"), None),
+        ],
+    );
+    let sides = classify_flow_sides("a", &meta);
+
+    let chain = sides.get("chain_flow").expect("chain_flow attachment");
+    assert_eq!(chain.side, StockAttachSide::Right);
+    assert!((chain.offset - 0.5).abs() < f64::EPSILON);
+
+    let waste = sides.get("waste_flow").expect("waste_flow attachment");
+    assert_eq!(waste.side, StockAttachSide::Bottom);
+    assert!((waste.offset - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_classify_sides_chain_plus_two_side_outflows() {
+    // Chain + two side outflows -> side outflows on Bottom at 1/3, 2/3
+    let meta = metadata_with_flows(
+        &[("a", &["chain_flow", "waste_a", "waste_b"])],
+        &[],
+        &[
+            ("chain_flow", Some("a"), Some("b")),
+            ("waste_a", Some("a"), None),
+            ("waste_b", Some("a"), None),
+        ],
+    );
+    let sides = classify_flow_sides("a", &meta);
+
+    let chain = sides.get("chain_flow").expect("chain_flow");
+    assert_eq!(chain.side, StockAttachSide::Right);
+
+    // waste_a and waste_b sorted alphabetically -> waste_a first
+    let wa = sides.get("waste_a").expect("waste_a");
+    let wb = sides.get("waste_b").expect("waste_b");
+    assert_eq!(wa.side, StockAttachSide::Bottom);
+    assert_eq!(wb.side, StockAttachSide::Bottom);
+    assert!((wa.offset - 1.0 / 3.0).abs() < 1e-10);
+    assert!((wb.offset - 2.0 / 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_classify_sides_chain_inflow_plus_side_inflow() {
+    // Stock with chain inflow (from stock) + side inflow (from cloud)
+    let meta = metadata_with_flows(
+        &[],
+        &[("b", &["chain_in", "side_in"])],
+        &[
+            ("chain_in", Some("a"), Some("b")),
+            ("side_in", None, Some("b")),
+        ],
+    );
+    let sides = classify_flow_sides("b", &meta);
+
+    let chain = sides.get("chain_in").expect("chain_in");
+    assert_eq!(chain.side, StockAttachSide::Left);
+    assert!((chain.offset - 0.5).abs() < f64::EPSILON);
+
+    let side = sides.get("side_in").expect("side_in");
+    assert_eq!(side.side, StockAttachSide::Top);
+    assert!((side.offset - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_classify_sides_only_nonchain_outflows() {
+    // Stock with only non-chain outflows -> all Right with (i+1)/(n+1)
+    let meta = metadata_with_flows(
+        &[("a", &["f1", "f2", "f3"])],
+        &[],
+        &[
+            ("f1", Some("a"), None),
+            ("f2", Some("a"), None),
+            ("f3", Some("a"), None),
+        ],
+    );
+    let sides = classify_flow_sides("a", &meta);
+
+    // All on Right, sorted alphabetically: f1, f2, f3
+    for name in &["f1", "f2", "f3"] {
+        assert_eq!(
+            sides.get(*name).unwrap().side,
+            StockAttachSide::Right,
+            "{name} should be Right"
+        );
+    }
+    assert!((sides["f1"].offset - 1.0 / 4.0).abs() < 1e-10);
+    assert!((sides["f2"].offset - 2.0 / 4.0).abs() < 1e-10);
+    assert!((sides["f3"].offset - 3.0 / 4.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_classify_sides_multiple_chain_outflows() {
+    // Stock with two chain outflows (feeds two stocks) -> both Right, 1/3 and 2/3
+    let meta = metadata_with_flows(
+        &[("a", &["f1", "f2"])],
+        &[],
+        &[("f1", Some("a"), Some("b")), ("f2", Some("a"), Some("c"))],
+    );
+    let sides = classify_flow_sides("a", &meta);
+
+    let a1 = sides.get("f1").expect("f1");
+    let a2 = sides.get("f2").expect("f2");
+    assert_eq!(a1.side, StockAttachSide::Right);
+    assert_eq!(a2.side, StockAttachSide::Right);
+    assert!((a1.offset - 1.0 / 3.0).abs() < 1e-10);
+    assert!((a2.offset - 2.0 / 3.0).abs() < 1e-10);
+}
+
+// ---------------------------------------------------------------------------
+// Layout behavior tests for perpendicular side flows
+// ---------------------------------------------------------------------------
+
+/// Build a model with stock A -> chain_flow -> stock B, plus stock A -> waste_flow -> cloud.
+fn chain_with_waste_model() -> datamodel::Model {
+    datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    }
+}
+
+/// Find a stock view element by canonical name.
+fn find_stock<'a>(view: &'a datamodel::StockFlow, name: &str) -> Option<&'a view_element::Stock> {
+    view.elements.iter().find_map(|e| {
+        if let ViewElement::Stock(s) = e
+            && canonicalize(&s.name) == name
+        {
+            Some(s)
+        } else {
+            None
+        }
+    })
+}
+
+/// Find a flow view element by canonical name.
+fn find_flow<'a>(view: &'a datamodel::StockFlow, name: &str) -> Option<&'a view_element::Flow> {
+    view.elements.iter().find_map(|e| {
+        if let ViewElement::Flow(f) = e
+            && canonicalize(&f.name) == name
+        {
+            Some(f)
+        } else {
+            None
+        }
+    })
+}
+
+#[test]
+fn test_layout_side_flow_below_stock() {
+    let project = test_project(chain_with_waste_model());
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let stock_a = find_stock(&result, "a").expect("stock a should exist");
+    let chain_flow = find_flow(&result, "chain_flow").expect("chain_flow should exist");
+    let waste_flow = find_flow(&result, "waste_flow").expect("waste_flow should exist");
+
+    // Chain flow should be horizontal (same y as stock)
+    assert!(
+        (chain_flow.y - stock_a.y).abs() < 1.0,
+        "chain_flow y ({}) should be near stock a y ({})",
+        chain_flow.y,
+        stock_a.y,
+    );
+
+    // Waste flow should be below stock
+    assert!(
+        waste_flow.y > stock_a.y + 10.0,
+        "waste_flow y ({}) should be well below stock a y ({})",
+        waste_flow.y,
+        stock_a.y,
+    );
+
+    // Waste flow should have vertical flow points (same x, different y)
+    assert!(
+        waste_flow.points.len() >= 2,
+        "waste_flow should have at least 2 points"
+    );
+    let first = &waste_flow.points[0];
+    let last = &waste_flow.points[waste_flow.points.len() - 1];
+    assert!(
+        (first.x - last.x).abs() < 1.0,
+        "waste_flow points should be vertically aligned: first.x={}, last.x={}",
+        first.x,
+        last.x,
+    );
+    assert!(
+        (first.y - last.y).abs() > 10.0,
+        "waste_flow points should have vertical separation: first.y={}, last.y={}",
+        first.y,
+        last.y,
+    );
+}
+
+#[test]
+fn test_layout_side_flows_no_overlap() {
+    let project = test_project(chain_with_waste_model());
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let chain_flow = find_flow(&result, "chain_flow").expect("chain_flow");
+    let waste_flow = find_flow(&result, "waste_flow").expect("waste_flow");
+
+    // Flows must not overlap: either x or y must differ significantly
+    let dist =
+        ((chain_flow.x - waste_flow.x).powi(2) + (chain_flow.y - waste_flow.y).powi(2)).sqrt();
+    assert!(
+        dist > 5.0,
+        "chain_flow ({}, {}) and waste_flow ({}, {}) should not overlap (dist={})",
+        chain_flow.x,
+        chain_flow.y,
+        waste_flow.x,
+        waste_flow.y,
+        dist,
+    );
+}
+
+/// Model with chain + 2 waste flows to test spacing.
+fn chain_with_two_waste_model() -> datamodel::Model {
+    datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![
+                    "chain_flow".to_string(),
+                    "waste_a".to_string(),
+                    "waste_b".to_string(),
+                ],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_a".to_string(),
+                equation: datamodel::Equation::Scalar("3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_b".to_string(),
+                equation: datamodel::Equation::Scalar("2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    }
+}
+
+#[test]
+fn test_layout_multiple_side_flows_spaced() {
+    let project = test_project(chain_with_two_waste_model());
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let waste_a = find_flow(&result, "waste_a").expect("waste_a");
+    let waste_b = find_flow(&result, "waste_b").expect("waste_b");
+    let stock_a = find_stock(&result, "a").expect("stock a");
+
+    // Both should be below the stock
+    assert!(waste_a.y > stock_a.y, "waste_a should be below stock a");
+    assert!(waste_b.y > stock_a.y, "waste_b should be below stock a");
+
+    // Their x-coordinates should differ (spaced along bottom edge)
+    assert!(
+        (waste_a.x - waste_b.x).abs() > 1.0,
+        "waste_a.x ({}) and waste_b.x ({}) should differ for spacing",
+        waste_a.x,
+        waste_b.x,
+    );
+}
+
+#[test]
+fn test_layout_single_outflow_still_horizontal() {
+    // Stock with only one outflow to cloud (no chain) -> should go right
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["f1".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f1".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let project = test_project(model);
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let stock_a = find_stock(&result, "a").expect("stock a");
+    let flow = find_flow(&result, "f1").expect("flow f1");
+
+    // Flow should be at same y as stock (horizontal)
+    assert!(
+        (flow.y - stock_a.y).abs() < 1.0,
+        "single outflow should be horizontal: flow.y={}, stock.y={}",
+        flow.y,
+        stock_a.y,
+    );
+
+    // Flow should be to the right of the stock
+    assert!(
+        flow.x > stock_a.x,
+        "single outflow should be to the right: flow.x={}, stock.x={}",
+        flow.x,
+        stock_a.x,
+    );
+}
+
 #[path = "layout_review_tests.rs"]
 mod review_tests;
