@@ -4806,12 +4806,10 @@ pub fn incremental_layout(
     }
 
     if new_elements.is_empty() {
-        // No new elements: only resnap if flows were actually rebuilt,
-        // to avoid rewriting imported/manual flow geometry on patches
-        // that only change equations or documentation.
-        if !flows_to_rebuild.is_empty() {
-            resnap_flow_endpoints(&mut state, &config);
-        }
+        // No new elements and no settlement step, so rebuilt flows
+        // already have correct geometry from create_flow_view_element.
+        // Skip resnap entirely to avoid rewriting unrelated manual or
+        // imported flow endpoints elsewhere in the diagram.
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
         optimize_labels(&mut state, model, &metadata);
