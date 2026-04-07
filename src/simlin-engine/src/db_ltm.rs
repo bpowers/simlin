@@ -263,7 +263,14 @@ pub fn compile_ltm_var_fragment(
 ) -> Option<VarFragmentResult> {
     let lsv = link_score_equation_text(db, link_id, model, project).as_ref()?;
 
-    compile_ltm_equation_fragment(db, &lsv.name, &lsv.equation, model, project)
+    compile_ltm_equation_fragment(
+        db,
+        &lsv.name,
+        &lsv.equation,
+        &lsv.dimensions,
+        model,
+        project,
+    )
 }
 
 /// Compile an arbitrary LTM equation string to symbolic bytecodes.
@@ -272,10 +279,15 @@ pub fn compile_ltm_var_fragment(
 /// and the loop/relative score compilation in `assemble_module`. Builds
 /// a mini-context that includes both model variables and implicit vars
 /// synthesized while parsing the LTM equation.
+///
+/// When `var_dimensions` is non-empty, the equation is compiled as
+/// Apply-to-All (A2A), producing bytecodes spanning
+/// `product(dim_lengths)` slots. When empty, the variable is scalar.
 pub(super) fn compile_ltm_equation_fragment(
     db: &dyn Db,
     var_name: &str,
     equation: &str,
+    var_dimensions: &[String],
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
@@ -296,7 +308,7 @@ pub(super) fn compile_ltm_equation_fragment(
     let parsed = parse_ltm_equation(
         var_name,
         equation,
-        &[],
+        var_dimensions,
         dims,
         units_ctx,
         Some(&module_idents),
@@ -311,7 +323,9 @@ pub(super) fn compile_ltm_equation_fragment(
         return None;
     }
 
-    // Lower the variable. LTM vars are always scalar auxes.
+    // Lower the variable. Scalar LTM vars produce a plain Var;
+    // A2A LTM vars produce a Var with dimension views that the
+    // compiler's expand_a2a_with_hoisting handles automatically.
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
         models: &models,
@@ -426,16 +440,30 @@ pub(super) fn compile_ltm_equation_fragment(
         );
     }
 
+    // Compute the LTM variable's size from its dimensions.
+    // Scalar vars get size 1; A2A vars get product(dim_lengths).
+    let var_size: usize = if var_dimensions.is_empty() {
+        1
+    } else {
+        var_dimensions
+            .iter()
+            .map(|dim_name| {
+                let canonical = crate::common::CanonicalDimensionName::from_raw(dim_name);
+                dim_context.get(&canonical).map(|d| d.len()).unwrap_or(1)
+            })
+            .product()
+    };
+
     // Add self (the LTM var itself)
     mini_metadata.insert(
         var_ident_canonical.clone(),
         crate::compiler::VariableMetadata {
             offset: mini_offset,
-            size: 1,
+            size: var_size,
             var: &lowered,
         },
     );
-    mini_offset += 1;
+    mini_offset += var_size;
 
     // Collect dependency variable names from the lowered AST
     let dep_idents = if let Some(ast) = lowered.ast() {

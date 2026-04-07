@@ -81,6 +81,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
         &db,
         "$⁚ltm⁚test_prev_module",
         "PREVIOUS(producer)",
+        &[],
         source_model,
         sync.project,
     )

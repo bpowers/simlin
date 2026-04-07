@@ -4820,13 +4820,21 @@ pub fn assemble_module(
                         db,
                         &ltm_var.name,
                         &ltm_var.equation,
+                        &ltm_var.dimensions,
                         model,
                         project,
                     )
                 }
             } else {
                 // Loop scores and relative loop scores: compile directly
-                compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project)
+                compile_ltm_equation_fragment(
+                    db,
+                    &ltm_var.name,
+                    &ltm_var.equation,
+                    &ltm_var.dimensions,
+                    model,
+                    project,
+                )
             };
 
             if let Some(result) = fragment_result {
