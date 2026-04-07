@@ -66,6 +66,210 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
     format!("{}[{}]", var_name, elements.join(","))
 }
 
+/// How a source variable is referenced in a target's equation.
+///
+/// When expanding variable-level causal edges to element-level edges,
+/// the dependency kind determines the expansion pattern:
+/// - `Scalar`: one-to-one or broadcast (no subscripts involved)
+/// - `SameElement`: A2A same-element reference (e.g., `population[Region]`)
+/// - `CrossElement`: reducer over all elements (e.g., `SUM(population[*])`)
+#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ElementDependencyKind {
+    /// Scalar reference: source appears as a bare variable with no subscripts
+    Scalar,
+    /// Same-element A2A reference: source referenced with non-wildcard subscripts.
+    /// In an A2A context, these resolve to the current element automatically.
+    SameElement,
+    /// Cross-element reference: source appears with a wildcard subscript
+    /// (e.g., `population[*]` inside a reducer like SUM or MEAN)
+    CrossElement,
+}
+
+/// Classify how a source variable is referenced in a target variable's equation.
+///
+/// Walks the target variable's lowered AST (`Expr2` level) looking for
+/// references to the source identifier. The classification is:
+/// - `CrossElement` if the source appears inside an `Expr2::Subscript` node
+///   with any `IndexExpr2::Wildcard` index (from `x[*]` syntax)
+/// - `SameElement` if the source appears inside an `Expr2::Subscript` node
+///   with all non-wildcard indices, OR if the source is arrayed and appears
+///   as a bare `Expr2::Var` in an A2A equation context (at Expr2 level,
+///   A2A variable references retain their Var form; subscript expansion
+///   happens later in the Expr3 phase)
+/// - `Scalar` if the source appears as a bare `Expr2::Var` and is NOT arrayed
+///
+/// `source_is_arrayed` indicates whether the source variable has dimensions.
+/// This is necessary because at the Expr2 level, arrayed variables referenced
+/// in an A2A equation keep their bare Var form (the ArrayBounds may not be
+/// populated when lowering with a minimal ScopeStage0 context).
+///
+/// If the source is referenced multiple ways (e.g., both `population` and
+/// `SUM(population[*])` in the same equation), the highest-priority kind
+/// wins: CrossElement > SameElement > Scalar.
+///
+/// Returns `Scalar` as default if the source is not found (defensive).
+#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
+fn classify_element_dependency(
+    target_var: &crate::variable::Variable,
+    source_ident: &str,
+    source_is_arrayed: bool,
+) -> ElementDependencyKind {
+    let Some(ast) = target_var.ast() else {
+        return ElementDependencyKind::Scalar;
+    };
+
+    let mut result = ElementDependencyKind::Scalar;
+    let mut found = false;
+
+    // Walk all expressions in the AST (scalar, A2A, or arrayed)
+    match ast {
+        crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
+            classify_in_expr(
+                expr,
+                source_ident,
+                source_is_arrayed,
+                &mut result,
+                &mut found,
+            );
+        }
+        crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
+            for expr in subscript_map.values() {
+                classify_in_expr(
+                    expr,
+                    source_ident,
+                    source_is_arrayed,
+                    &mut result,
+                    &mut found,
+                );
+                if result == ElementDependencyKind::CrossElement {
+                    return result; // highest priority, short-circuit
+                }
+            }
+            if let Some(default) = default_expr {
+                classify_in_expr(
+                    default,
+                    source_ident,
+                    source_is_arrayed,
+                    &mut result,
+                    &mut found,
+                );
+            }
+        }
+    }
+
+    if found {
+        result
+    } else {
+        ElementDependencyKind::Scalar
+    }
+}
+
+/// Recursively walk an `Expr2` tree, looking for references to `source_ident`.
+///
+/// Updates `result` to the highest-priority classification found so far.
+/// Priority: CrossElement > SameElement > Scalar.
+///
+/// At the Expr2 level, an arrayed variable referenced without explicit subscripts
+/// in an A2A equation stays as `Expr2::Var(ident, Some(ArrayBounds), _)` -- it is
+/// NOT lowered to a `Subscript` node. The subscript expansion happens later in
+/// the compiler (Expr3 phase). We detect SameElement by checking whether the
+/// `Var` node carries `ArrayBounds` (meaning it's arrayed and will be subscript-
+/// expanded element-wise at compile time).
+fn classify_in_expr(
+    expr: &crate::ast::Expr2,
+    source_ident: &str,
+    source_is_arrayed: bool,
+    result: &mut ElementDependencyKind,
+    found: &mut bool,
+) {
+    use crate::ast::{Expr2, IndexExpr2};
+    use crate::builtins::{BuiltinContents, walk_builtin_expr};
+
+    // Short-circuit once we've found the highest-priority kind
+    if *result == ElementDependencyKind::CrossElement {
+        return;
+    }
+
+    match expr {
+        Expr2::Const(..) => {}
+        Expr2::Var(ident, array_bounds, _) => {
+            if ident.as_str() == source_ident {
+                *found = true;
+                // A bare Var reference to an arrayed variable in an A2A equation
+                // means same-element mapping. At Expr2 level, ArrayBounds may or
+                // may not be populated (depends on the lowering context), so we
+                // use the caller-provided `source_is_arrayed` flag as the primary
+                // signal, with ArrayBounds as a secondary check.
+                if (source_is_arrayed || array_bounds.is_some())
+                    && *result == ElementDependencyKind::Scalar
+                {
+                    *result = ElementDependencyKind::SameElement;
+                }
+                // Scalar source -> Scalar (no upgrade needed)
+            }
+        }
+        Expr2::Subscript(ident, indices, _, _) => {
+            if ident.as_str() == source_ident {
+                *found = true;
+                let has_wildcard = indices
+                    .iter()
+                    .any(|idx| matches!(idx, IndexExpr2::Wildcard(_)));
+                if has_wildcard {
+                    *result = ElementDependencyKind::CrossElement;
+                    return;
+                }
+                // Non-wildcard subscript -> SameElement (upgrades from Scalar)
+                if *result == ElementDependencyKind::Scalar {
+                    *result = ElementDependencyKind::SameElement;
+                }
+            } else {
+                // The subscripted variable is not our source, but the source
+                // might appear inside the index expressions
+                for idx in indices {
+                    match idx {
+                        IndexExpr2::Expr(e) => {
+                            classify_in_expr(e, source_ident, source_is_arrayed, result, found);
+                        }
+                        IndexExpr2::Range(l, r, _) => {
+                            classify_in_expr(l, source_ident, source_is_arrayed, result, found);
+                            classify_in_expr(r, source_ident, source_is_arrayed, result, found);
+                        }
+                        IndexExpr2::Wildcard(_)
+                        | IndexExpr2::StarRange(_, _)
+                        | IndexExpr2::DimPosition(_, _) => {}
+                    }
+                }
+            }
+        }
+        Expr2::App(builtin, _, _) => {
+            walk_builtin_expr(builtin, |contents| match contents {
+                BuiltinContents::Ident(id, _) => {
+                    if id == source_ident {
+                        *found = true;
+                        // Ident inside a builtin but without subscript context -> Scalar
+                    }
+                }
+                BuiltinContents::Expr(sub_expr) => {
+                    classify_in_expr(sub_expr, source_ident, source_is_arrayed, result, found);
+                }
+            });
+        }
+        Expr2::Op1(_, operand, _, _) => {
+            classify_in_expr(operand, source_ident, source_is_arrayed, result, found);
+        }
+        Expr2::Op2(_, left, right, _, _) => {
+            classify_in_expr(left, source_ident, source_is_arrayed, result, found);
+            classify_in_expr(right, source_ident, source_is_arrayed, result, found);
+        }
+        Expr2::If(cond, then_expr, else_expr, _, _) => {
+            classify_in_expr(cond, source_ident, source_is_arrayed, result, found);
+            classify_in_expr(then_expr, source_ident, source_is_arrayed, result, found);
+            classify_in_expr(else_expr, source_ident, source_is_arrayed, result, found);
+        }
+    }
+}
+
 /// Deduplicated loop circuits as node name lists.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct LoopCircuitsResult {
@@ -591,4 +795,136 @@ fn reconstruct_implicit_variable(
         |mi| Ok(Some(mi.clone())),
     );
     crate::model::lower_variable(scope, &parsed_imp)
+}
+
+#[cfg(test)]
+mod classify_element_dependency_tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    /// Helper: build a project, sync into salsa, and classify the dependency
+    /// of `source_name` as seen by `target_name`.
+    ///
+    /// Looks up both variables' dimensions to determine whether the source
+    /// is arrayed, mirroring what the element-level graph expansion will do.
+    fn classify(
+        project: &TestProject,
+        target_name: &str,
+        source_name: &str,
+    ) -> ElementDependencyKind {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+        let source_vars = source_model.variables(&db);
+
+        let target_var =
+            reconstruct_single_variable(&db, source_model, source_project, target_name)
+                .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
+
+        // Determine if the source variable is arrayed by checking its dimensions
+        let source_is_arrayed = source_vars
+            .get(source_name)
+            .map(|sv| !super::super::variable_dimensions(&db, *sv, source_project).is_empty())
+            .unwrap_or(false);
+
+        classify_element_dependency(&target_var, source_name, source_is_arrayed)
+    }
+
+    #[test]
+    fn scalar_reference() {
+        // A simple scalar equation: growth = base * 0.1
+        // "base" is referenced as a bare Var (no subscripts) and is not
+        // arrayed -> Scalar
+        let project = TestProject::new("scalar_ref")
+            .scalar_const("base", 100.0)
+            .scalar_aux("growth", "base * 0.1");
+
+        assert_eq!(
+            classify(&project, "growth", "base"),
+            ElementDependencyKind::Scalar
+        );
+    }
+
+    #[test]
+    fn same_element_a2a_reference() {
+        // A2A equation: births[Region] = population * 0.1
+        // "population" is arrayed over Region and referenced without explicit
+        // subscripts in an A2A context. At Expr2 level, the reference stays
+        // as Expr2::Var (subscript expansion happens in Expr3), but because
+        // the source is known to be arrayed, we classify as SameElement.
+        let project = TestProject::new("same_element")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_aux("population[Region]", "100")
+            .array_aux("births[Region]", "population * 0.1");
+
+        assert_eq!(
+            classify(&project, "births", "population"),
+            ElementDependencyKind::SameElement
+        );
+    }
+
+    #[test]
+    fn cross_element_wildcard_reference() {
+        // total_pop = SUM(population[*])
+        // "population" is referenced with a wildcard subscript -> CrossElement
+        let project = TestProject::new("cross_element")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_aux("population[Region]", "100")
+            .scalar_aux("total_pop", "SUM(population[*])");
+
+        assert_eq!(
+            classify(&project, "total_pop", "population"),
+            ElementDependencyKind::CrossElement
+        );
+    }
+
+    #[test]
+    fn a2a_with_cross_element_in_same_equation() {
+        // An A2A equation that uses both same-element and cross-element:
+        // share[Region] = population / SUM(population[*])
+        // "population" appears both as SameElement (the numerator) and
+        // CrossElement (inside SUM). CrossElement should win.
+        let project = TestProject::new("mixed_dep")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_aux("population[Region]", "100")
+            .array_aux("share[Region]", "population / SUM(population[*])");
+
+        assert_eq!(
+            classify(&project, "share", "population"),
+            ElementDependencyKind::CrossElement
+        );
+    }
+
+    #[test]
+    fn source_not_found_defaults_to_scalar() {
+        // If the source ident doesn't appear in the equation at all,
+        // classify_element_dependency should defensively return Scalar.
+        let project = TestProject::new("not_found")
+            .scalar_const("x", 1.0)
+            .scalar_aux("y", "x + 1");
+
+        assert_eq!(
+            classify(&project, "y", "nonexistent"),
+            ElementDependencyKind::Scalar
+        );
+    }
+
+    #[test]
+    fn scalar_source_in_a2a_target() {
+        // growth_factor is scalar, births[Region] references it as bare Var.
+        // Because growth_factor is NOT arrayed, this is Scalar.
+        let project = TestProject::new("scalar_in_a2a")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .scalar_const("growth_factor", 0.1)
+            .array_aux("population[Region]", "100")
+            .array_aux("births[Region]", "population * growth_factor");
+
+        assert_eq!(
+            classify(&project, "births", "growth_factor"),
+            ElementDependencyKind::Scalar
+        );
+    }
 }
