@@ -270,6 +270,320 @@ fn classify_in_expr(
     }
 }
 
+/// Collect element names from a dimension as owned strings.
+///
+/// For `Dimension::Named`, returns the canonical element names.
+/// For `Dimension::Indexed`, returns zero-based index strings ("0", "1", ...).
+#[allow(dead_code)] // called by expand_edge_to_elements; used in Task 4
+fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
+    match dim {
+        crate::dimensions::Dimension::Named(_, named) => named
+            .elements
+            .iter()
+            .map(|e| e.as_str().to_string())
+            .collect(),
+        crate::dimensions::Dimension::Indexed(_, size) => {
+            (0..*size).map(|i| i.to_string()).collect()
+        }
+    }
+}
+
+/// Expand a single variable-level edge into element-level edges.
+///
+/// Uses the source/target dimensions and dependency classification to
+/// determine the expansion pattern. The rules are:
+///
+/// | from_dims | to_dims    | dep_kind     | Expansion                                    |
+/// |-----------|------------|--------------|----------------------------------------------|
+/// | []        | []         | Scalar       | from -> to (unchanged)                       |
+/// | []        | [D...]     | Scalar       | from -> to[d] for each element d             |
+/// | [D...]    | []         | any          | from[d] -> to for each element d             |
+/// | [D]       | [D]        | SameElement  | from[d] -> to[d] for each d                  |
+/// | [D]       | [D]        | CrossElement | from[d] -> to[e] for all d,e (full cross)    |
+/// | [D1,D2]   | [D1]       | SameElement  | from[d1,d2] -> to[d1] for all (d1,d2)        |
+///
+/// When both source and target are arrayed and dep_kind is CrossElement,
+/// every source element connects to every target element (a SUM(x[*])
+/// inside an A2A equation means each source element contributes to the
+/// scalar reduction, which then feeds all target elements).
+#[allow(dead_code)] // infrastructure for model_element_causal_edges (Task 4)
+fn expand_edge_to_elements(
+    from_name: &str,
+    to_name: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    dep_kind: ElementDependencyKind,
+    element_edges: &mut HashMap<String, BTreeSet<String>>,
+) {
+    let from_is_scalar = from_dims.is_empty();
+    let to_is_scalar = to_dims.is_empty();
+
+    // Case 1: Both scalar -- pass through unchanged
+    if from_is_scalar && to_is_scalar {
+        element_edges
+            .entry(from_name.to_string())
+            .or_default()
+            .insert(to_name.to_string());
+        return;
+    }
+
+    // Case 2: Scalar source, arrayed target -- broadcast
+    // from -> to[d] for each element d across all target dimensions
+    if from_is_scalar {
+        let to_elements = cartesian_element_names(to_name, to_dims);
+        for to_elem in to_elements {
+            element_edges
+                .entry(from_name.to_string())
+                .or_default()
+                .insert(to_elem);
+        }
+        return;
+    }
+
+    // Case 3: Arrayed source, scalar target -- reduction
+    // from[d] -> to for each element d across all source dimensions
+    if to_is_scalar {
+        let from_elements = cartesian_element_names(from_name, from_dims);
+        for from_elem in from_elements {
+            element_edges
+                .entry(from_elem)
+                .or_default()
+                .insert(to_name.to_string());
+        }
+        return;
+    }
+
+    // Both arrayed: expansion depends on dep_kind
+    match dep_kind {
+        ElementDependencyKind::Scalar => {
+            // Scalar reference in an arrayed context (e.g., a scalar constant
+            // that the dependency tracker found -- shouldn't normally happen
+            // when both are arrayed, but handle defensively). Treat as
+            // broadcast: from[d] -> to[e] for all d,e.
+            let from_elements = cartesian_element_names(from_name, from_dims);
+            let to_elements = cartesian_element_names(to_name, to_dims);
+            for from_elem in &from_elements {
+                for to_elem in &to_elements {
+                    element_edges
+                        .entry(from_elem.clone())
+                        .or_default()
+                        .insert(to_elem.clone());
+                }
+            }
+        }
+        ElementDependencyKind::SameElement => {
+            // Same-element mapping. Shared dimensions are iterated element-wise;
+            // non-shared dimensions produce a partial collapse.
+            //
+            // Simple case: identical dimension lists -> from[d] -> to[d] per element.
+            // Partial collapse: from[D1,D2] -> to[D1] -> from[d1,d2] -> to[d1].
+            //
+            // We generate the cartesian product of source elements and map each
+            // source element tuple to the target element tuple by keeping only
+            // the dimensions present in the target.
+            expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
+        }
+        ElementDependencyKind::CrossElement => {
+            // Cross-element: every source element connects to every target element.
+            // This represents a reducer like SUM(from[*]) inside the target's
+            // equation: each source element contributes to the reduction, whose
+            // scalar result feeds all target elements.
+            let from_elements = cartesian_element_names(from_name, from_dims);
+            let to_elements = cartesian_element_names(to_name, to_dims);
+            for from_elem in &from_elements {
+                for to_elem in &to_elements {
+                    element_edges
+                        .entry(from_elem.clone())
+                        .or_default()
+                        .insert(to_elem.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Generate element-level node names for the cartesian product of all dimensions.
+///
+/// For a variable `x` with dimensions `[D1, D2]` where D1 = {a, b} and D2 = {1, 2},
+/// produces: `["x[a,1]", "x[a,2]", "x[b,1]", "x[b,2]"]`.
+///
+/// For a single dimension `[D]` where D = {NYC, Boston}, produces:
+/// `["x[NYC]", "x[Boston]"]`.
+#[allow(dead_code)] // called by expand_edge_to_elements
+fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]) -> Vec<String> {
+    if dims.is_empty() {
+        return vec![var_name.to_string()];
+    }
+
+    // Build element name lists for each dimension
+    let dim_elements: Vec<Vec<String>> = dims.iter().map(dimension_element_names).collect();
+
+    // Compute cartesian product
+    let mut tuples: Vec<Vec<&str>> = vec![vec![]];
+    for elements in &dim_elements {
+        let mut new_tuples = Vec::with_capacity(tuples.len() * elements.len());
+        for existing in &tuples {
+            for elem in elements {
+                let mut extended = existing.clone();
+                extended.push(elem.as_str());
+                new_tuples.push(extended);
+            }
+        }
+        tuples = new_tuples;
+    }
+
+    tuples
+        .into_iter()
+        .map(|elems| {
+            if elems.len() == 1 {
+                format_element_name(var_name, elems[0])
+            } else {
+                format_multi_element_name(var_name, &elems)
+            }
+        })
+        .collect()
+}
+
+/// Expand same-element edges with possible partial dimension collapse.
+///
+/// For each source element tuple, constructs the target element tuple by
+/// matching shared dimension names. Dimensions in the source that are not
+/// present in the target are collapsed (their elements are iterated but
+/// do not appear in the target subscript).
+///
+/// Example: from[D1,D2] -> to[D1] with SameElement produces
+/// from[d1,d2] -> to[d1] for all (d1,d2).
+#[allow(dead_code)] // called by expand_edge_to_elements
+fn expand_same_element(
+    from_name: &str,
+    to_name: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    element_edges: &mut HashMap<String, BTreeSet<String>>,
+) {
+    // Build a map of target dimension name -> position for matching
+    let to_dim_positions: HashMap<&str, usize> = to_dims
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.name(), i))
+        .collect();
+
+    // For each source dimension, record which target dimension position
+    // it corresponds to (if any). Dimensions in the source not found in
+    // the target are "collapsed" (iterated but not projected).
+    let from_to_target_pos: Vec<Option<usize>> = from_dims
+        .iter()
+        .map(|d| to_dim_positions.get(d.name()).copied())
+        .collect();
+
+    // Build element name lists for each dimension
+    let from_dim_elements: Vec<Vec<String>> =
+        from_dims.iter().map(dimension_element_names).collect();
+    let to_dim_elements: Vec<Vec<String>> = to_dims.iter().map(dimension_element_names).collect();
+    let to_dim_count = to_dims.len();
+
+    // Compute cartesian product of source elements
+    let mut from_tuples: Vec<Vec<usize>> = vec![vec![]];
+    for elements in &from_dim_elements {
+        let mut new_tuples = Vec::with_capacity(from_tuples.len() * elements.len());
+        for existing in &from_tuples {
+            for idx in 0..elements.len() {
+                let mut extended = existing.clone();
+                extended.push(idx);
+                new_tuples.push(extended);
+            }
+        }
+        from_tuples = new_tuples;
+    }
+
+    for from_indices in &from_tuples {
+        // Build source element name
+        let from_elems: Vec<&str> = from_indices
+            .iter()
+            .enumerate()
+            .map(|(dim_idx, &elem_idx)| from_dim_elements[dim_idx][elem_idx].as_str())
+            .collect();
+        let from_node = if from_elems.len() == 1 {
+            format_element_name(from_name, from_elems[0])
+        } else {
+            format_multi_element_name(from_name, &from_elems)
+        };
+
+        // Build target element name by projecting shared dimensions
+        let mut to_elems: Vec<&str> = vec![""; to_dim_count];
+        let mut all_mapped = true;
+        for (src_dim_idx, target_pos) in from_to_target_pos.iter().enumerate() {
+            if let Some(pos) = target_pos {
+                let src_elem_idx = from_indices[src_dim_idx];
+                // Use the element name from the target dimension at the
+                // corresponding position. If the source element index is
+                // out of range for the target dimension (dimension size
+                // mismatch), fall back to the source element name.
+                to_elems[*pos] = if src_elem_idx < to_dim_elements[*pos].len() {
+                    &to_dim_elements[*pos][src_elem_idx]
+                } else {
+                    from_dim_elements[src_dim_idx][src_elem_idx].as_str()
+                };
+            }
+        }
+
+        // Check if all target dimensions got filled from shared source dims
+        for elem in to_elems.iter().take(to_dim_count) {
+            if elem.is_empty() {
+                all_mapped = false;
+                break;
+            }
+        }
+
+        if all_mapped {
+            let to_node = if to_elems.len() == 1 {
+                format_element_name(to_name, to_elems[0])
+            } else {
+                format_multi_element_name(to_name, &to_elems)
+            };
+            element_edges.entry(from_node).or_default().insert(to_node);
+        } else {
+            // If some target dimensions are not covered by the source,
+            // we need to iterate over those target dimensions too (broadcast).
+            // Collect the unfilled target dimension indices and their elements.
+            let unfilled: Vec<(usize, &Vec<String>)> = (0..to_dim_count)
+                .filter(|&pos| to_elems[pos].is_empty())
+                .map(|pos| (pos, &to_dim_elements[pos]))
+                .collect();
+
+            // Cartesian product of unfilled target dimensions
+            let mut unfilled_tuples: Vec<Vec<(usize, usize)>> = vec![vec![]];
+            for &(pos, elements) in &unfilled {
+                let mut new_tuples = Vec::with_capacity(unfilled_tuples.len() * elements.len());
+                for existing in &unfilled_tuples {
+                    for elem_idx in 0..elements.len() {
+                        let mut extended = existing.clone();
+                        extended.push((pos, elem_idx));
+                        new_tuples.push(extended);
+                    }
+                }
+                unfilled_tuples = new_tuples;
+            }
+
+            for fill in &unfilled_tuples {
+                let mut filled = to_elems.clone();
+                for &(pos, elem_idx) in fill {
+                    filled[pos] = &to_dim_elements[pos][elem_idx];
+                }
+                let to_node = if filled.len() == 1 {
+                    format_element_name(to_name, filled[0])
+                } else {
+                    format_multi_element_name(to_name, &filled)
+                };
+                element_edges
+                    .entry(from_node.clone())
+                    .or_default()
+                    .insert(to_node);
+            }
+        }
+    }
+}
+
 /// Deduplicated loop circuits as node name lists.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct LoopCircuitsResult {
