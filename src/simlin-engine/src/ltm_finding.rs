@@ -1548,6 +1548,128 @@ mod tests {
         );
     }
 
+    /// AC7.5: SearchGraph built from element-level LinkOffset entries reads the
+    /// correct weight value from the correct result slot for each element.
+    ///
+    /// A2A expansion maps `birth_rate→births` (with dimension Region = [nyc,
+    /// boston, chicago]) to three element-level `LinkOffset` entries:
+    ///   `birth_rate[nyc]→births[nyc]`        at base_offset
+    ///   `birth_rate[boston]→births[boston]`  at base_offset + 1
+    ///   `birth_rate[chicago]→births[chicago]` at base_offset + 2
+    ///
+    /// This test verifies that `SearchGraph::from_results` reads the value
+    /// stored at `base_offset + element_index` for each element-level edge,
+    /// not the value at `base_offset` for all of them. If the offset mapping
+    /// were wrong, each edge would carry the same weight (the value at
+    /// `base_offset`), and the assertions on per-element weights would fail.
+    #[test]
+    fn test_search_graph_from_results_element_level_weights() {
+        let base_offset = 10usize;
+
+        // Build a Results object: step_size large enough to hold all offsets.
+        // One timestep (step=0); distinct values at base_offset/+1/+2 so we
+        // can confirm each element-level edge reads its own result slot.
+        //   nyc=0.8, boston=0.3, chicago=0.5
+        let step_size = 20;
+        let step_count = 1;
+        let mut data = vec![0.0f64; step_size * step_count];
+        data[base_offset] = 0.8; // birth_rate[nyc]    -> births[nyc]    (element 0)
+        data[base_offset + 1] = 0.3; // birth_rate[boston] -> births[boston] (element 1)
+        data[base_offset + 2] = 0.5; // birth_rate[chicago]-> births[chicago](element 2)
+
+        let results = Results {
+            offsets: HashMap::new(), // from_results does not use offsets
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: 0.0,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: 1,
+            },
+            is_vensim: false,
+        };
+
+        // Element-level LinkOffset entries produced by expand_a2a_link_offsets
+        // for an A2A link score with three dimension elements.
+        let link_offsets: Vec<LinkOffset> = vec![
+            (
+                (Ident::new("birth_rate[nyc]"), Ident::new("births[nyc]")),
+                base_offset,
+            ),
+            (
+                (
+                    Ident::new("birth_rate[boston]"),
+                    Ident::new("births[boston]"),
+                ),
+                base_offset + 1,
+            ),
+            (
+                (
+                    Ident::new("birth_rate[chicago]"),
+                    Ident::new("births[chicago]"),
+                ),
+                base_offset + 2,
+            ),
+        ];
+
+        let stocks = vec![Ident::new("population[nyc]")];
+        let graph = SearchGraph::from_results(&results, 0, &link_offsets, &stocks);
+
+        // Each element-level edge must carry the value stored at its own slot.
+        // The SearchGraph adjacency list is keyed by the canonical "from" ident.
+        let nyc_key = canonicalize("birth_rate[nyc]");
+        let boston_key = canonicalize("birth_rate[boston]");
+        let chicago_key = canonicalize("birth_rate[chicago]");
+
+        let nyc_edges = graph.adj.get(&*nyc_key);
+        assert!(
+            nyc_edges.is_some(),
+            "birth_rate[nyc] should have an outbound edge"
+        );
+        let nyc_score = nyc_edges.unwrap()[0].score;
+        assert!(
+            (nyc_score - 0.8).abs() < 1e-10,
+            "birth_rate[nyc]->births[nyc] should have weight 0.8 (slot base_offset), got {nyc_score}"
+        );
+
+        let boston_edges = graph.adj.get(&*boston_key);
+        assert!(
+            boston_edges.is_some(),
+            "birth_rate[boston] should have an outbound edge"
+        );
+        let boston_score = boston_edges.unwrap()[0].score;
+        assert!(
+            (boston_score - 0.3).abs() < 1e-10,
+            "birth_rate[boston]->births[boston] should have weight 0.3 (slot base+1), got {boston_score}"
+        );
+
+        let chicago_edges = graph.adj.get(&*chicago_key);
+        assert!(
+            chicago_edges.is_some(),
+            "birth_rate[chicago] should have an outbound edge"
+        );
+        let chicago_score = chicago_edges.unwrap()[0].score;
+        assert!(
+            (chicago_score - 0.5).abs() < 1e-10,
+            "birth_rate[chicago]->births[chicago] should have weight 0.5 (slot base+2), got {chicago_score}"
+        );
+
+        // If all offsets pointed to base_offset+0 (wrong), all weights would
+        // be 0.8. Distinct values (0.8, 0.3, 0.5) make this bug visible.
+        assert!(
+            (nyc_score - boston_score).abs() > 1e-10,
+            "nyc and boston weights must differ; both being {nyc_score} indicates an offset bug"
+        );
+        assert!(
+            (boston_score - chicago_score).abs() > 1e-10,
+            "boston and chicago weights must differ; both being {boston_score} indicates an offset bug"
+        );
+    }
+
     #[test]
     fn test_rank_and_filter_element_level_partitions() {
         // Element-level partitions: population[nyc] and population[boston]

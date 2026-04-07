@@ -2722,6 +2722,20 @@ fn test_cross_dim_stddev_expansion() {
 /// generation picks up the first reducer found (MAX in this case) and
 /// generates per-element scores. The range formula ensures both the min
 /// and max elements have non-zero influence on the target.
+///
+/// **Justified deviation from `RANK(population[*], 1)` as a scalar target:**
+/// RANK (Vensim VECTOR RANK) returns an array of 1-based ordinal positions
+/// with the same cardinality as its input. It cannot be used as the equation
+/// for a scalar aux: the engine would produce a dimension mismatch error
+/// because RANK's output is always an array. Therefore, there is no valid
+/// model structure where a scalar variable has `RANK(population[*], 1)` as its
+/// sole equation. The closest expressible case -- a scalar that reads from RANK
+/// output through an outer reducer (e.g., `SUM(RANK(population[*], 1))`) --
+/// classifies as `ReducerKind::Linear` (SUM is the outermost reducer) and is
+/// covered by `test_cross_dim_sum_algebraic`. The nonlinear reducer path
+/// (generate_nonlinear_partial / STDDEV/RANK fallback) is exercised when MAX
+/// or MIN appears as the outermost reducer, which is exactly what this test
+/// covers with the compound `MAX(population[*]) - MIN(population[*])` pattern.
 #[test]
 fn test_cross_dim_compound_nonlinear() {
     let project = build_arrayed_to_scalar_model(
