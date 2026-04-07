@@ -1732,3 +1732,617 @@ fn test_build_stock_flow_from_state_negative_coordinate_view_box() {
         right_edge
     );
 }
+
+// ---------------------------------------------------------------------------
+// P1: New top/bottom flows must be seeded from their attachment point
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_new_side_flow_valve_on_pipe() {
+    // When a waste flow is added incrementally to a stock that already has a
+    // chain outflow, the waste flow's valve must lie on its vertical pipe,
+    // not at the generic horizontal seed position.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Add waste_flow as a new outflow from stock_a
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows.push("waste_flow".to_string());
+        }
+    }
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "waste_flow".to_string(),
+            equation: datamodel::Equation::Scalar("5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            crate::patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            crate::patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let stock_a = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a");
+
+    let waste = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
+            _ => None,
+        })
+        .expect("waste_flow");
+
+    // The waste flow valve must be below the stock
+    assert!(
+        waste.y > stock_a.y + 5.0,
+        "waste_flow valve y ({}) should be below stock_a y ({})",
+        waste.y,
+        stock_a.y,
+    );
+
+    // The valve x must be near the pipe's x (within stock width)
+    let half_w = LayoutConfig::default().stock_width / 2.0;
+    assert!(
+        (waste.x - waste.points[0].x).abs() < half_w,
+        "waste_flow valve x ({}) should be near pipe x ({}) -- valve must be on the pipe",
+        waste.x,
+        waste.points[0].x,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Preserved side flows must be rebuilt when their offset changes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_add_second_side_flow_redistributes_offsets() {
+    // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_a -> cloud
+    // Then add waste_b. Both waste_a and waste_b should have distinct offsets
+    // on the bottom face (1/3 and 2/3, not both at 0.5).
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_a".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_a".to_string(),
+                equation: datamodel::Equation::Scalar("3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Verify waste_a's attach point before: should be at offset 0.5
+    let old_waste_a = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => Some(f),
+            _ => None,
+        })
+        .expect("waste_a in old view");
+    let old_stock_a = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a in old view");
+    let old_attach_x = old_waste_a.points[0].x;
+    let old_expected_mid = old_stock_a.x; // offset 0.5 = stock center
+    assert!(
+        (old_attach_x - old_expected_mid).abs() < 1.0,
+        "before: waste_a attach x ({}) should be at stock center ({})",
+        old_attach_x,
+        old_expected_mid,
+    );
+
+    // Now add waste_b
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows.push("waste_b".to_string());
+        }
+    }
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "waste_b".to_string(),
+            equation: datamodel::Equation::Scalar("2".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            crate::patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "waste_b".to_string(),
+                equation: datamodel::Equation::Scalar("2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            crate::patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec![
+                    "chain_flow".to_string(),
+                    "waste_a".to_string(),
+                    "waste_b".to_string(),
+                ],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let new_stock_a = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a in new view");
+
+    let new_waste_a = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => Some(f),
+            _ => None,
+        })
+        .expect("waste_a in new view");
+
+    let new_waste_b = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_b" => Some(f),
+            _ => None,
+        })
+        .expect("waste_b in new view");
+
+    // Both flows should have distinct x-positions (different offsets on bottom face)
+    let attach_a_x = new_waste_a.points[0].x;
+    let attach_b_x = new_waste_b.points[0].x;
+    assert!(
+        (attach_a_x - attach_b_x).abs() > 1.0,
+        "waste_a attach x ({}) and waste_b attach x ({}) should differ after redistribution",
+        attach_a_x,
+        attach_b_x,
+    );
+
+    // waste_a (alphabetically first) should be at offset 1/3, not 0.5 anymore.
+    // With stock_width=45, the expected attach for 1/3 is stock_x - 22.5 + 45 * 1/3 = stock_x - 7.5
+    let config = LayoutConfig::default();
+    let expected_a_x = new_stock_a.x - config.stock_width / 2.0 + config.stock_width * (1.0 / 3.0);
+    assert!(
+        (attach_a_x - expected_a_x).abs() < 1.0,
+        "waste_a should be at 1/3 offset ({}) but attach x is ({})",
+        expected_a_x,
+        attach_a_x,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Cloud flows must be reclassified when chain flows are removed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_remove_chain_reclassifies_cloud_flow() {
+    // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_flow -> cloud
+    // waste_flow should be on Bottom because chain_flow exists.
+    // Then remove chain_flow and stock_b. waste_flow should move back to Right.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Verify waste_flow starts vertical (below stock, as side flow)
+    let old_waste = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
+            _ => None,
+        })
+        .expect("waste_flow in old view");
+    let old_stock = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a in old view");
+    assert!(
+        old_waste.y > old_stock.y + 5.0,
+        "waste_flow should initially be below stock_a (side flow)"
+    );
+
+    // Now remove chain_flow and stock_b
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model
+        .variables
+        .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
+    for var in &mut model.variables {
+        if let datamodel::Variable::Stock(s) = var
+            && s.ident == "stock_a"
+        {
+            s.outflows = vec!["waste_flow".to_string()];
+        }
+    }
+
+    let patch = crate::patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            crate::patch::ModelOperation::DeleteVariable {
+                ident: "chain_flow".to_string(),
+            },
+            crate::patch::ModelOperation::DeleteVariable {
+                ident: "stock_b".to_string(),
+            },
+            crate::patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["waste_flow".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let new_stock = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a in new view");
+
+    let new_waste = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
+            _ => None,
+        })
+        .expect("waste_flow in new view");
+
+    // waste_flow should now be horizontal (same y as stock) since there's no
+    // chain flow anymore -- it should be the sole outflow going right.
+    assert!(
+        (new_waste.y - new_stock.y).abs() < 5.0,
+        "waste_flow y ({}) should be near stock_a y ({}) after chain removed (now horizontal)",
+        new_waste.y,
+        new_stock.y,
+    );
+
+    // Flow points should be horizontal (similar y values)
+    let first_pt = &new_waste.points[0];
+    let last_pt = &new_waste.points[new_waste.points.len() - 1];
+    assert!(
+        (first_pt.y - last_pt.y).abs() < 5.0,
+        "waste_flow points should be horizontal after chain removal: first.y={}, last.y={}",
+        first_pt.y,
+        last_pt.y,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Resnap must preserve off-center top/bottom attachment positions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_resnap_preserves_vertical_flow_offset() {
+    // Create a flow attached to the bottom of a stock at an off-center position.
+    // After resnap, the x position should be preserved, not snapped to center.
+    let config = LayoutConfig::default();
+    let half_w = config.stock_width / 2.0;
+    let half_h = config.stock_height / 2.0;
+
+    let stock_uid = 1;
+    let flow_uid = 2;
+    let cloud_uid = 3;
+    let stock_x = 200.0;
+    let stock_y = 100.0;
+    // Offset 1/3: should attach at stock_x - half_w + stock_w * (1/3)
+    let attach_x = stock_x - half_w + config.stock_width * (1.0 / 3.0);
+    let valve_x = attach_x;
+    let valve_y = stock_y + half_h + 50.0;
+
+    let resnap_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ],
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+    };
+    let mut state = LayoutState::new(&resnap_model);
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "stock_a".to_string(),
+        uid: stock_uid,
+        x: stock_x,
+        y: stock_y,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(stock_uid, Position::new(stock_x, stock_y));
+
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "waste_flow".to_string(),
+        uid: flow_uid,
+        x: valve_x,
+        y: valve_y,
+        label_side: LabelSide::Left,
+        points: vec![
+            FlowPoint {
+                x: attach_x,
+                y: stock_y + half_h,
+                attached_to_uid: Some(stock_uid),
+            },
+            FlowPoint {
+                x: attach_x,
+                y: valve_y + 50.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state
+        .positions
+        .insert(flow_uid, Position::new(valve_x, valve_y));
+
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid,
+        flow_uid,
+        x: attach_x,
+        y: valve_y + 50.0,
+        compat: None,
+    }));
+
+    resnap_flow_endpoints(&mut state, &config);
+
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == flow_uid => Some(f),
+            _ => None,
+        })
+        .expect("flow should exist after resnap");
+
+    let attached_pt = flow
+        .points
+        .iter()
+        .find(|pt| pt.attached_to_uid == Some(stock_uid))
+        .expect("flow should have point attached to stock");
+
+    // The x position should be preserved (not snapped to stock center)
+    assert!(
+        (attached_pt.x - attach_x).abs() < 0.5,
+        "resnap should preserve off-center x ({}) but got ({})",
+        attach_x,
+        attached_pt.x,
+    );
+
+    // The y should still be at the stock bottom edge
+    assert!(
+        (attached_pt.y - (stock_y + half_h)).abs() < 0.5,
+        "resnap should keep y at stock bottom edge ({}) but got ({})",
+        stock_y + half_h,
+        attached_pt.y,
+    );
+}

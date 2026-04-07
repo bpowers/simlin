@@ -1026,8 +1026,10 @@ pub fn resnap_flow_endpoints(state: &mut LayoutState, config: &LayoutConfig) {
                         pt.x = stock_pos.x + dx.signum() * half_w;
                         pt.y = stock_pos.y;
                     } else {
-                        // Vertical approach: snap to top or bottom edge
-                        pt.x = stock_pos.x;
+                        // Vertical approach: snap to top or bottom edge.
+                        // Preserve the x position (may be off-center for
+                        // multi-flow sides), clamped to stock bounds.
+                        pt.x = pt.x.clamp(stock_pos.x - half_w, stock_pos.x + half_w);
                         pt.y = stock_pos.y + dy.signum() * half_h;
                     }
                 }
@@ -1473,7 +1475,8 @@ fn classify_flow_sides(
     for flow in &side_outflows {
         match side_outflow_side {
             StockAttachSide::Bottom => bottom_flows.push(flow.clone()),
-            _ => right_flows.push(flow.clone()),
+            StockAttachSide::Right => right_flows.push(flow.clone()),
+            StockAttachSide::Top | StockAttachSide::Left => right_flows.push(flow.clone()),
         }
     }
 
@@ -1486,12 +1489,13 @@ fn classify_flow_sides(
     for flow in &side_inflows {
         match side_inflow_side {
             StockAttachSide::Top => top_flows.push(flow.clone()),
-            _ => left_flows.push(flow.clone()),
+            StockAttachSide::Left => left_flows.push(flow.clone()),
+            StockAttachSide::Bottom | StockAttachSide::Right => left_flows.push(flow.clone()),
         }
     }
 
     // Distribute flows within each side group using (i+1)/(n+1)
-    let assign_side = |flows: &mut Vec<String>,
+    let assign_side = |flows: &mut [String],
                        side: StockAttachSide,
                        result: &mut HashMap<String, FlowAttachment>| {
         flows.sort(); // deterministic ordering by ident
@@ -1600,6 +1604,48 @@ fn record_flow_template(state: &mut LayoutState, flow_ident: &str, flow_elem: &v
     state
         .flow_templates
         .insert(flow_ident.to_string(), FlowTemplate { offsets });
+}
+
+/// Compute the valve position for a flow based on its attachment info and
+/// connected stock position.  Returns `None` if the flow has no attachment
+/// or the stock position is unknown, in which case the caller should fall
+/// back to `initial_positions`.
+fn attachment_based_flow_position(
+    state: &LayoutState,
+    config: &LayoutConfig,
+    metadata: &ComputedMetadata,
+    flow_ident: &str,
+    flow_attachments: &HashMap<String, FlowAttachment>,
+) -> Option<Position> {
+    let attachment = flow_attachments.get(flow_ident)?;
+    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+    let stock_name = from_stock.or(to_stock)?;
+    let stock_uid = state.uid_manager.get_uid(stock_name)?;
+    let stock_pos = state.positions.get(&stock_uid)?;
+    Some(match attachment.side {
+        StockAttachSide::Bottom => {
+            let x = stock_pos.x - config.stock_width / 2.0 + config.stock_width * attachment.offset;
+            Position::new(
+                x,
+                stock_pos.y + config.stock_height / 2.0 + config.horizontal_spacing / 2.0,
+            )
+        }
+        StockAttachSide::Top => {
+            let x = stock_pos.x - config.stock_width / 2.0 + config.stock_width * attachment.offset;
+            Position::new(
+                x,
+                stock_pos.y - config.stock_height / 2.0 - config.horizontal_spacing / 2.0,
+            )
+        }
+        StockAttachSide::Right => Position::new(
+            stock_pos.x + config.stock_width / 2.0 + config.horizontal_spacing / 2.0,
+            stock_pos.y,
+        ),
+        StockAttachSide::Left => Position::new(
+            stock_pos.x - config.stock_width / 2.0 - config.horizontal_spacing / 2.0,
+            stock_pos.y,
+        ),
+    })
 }
 
 /// Create a single flow view element with its flow points and clouds.
@@ -1863,6 +1909,14 @@ fn layout_chain(
         }
     };
 
+    // Precompute flow attachment sides for all stocks in this chain.
+    // This avoids redundant calls to classify_flow_sides during BFS.
+    let mut flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
+    for stock_ident in stocks {
+        let sides = classify_flow_sides(stock_ident, metadata);
+        flow_attachments.extend(sides);
+    }
+
     let mut positioned: HashMap<String, Position> = HashMap::new();
     positioned.insert(start_stock.clone(), base_position);
 
@@ -1974,10 +2028,9 @@ fn layout_chain(
                             )
                         }
                     }
-                    (Some(from), None) => {
+                    (Some(_), None) => {
                         // Outflow to cloud: check if it should go downward
-                        let attachment = classify_flow_sides(from, metadata).get(&item.id).copied();
-                        match attachment {
+                        match flow_attachments.get(&item.id).copied() {
                             Some(FlowAttachment {
                                 side: StockAttachSide::Bottom,
                                 offset,
@@ -1999,10 +2052,9 @@ fn layout_chain(
                             ),
                         }
                     }
-                    (None, Some(to)) => {
+                    (None, Some(_)) => {
                         // Inflow from cloud: check if it should come from above
-                        let attachment = classify_flow_sides(to, metadata).get(&item.id).copied();
-                        match attachment {
+                        match flow_attachments.get(&item.id).copied() {
                             Some(FlowAttachment {
                                 side: StockAttachSide::Top,
                                 offset,
@@ -2033,13 +2085,6 @@ fn layout_chain(
                 positioned.insert(item.id.clone(), flow_pos);
             }
         }
-    }
-
-    // Compute flow attachment sides for all stocks in this chain
-    let mut flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
-    for stock_ident in stocks {
-        let sides = classify_flow_sides(stock_ident, metadata);
-        flow_attachments.extend(sides);
     }
 
     // Convert positioned elements to view elements
@@ -4378,8 +4423,135 @@ pub fn incremental_layout(
     // Step 4: Identify new elements and compute initial positions
     let new_elements = state.identify_new_elements(model);
 
+    // Compute flow attachments for flows on stocks that are affected by
+    // flow additions, deletions, or connection changes.  This ensures
+    // preserved flows get reclassified when a sibling chain flow is
+    // added or removed.
+    let mut incr_flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
+    let mut affected_stocks: HashSet<String> = HashSet::new();
+
+    for flow_ident in &new_elements.new_flows {
+        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+        if let Some(stock) = from_stock {
+            affected_stocks.insert(stock.to_string());
+        }
+        if let Some(stock) = to_stock {
+            affected_stocks.insert(stock.to_string());
+        }
+    }
+
+    // Also mark stocks whose flow connections changed via the patch
+    // (e.g. when a chain flow is deleted, the stock loses a flow and
+    // remaining cloud flows may need reclassification from Bottom/Top
+    // back to Right/Left).
+    for op in &patch.ops {
+        if let crate::patch::ModelOperation::UpdateStockFlows { ident, .. } = op {
+            let canonical = canonicalize(ident).into_owned();
+            affected_stocks.insert(canonical);
+        }
+    }
+
+    for stock in &affected_stocks {
+        let sides = classify_flow_sides(stock, &metadata);
+        incr_flow_attachments.extend(sides);
+    }
+
+    // Check if any existing (preserved) flows need to change sides.
+    // If classify_flow_sides assigns Bottom/Top to a flow that is
+    // currently horizontal (or Right/Left to one that is vertical),
+    // delete and rebuild it so its geometry matches.
+    let mut flows_to_rebuild: Vec<String> = Vec::new();
+    for (flow_ident, attachment) in &incr_flow_attachments {
+        // Skip flows that are new (they'll be created below)
+        if new_elements.new_flows.contains(flow_ident) {
+            continue;
+        }
+        // Check if this flow exists and has mismatched orientation or offset
+        if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
+            let existing = state.elements.iter().find(|e| {
+                if let ViewElement::Flow(f) = e {
+                    f.uid == uid
+                } else {
+                    false
+                }
+            });
+            if let Some(ViewElement::Flow(f)) = existing {
+                let orientation = compute_flow_orientation(&f.points);
+                let needs_vertical = matches!(
+                    attachment.side,
+                    StockAttachSide::Bottom | StockAttachSide::Top
+                );
+                let is_vertical = matches!(orientation, FlowOrientation::Vertical);
+                if needs_vertical != is_vertical {
+                    flows_to_rebuild.push(flow_ident.clone());
+                } else if needs_vertical {
+                    // Orientation matches but the offset may have changed
+                    // (e.g. a sibling was added/removed on the same face).
+                    // Check if the current attachment x matches the expected
+                    // offset; if not, rebuild.
+                    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+                    let stock_name = from_stock.or(to_stock);
+                    if let Some(sn) = stock_name
+                        && let Some(stock_uid) = state.uid_manager.get_uid(sn)
+                        && let Some(&stock_pos) = state.positions.get(&stock_uid)
+                    {
+                        let expected_x = stock_pos.x - config.stock_width / 2.0
+                            + config.stock_width * attachment.offset;
+                        let current_x = f
+                            .points
+                            .iter()
+                            .find(|pt| pt.attached_to_uid == Some(stock_uid))
+                            .map(|pt| pt.x);
+                        if let Some(cx) = current_x
+                            && (cx - expected_x).abs() > 0.5
+                        {
+                            flows_to_rebuild.push(flow_ident.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Delete and rebuild flows that need to change orientation or offset
+    for flow_ident in &flows_to_rebuild {
+        let saved_display = state
+            .display_names
+            .get(&canonicalize(flow_ident).into_owned())
+            .cloned();
+        state.apply_deletion(flow_ident);
+        if let Some(display) = saved_display {
+            state
+                .display_names
+                .insert(canonicalize(flow_ident).into_owned(), display);
+        }
+    }
+
+    // Compute positions for rebuilt flows based on their attachment info
+    for flow_ident in &flows_to_rebuild {
+        if let Some(pos) = attachment_based_flow_position(
+            &state,
+            &config,
+            &metadata,
+            flow_ident,
+            &incr_flow_attachments,
+        ) {
+            let uid = state.get_or_alloc_uid(flow_ident);
+            create_flow_view_element(
+                &mut state,
+                &config,
+                &metadata,
+                flow_ident,
+                uid,
+                pos,
+                &incr_flow_attachments,
+            )?;
+        }
+    }
+
     if new_elements.is_empty() {
-        // No new elements: just diff connectors/clouds and rebuild
+        // No new elements: resnap rebuilt flows, diff connectors/clouds, polish
+        resnap_flow_endpoints(&mut state, &config);
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
         optimize_labels(&mut state, model, &metadata);
@@ -4409,131 +4581,19 @@ pub fn incremental_layout(
         }
     }
 
-    // Compute flow attachments for new flows AND for all flows on
-    // stocks that are affected by new chain/side flow changes.  This
-    // ensures that existing preserved flows get reclassified when a
-    // sibling chain flow is added.
-    let mut incr_flow_attachments: HashMap<String, FlowAttachment> = HashMap::new();
-    let mut affected_stocks: HashSet<String> = HashSet::new();
-
     for flow_ident in &new_elements.new_flows {
-        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
-        if let Some(stock) = from_stock {
-            affected_stocks.insert(stock.to_string());
-        }
-        if let Some(stock) = to_stock {
-            affected_stocks.insert(stock.to_string());
-        }
-    }
-
-    for stock in &affected_stocks {
-        let sides = classify_flow_sides(stock, &metadata);
-        incr_flow_attachments.extend(sides);
-    }
-
-    // Check if any existing (preserved) flows need to change sides.
-    // If classify_flow_sides assigns Bottom/Top to a flow that is
-    // currently horizontal (or Right/Left to one that is vertical),
-    // delete and rebuild it so its geometry matches.
-    let mut flows_to_rebuild: Vec<String> = Vec::new();
-    for (flow_ident, attachment) in &incr_flow_attachments {
-        // Skip flows that are new (they'll be created below)
-        if new_elements.new_flows.contains(flow_ident) {
-            continue;
-        }
-        // Check if this flow exists and has mismatched orientation
-        if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
-            let existing = state.elements.iter().find(|e| {
-                if let ViewElement::Flow(f) = e {
-                    f.uid == uid
-                } else {
-                    false
-                }
-            });
-            if let Some(ViewElement::Flow(f)) = existing {
-                let orientation = compute_flow_orientation(&f.points);
-                let needs_vertical = matches!(
-                    attachment.side,
-                    StockAttachSide::Bottom | StockAttachSide::Top
-                );
-                let is_vertical = matches!(orientation, FlowOrientation::Vertical);
-                if needs_vertical != is_vertical {
-                    flows_to_rebuild.push(flow_ident.clone());
-                }
-            }
-        }
-    }
-
-    // Delete and rebuild flows that need to change orientation
-    for flow_ident in &flows_to_rebuild {
-        let saved_display = state
-            .display_names
-            .get(&canonicalize(flow_ident).into_owned())
-            .cloned();
-        state.apply_deletion(flow_ident);
-        if let Some(display) = saved_display {
-            state
-                .display_names
-                .insert(canonicalize(flow_ident).into_owned(), display);
-        }
-    }
-
-    // Compute positions for rebuilt flows based on their attachment info
-    for flow_ident in &flows_to_rebuild {
-        let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
-        if let Some(attachment) = incr_flow_attachments.get(flow_ident) {
-            let stock_ident = from_stock.or(to_stock);
-            if let Some(stock) = stock_ident {
-                let stock_uid = state.get_or_alloc_uid(stock);
-                if let Some(&stock_pos) = state.positions.get(&stock_uid) {
-                    let pos = match attachment.side {
-                        StockAttachSide::Bottom => {
-                            let x_offset = stock_pos.x - config.stock_width / 2.0
-                                + config.stock_width * attachment.offset;
-                            Position::new(
-                                x_offset,
-                                stock_pos.y
-                                    + config.stock_height / 2.0
-                                    + config.horizontal_spacing / 2.0,
-                            )
-                        }
-                        StockAttachSide::Top => {
-                            let x_offset = stock_pos.x - config.stock_width / 2.0
-                                + config.stock_width * attachment.offset;
-                            Position::new(
-                                x_offset,
-                                stock_pos.y
-                                    - config.stock_height / 2.0
-                                    - config.horizontal_spacing / 2.0,
-                            )
-                        }
-                        _ => {
-                            // Right/Left: use existing horizontal position
-                            Position::new(
-                                stock_pos.x
-                                    + config.stock_width / 2.0
-                                    + config.horizontal_spacing / 2.0,
-                                stock_pos.y,
-                            )
-                        }
-                    };
-                    let uid = state.get_or_alloc_uid(flow_ident);
-                    create_flow_view_element(
-                        &mut state,
-                        &config,
-                        &metadata,
-                        flow_ident,
-                        uid,
-                        pos,
-                        &incr_flow_attachments,
-                    )?;
-                }
-            }
-        }
-    }
-
-    for flow_ident in &new_elements.new_flows {
-        if let Some(&pos) = initial_positions.get(flow_ident) {
+        // Use attachment-based position for top/bottom flows so the valve
+        // is correctly placed on the vertical pipe. Fall back to the
+        // generic initial_positions for horizontal (Right/Left) flows.
+        let pos = attachment_based_flow_position(
+            &state,
+            &config,
+            &metadata,
+            flow_ident,
+            &incr_flow_attachments,
+        )
+        .or_else(|| initial_positions.get(flow_ident).copied());
+        if let Some(pos) = pos {
             let uid = state.get_or_alloc_uid(flow_ident);
             create_flow_view_element(
                 &mut state,
