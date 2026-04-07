@@ -1730,6 +1730,182 @@ fn find_model_output_ports(
     output_ports.into_iter().collect()
 }
 
+/// Strip the subscript suffix from an element-level node name.
+///
+/// For `"population[nyc]"` returns `"population"`. For `"scalar_var"`
+/// (no bracket) returns the name unchanged. For multi-dimensional
+/// subscripts like `"x[nyc,boston]"` the same rule applies: find last
+/// `[`, truncate there.
+fn strip_subscript(name: &str) -> &str {
+    match name.rfind('[') {
+        Some(pos) => &name[..pos],
+        None => name,
+    }
+}
+
+/// Build `Loop` structs from element-level circuits, grouping
+/// pure-dimension circuits into shared A2A loops and keeping mixed
+/// circuits as individual scalar loops.
+///
+/// Pure-dimension: all circuits in a group have the same variable-level
+/// node sequence (e.g., `[population, births]` for both `[population[nyc],
+/// births[nyc]]` and `[population[boston], births[boston]]`). These share
+/// one loop ID and produce an A2A loop score with dimensions.
+///
+/// Mixed: any circuit containing a scalar node or where the group has
+/// circuits with different variable-level structures. Each gets its own
+/// scalar loop with a unique element-specific ID suffix.
+fn build_element_level_loops(
+    element_circuits: &[Vec<String>],
+    var_graph: &crate::ltm::CausalGraph,
+    source_vars: &HashMap<String, super::SourceVariable>,
+    db: &dyn Db,
+    project: SourceProject,
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<crate::ltm::Loop> {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{Loop, assign_loop_ids};
+
+    // Group element-level circuits by their variable-level node sequence.
+    // The key is the joined stripped names; the value collects all circuits
+    // that share that variable-level structure.
+    let mut groups: HashMap<String, Vec<&Vec<String>>> = HashMap::new();
+    for circuit in element_circuits {
+        let var_level_key: String = circuit
+            .iter()
+            .map(|n| strip_subscript(n))
+            .collect::<Vec<_>>()
+            .join("\x00");
+        groups.entry(var_level_key).or_default().push(circuit);
+    }
+
+    // Sort groups deterministically by their key.
+    let mut sorted_groups: Vec<(String, Vec<&Vec<String>>)> = groups.into_iter().collect();
+    sorted_groups.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut all_loops: Vec<Loop> = Vec::new();
+
+    for (_group_key, circuits_in_group) in &sorted_groups {
+        // Determine if this is a pure-dimension group.
+        //
+        // A group is pure-dimension when:
+        // 1. Every node in every circuit has a subscript (no scalar nodes)
+        // 2. The group has more than one circuit (multiple elements share
+        //    the same structure), OR has exactly one circuit with subscripted
+        //    nodes (single-element dimension is still A2A)
+        //
+        // When a model has no arrayed variables, circuits won't have
+        // subscripts and each group has exactly one circuit -- they are
+        // scalar loops.
+        let representative = circuits_in_group[0];
+        let all_subscripted = representative.iter().all(|n| n.contains('['));
+
+        if all_subscripted && !representative.is_empty() {
+            // Pure-dimension group: produce a single A2A loop.
+            //
+            // Use the variable-level graph for polarity analysis and stock
+            // detection (the element-level graph has empty variables).
+            let var_level_nodes: Vec<Ident<Canonical>> = representative
+                .iter()
+                .map(|n| Ident::new(strip_subscript(n)))
+                .collect();
+            let links = var_graph.circuit_to_links(&var_level_nodes);
+            let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+            let polarity = var_graph.calculate_polarity(&links);
+
+            // Determine the shared dimension(s) from the subscripts.
+            // Look at the first subscripted node to find which dimensions
+            // it carries, then map canonical dim names to original
+            // datamodel names for equation parsing.
+            let first_var_name = strip_subscript(&representative[0]);
+            let dimensions = source_vars
+                .get(first_var_name)
+                .map(|sv| {
+                    variable_dimensions(db, *sv, project)
+                        .iter()
+                        .map(|d| {
+                            let canonical = d.name();
+                            dm_dims
+                                .iter()
+                                .find(|dm| {
+                                    crate::common::canonicalize(dm.name()).as_ref() == canonical
+                                })
+                                .map(|dm| dm.name().to_string())
+                                .unwrap_or_else(|| canonical.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            all_loops.push(Loop {
+                id: String::new(),
+                links,
+                stocks,
+                polarity,
+                dimensions,
+            });
+        } else {
+            // Mixed or scalar group: each circuit becomes its own scalar loop.
+            for circuit in circuits_in_group {
+                // For mixed loops, we can still attempt polarity via the
+                // variable-level graph. Strip subscripts and analyze.
+                let var_level_nodes: Vec<Ident<Canonical>> = circuit
+                    .iter()
+                    .map(|n| Ident::new(strip_subscript(n)))
+                    .collect();
+                let var_links = var_graph.circuit_to_links(&var_level_nodes);
+                let polarity = var_graph.calculate_polarity(&var_links);
+
+                // For the actual loop links, use element-level names so
+                // the link score references match the generated per-element
+                // link score variable names.
+                let element_nodes: Vec<Ident<Canonical>> =
+                    circuit.iter().map(|n| Ident::new(n)).collect();
+
+                // Build element-level links with polarity from var-level analysis.
+                let mut links = Vec::with_capacity(element_nodes.len());
+                for (i, _) in element_nodes.iter().enumerate() {
+                    let from = &element_nodes[i];
+                    let to = &element_nodes[(i + 1) % element_nodes.len()];
+                    // Use the polarity from the corresponding var-level link
+                    let var_link_polarity = if i < var_links.len() {
+                        var_links[i].polarity
+                    } else {
+                        crate::ltm::LinkPolarity::Unknown
+                    };
+                    links.push(crate::ltm::Link {
+                        from: from.clone(),
+                        to: to.clone(),
+                        polarity: var_link_polarity,
+                    });
+                }
+
+                // Find stocks among element-level nodes. We check the
+                // variable-level stock set by stripping subscripts.
+                let stocks: Vec<Ident<Canonical>> = element_nodes
+                    .iter()
+                    .filter(|n| {
+                        let var_name = strip_subscript(n.as_str());
+                        var_graph.stocks.contains(&Ident::new(var_name))
+                    })
+                    .cloned()
+                    .collect();
+
+                all_loops.push(Loop {
+                    id: String::new(),
+                    links,
+                    stocks,
+                    polarity,
+                    dimensions: vec![],
+                });
+            }
+        }
+    }
+
+    assign_loop_ids(&mut all_loops);
+    all_loops
+}
+
 /// Unified LTM variable generation for any model (root or sub-model).
 ///
 /// Auto-detects sub-model behavior by checking for input ports with causal
@@ -1746,14 +1922,14 @@ pub fn model_ltm_variables(
     model: SourceModel,
     project: SourceProject,
 ) -> super::LtmVariablesResult {
-    use crate::common::{Canonical, Ident};
-    use crate::ltm::{CyclePartitions, Loop, assign_loop_ids};
+    use crate::common::Ident;
+    use crate::ltm::{CyclePartitions, Loop};
     use std::collections::HashSet;
 
     use super::{
         LtmLinkId, LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules,
-        generate_max_abs_chain_str, model_causal_edges, model_cycle_partitions,
-        model_loop_circuits, module_input_pathways_from_edges,
+        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
+        model_element_loop_circuits, module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
@@ -1782,38 +1958,45 @@ pub fn model_ltm_variables(
 
     let mut vars = Vec::new();
 
-    // Pre-compute loops for exhaustive mode. Both the link-score
-    // strategy (loop edges only) and loop/relative score generation
-    // share this data, so compute once and reuse.
+    // Fetch source variables and dimension metadata early -- needed by
+    // both loop pre-computation (for dimension lookups) and link score
+    // classification.
+    let source_vars = model.variables(db);
+    let dm_dims = project_datamodel_dims(db, project);
+
+    // Pre-compute loops for exhaustive mode using element-level circuit
+    // detection. Element-level circuits capture per-element feedback
+    // (e.g., population[NYC] -> births[NYC] -> population[NYC]) and
+    // cross-element feedback (e.g., population[NYC] -> migration ->
+    // population[Boston]).
+    //
+    // Pure-dimension loops (all nodes in a group of circuits share the
+    // same variable-level structure, differing only by subscript) produce
+    // a single A2A loop with shared ID. Mixed loops (involving scalar
+    // nodes or cross-element edges) produce individual scalar loops.
+    //
+    // We also need the variable-level graph for polarity analysis since
+    // the element-level graph has no variable data populated.
     let loops: Option<Vec<Loop>> = if !is_discovery {
-        let circuits_result = model_loop_circuits(db, model, project);
+        let circuits_result = model_element_loop_circuits(db, model, project);
         if circuits_result.circuits.is_empty() {
             if !has_input_ports {
                 return LtmVariablesResult { vars: vec![] };
             }
             None
         } else {
-            let graph = causal_graph_with_modules(db, model, project);
+            // Build the variable-level graph with populated variables for
+            // polarity analysis. Element-level graphs have empty variables.
+            let var_graph = causal_graph_with_modules(db, model, project);
 
-            let mut detected: Vec<Loop> = circuits_result
-                .circuits
-                .iter()
-                .map(|circuit_strs| {
-                    let circuit: Vec<Ident<Canonical>> =
-                        circuit_strs.iter().map(|s| Ident::new(s)).collect();
-                    let links = graph.circuit_to_links(&circuit);
-                    let parent_stocks = graph.find_stocks_in_loop(&circuit);
-                    let polarity = graph.calculate_polarity(&links);
-                    Loop {
-                        id: String::new(),
-                        links,
-                        stocks: parent_stocks,
-                        polarity,
-                    }
-                })
-                .collect();
-
-            assign_loop_ids(&mut detected);
+            let detected = build_element_level_loops(
+                &circuits_result.circuits,
+                &var_graph,
+                source_vars,
+                db,
+                project,
+                dm_dims,
+            );
             Some(detected)
         }
     } else {
@@ -1830,8 +2013,6 @@ pub fn model_ltm_variables(
     // dimensions and either the source is scalar or shares the same
     // dimensions, the link score inherits the target's dimensions so
     // that per-element scores are computed via the A2A expansion.
-    let source_vars = model.variables(db);
-    let dm_dims = project_datamodel_dims(db, project);
 
     /// Determine the dimensions a link score should carry.
     ///
@@ -2038,8 +2219,12 @@ pub fn model_ltm_variables(
     // Generated for any model with feedback loops, regardless of whether
     // it also has input ports. A model can be both a reusable sub-model
     // AND have internal loops that need scoring.
+    //
+    // Uses element-level cycle partitions so that cross-element feedback
+    // is detected correctly (e.g., population[NYC] and population[Boston]
+    // in the same partition when connected through migration).
     if let Some(ref detected_loops) = loops {
-        let partitions_result = model_cycle_partitions(db, model, project);
+        let partitions_result = model_element_cycle_partitions(db, model, project);
         let partitions = CyclePartitions {
             partitions: partitions_result
                 .partitions
@@ -2060,10 +2245,23 @@ pub fn model_ltm_variables(
                 Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
                 _ => String::new(),
             };
+            // Carry forward dimensions from the Loop struct for A2A loops.
+            let loop_item = detected_loops
+                .iter()
+                .find(|l| name.as_str().ends_with(&l.id));
+            let dimensions = loop_item
+                .and_then(|l| {
+                    if l.dimensions.is_empty() {
+                        None
+                    } else {
+                        Some(l.dimensions.clone())
+                    }
+                })
+                .unwrap_or_default();
             vars.push(LtmSyntheticVar {
                 name: name.to_string(),
                 equation,
-                dimensions: vec![],
+                dimensions,
             });
         }
     }

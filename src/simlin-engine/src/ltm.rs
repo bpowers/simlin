@@ -30,7 +30,15 @@ pub struct Link {
     pub polarity: LinkPolarity,
 }
 
-/// Represents a feedback loop
+/// Represents a feedback loop.
+///
+/// For scalar models, `dimensions` is empty and links reference scalar
+/// variable names.  For arrayed models, a pure-dimension A2A loop has
+/// `dimensions` set to the shared dimension names (e.g., `["Region"]`)
+/// and links reference variable-level names (the A2A expansion handles
+/// per-element evaluation).  Mixed loops (scalar + arrayed nodes, or
+/// cross-element feedback) have empty `dimensions` and use
+/// element-specific link names.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Loop {
@@ -38,6 +46,8 @@ pub struct Loop {
     pub links: Vec<Link>,
     pub stocks: Vec<Ident<Canonical>>,
     pub polarity: LoopPolarity,
+    /// Dimension names for A2A loop scores. Empty for scalar or mixed loops.
+    pub dimensions: Vec<String>,
 }
 
 impl Loop {
@@ -433,6 +443,7 @@ impl CausalGraph {
                         links,
                         stocks,
                         polarity,
+                        dimensions: vec![],
                     });
                 }
             }
@@ -1816,6 +1827,7 @@ mod tests {
             links: vec![],
             stocks: vec![],
             polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
         };
 
         let path = loop_item.format_path();
@@ -2619,6 +2631,7 @@ mod tests {
                 ],
                 stocks: vec![],
                 polarity: LoopPolarity::Undetermined,
+                dimensions: vec![],
             },
             Loop {
                 id: String::new(),
@@ -2636,6 +2649,7 @@ mod tests {
                 ],
                 stocks: vec![],
                 polarity: LoopPolarity::Reinforcing,
+                dimensions: vec![],
             },
         ];
 
