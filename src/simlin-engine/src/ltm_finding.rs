@@ -16,6 +16,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident, Result};
+use crate::datamodel;
+use crate::db::LtmSyntheticVar;
 #[cfg(test)]
 use crate::ltm::Link;
 use crate::ltm::{CausalGraph, CyclePartitions, Loop, LoopPolarity};
@@ -255,10 +257,33 @@ impl SearchGraph {
     }
 }
 
-/// Parse link score variable names from results offsets.
+/// Parse link score variable names from results offsets, expanding A2A
+/// link scores into per-element edges.
 ///
-/// Returns a vector of ((from, to), offset) tuples for all link score variables.
-fn parse_link_offsets(results: &Results) -> Vec<LinkOffset> {
+/// For scalar link scores (size 1), produces one `LinkOffset` per variable.
+/// For A2A link scores (size N), produces N `LinkOffset` entries -- one per
+/// dimension element -- where each element-level edge maps
+/// `from[elem]->to[elem]` to `base_offset + element_index`.
+///
+/// Cross-dimensional per-element scores (names containing `[` in the
+/// from-name, e.g. `$..link_score..population[nyc]->total_pop`) are
+/// already element-level and map directly to one offset.
+///
+/// When `ltm_vars` is empty (e.g. in the non-salsa convenience path),
+/// all link scores are treated as scalar (no expansion).
+fn parse_link_offsets(
+    results: &Results,
+    ltm_vars: &[LtmSyntheticVar],
+    dims: &[datamodel::Dimension],
+) -> Vec<LinkOffset> {
+    // Build a lookup from canonical link score name -> LtmSyntheticVar
+    // for quick dimension lookup during expansion.
+    let ltm_var_map: HashMap<String, &LtmSyntheticVar> = ltm_vars
+        .iter()
+        .filter(|v| v.name.contains(LINK_SCORE_PREFIX))
+        .map(|v| (crate::common::canonicalize(&v.name).into_owned(), v))
+        .collect();
+
     let mut link_offsets = Vec::new();
 
     for (var_name, &offset) in &results.offsets {
@@ -266,14 +291,122 @@ fn parse_link_offsets(results: &Results) -> Vec<LinkOffset> {
         if let Some(suffix) = name_str.strip_prefix(LINK_SCORE_PREFIX) {
             // Split on the arrow separator to get from and to
             if let Some((from_str, to_str)) = suffix.split_once(LTM_LINK_SEP) {
-                let from = Ident::new(from_str);
-                let to = Ident::new(to_str);
-                link_offsets.push(((from, to), offset));
+                // Check if this is a cross-dimensional per-element score
+                // (already element-level, contains `[` in from-name).
+                if from_str.contains('[') || to_str.contains('[') {
+                    let from = Ident::new(from_str);
+                    let to = Ident::new(to_str);
+                    link_offsets.push(((from, to), offset));
+                    continue;
+                }
+
+                // Look up the LtmSyntheticVar for this link score to get
+                // its dimensions. If found and dimensions are non-empty,
+                // this is an A2A link score that needs expansion.
+                let var_dims = ltm_var_map
+                    .get(name_str)
+                    .map(|v| &v.dimensions[..])
+                    .unwrap_or(&[]);
+
+                if var_dims.is_empty() {
+                    // Scalar link score: one entry at the base offset.
+                    let from = Ident::new(from_str);
+                    let to = Ident::new(to_str);
+                    link_offsets.push(((from, to), offset));
+                } else {
+                    // A2A link score: expand to N element-level edges.
+                    expand_a2a_link_offsets(
+                        from_str,
+                        to_str,
+                        offset,
+                        var_dims,
+                        dims,
+                        &mut link_offsets,
+                    );
+                }
             }
         }
     }
 
     link_offsets
+}
+
+/// Expand an A2A link score into per-element `LinkOffset` entries.
+///
+/// Given a link score name like `birth_rate→births` with dimensions
+/// `["Region"]` and base offset, produces one entry per element:
+/// `(birth_rate[nyc], births[nyc])` at `base + 0`,
+/// `(birth_rate[boston], births[boston])` at `base + 1`, etc.
+///
+/// The element order matches the layout allocation order: row-major
+/// cartesian product of dimension elements.
+fn expand_a2a_link_offsets(
+    from_var: &str,
+    to_var: &str,
+    base_offset: usize,
+    var_dims: &[String],
+    dims: &[datamodel::Dimension],
+    link_offsets: &mut Vec<LinkOffset>,
+) {
+    // Resolve dimension element names. For each dimension name in
+    // var_dims, look up the datamodel::Dimension to get element names.
+    let dim_elements: Vec<Vec<String>> = var_dims
+        .iter()
+        .filter_map(|dim_name| {
+            let canonical_dim_name = crate::common::canonicalize(dim_name);
+            dims.iter()
+                .find(|d| {
+                    crate::common::canonicalize(d.name()).as_ref() == canonical_dim_name.as_ref()
+                })
+                .map(datamodel_dim_element_names)
+        })
+        .collect();
+
+    if dim_elements.len() != var_dims.len() {
+        // Dimension resolution failed; fall back to a single scalar entry.
+        let from = Ident::new(from_var);
+        let to = Ident::new(to_var);
+        link_offsets.push(((from, to), base_offset));
+        return;
+    }
+
+    // Compute cartesian product of element names (row-major order).
+    let mut tuples: Vec<Vec<&str>> = vec![vec![]];
+    for elements in &dim_elements {
+        let mut new_tuples = Vec::with_capacity(tuples.len() * elements.len());
+        for existing in &tuples {
+            for elem in elements {
+                let mut extended = existing.clone();
+                extended.push(elem.as_str());
+                new_tuples.push(extended);
+            }
+        }
+        tuples = new_tuples;
+    }
+
+    for (idx, elems) in tuples.iter().enumerate() {
+        let subscript = if elems.len() == 1 {
+            elems[0].to_string()
+        } else {
+            elems.join(",")
+        };
+        let from = Ident::new(&format!("{from_var}[{subscript}]"));
+        let to = Ident::new(&format!("{to_var}[{subscript}]"));
+        link_offsets.push(((from, to), base_offset + idx));
+    }
+}
+
+/// Get element names from a datamodel::Dimension, canonicalized for use
+/// in element-level identifiers. Named dimensions return their element
+/// names lowercased; indexed dimensions return "0", "1", etc.
+fn datamodel_dim_element_names(dim: &datamodel::Dimension) -> Vec<String> {
+    match &dim.elements {
+        datamodel::DimensionElements::Named(names) => names
+            .iter()
+            .map(|n| crate::common::canonicalize(n).into_owned())
+            .collect(),
+        datamodel::DimensionElements::Indexed(size) => (0..*size).map(|i| i.to_string()).collect(),
+    }
 }
 
 /// Look up the main model deterministically by its canonical name "main".
@@ -316,6 +449,12 @@ fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
 ///
 /// The simulation must have been compiled with `ltm_discovery_mode` enabled
 /// so that link score variables exist for all causal links.
+///
+/// This convenience function builds the causal graph from the `Project` and
+/// does not have access to LTM synthetic variable metadata or project
+/// dimensions, so A2A link scores are treated as scalar (no element-level
+/// expansion). For full element-level discovery, use
+/// `discover_loops_with_graph` with explicit `ltm_vars` and `dims`.
 pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundLoop>> {
     let stocks = get_stock_variables(project);
     let main_model = find_main_model(project).ok_or_else(|| crate::common::Error {
@@ -324,7 +463,7 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
         details: Some("No non-implicit model found for loop discovery".to_string()),
     })?;
     let causal_graph = CausalGraph::from_model(main_model, project)?;
-    discover_loops_with_graph(results, &causal_graph, &stocks)
+    discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[])
 }
 
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
@@ -332,12 +471,19 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
 /// This is the implementation shared by `discover_loops` (which builds
 /// the graph from a `Project`) and callers that have a salsa-derived
 /// `CausalGraph`.
+///
+/// When `ltm_vars` and `dims` are provided, A2A link scores are expanded
+/// into per-element edges so the DFS operates on the element-level graph.
+/// When they are empty (convenience path), all link scores are treated as
+/// scalar.
 pub fn discover_loops_with_graph(
     results: &Results,
     causal_graph: &CausalGraph,
     stocks: &[Ident<Canonical>],
+    ltm_vars: &[LtmSyntheticVar],
+    dims: &[datamodel::Dimension],
 ) -> Result<Vec<FoundLoop>> {
-    let link_offsets = parse_link_offsets(results);
+    let link_offsets = parse_link_offsets(results, ltm_vars, dims);
     if link_offsets.is_empty() {
         return Ok(Vec::new());
     }
@@ -480,6 +626,13 @@ pub fn discover_loops_with_graph(
 ///    partition-scoped total score at any timestep
 /// 4. Assign deterministic polarity-based IDs (r1, b1, etc.)
 /// 5. Re-sort by score descending for callers
+///
+/// The `partitions` argument can be either variable-level or element-level.
+/// When the discovery pipeline operates on an element-level graph, the
+/// partitions are element-level (e.g., `population[nyc]` is a distinct
+/// stock node), and loop stocks are element-specific. The threshold
+/// filtering logic is partition-agnostic -- it compares each loop's
+/// score to the total within its partition regardless of naming granularity.
 fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartitions) {
     // Sort by average |score| descending
     found_loops.sort_by(|a, b| {
@@ -932,7 +1085,7 @@ mod tests {
             is_vensim: false,
         };
 
-        let parsed = parse_link_offsets(&results);
+        let parsed = parse_link_offsets(&results, &[], &[]);
         assert_eq!(parsed.len(), 2, "Should find 2 link score variables");
 
         // Verify the parsed entries
@@ -945,6 +1098,125 @@ mod tests {
 
         assert!(has_pop_to_births, "Should parse population->births link");
         assert!(has_births_to_pop, "Should parse births->population link");
+    }
+
+    #[test]
+    fn test_parse_link_offsets_a2a_expansion() {
+        // An A2A link score `birth_rate->births` with dimension Region
+        // (NYC, Boston, Chicago) should expand to 3 element-level entries.
+        let mut offsets = HashMap::new();
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚birth_rate→births"), 10usize);
+        // A scalar link score for comparison
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚scalar_a→scalar_b"), 20usize);
+
+        let results = Results {
+            offsets,
+            data: vec![0.0; 30].into_boxed_slice(),
+            step_size: 30,
+            step_count: 1,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: 0.0,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: 1,
+            },
+            is_vensim: false,
+        };
+
+        let ltm_vars = vec![
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}birth_rate\u{2192}births".to_string(),
+                equation: String::new(),
+                dimensions: vec!["Region".to_string()],
+            },
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}scalar_a\u{2192}scalar_b".to_string(),
+                equation: String::new(),
+                dimensions: vec![],
+            },
+        ];
+        let dims = vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec![
+                "NYC".to_string(),
+                "Boston".to_string(),
+                "Chicago".to_string(),
+            ],
+        )];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+
+        // Should have 3 element-level entries for A2A + 1 scalar = 4 total
+        assert_eq!(parsed.len(), 4, "3 A2A elements + 1 scalar = 4 total");
+
+        // Check A2A expansion: birth_rate[nyc]->births[nyc] at offset 10
+        let nyc = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "birth_rate[nyc]" && t.as_str() == "births[nyc]");
+        assert!(nyc.is_some(), "Should have birth_rate[nyc]->births[nyc]");
+        assert_eq!(nyc.unwrap().1, 10);
+
+        let boston = parsed.iter().find(|((f, t), _)| {
+            f.as_str() == "birth_rate[boston]" && t.as_str() == "births[boston]"
+        });
+        assert!(
+            boston.is_some(),
+            "Should have birth_rate[boston]->births[boston]"
+        );
+        assert_eq!(boston.unwrap().1, 11);
+
+        let chicago = parsed.iter().find(|((f, t), _)| {
+            f.as_str() == "birth_rate[chicago]" && t.as_str() == "births[chicago]"
+        });
+        assert!(
+            chicago.is_some(),
+            "Should have birth_rate[chicago]->births[chicago]"
+        );
+        assert_eq!(chicago.unwrap().1, 12);
+
+        // Check scalar is unchanged
+        let scalar = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "scalar_a" && t.as_str() == "scalar_b");
+        assert!(scalar.is_some(), "Scalar link should be preserved");
+        assert_eq!(scalar.unwrap().1, 20);
+    }
+
+    #[test]
+    fn test_parse_link_offsets_cross_dim_passthrough() {
+        // Cross-dimensional per-element scores (with `[` in the name)
+        // should pass through directly without expansion.
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$⁚ltm⁚link_score⁚population[nyc]→total_pop"),
+            5usize,
+        );
+
+        let results = Results {
+            offsets,
+            data: vec![0.0; 10].into_boxed_slice(),
+            step_size: 10,
+            step_count: 1,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: 0.0,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: 1,
+            },
+            is_vensim: false,
+        };
+
+        // Even with ltm_vars and dims, cross-dim scores pass through directly
+        let parsed = parse_link_offsets(&results, &[], &[]);
+        assert_eq!(parsed.len(), 1);
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(from.as_str(), "population[nyc]");
+        assert_eq!(to.as_str(), "total_pop");
+        assert_eq!(*offset, 5);
     }
 
     #[test]
@@ -1274,5 +1546,76 @@ mod tests {
             3,
             "Loop dominant in its own partition should be retained even if globally tiny"
         );
+    }
+
+    #[test]
+    fn test_rank_and_filter_element_level_partitions() {
+        // Element-level partitions: population[nyc] and population[boston]
+        // are separate stocks in the same partition. A tiny loop through
+        // population[chicago] in a separate partition should be retained
+        // because it dominates its own partition.
+        let mut loops = vec![
+            make_found_loop(
+                &[
+                    ("population[nyc]", "births[nyc]"),
+                    ("births[nyc]", "population[nyc]"),
+                ],
+                &["population[nyc]"],
+                LoopPolarity::Reinforcing,
+                500.0,
+            ),
+            make_found_loop(
+                &[
+                    ("population[boston]", "births[boston]"),
+                    ("births[boston]", "population[boston]"),
+                ],
+                &["population[boston]"],
+                LoopPolarity::Reinforcing,
+                400.0,
+            ),
+            make_found_loop(
+                &[
+                    ("population[chicago]", "births[chicago]"),
+                    ("births[chicago]", "population[chicago]"),
+                ],
+                &["population[chicago]"],
+                LoopPolarity::Reinforcing,
+                0.01,
+            ),
+        ];
+
+        // Two partitions: NYC+Boston share a partition (connected by
+        // some cross-element feedback), Chicago is alone.
+        let partitions = CyclePartitions {
+            partitions: vec![
+                vec![
+                    Ident::new("population[boston]"),
+                    Ident::new("population[nyc]"),
+                ],
+                vec![Ident::new("population[chicago]")],
+            ],
+            stock_partition: vec![
+                (Ident::new("population[nyc]"), 0),
+                (Ident::new("population[boston]"), 0),
+                (Ident::new("population[chicago]"), 1),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        rank_and_filter(&mut loops, &partitions);
+
+        // All 3 loops should be retained: Chicago's loop is 100% of its
+        // partition's total, even though globally it's tiny.
+        assert_eq!(
+            loops.len(),
+            3,
+            "Element-level loop dominant in its partition should be retained"
+        );
+
+        // Verify ordering: NYC (500) > Boston (400) > Chicago (0.01)
+        assert_eq!(loops[0].avg_abs_score, 500.0);
+        assert_eq!(loops[1].avg_abs_score, 400.0);
+        assert!((loops[2].avg_abs_score - 0.01).abs() < 1e-10);
     }
 }

@@ -138,21 +138,33 @@ fn run_ltm_pipeline(
     vm.run_to_end().ok()?;
     let results = vm.into_results();
 
-    // Build the CausalGraph from salsa-tracked causal edges.
+    // Build an element-level CausalGraph for loop discovery. This ensures
+    // that arrayed models get element-specific loops (e.g., population[NYC]
+    // -> births[NYC] -> population[NYC]) rather than variable-level loops.
     let source_model = source_project.models(db).get(&canonical_name).copied()?;
-    let edges_result = crate::db::model_causal_edges(db, source_model, source_project);
-    let mut causal_graph = crate::db::causal_graph_from_edges(edges_result);
-    causal_graph.variables =
-        crate::db::reconstruct_model_variables(db, source_model, source_project);
+    let element_edges = crate::db::model_element_causal_edges(db, source_model, source_project);
+    let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
 
-    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = edges_result
+    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = element_edges
         .stocks
         .iter()
         .map(|s| crate::common::Ident::new(s))
         .collect();
 
-    let found_loops =
-        crate::ltm_finding::discover_loops_with_graph(&results, &causal_graph, &stocks).ok()?;
+    // Get LTM variable metadata and project dimensions for A2A link
+    // score expansion. This allows parse_link_offsets to expand A2A
+    // link scores into per-element edges.
+    let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
+    let dm_dims = crate::db::project_datamodel_dims(db, source_project);
+
+    let found_loops = crate::ltm_finding::discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm_vars.vars,
+        dm_dims,
+    )
+    .ok()?;
 
     let time = build_time_array(&results);
 
