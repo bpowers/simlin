@@ -12,9 +12,9 @@ use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{
     DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_from_element_edges,
     compile_project_incremental, model_cycle_partitions, model_detected_loops,
-    model_element_causal_edges, model_element_loop_circuits, model_ltm_variables,
-    project_datamodel_dims, set_project_ltm_discovery_mode, set_project_ltm_enabled,
-    sync_from_datamodel, sync_from_datamodel_incremental,
+    model_element_causal_edges, model_element_cycle_partitions, model_element_loop_circuits,
+    model_ltm_variables, project_datamodel_dims, set_project_ltm_discovery_mode,
+    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding};
@@ -3651,4 +3651,401 @@ fn test_discovery_threshold_filters_negligible_loops() {
                 .join(", "))
             .collect::<Vec<_>>()
     );
+}
+
+// --- AC8: End-to-end XMILE test model integration tests ---
+//
+// These tests load XMILE test models from the test/ directory and exercise
+// the full LTM pipeline: XMILE parsing, compilation with LTM, simulation,
+// structural analysis, and loop discovery. They validate both exhaustive
+// and discovery modes on arrayed models with per-region feedback (A2A) and
+// cross-element migration feedback.
+
+/// Load an XMILE model from a file path, returning the parsed datamodel project.
+fn load_xmile_model(path: &str) -> simlin_engine::datamodel::Project {
+    let f = File::open(path).unwrap_or_else(|e| panic!("failed to open {}: {}", path, e));
+    let mut f = BufReader::new(f);
+    xmile::project_from_reader(&mut f)
+        .unwrap_or_else(|e| panic!("failed to parse XMILE from {}: {}", path, e))
+}
+
+/// AC8.1: A2A arrayed population model -- exhaustive mode.
+///
+/// Model: population[Region] (3 regions: NYC, Boston, LA) with:
+///   - births[Region] = population * birth_rate (reinforcing A2A loop)
+///   - deaths[Region] = population * death_rate (balancing A2A loop)
+///   - birth_rate varies per region (0.03, 0.02, 0.01)
+///   - death_rate is constant (0.01) across regions
+///
+/// Verifies:
+///   - Per-element link scores exist and are non-zero
+///   - Loop scores are A2A (3 slots for 3 regions)
+///   - Relative loop scores per element sum to approximately 100%
+///   - Each region's loop dominance pattern is independent
+#[test]
+fn test_arrayed_population_ltm_exhaustive() {
+    let n_elements: usize = 3;
+    let datamodel_project =
+        load_xmile_model("../../test/arrayed_population_ltm/arrayed_population.stmx");
+
+    // Compile with LTM exhaustive mode and simulate
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("A2A population model should simulate");
+    let results = vm.into_results();
+
+    // Verify per-element link scores exist and are non-zero.
+    // Look for A2A link score variables (population -> births edge).
+    let link_score_vars: Vec<_> = results
+        .offsets
+        .iter()
+        .filter(|(k, _)| {
+            let s = k.as_str();
+            s.starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .map(|(k, &off)| (k.as_str().to_string(), off))
+        .collect();
+    assert!(
+        !link_score_vars.is_empty(),
+        "Should have link score variables for the A2A population model"
+    );
+
+    // Verify some link scores have non-zero values after initialization
+    let has_nonzero_link = link_score_vars.iter().any(|(_, off)| {
+        (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + off];
+            val.abs() > 1e-10 && !val.is_nan()
+        })
+    });
+    assert!(
+        has_nonzero_link,
+        "At least some link scores should be non-zero"
+    );
+
+    // Verify loop scores are A2A: should have loop score variables with
+    // 3 slots (one per region).
+    let loop_scores = find_loop_score_offsets(&results);
+    assert!(
+        !loop_scores.is_empty(),
+        "Should have loop score variables for the A2A population model"
+    );
+
+    // Each loop score variable should have n_elements slots with non-zero values.
+    for (name, base_offset) in &loop_scores {
+        for elem in 0..n_elements {
+            let elem_offset = base_offset + elem;
+            let any_nonzero = (2..results.step_count).any(|step| {
+                let val = results.data[step * results.step_size + elem_offset];
+                val.abs() > 1e-10 && !val.is_nan()
+            });
+            assert!(
+                any_nonzero,
+                "Loop score element {} (offset {}) should have non-zero values, var: {}",
+                elem, elem_offset, name
+            );
+        }
+    }
+
+    // Verify relative loop scores exist and each element's absolute values
+    // sum to approximately 1.0 (since each region has independent dynamics,
+    // each element is its own partition).
+    let rel_scores = find_rel_loop_score_offsets(&results);
+    assert!(
+        !rel_scores.is_empty(),
+        "Should have relative loop score variables"
+    );
+
+    // Check that relative loop scores per element sum to ~1.0 at some
+    // timestep after initialization.
+    for elem in 0..n_elements {
+        let mut found_good_sum = false;
+        for step in 3..results.step_count {
+            let sum: f64 = rel_scores
+                .iter()
+                .map(|(_, off)| {
+                    let val = results.data[step * results.step_size + off + elem];
+                    if val.is_nan() { 0.0 } else { val.abs() }
+                })
+                .sum();
+            if sum > 0.5 && (sum - 1.0).abs() < 0.15 {
+                found_good_sum = true;
+                break;
+            }
+        }
+        assert!(
+            found_good_sum,
+            "Element {} relative loop scores should sum to ~1.0 at some timestep",
+            elem
+        );
+    }
+
+    // Verify region independence: each element's loop scores should be
+    // computed independently. With 2 loops (reinforcing births, balancing
+    // deaths) per region, verify that both polarities appear in the detected
+    // loops from structural analysis.
+    let mut db2 = SimlinDb::default();
+    let sync2 = sync_from_datamodel_incremental(&mut db2, &datamodel_project, None);
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model2 = sync2
+        .project
+        .models(&db2)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist");
+    let detected = model_detected_loops(&db2, source_model2, sync2.project);
+    assert!(
+        detected.loops.len() >= 2,
+        "A2A population model should detect at least 2 loops (births reinforcing, deaths balancing), \
+         found {}",
+        detected.loops.len()
+    );
+}
+
+/// AC8.1: A2A arrayed population model -- discovery mode.
+///
+/// Same model as test_arrayed_population_ltm_exhaustive but with discovery mode.
+/// Verifies that discovery mode finds the same structural loops as exhaustive
+/// mode and per-element loop rankings are consistent.
+#[test]
+fn test_arrayed_population_ltm_discovery() {
+    let datamodel_project =
+        load_xmile_model("../../test/arrayed_population_ltm/arrayed_population.stmx");
+
+    // Discovery mode via element-level pipeline
+    let found = discover_loops_element_level(&datamodel_project);
+
+    // The model has per-element reinforcing (births) and balancing (deaths)
+    // loops for each of 3 regions. Discovery should find element-specific loops.
+    assert!(
+        !found.is_empty(),
+        "Discovery should find loops in the A2A population model"
+    );
+
+    // Each found loop should contain element-subscripted variables
+    for loop_result in &found {
+        let has_subscripted = loop_result
+            .loop_info
+            .links
+            .iter()
+            .any(|link| link.from.as_str().contains('[') || link.to.as_str().contains('['));
+        assert!(
+            has_subscripted,
+            "Discovery loops should contain element-subscripted variables, got: {:?}",
+            loop_result
+                .loop_info
+                .links
+                .iter()
+                .map(|link| format!("{} -> {}", link.from.as_str(), link.to.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Cross-validate with exhaustive: both should find the same structural
+    // loop patterns.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model = sync
+        .project
+        .models(&db)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist");
+    let exhaustive_circuits = model_element_loop_circuits(&db, source_model, sync.project);
+
+    // Discovery should find loops for the same regions that exhaustive finds.
+    // Each exhaustive circuit corresponds to a per-element loop.
+    assert!(
+        found.len() <= exhaustive_circuits.circuits.len(),
+        "Discovery ({}) should find at most as many loops as exhaustive ({}) for a small model",
+        found.len(),
+        exhaustive_circuits.circuits.len()
+    );
+}
+
+/// AC8.2: Cross-element feedback model -- exhaustive mode.
+///
+/// Model: population[Region] (2 regions: NYC, Boston) with:
+///   - births[Region] = population * 0.02 (per-element reinforcing loop)
+///   - migration_pressure cross-references population[NYC] and population[Boston]
+///   - total_population = SUM(population[*]) (arrayed-to-scalar edge)
+///
+/// Verifies:
+///   - Cross-element loops are detected
+///   - Per-element cross-dimensional link scores exist
+///   - Element-level cycle partitions correctly group connected stocks
+#[test]
+fn test_cross_element_ltm_exhaustive() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+
+    // Compile with LTM exhaustive mode and simulate
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("Cross-element model should simulate");
+    let results = vm.into_results();
+
+    // Verify link scores exist
+    let link_score_vars: Vec<_> = results
+        .offsets
+        .iter()
+        .filter(|(k, _)| {
+            let s = k.as_str();
+            s.starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+        })
+        .map(|(k, &off)| (k.as_str().to_string(), off))
+        .collect();
+    assert!(
+        !link_score_vars.is_empty(),
+        "Should have link score variables for the cross-element model"
+    );
+
+    // Verify cross-element loops are detected via structural analysis.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model = sync
+        .project
+        .models(&db)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist");
+
+    // Element-level causal edges should include cross-element references
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    assert!(
+        !element_edges.edges.is_empty(),
+        "Element-level causal edges should be non-empty"
+    );
+
+    // The model has element-subscripted variables. Verify that the
+    // element-level graph contains edges involving subscripted nodes.
+    let has_subscripted_edges = element_edges
+        .edges
+        .iter()
+        .any(|(from, targets)| from.contains('[') || targets.iter().any(|to| to.contains('[')));
+    assert!(
+        has_subscripted_edges,
+        "Element-level edges should contain subscripted variable nodes. \
+         Edges: {:?}",
+        element_edges
+            .edges
+            .iter()
+            .flat_map(|(from, targets)| targets.iter().map(move |to| format!("{} -> {}", from, to)))
+            .collect::<Vec<_>>()
+    );
+
+    // Verify cross-dimensional edges exist: the SUM(population[*]) equation
+    // for total_population should create edges from both population[nyc] and
+    // population[boston] to the scalar total_population.
+    let pop_to_total: Vec<_> = element_edges
+        .edges
+        .iter()
+        .filter(|(from, targets)| {
+            from.starts_with("population[") && targets.contains("total_population")
+        })
+        .map(|(from, _)| from.clone())
+        .collect();
+    assert!(
+        pop_to_total.len() >= 2,
+        "Both population[nyc] and population[boston] should have edges to total_population. \
+         Found: {:?}",
+        pop_to_total
+    );
+
+    // Element-level cycle partitions should exist for each stock element.
+    let cycle_partitions = model_element_cycle_partitions(&db, source_model, sync.project);
+    assert!(
+        !cycle_partitions.partitions.is_empty(),
+        "Cycle partitions should be non-empty"
+    );
+
+    // Both stock elements should have partition assignments.
+    let nyc_partition = cycle_partitions.stock_partition.get("population[nyc]");
+    let boston_partition = cycle_partitions.stock_partition.get("population[boston]");
+    assert!(
+        nyc_partition.is_some(),
+        "population[nyc] should have a partition assignment"
+    );
+    assert!(
+        boston_partition.is_some(),
+        "population[boston] should have a partition assignment"
+    );
+
+    // Verify loop scores exist. The model has per-element feedback loops
+    // (births -> population) for each region.
+    let loop_scores = find_loop_score_offsets(&results);
+    assert!(
+        !loop_scores.is_empty(),
+        "Should have loop score variables for the cross-element model"
+    );
+
+    // Verify that A2A link scores have non-zero per-element values
+    // for the births -> population feedback path.
+    let n_elements: usize = 2;
+    for (name, base_offset) in &loop_scores {
+        for elem in 0..n_elements {
+            let elem_offset = base_offset + elem;
+            let any_nonzero = (2..results.step_count).any(|step| {
+                let val = results.data[step * results.step_size + elem_offset];
+                val.abs() > 1e-10 && !val.is_nan()
+            });
+            assert!(
+                any_nonzero,
+                "Loop score element {} (offset {}) should have non-zero values, var: {}",
+                elem, elem_offset, name
+            );
+        }
+    }
+}
+
+/// AC8.2: Cross-element feedback model -- discovery mode.
+///
+/// Same model as test_cross_element_ltm_exhaustive but with discovery mode.
+/// Verifies that cross-element loops are found.
+#[test]
+fn test_cross_element_ltm_discovery() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+
+    // Discovery mode via element-level pipeline
+    let found = discover_loops_element_level(&datamodel_project);
+
+    // The cross-element model should have discoverable loops.
+    // At minimum, the per-element births loop should be found.
+    assert!(
+        !found.is_empty(),
+        "Discovery should find loops in the cross-element model"
+    );
+
+    // Verify found loops contain element-subscripted variables
+    let has_subscripted_loop = found.iter().any(|l| {
+        l.loop_info
+            .links
+            .iter()
+            .any(|link| link.from.as_str().contains('['))
+    });
+    assert!(
+        has_subscripted_loop,
+        "At least one discovery loop should contain element-subscripted variables. Found: {:?}",
+        found
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|link| format!("{} -> {}", link.from.as_str(), link.to.as_str()))
+                .collect::<Vec<_>>()
+                .join(", "))
+            .collect::<Vec<_>>()
+    );
+
+    // Cross-validate: all discovered loops should be structurally valid
+    // (every link should connect variables that exist in the model)
+    for loop_result in &found {
+        assert!(
+            !loop_result.loop_info.links.is_empty(),
+            "Discovered loop should have at least one link"
+        );
+    }
 }

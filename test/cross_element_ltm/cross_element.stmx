@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>cross-element-ltm</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>50</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Region">
+            <elem name="NYC"/>
+            <elem name="Boston"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <stock name="population">
+                <element subscript="NYC">
+                    <eqn>1000</eqn>
+                </element>
+                <element subscript="Boston">
+                    <eqn>500</eqn>
+                </element>
+                <inflow>births</inflow>
+                <inflow>migration_in</inflow>
+                <outflow>migration_out</outflow>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </stock>
+            <flow name="births">
+                <eqn>population * 0.02</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </flow>
+            <aux name="migration_pressure">
+                <element subscript="NYC">
+                    <eqn>(population[NYC] - population[Boston]) * 0.01</eqn>
+                </element>
+                <element subscript="Boston">
+                    <eqn>(population[Boston] - population[NYC]) * 0.01</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <flow name="migration_out">
+                <eqn>MAX(migration_pressure, 0)</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </flow>
+            <flow name="migration_in">
+                <element subscript="NYC">
+                    <eqn>MAX(migration_pressure[Boston] * -1, 0)</eqn>
+                </element>
+                <element subscript="Boston">
+                    <eqn>MAX(migration_pressure[NYC] * -1, 0)</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </flow>
+            <aux name="total_population">
+                <eqn>SUM(population[*])</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view page_width="800" page_height="600" view_type="stock_flow">
+                <stock name="population" x="400" y="200" label_side="top"/>
+                <flow name="births" x="300" y="200" label_side="top">
+                    <pts>
+                        <pt x="220" y="200"/>
+                        <pt x="377.5" y="200"/>
+                    </pts>
+                </flow>
+                <flow name="migration_out" x="500" y="200" label_side="top">
+                    <pts>
+                        <pt x="422.5" y="200"/>
+                        <pt x="580" y="200"/>
+                    </pts>
+                </flow>
+                <flow name="migration_in" x="300" y="250" label_side="bottom">
+                    <pts>
+                        <pt x="220" y="250"/>
+                        <pt x="377.5" y="250"/>
+                    </pts>
+                </flow>
+                <aux name="migration_pressure" x="500" y="300" label_side="right"/>
+                <aux name="total_population" x="400" y="100" label_side="top"/>
+                <connector angle="90">
+                    <from>population</from>
+                    <to>births</to>
+                </connector>
+                <connector angle="-90">
+                    <from>population</from>
+                    <to>migration_pressure</to>
+                </connector>
+                <connector angle="90">
+                    <from>migration_pressure</from>
+                    <to>migration_out</to>
+                </connector>
+                <connector angle="90">
+                    <from>migration_pressure</from>
+                    <to>migration_in</to>
+                </connector>
+                <connector angle="90">
+                    <from>population</from>
+                    <to>total_population</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>
