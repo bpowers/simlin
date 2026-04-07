@@ -6,6 +6,7 @@
 //!
 //! Extracted from db.rs for file-size management. Contains:
 //! - CausalEdgesResult, LoopCircuitsResult, CyclePartitionsResult
+//! - ElementCausalEdgesResult, ElementDependencyKind (element-level graph)
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
 //! - model_causal_edges, model_loop_circuits, model_cycle_partitions
 //! - model_detected_loops (matches LTM augmentation loop IDs)
@@ -32,6 +33,37 @@ pub struct CausalEdgesResult {
     pub stocks: BTreeSet<String>,
     /// Module var_name -> model_name for dynamic modules
     pub dynamic_modules: HashMap<String, String>,
+}
+
+/// Element-level causal edge structure for a model.
+///
+/// Expands variable-level edges from `CausalEdgesResult` into element-level
+/// edges where each array element is an independent node. Scalar variables
+/// keep their plain names; arrayed variables use subscript notation
+/// (e.g., `population[NYC]`). Models without arrays produce an element
+/// graph identical to the variable graph.
+#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ElementCausalEdgesResult {
+    /// Adjacency list: from_element -> {to_element1, to_element2, ...}
+    pub edges: HashMap<String, BTreeSet<String>>,
+    /// Element-level stock nodes (e.g., `population[NYC]`, `population[Boston]`)
+    pub stocks: BTreeSet<String>,
+}
+
+/// Format an element-level node name with subscript notation.
+/// For scalar variables, the caller should use the name directly;
+/// this function always appends the subscript.
+#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
+fn format_element_name(var_name: &str, element: &str) -> String {
+    format!("{var_name}[{element}]")
+}
+
+/// Format an element-level node name for multi-dimensional arrays.
+/// Returns `name[e1,e2,...]` (e.g., `migration[NYC,Boston]`).
+#[allow(dead_code)] // infrastructure for upcoming element-level graph expansion
+fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
+    format!("{}[{}]", var_name, elements.join(","))
 }
 
 /// Deduplicated loop circuits as node name lists.
