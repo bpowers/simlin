@@ -1748,8 +1748,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     const canvasOffset = this.getCanvasOffset();
     const { selectedTool } = this.props;
-    if (selectedTool === 'aux' || selectedTool === 'stock') {
-      let inCreation: AuxViewElement | StockViewElement;
+    if (selectedTool === 'aux' || selectedTool === 'stock' || selectedTool === 'module') {
+      let inCreation: AuxViewElement | StockViewElement | ModuleViewElement;
       if (selectedTool === 'aux') {
         const name = this.getNewVariableName('New Variable');
         inCreation = {
@@ -1763,7 +1763,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           labelSide: 'right',
           isZeroRadius: false,
         };
-      } else {
+      } else if (selectedTool === 'stock') {
         const name = this.getNewVariableName('New Stock');
         inCreation = {
           type: 'stock',
@@ -1777,6 +1777,19 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           isZeroRadius: false,
           inflows: [],
           outflows: [],
+        };
+      } else {
+        const name = this.getNewVariableName('New Module');
+        inCreation = {
+          type: 'module',
+          uid: inCreationUid,
+          var: undefined,
+          x: client.x - canvasOffset.x,
+          y: client.y - canvasOffset.y,
+          name,
+          ident: canonicalize(name),
+          labelSide: 'bottom',
+          isZeroRadius: false,
         };
       }
 

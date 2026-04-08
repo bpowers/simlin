@@ -1139,6 +1139,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           },
         },
       };
+    } else if (elementType === 'module') {
+      op = {
+        type: 'upsertModule',
+        payload: {
+          module: {
+            name,
+            modelName: '',
+            references: [],
+          },
+        },
+      };
     } else {
       op = {
         type: 'upsertAux',
