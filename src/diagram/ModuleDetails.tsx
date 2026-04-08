@@ -106,7 +106,9 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
   renderModelRefSelector(): React.ReactNode {
     const { variable, project, currentModelName } = this.props;
     const { projectModels, stdlibModels } = getAvailableModels(project, currentModelName);
-    const hasModelRef = variable.modelName !== '';
+    // Only show duplicate action when the model actually exists in the project
+    // (stdlib models are internal to the engine and not in project.models)
+    const hasModelRef = variable.modelName !== '' && project.models.has(variable.modelName);
 
     return (
       <div className={styles.modelRefSection}>

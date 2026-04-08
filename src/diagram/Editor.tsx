@@ -1609,6 +1609,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!view) {
       return;
     }
+    // Don't drill into models that aren't materialized in the project
+    // (e.g. stdlib models that are internal to the engine).
+    const project = this.project();
+    if (!project || !project.models.has(targetModelName)) {
+      return;
+    }
     const newStack = pushModule(
       this.state.modelStack,
       targetModelName,
@@ -2183,11 +2189,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
     }
 
-    // Copy the primary view
+    // Copy the primary view, or seed an empty one so getCanvas() works
     if (sourceModel.views.length > 0) {
       variableOps.push({
         type: 'upsertView',
         payload: { index: 0, view: stockFlowViewToJson(sourceModel.views[0]) },
+      });
+    } else {
+      variableOps.push({
+        type: 'upsertView',
+        payload: { index: 0, view: { elements: [] } },
       });
     }
 
