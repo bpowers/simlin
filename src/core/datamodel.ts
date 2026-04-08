@@ -284,6 +284,8 @@ export interface Stock {
   readonly inflows: readonly string[];
   readonly outflows: readonly string[];
   readonly nonNegative: boolean;
+  readonly canBeModuleInput: boolean;
+  readonly isPublic: boolean;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -298,6 +300,8 @@ export interface Flow {
   readonly units: string;
   readonly gf: GraphicalFunction | undefined;
   readonly nonNegative: boolean;
+  readonly canBeModuleInput: boolean;
+  readonly isPublic: boolean;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -311,6 +315,8 @@ export interface Aux {
   readonly documentation: string;
   readonly units: string;
   readonly gf: GraphicalFunction | undefined;
+  readonly canBeModuleInput: boolean;
+  readonly isPublic: boolean;
   readonly data: Readonly<Array<Series>> | undefined;
   readonly errors: readonly EquationError[] | undefined;
   readonly unitErrors: readonly UnitError[] | undefined;
@@ -376,6 +382,8 @@ export function stockFromJson(json: JsonStock): Stock {
     // OR-merge: old code never writes compat booleans and new code never
     // writes top-level booleans, so both cannot be meaningfully set at once.
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
+    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
+    isPublic: json.compat?.isPublic ?? false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -408,6 +416,18 @@ export function stockToJson(stock: Stock): JsonStock {
     }
     result.compat.nonNegative = stock.nonNegative;
   }
+  if (stock.canBeModuleInput) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.canBeModuleInput = true;
+  }
+  if (stock.isPublic) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.isPublic = true;
+  }
   if (stock.documentation) {
     result.documentation = stock.documentation;
   }
@@ -426,6 +446,8 @@ export function flowFromJson(json: JsonFlow): Flow {
     // OR-merge: old code never writes compat booleans and new code never
     // writes top-level booleans, so both cannot be meaningfully set at once.
     nonNegative: json.compat?.nonNegative || json.nonNegative || false,
+    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
+    isPublic: json.compat?.isPublic ?? false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -459,6 +481,18 @@ export function flowToJson(flow: Flow): JsonFlow {
     }
     result.compat.nonNegative = flow.nonNegative;
   }
+  if (flow.canBeModuleInput) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.canBeModuleInput = true;
+  }
+  if (flow.isPublic) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.isPublic = true;
+  }
   if (flow.documentation) {
     result.documentation = flow.documentation;
   }
@@ -474,6 +508,8 @@ export function auxFromJson(json: JsonAuxiliary): Aux {
     documentation: json.documentation ?? '',
     units: json.units ?? '',
     gf: graphicalFunction,
+    canBeModuleInput: json.compat?.canBeModuleInput ?? false,
+    isPublic: json.compat?.isPublic ?? false,
     data: undefined,
     errors: undefined,
     unitErrors: undefined,
@@ -500,6 +536,18 @@ export function auxToJson(aux: Aux): JsonAuxiliary {
   }
   if (aux.units) {
     result.units = aux.units;
+  }
+  if (aux.canBeModuleInput) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.canBeModuleInput = true;
+  }
+  if (aux.isPublic) {
+    if (!result.compat) {
+      result.compat = {};
+    }
+    result.compat.isPublic = true;
   }
   if (aux.documentation) {
     result.documentation = aux.documentation;

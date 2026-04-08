@@ -126,6 +126,8 @@ describe('Stock', () => {
       inflows: ['births'],
       outflows: ['deaths'],
       nonNegative: true,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -185,6 +187,8 @@ describe('Flow', () => {
       units: 'people/year',
       gf: undefined,
       nonNegative: true,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -220,6 +224,8 @@ describe('Aux', () => {
       documentation: 'Annual birth rate',
       units: '1/year',
       gf: undefined,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -250,6 +256,8 @@ describe('Aux', () => {
       documentation: '',
       units: '',
       gf,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -672,6 +680,219 @@ describe('StockFlowView', () => {
   });
 });
 
+describe('canBeModuleInput and isPublic', () => {
+  it('should default canBeModuleInput and isPublic to false for Stock', () => {
+    const json = { name: 'pop', inflows: [], outflows: [] };
+    const stock = stockFromJson(json);
+    expect(stock.canBeModuleInput).toBe(false);
+    expect(stock.isPublic).toBe(false);
+  });
+
+  it('should read canBeModuleInput and isPublic from compat for Stock', () => {
+    const json = {
+      name: 'pop',
+      inflows: [],
+      outflows: [],
+      compat: { canBeModuleInput: true, isPublic: true },
+    };
+    const stock = stockFromJson(json);
+    expect(stock.canBeModuleInput).toBe(true);
+    expect(stock.isPublic).toBe(true);
+  });
+
+  it('should write canBeModuleInput and isPublic to compat for Stock', () => {
+    const stock: Stock = {
+      type: 'stock',
+      ident: 'pop',
+      equation: { type: 'scalar', equation: '100' },
+      documentation: '',
+      units: '',
+      inflows: [],
+      outflows: [],
+      nonNegative: false,
+      canBeModuleInput: true,
+      isPublic: true,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 1,
+    };
+    const json = stockToJson(stock);
+    expect(json.compat?.canBeModuleInput).toBe(true);
+    expect(json.compat?.isPublic).toBe(true);
+  });
+
+  it('should not write false canBeModuleInput/isPublic to compat for Stock', () => {
+    const stock: Stock = {
+      type: 'stock',
+      ident: 'pop',
+      equation: { type: 'scalar', equation: '100' },
+      documentation: '',
+      units: '',
+      inflows: [],
+      outflows: [],
+      nonNegative: false,
+      canBeModuleInput: false,
+      isPublic: false,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 1,
+    };
+    const json = stockToJson(stock);
+    expect(json.compat).toBeUndefined();
+  });
+
+  it('should preserve nonNegative alongside canBeModuleInput in compat roundtrip for Stock', () => {
+    const stock: Stock = {
+      type: 'stock',
+      ident: 'pop',
+      equation: { type: 'scalar', equation: '100' },
+      documentation: '',
+      units: '',
+      inflows: [],
+      outflows: [],
+      nonNegative: true,
+      canBeModuleInput: true,
+      isPublic: false,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 1,
+    };
+    const json = stockToJson(stock);
+    expect(json.compat?.nonNegative).toBe(true);
+    expect(json.compat?.canBeModuleInput).toBe(true);
+    expect(json.compat?.isPublic).toBeUndefined();
+
+    const restored = stockFromJson(json);
+    expect(restored.nonNegative).toBe(true);
+    expect(restored.canBeModuleInput).toBe(true);
+    expect(restored.isPublic).toBe(false);
+  });
+
+  it('should default canBeModuleInput and isPublic to false for Flow', () => {
+    const json = { name: 'rate' };
+    const flow = flowFromJson(json);
+    expect(flow.canBeModuleInput).toBe(false);
+    expect(flow.isPublic).toBe(false);
+  });
+
+  it('should read canBeModuleInput and isPublic from compat for Flow', () => {
+    const json = {
+      name: 'rate',
+      compat: { canBeModuleInput: true, isPublic: true },
+    };
+    const flow = flowFromJson(json);
+    expect(flow.canBeModuleInput).toBe(true);
+    expect(flow.isPublic).toBe(true);
+  });
+
+  it('should write canBeModuleInput and isPublic to compat for Flow', () => {
+    const flow: Flow = {
+      type: 'flow',
+      ident: 'rate',
+      equation: { type: 'scalar', equation: '10' },
+      documentation: '',
+      units: '',
+      gf: undefined,
+      nonNegative: false,
+      canBeModuleInput: true,
+      isPublic: true,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 2,
+    };
+    const json = flowToJson(flow);
+    expect(json.compat?.canBeModuleInput).toBe(true);
+    expect(json.compat?.isPublic).toBe(true);
+  });
+
+  it('should preserve nonNegative alongside isPublic in compat roundtrip for Flow', () => {
+    const flow: Flow = {
+      type: 'flow',
+      ident: 'rate',
+      equation: { type: 'scalar', equation: '10' },
+      documentation: '',
+      units: '',
+      gf: undefined,
+      nonNegative: true,
+      canBeModuleInput: false,
+      isPublic: true,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 2,
+    };
+    const json = flowToJson(flow);
+    expect(json.compat?.nonNegative).toBe(true);
+    expect(json.compat?.isPublic).toBe(true);
+    expect(json.compat?.canBeModuleInput).toBeUndefined();
+
+    const restored = flowFromJson(json);
+    expect(restored.nonNegative).toBe(true);
+    expect(restored.isPublic).toBe(true);
+    expect(restored.canBeModuleInput).toBe(false);
+  });
+
+  it('should default canBeModuleInput and isPublic to false for Aux', () => {
+    const json = { name: 'param' };
+    const aux = auxFromJson(json);
+    expect(aux.canBeModuleInput).toBe(false);
+    expect(aux.isPublic).toBe(false);
+  });
+
+  it('should read canBeModuleInput and isPublic from compat for Aux', () => {
+    const json = {
+      name: 'param',
+      compat: { canBeModuleInput: true, isPublic: true },
+    };
+    const aux = auxFromJson(json);
+    expect(aux.canBeModuleInput).toBe(true);
+    expect(aux.isPublic).toBe(true);
+  });
+
+  it('should write canBeModuleInput and isPublic to compat for Aux', () => {
+    const aux: Aux = {
+      type: 'aux',
+      ident: 'param',
+      equation: { type: 'scalar', equation: '5' },
+      documentation: '',
+      units: '',
+      gf: undefined,
+      canBeModuleInput: true,
+      isPublic: true,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 3,
+    };
+    const json = auxToJson(aux);
+    expect(json.compat?.canBeModuleInput).toBe(true);
+    expect(json.compat?.isPublic).toBe(true);
+  });
+
+  it('should not write false canBeModuleInput/isPublic to compat for Aux', () => {
+    const aux: Aux = {
+      type: 'aux',
+      ident: 'param',
+      equation: { type: 'scalar', equation: '5' },
+      documentation: '',
+      units: '',
+      gf: undefined,
+      canBeModuleInput: false,
+      isPublic: false,
+      data: undefined,
+      errors: undefined,
+      unitErrors: undefined,
+      uid: 3,
+    };
+    const json = auxToJson(aux);
+    expect(json.compat).toBeUndefined();
+  });
+});
+
 describe('Arrayed Equations', () => {
   it('should roundtrip Stock with ApplyToAllEquation', () => {
     const stock: Stock = {
@@ -687,6 +908,8 @@ describe('Arrayed Equations', () => {
       inflows: [],
       outflows: [],
       nonNegative: false,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -721,6 +944,8 @@ describe('Arrayed Equations', () => {
       documentation: 'Demand by region',
       units: '',
       gf: undefined,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -798,6 +1023,8 @@ describe('Model', () => {
       inflows: ['births'],
       outflows: ['deaths'],
       nonNegative: false,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -812,6 +1039,8 @@ describe('Model', () => {
       units: 'people/year',
       gf: undefined,
       nonNegative: false,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -853,6 +1082,8 @@ describe('Project', () => {
       inflows: ['births'],
       outflows: [],
       nonNegative: true,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -867,6 +1098,8 @@ describe('Project', () => {
       units: 'people/year',
       gf: undefined,
       nonNegative: true,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
@@ -880,6 +1113,8 @@ describe('Project', () => {
       documentation: '',
       units: '1/year',
       gf: undefined,
+      canBeModuleInput: false,
+      isPublic: false,
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
