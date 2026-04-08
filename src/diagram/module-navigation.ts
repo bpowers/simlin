@@ -33,7 +33,7 @@ export interface BreadcrumbSegment {
   readonly level: number;
 }
 
-const STDLIB_MODEL_NAMES: ReadonlySet<string> = new Set([
+export const STDLIB_MODEL_NAMES: ReadonlySet<string> = new Set([
   'delay1',
   'delay3',
   'npv',
