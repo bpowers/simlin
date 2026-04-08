@@ -10,12 +10,17 @@ import { createEditor, Descendant } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, Slate, withReact } from 'slate-react';
 
+import Autocomplete from './components/Autocomplete';
 import Button from './components/Button';
-import { getAvailableModels, getPublicVariables } from './module-details-utils';
+import IconButton from './components/IconButton';
+import TextField from './components/TextField';
+import { AddIcon, RemoveIcon } from './components/icons';
+import { getAvailableModels, getInputPorts, getPublicVariables } from './module-details-utils';
+import { addReference, getAvailableSrcVariables, removeReference, updateReferenceDst, updateReferenceSrc } from './module-wiring';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import type { CustomEditor } from './drawing/SlateEditor';
 
-import type { Module, Project, Variable, ViewElement } from '@simlin/core/datamodel';
+import type { Module, ModuleReference, Project, Variable, ViewElement } from '@simlin/core/datamodel';
 
 import styles from './ModuleDetails.module.css';
 
@@ -30,6 +35,7 @@ interface ModuleDetailsProps {
   onDrillIntoModule: (moduleIdent: string, targetModelName: string) => void;
   onCreateModel: (moduleName: string) => void;
   onDuplicateModel: (moduleIdent: string, sourceModelName: string) => void;
+  onReferencesChange: (ident: string, newReferences: ReadonlyArray<ModuleReference>) => void;
 }
 
 interface ModuleDetailsState {
@@ -142,12 +148,45 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
     );
   }
 
-  renderInputWiring(): React.ReactNode {
+  handleAddReference = (): void => {
     const { variable } = this.props;
+    const updated = addReference(variable.references, '', '');
+    this.props.onReferencesChange(variable.ident, updated);
+  };
+
+  handleRemoveReference = (index: number): void => {
+    const { variable } = this.props;
+    const updated = removeReference(variable.references, index);
+    this.props.onReferencesChange(variable.ident, updated);
+  };
+
+  handleSrcChange = (index: number, newSrc: string): void => {
+    const { variable } = this.props;
+    const updated = updateReferenceSrc(variable.references, index, newSrc);
+    this.props.onReferencesChange(variable.ident, updated);
+  };
+
+  handleDstChange = (index: number, newDst: string): void => {
+    const { variable } = this.props;
+    const updated = updateReferenceDst(variable.references, index, newDst);
+    this.props.onReferencesChange(variable.ident, updated);
+  };
+
+  renderInputWiring(): React.ReactNode {
+    const { variable, project, currentModelName } = this.props;
 
     if (!variable.modelName) {
       return null;
     }
+
+    const parentModel = project.models.get(currentModelName);
+    const childModel = project.models.get(variable.modelName);
+
+    const availableSrcVars: ReadonlyArray<string> = parentModel
+      ? getAvailableSrcVariables(parentModel.variables)
+      : [];
+    const inputPorts: ReadonlyArray<Variable> = childModel ? getInputPorts(childModel) : [];
+    const dstOptions: Array<string> = inputPorts.map((v) => v.ident).sort();
 
     return (
       <div className={styles.section}>
@@ -160,18 +199,72 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
               <tr>
                 <th>Source (parent)</th>
                 <th>Destination (module)</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {variable.references.map((ref, i) => (
-                <tr key={i}>
-                  <td>{ref.src}</td>
-                  <td>{ref.dst}</td>
+                <tr key={i} className={styles.wiringRow}>
+                  <td className={styles.wiringDropdown}>
+                    <Autocomplete
+                      value={ref.src || null}
+                      options={[...availableSrcVars]}
+                      onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
+                        if (newValue) {
+                          this.handleSrcChange(i, newValue);
+                        }
+                      }}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          variant="standard"
+                          placeholder="Select variable"
+                        />
+                      )}
+                    />
+                  </td>
+                  <td className={styles.wiringDropdown}>
+                    <Autocomplete
+                      value={ref.dst || null}
+                      options={dstOptions}
+                      onChange={(_: React.SyntheticEvent | null, newValue: string | null) => {
+                        if (newValue) {
+                          this.handleDstChange(i, newValue);
+                        }
+                      }}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          variant="standard"
+                          placeholder="Select input"
+                        />
+                      )}
+                    />
+                  </td>
+                  <td>
+                    <IconButton
+                      size="small"
+                      aria-label="Remove reference"
+                      onClick={() => this.handleRemoveReference(i)}
+                    >
+                      <RemoveIcon />
+                    </IconButton>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
+        <div className={styles.addInputButton}>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={this.handleAddReference}
+            data-testid="add-input-button"
+          >
+            <AddIcon /> Add Input
+          </Button>
+        </div>
       </div>
     );
   }

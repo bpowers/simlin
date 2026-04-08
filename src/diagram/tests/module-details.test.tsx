@@ -120,6 +120,7 @@ function defaultCallbacks() {
     onDrillIntoModule: jest.fn(),
     onCreateModel: jest.fn(),
     onDuplicateModel: jest.fn(),
+    onReferencesChange: jest.fn(),
   };
 }
 
@@ -470,10 +471,11 @@ describe('ModuleDetails', () => {
         />,
       );
 
-      expect(screen.getByText('food')).not.toBeNull();
-      expect(screen.getByText('input_food')).not.toBeNull();
-      expect(screen.getByText('water')).not.toBeNull();
-      expect(screen.getByText('input_water')).not.toBeNull();
+      // Reference values are displayed inside Autocomplete input fields
+      expect(screen.getByDisplayValue('food')).not.toBeNull();
+      expect(screen.getByDisplayValue('input_food')).not.toBeNull();
+      expect(screen.getByDisplayValue('water')).not.toBeNull();
+      expect(screen.getByDisplayValue('input_water')).not.toBeNull();
     });
 
     // AC2.9: Module with zero input ports shows empty state
@@ -913,9 +915,9 @@ describe('ModuleDetails', () => {
         />,
       );
 
-      // Wiring should show the reference from parent model (model_a)
-      expect(screen.getByText('local_var')).not.toBeNull();
-      expect(screen.getByText('deep_input')).not.toBeNull();
+      // Wiring values are displayed inside Autocomplete input fields
+      expect(screen.getByDisplayValue('local_var')).not.toBeNull();
+      expect(screen.getByDisplayValue('deep_input')).not.toBeNull();
     });
   });
 

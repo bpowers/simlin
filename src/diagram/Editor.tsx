@@ -51,6 +51,7 @@ import {
   flowToJson,
   auxToJson,
   moduleToJson,
+  type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, mapSet, Series, setsEqual, toInt, uint8ArraysEqual } from '@simlin/core/common';
 import { first, getOrThrow, last, only } from '@simlin/core/collections';
@@ -2046,6 +2047,47 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.scheduleSimRun();
   };
 
+  // Updates the input references array for a module variable via upsertModule.
+  // The engine does full variable replacement (not merge), so we send the
+  // complete module with the new references array.
+  handleModuleReferencesChange = async (ident: string, newReferences: ReadonlyArray<ModuleReference>) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const model = this.getModel();
+    if (!model) return;
+    const variable = model.variables.get(ident);
+    if (!variable || variable.type !== 'module') return;
+
+    const op: JsonModelOperation = {
+      type: 'upsertModule',
+      payload: {
+        module: {
+          name: variable.ident,
+          modelName: variable.modelName,
+          references: newReferences.map((r) => ({ src: r.src, dst: r.dst })),
+          units: variable.units || undefined,
+          documentation: variable.documentation || undefined,
+        },
+      },
+    };
+
+    const patch: JsonProjectPatch = {
+      models: [{ name: this.state.modelName, ops: [op] }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (references update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during references update');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
   // Creates a new empty model and sets it as the module's reference.
   // The engine processes projectOps before model ops (see patch.rs),
   // so AddModel creates the model before upsertModule references it.
@@ -2240,6 +2282,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
             onDrillIntoModule={this.handleDrillIntoModule}
             onCreateModel={this.handleCreateModelForModule}
             onDuplicateModel={this.handleDuplicateModelForModule}
+            onReferencesChange={this.handleModuleReferencesChange}
           />
         </div>
       );
