@@ -143,9 +143,20 @@ export function breadcrumbSegments(stack: ReadonlyArray<ModuleStackEntry>): Read
   return segments;
 }
 
+// Unicode TWO DOT PUNCTUATION used as a separator in stdlib model names
+const STDLIB_PREFIX = 'stdlib\u{205A}';
+
 /**
  * Returns true if the model name is one of the 9 stdlib models.
+ * Handles both bare names (e.g. 'delay1') and engine-prefixed
+ * names (e.g. 'stdlib⁚delay1').
  */
 export function isStdlibModel(modelName: string): boolean {
-  return STDLIB_MODEL_NAMES.has(modelName);
+  if (STDLIB_MODEL_NAMES.has(modelName)) {
+    return true;
+  }
+  if (modelName.startsWith(STDLIB_PREFIX)) {
+    return STDLIB_MODEL_NAMES.has(modelName.slice(STDLIB_PREFIX.length));
+  }
+  return false;
 }

@@ -952,7 +952,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
         if (this.state.editNameOnPointerUp) {
           let inCreation = this.state.inCreation;
-          if (inCreation !== undefined && (inCreation.type === 'stock' || inCreation.type === 'aux')) {
+          if (inCreation !== undefined && (inCreation.type === 'stock' || inCreation.type === 'aux' || inCreation.type === 'module')) {
             inCreation = {
               ...inCreation,
               x: inCreation.x - delta.x,

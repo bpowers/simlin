@@ -272,6 +272,17 @@ describe('isStdlibModel', () => {
   it('returns false for empty string', () => {
     expect(isStdlibModel('')).toBe(false);
   });
+
+  // Engine uses 'stdlib⁚' prefix (Unicode TWO DOT PUNCTUATION) for stdlib model names
+  for (const name of stdlibModels) {
+    it(`returns true for prefixed stdlib model "stdlib\u{205A}${name}"`, () => {
+      expect(isStdlibModel(`stdlib\u{205A}${name}`)).toBe(true);
+    });
+  }
+
+  it('returns false for stdlib prefix with non-stdlib name', () => {
+    expect(isStdlibModel('stdlib\u{205A}hares')).toBe(false);
+  });
 });
 
 describe('selection/viewport restoration (AC3.5)', () => {

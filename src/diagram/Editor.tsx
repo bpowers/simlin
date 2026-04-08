@@ -360,11 +360,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       );
       const project = defined(this.project());
       // Simulation data comes from mainModel(), so variable idents are
-      // root-model-scoped. Only attach data when viewing the root model;
-      // otherwise child model variables would show wrong or empty series.
-      const isRootModel = this.state.modelStack.length === 0;
+      // root-model-scoped. Always attach data to 'main' so root sparklines
+      // stay populated even when a sim runs while viewing a child model.
       this.setState({
-        activeProject: isRootModel ? projectAttachData(project, data, this.state.modelName) : project,
+        activeProject: projectAttachData(project, data, 'main'),
         data,
       });
     } catch (e) {
@@ -391,8 +390,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
     const json = JSON.parse(await engine.serializeJson()) as JsonProject;
     let activeProject = await this.updateVariableErrors(projectFromJson(json));
-    if (this.state.data && this.state.modelStack.length === 0) {
-      activeProject = projectAttachData(activeProject, this.state.data, this.state.modelName);
+    if (this.state.data) {
+      activeProject = projectAttachData(activeProject, this.state.data, 'main');
     }
 
     const priorHistory = this.state.projectHistory.slice();
