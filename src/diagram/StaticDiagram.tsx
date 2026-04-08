@@ -105,6 +105,7 @@ export class StaticDiagram extends React.PureComponent<DiagramProps, DiagramStat
         onDeleteSelection={nullCb}
         onShowVariableDetails={nullCb}
         onViewBoxChange={nullCb}
+        onDrillIntoModule={nullCb}
       />
     );
 

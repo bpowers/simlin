@@ -5,11 +5,10 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import IconButton from './components/IconButton';
 import TextField from './components/TextField';
 import Autocomplete, { type AutocompleteRenderInputParams } from './components/Autocomplete';
 import Snackbar from './components/Snackbar';
-import { ClearIcon, EditIcon, MenuIcon } from './components/icons';
+import { ClearIcon, EditIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
 import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
@@ -48,6 +47,11 @@ import {
   projectFromJson,
   projectAttachData,
   isNamedViewElement,
+  stockToJson,
+  flowToJson,
+  auxToJson,
+  moduleToJson,
+  type ModuleReference,
 } from '@simlin/core/datamodel';
 import { defined, exists, mapSet, Series, setsEqual, toInt, uint8ArraysEqual } from '@simlin/core/common';
 import { first, getOrThrow, last, only } from '@simlin/core/collections';
@@ -56,12 +60,14 @@ import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
 import { FlowIcon } from './FlowIcon';
 import { LinkIcon } from './LinkIcon';
+import { ModuleIcon } from './ModuleIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
 import { renderSvgToString } from './render-common';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
 import { UndoRedoBar } from './UndoRedoBar';
 import { VariableDetails } from './VariableDetails';
+import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
@@ -69,6 +75,9 @@ import { Point, searchableName } from './drawing/common';
 import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
+import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel, isStdlibModel } from './module-navigation';
+import { countModelInstances } from './module-details-utils';
+import { BreadcrumbBar } from './BreadcrumbBar';
 
 import styles from './Editor.module.css';
 
@@ -173,9 +182,10 @@ interface EditorState {
   projectHistory: readonly Readonly<Uint8Array>[];
   projectOffset: number;
   modelName: string;
+  modelStack: ReadonlyArray<ModuleStackEntry>;
   dialOpen: boolean;
   dialVisible: boolean;
-  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   data: ReadonlyMap<string, Series>;
   selection: ReadonlySet<UID>;
   status: 'ok' | 'error' | 'disabled';
@@ -244,6 +254,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       projectOffset: 0,
       modelErrors: [],
       modelName: 'main',
+      modelStack: [],
       dialOpen: false,
       dialVisible: true,
       selectedTool: undefined,
@@ -348,8 +359,11 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         }),
       );
       const project = defined(this.project());
+      // Simulation data comes from mainModel(), so variable idents are
+      // root-model-scoped. Always attach data to 'main' so root sparklines
+      // stay populated even when a sim runs while viewing a child model.
       this.setState({
-        activeProject: projectAttachData(project, data, this.state.modelName),
+        activeProject: projectAttachData(project, data, 'main'),
         data,
       });
     } catch (e) {
@@ -377,7 +391,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const json = JSON.parse(await engine.serializeJson()) as JsonProject;
     let activeProject = await this.updateVariableErrors(projectFromJson(json));
     if (this.state.data) {
-      activeProject = projectAttachData(activeProject, this.state.data, this.state.modelName);
+      activeProject = projectAttachData(activeProject, this.state.data, 'main');
     }
 
     const priorHistory = this.state.projectHistory.slice();
@@ -1135,6 +1149,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           },
         },
       };
+    } else if (elementType === 'module') {
+      op = {
+        type: 'upsertModule',
+        payload: {
+          module: {
+            name,
+            modelName: '',
+            references: [],
+          },
+        },
+      };
     } else {
       op = {
         type: 'upsertAux',
@@ -1147,6 +1172,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
     }
 
+    // AC5.2: patch targets this.state.modelName (not a hardcoded value), so
+    // module creation works at any nesting depth -- navigating into a child
+    // model updates modelName, and newly created modules land in that child.
     const patch: JsonProjectPatch = {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
@@ -1435,19 +1463,25 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    const onRenameVariable = !embedded ? this.handleRename : (_oldName: string, _newName: string): void => {};
+    // Stdlib models are read-only: disable all mutation handlers while
+    // keeping selection, viewbox, and drill-in navigation active.
+    const readOnly = embedded || isStdlibModel(this.state.modelName);
+    const onRenameVariable = !readOnly ? this.handleRename : (_oldName: string, _newName: string): void => {};
     const onSetSelection = !embedded ? this.handleSelection : (_selected: ReadonlySet<UID>): void => {};
-    const onMoveSelection = !embedded ? this.handleSelectionMove : (_position: Point): void => {};
-    const onMoveFlow = !embedded ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
-    const onMoveLabel = !embedded
+    const onMoveSelection = !readOnly ? this.handleSelectionMove : (_position: Point): void => {};
+    const onMoveFlow = !readOnly ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
+    const onMoveLabel = !readOnly
       ? this.handleMoveLabel
       : (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
-    const onAttachLink = !embedded ? this.handleLinkAttach : (_element: ViewElement, _to: string): void => {};
-    const onCreateVariable = !embedded ? this.handleCreateVariable : (_element: ViewElement): void => {};
-    const onClearSelectedTool = !embedded ? this.handleClearSelectedTool : () => {};
-    const onDeleteSelection = !embedded ? this.handleSelectionDelete : () => {};
-    const onShowVariableDetails = !embedded ? this.handleShowVariableDetails : () => {};
+    const onAttachLink = !readOnly ? this.handleLinkAttach : (_element: ViewElement, _to: string): void => {};
+    const onCreateVariable = !readOnly ? this.handleCreateVariable : (_element: ViewElement): void => {};
+    const onClearSelectedTool = !readOnly ? this.handleClearSelectedTool : () => {};
+    const onDeleteSelection = !readOnly ? this.handleSelectionDelete : () => {};
+    const onShowVariableDetails = !readOnly ? this.handleShowVariableDetails : () => {};
     const onViewBoxChange = !embedded ? this.handleViewBoxChange : () => {};
+    const onDrillIntoModule = !embedded
+      ? this.handleDrillIntoModule
+      : (_moduleIdent: string, _targetModelName: string): void => {};
 
     return (
       <Canvas
@@ -1456,7 +1490,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         model={model}
         view={view}
         version={this.state.projectVersion}
-        selectedTool={this.state.selectedTool}
+        selectedTool={readOnly ? undefined : this.state.selectedTool}
         selection={this.state.selection}
         onRenameVariable={onRenameVariable}
         onSetSelection={onSetSelection}
@@ -1469,6 +1503,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         onDeleteSelection={onDeleteSelection}
         onShowVariableDetails={onShowVariableDetails}
         onViewBoxChange={onViewBoxChange}
+        onDrillIntoModule={onDrillIntoModule}
       />
     );
   }
@@ -1569,6 +1604,87 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
+  handleDrillIntoModule = (moduleIdent: string, targetModelName: string): void => {
+    const view = this.getView();
+    if (!view) {
+      return;
+    }
+    // Don't drill into models that aren't materialized in the project
+    // (e.g. stdlib models that are internal to the engine).
+    const project = this.project();
+    if (!project || !project.models.has(targetModelName)) {
+      return;
+    }
+    const newStack = pushModule(
+      this.state.modelStack,
+      targetModelName,
+      moduleIdent,
+      this.state.selection,
+      view.viewBox,
+      view.zoom,
+    );
+    const newModelName = currentModelName(newStack);
+    this.setState({
+      modelStack: newStack,
+      modelName: newModelName,
+      selection: new Set<UID>(),
+      showDetails: undefined,
+      // Clear selected tool when entering a stdlib model (tool palette is hidden)
+      selectedTool: isStdlibModel(newModelName) ? undefined : this.state.selectedTool,
+    });
+    // Refresh errors for the newly active model so warning dots and the
+    // error panel reflect the child model's state immediately.
+    setTimeout(() => void this.refreshCachedErrors());
+  };
+
+  handleNavigateBack = (): void => {
+    const { modelStack } = this.state;
+    if (modelStack.length === 0) {
+      return;
+    }
+    const result = popModule(modelStack);
+    this.setState({
+      modelStack: result.newStack,
+      modelName: result.restoredModelName,
+      selection: result.restoredSelection,
+      showDetails: undefined,
+    });
+    // Restore the parent model's viewport asynchronously via queueViewUpdate.
+    // The parent model's view already exists in the project; we just need to
+    // apply the saved viewBox and zoom back onto it.
+    setTimeout(async () => {
+      const view = this.getView();
+      if (view) {
+        await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+      }
+    });
+    // Refresh errors for the restored model
+    setTimeout(() => void this.refreshCachedErrors());
+  };
+
+  handleNavigateToLevel = (targetLevel: number): void => {
+    const { modelStack } = this.state;
+    if (targetLevel >= modelStack.length) {
+      return;
+    }
+    const result = navigateToLevel(modelStack, targetLevel);
+    this.setState({
+      modelStack: result.newStack,
+      modelName: result.restoredModelName,
+      selection: result.restoredSelection,
+      showDetails: undefined,
+    });
+    // Restore the target level's viewport asynchronously
+    setTimeout(async () => {
+      const view = this.getView();
+      if (view) {
+        await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+      }
+    });
+    // Refresh errors for the target level's model
+    setTimeout(() => void this.refreshCachedErrors());
+  };
+
   handleSearchChange = async (_event: React.SyntheticEvent | null, newValue: string | null) => {
     if (!newValue) {
       this.handleSelection(new Set());
@@ -1617,9 +1733,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     return (
       <div className={styles.searchBar}>
-        <IconButton className={styles.menuButton} aria-label="Menu" onClick={this.handleShowDrawer} size="small">
-          <MenuIcon />
-        </IconButton>
+        <BreadcrumbBar
+          modelStack={this.state.modelStack}
+          modelName={this.state.modelName}
+          onBack={this.handleNavigateBack}
+          onNavigateToLevel={this.handleNavigateToLevel}
+          onShowDrawer={this.handleShowDrawer}
+        />
         <div className={styles.searchBox}>
           <Autocomplete
             key={name}
@@ -1702,13 +1822,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     let op: JsonModelOperation;
     if (variable.type === 'stock') {
+      // Use stockToJson to preserve all fields (including compat flags
+      // like nonNegative, canBeModuleInput, isPublic), then override
+      // the fields being edited.
+      const base = stockToJson(variable);
       op = {
         type: 'upsertStock',
         payload: {
           stock: {
-            name: variable.ident,
-            inflows: [...variable.inflows],
-            outflows: [...variable.outflows],
+            ...base,
             initialEquation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? variable.units ?? undefined,
@@ -1717,47 +1839,45 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         },
       };
     } else if (variable.type === 'flow') {
-      const gf = variable.gf
-        ? {
-            yPoints: [...variable.gf.yPoints],
-            kind: variable.gf.kind,
-            xScale: variable.gf.xScale ? { min: variable.gf.xScale.min, max: variable.gf.xScale.max } : undefined,
-            yScale: variable.gf.yScale ? { min: variable.gf.yScale.min, max: variable.gf.yScale.max } : undefined,
-          }
-        : undefined;
+      const base = flowToJson(variable);
       op = {
         type: 'upsertFlow',
         payload: {
           flow: {
-            name: variable.ident,
+            ...base,
             equation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? variable.units ?? undefined,
             documentation: newDocs ?? variable.documentation ?? undefined,
-            graphicalFunction: gf,
+          },
+        },
+      };
+    } else if (variable.type === 'module') {
+      // Modules have no equations or graphical functions -- only units and docs
+      op = {
+        type: 'upsertModule',
+        payload: {
+          module: {
+            name: variable.ident,
+            modelName: variable.modelName,
+            references: variable.references.map((r) => ({ src: r.src, dst: r.dst })),
+            units: newUnits ?? variable.units ?? undefined,
+            documentation: newDocs ?? variable.documentation ?? undefined,
           },
         },
       };
     } else {
       const auxVar = variable as Aux;
-      const gf = auxVar.gf
-        ? {
-            yPoints: [...auxVar.gf.yPoints],
-            kind: auxVar.gf.kind,
-            xScale: auxVar.gf.xScale ? { min: auxVar.gf.xScale.min, max: auxVar.gf.xScale.max } : undefined,
-            yScale: auxVar.gf.yScale ? { min: auxVar.gf.yScale.min, max: auxVar.gf.yScale.max } : undefined,
-          }
-        : undefined;
+      const base = auxToJson(auxVar);
       op = {
         type: 'upsertAux',
         payload: {
           aux: {
-            name: auxVar.ident,
+            ...base,
             equation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? auxVar.units ?? undefined,
             documentation: newDocs ?? auxVar.documentation ?? undefined,
-            graphicalFunction: gf,
           },
         },
       };
@@ -1808,32 +1928,32 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // Preserve the existing equation structure when updating the graphical function
     const existingEqFields = this.getEquationFields(variable);
 
+    // Use *ToJson to preserve all fields (including compat flags),
+    // then override the graphical function.
     let op: JsonModelOperation;
     if (variable.type === 'flow') {
+      const base = flowToJson(variable);
       op = {
         type: 'upsertFlow',
         payload: {
           flow: {
-            name: variable.ident,
+            ...base,
             equation: existingEqFields.equation,
             arrayedEquation: existingEqFields.arrayedEquation,
-            units: variable.units ?? undefined,
-            documentation: variable.documentation ?? undefined,
             graphicalFunction: gf,
           },
         },
       };
     } else {
       const auxVar = variable as Aux;
+      const base = auxToJson(auxVar);
       op = {
         type: 'upsertAux',
         payload: {
           aux: {
-            name: auxVar.ident,
+            ...base,
             equation: existingEqFields.equation,
             arrayedEquation: existingEqFields.arrayedEquation,
-            units: auxVar.units ?? undefined,
-            documentation: auxVar.documentation ?? undefined,
             graphicalFunction: gf,
           },
         },
@@ -1857,6 +1977,278 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.scheduleSimRun();
   };
 
+  // Updates the model reference for a module variable.
+  handleModuleModelReferenceChange = async (ident: string, newModelName: string) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const model = this.getModel();
+    if (!model) return;
+    const variable = model.variables.get(ident);
+    if (!variable || variable.type !== 'module') return;
+
+    const op: JsonModelOperation = {
+      type: 'upsertModule',
+      payload: {
+        module: {
+          name: variable.ident,
+          modelName: newModelName,
+          references: variable.references.map((r) => ({ src: r.src, dst: r.dst })),
+          units: variable.units || undefined,
+          documentation: variable.documentation || undefined,
+        },
+      },
+    };
+
+    const patch: JsonProjectPatch = {
+      models: [{ name: this.state.modelName, ops: [op] }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (model reference update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during model reference update');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Updates units and/or documentation for a module variable.
+  handleModuleUnitsDocsChange = async (ident: string, newUnits: string | undefined, newDocs: string | undefined) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const model = this.getModel();
+    if (!model) return;
+    const variable = model.variables.get(ident);
+    if (!variable || variable.type !== 'module') return;
+
+    const op: JsonModelOperation = {
+      type: 'upsertModule',
+      payload: {
+        module: {
+          name: variable.ident,
+          modelName: variable.modelName,
+          references: variable.references.map((r) => ({ src: r.src, dst: r.dst })),
+          units: newUnits ?? variable.units ?? undefined,
+          documentation: newDocs ?? variable.documentation ?? undefined,
+        },
+      },
+    };
+
+    const patch: JsonProjectPatch = {
+      models: [{ name: this.state.modelName, ops: [op] }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (module units/docs update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during module update');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Updates the input references array for a module variable via upsertModule.
+  // The engine does full variable replacement (not merge), so we send the
+  // complete module with the new references array.
+  handleModuleReferencesChange = async (ident: string, newReferences: ReadonlyArray<ModuleReference>) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const model = this.getModel();
+    if (!model) return;
+    const variable = model.variables.get(ident);
+    if (!variable || variable.type !== 'module') return;
+
+    const op: JsonModelOperation = {
+      type: 'upsertModule',
+      payload: {
+        module: {
+          name: variable.ident,
+          modelName: variable.modelName,
+          references: newReferences.map((r) => ({ src: r.src, dst: r.dst })),
+          units: variable.units || undefined,
+          documentation: variable.documentation || undefined,
+        },
+      },
+    };
+
+    const patch: JsonProjectPatch = {
+      models: [{ name: this.state.modelName, ops: [op] }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (references update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during references update');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Creates a new empty model and sets it as the module's reference.
+  // The engine processes projectOps before model ops (see patch.rs),
+  // so AddModel creates the model before upsertModule references it.
+  handleCreateModelForModule = async (moduleIdent: string) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const project = this.project();
+    if (!project) return;
+
+    // Generate a unique model name to avoid collisions when the module
+    // ident already matches an existing model name.
+    let newModelName = moduleIdent;
+    if (project.models.has(newModelName)) {
+      newModelName = this.getUniqueDuplicateName(moduleIdent, project);
+    }
+
+    // Look up existing module to preserve metadata through the model reference change
+    const model = this.getModel();
+    const existingModule = model?.variables.get(moduleIdent);
+    const modulePayload: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string } = {
+      name: moduleIdent,
+      modelName: newModelName,
+    };
+    if (existingModule && existingModule.type === 'module') {
+      if (existingModule.references.length > 0) {
+        modulePayload.references = existingModule.references.map((r) => ({ src: r.src, dst: r.dst }));
+      }
+      if (existingModule.units) modulePayload.units = existingModule.units;
+      if (existingModule.documentation) modulePayload.documentation = existingModule.documentation;
+    }
+
+    const patch: JsonProjectPatch = {
+      projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
+      models: [
+        // Seed a default empty view so getCanvas() works after drilling in
+        {
+          name: newModelName,
+          ops: [{ type: 'upsertView', payload: { index: 0, view: { elements: [] } } }],
+        },
+        {
+          name: this.state.modelName,
+          ops: [{ type: 'upsertModule', payload: { module: modulePayload } }],
+        },
+      ],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (create model for module):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during model creation');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Duplicates the source model and sets the copy as the module's reference.
+  // Copies all variables and the primary view from the source model.
+  handleDuplicateModelForModule = async (moduleIdent: string, sourceModelName: string) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const project = this.project();
+    if (!project) return;
+
+    const sourceModel = project.models.get(sourceModelName);
+    if (!sourceModel) return;
+
+    const newModelName = this.getUniqueDuplicateName(sourceModelName, project);
+
+    // Build ops to copy all variables from source model
+    const variableOps: JsonModelOperation[] = [];
+    for (const variable of sourceModel.variables.values()) {
+      if (variable.type === 'stock') {
+        variableOps.push({ type: 'upsertStock', payload: { stock: stockToJson(variable) } });
+      } else if (variable.type === 'flow') {
+        variableOps.push({ type: 'upsertFlow', payload: { flow: flowToJson(variable) } });
+      } else if (variable.type === 'aux') {
+        variableOps.push({ type: 'upsertAux', payload: { aux: auxToJson(variable) } });
+      } else if (variable.type === 'module') {
+        variableOps.push({ type: 'upsertModule', payload: { module: moduleToJson(variable) } });
+      }
+    }
+
+    // Copy the primary view, or seed an empty one so getCanvas() works
+    if (sourceModel.views.length > 0) {
+      variableOps.push({
+        type: 'upsertView',
+        payload: { index: 0, view: stockFlowViewToJson(sourceModel.views[0]) },
+      });
+    } else {
+      variableOps.push({
+        type: 'upsertView',
+        payload: { index: 0, view: { elements: [] } },
+      });
+    }
+
+    // Preserve existing module metadata through the model reference change
+    const currentModel = this.getModel();
+    const existingModule = currentModel?.variables.get(moduleIdent);
+    const dupModulePayload: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string } = {
+      name: moduleIdent,
+      modelName: newModelName,
+    };
+    if (existingModule && existingModule.type === 'module') {
+      if (existingModule.references.length > 0) {
+        dupModulePayload.references = existingModule.references.map((r) => ({ src: r.src, dst: r.dst }));
+      }
+      if (existingModule.units) dupModulePayload.units = existingModule.units;
+      if (existingModule.documentation) dupModulePayload.documentation = existingModule.documentation;
+    }
+
+    // Combined patch: create model, copy contents, update module reference.
+    // Engine processes projectOps before model ops (patch.rs).
+    const patch: JsonProjectPatch = {
+      projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
+      models: [
+        { name: newModelName, ops: variableOps },
+        {
+          name: this.state.modelName,
+          ops: [{
+            type: 'upsertModule',
+            payload: { module: dupModulePayload },
+          }],
+        },
+      ],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (duplicate model):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during model duplication');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  private getUniqueDuplicateName(baseName: string, project: Project): string {
+    let name = `${baseName}_copy`;
+    let i = 2;
+    while (project.models.has(name)) {
+      name = `${baseName}_copy_${i}`;
+      i++;
+    }
+    return name;
+  }
+
   getErrorDetails() {
     const { cachedErrors } = this.state;
 
@@ -1869,6 +2261,37 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           varErrors={cachedErrors.varErrors}
           varUnitErrors={cachedErrors.unitErrors}
         />
+      </div>
+    );
+  }
+
+  // Shows a thin info banner when inside a module whose model is shared
+  // by multiple module instances, or when viewing a stdlib model.
+  getSharedModelBanner(): React.ReactNode {
+    const { modelStack, modelName } = this.state;
+    if (modelStack.length === 0) return undefined;
+
+    const project = this.project();
+    if (!project) return undefined;
+
+    // AC4.4: stdlib models show read-only message
+    if (isStdlibModel(modelName)) {
+      return (
+        <div className={styles.sharedModelBanner}>
+          Standard library model (read-only)
+        </div>
+      );
+    }
+
+    // AC4.1, AC4.2: count instances
+    const count = countModelInstances(project, modelName);
+
+    // AC4.3: single instance shows no banner
+    if (count <= 1) return undefined;
+
+    return (
+      <div className={styles.sharedModelBanner}>
+        This model is used by {count} modules &mdash; changes affect all instances
       </div>
     );
   }
@@ -1897,6 +2320,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const ident = defined(namedElement.ident);
     const variable = getOrThrow(model.variables, ident);
+
+    if (variable.type === 'module') {
+      return (
+        <div className={styles.varDetails}>
+          <ModuleDetails
+            key={`md-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
+            variable={variable}
+            viewElement={namedElement}
+            project={defined(this.project())}
+            currentModelName={this.state.modelName}
+            onDelete={this.handleVariableDelete}
+            onModelReferenceChange={this.handleModuleModelReferenceChange}
+            onUnitsDocsChange={this.handleModuleUnitsDocsChange}
+            onDrillIntoModule={this.handleDrillIntoModule}
+            onCreateModel={this.handleCreateModelForModule}
+            onDuplicateModel={this.handleDuplicateModelForModule}
+            onReferencesChange={this.handleModuleReferencesChange}
+          />
+        </div>
+      );
+    }
 
     const activeTab = this.state.variableDetailsActiveTab;
 
@@ -1967,6 +2411,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     e.stopPropagation();
     this.setState({
       selectedTool: 'link',
+    });
+  };
+
+  handleSelectModule = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.setState({
+      selectedTool: 'module',
     });
   };
 
@@ -2152,6 +2604,19 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     setTimeout(async () => {
       await this.openEngineProject(serializedProject);
+      // After undo/redo, the restored project may not contain the model
+      // we were viewing (e.g. undo after creating and drilling into a new
+      // submodel). Reset navigation state if the current model is gone.
+      const project = this.project();
+      if (project && this.state.modelStack.length > 0 && !project.models.has(this.state.modelName)) {
+        this.setState({
+          modelStack: [],
+          modelName: 'main',
+          selection: new Set<UID>(),
+          showDetails: undefined,
+          selectedTool: undefined,
+        });
+      }
       this.scheduleSimRun();
       this.scheduleSave();
     });
@@ -2251,7 +2716,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { embedded } = this.props;
     const { dialOpen, dialVisible, selectedTool } = this.state;
 
-    if (embedded) {
+    if (embedded || isStdlibModel(this.state.modelName)) {
       return undefined;
     }
 
@@ -2288,6 +2753,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           title="Link"
           onClick={this.handleSelectLink}
           selected={selectedTool === 'link'}
+        />
+        <SpeedDialAction
+          icon={<ModuleIcon />}
+          title="Module"
+          onClick={this.handleSelectModule}
+          selected={selectedTool === 'module'}
         />
       </SpeedDial>
     );
@@ -2329,6 +2800,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         {this.getDrawer()}
         {this.getDetails()}
         {this.getSearchBar()}
+        {this.getSharedModelBanner()}
         {this.getCanvas()}
         {this.getSnackbar()}
         {this.getEditorControls()}

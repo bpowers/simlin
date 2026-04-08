@@ -45,6 +45,7 @@ import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows }
 import { applyGroupMovement } from '../group-movement';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
+import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { shouldShowVariableDetails } from './pointer-utils';
@@ -160,7 +161,7 @@ export interface CanvasProps {
   model: Model;
   view: StockFlowView;
   version: number;
-  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   selection: ReadonlySet<UID>;
   onRenameVariable: (oldName: string, newName: string) => void;
   onSetSelection: (selected: ReadonlySet<UID>) => void;
@@ -180,6 +181,7 @@ export interface CanvasProps {
   onDeleteSelection: () => void;
   onShowVariableDetails: () => void;
   onViewBoxChange: (viewBox: ViewRect, zoom: number) => void;
+  onDrillIntoModule: (moduleIdent: string, targetModelName: string) => void;
 }
 
 export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
@@ -193,7 +195,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   selectionCenterOffset: Point | undefined;
   pointerId: number | undefined;
   elementBounds: Array<Rect | undefined> = [];
-  prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+  prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   // we have to regenerate selectionUpdates when selection !== props.selection
   selection: ReadonlySet<UID> = new Set<UID>();
   cachedVersion = -Infinity;
@@ -223,6 +225,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   // visual, and stores the pointer type to distinguish mouse from touch.
   draggedLinkArc: number | undefined;
   dragPointerType: string | undefined;
+
+  // Cached per-render: whether any module in the current model has a model
+  // reference. When false, warning indicators on unconfigured modules are
+  // suppressed (AC1.6 -- new model scenario where user is sketching structure).
+  hasAnyModuleReference = false;
 
   constructor(props: CanvasProps) {
     super(props);
@@ -502,7 +509,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
   module(element: ModuleViewElement) {
     const variable = this.props.model.variables.get(element.ident);
-    const hasWarning = variable ? variableHasError(variable) : false;
+    const hasEngineError = variable ? variableHasError(variable) : false;
+    // AC1.6: suppress warning when no module in the model has a model reference
+    // yet (new model scenario where user is rapidly sketching structure).
+    const hasWarning = hasEngineError && this.hasAnyModuleReference;
     const isSelected = this.isSelected(element);
     const props: ModuleProps = {
       element,
@@ -511,6 +521,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
+      onDoubleClick: this.handleModuleDoubleClick,
       hasWarning,
     };
 
@@ -941,7 +952,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
         if (this.state.editNameOnPointerUp) {
           let inCreation = this.state.inCreation;
-          if (inCreation !== undefined && (inCreation.type === 'stock' || inCreation.type === 'aux')) {
+          if (inCreation !== undefined && (inCreation.type === 'stock' || inCreation.type === 'aux' || inCreation.type === 'module')) {
             inCreation = {
               ...inCreation,
               x: inCreation.x - delta.x,
@@ -1476,6 +1487,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     };
   }
 
+  handleModuleDoubleClick = (element: ModuleViewElement): void => {
+    const variable = this.props.model.variables.get(element.ident);
+    if (variable?.type !== 'module' || !variable.modelName) {
+      return;
+    }
+    this.props.onDrillIntoModule(element.ident, variable.modelName);
+  };
+
   handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
     this.pointerId = e.pointerId;
 
@@ -1738,8 +1757,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
     const canvasOffset = this.getCanvasOffset();
     const { selectedTool } = this.props;
-    if (selectedTool === 'aux' || selectedTool === 'stock') {
-      let inCreation: AuxViewElement | StockViewElement;
+    if (selectedTool === 'aux' || selectedTool === 'stock' || selectedTool === 'module') {
+      let inCreation: AuxViewElement | StockViewElement | ModuleViewElement;
       if (selectedTool === 'aux') {
         const name = this.getNewVariableName('New Variable');
         inCreation = {
@@ -1753,7 +1772,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           labelSide: 'right',
           isZeroRadius: false,
         };
-      } else {
+      } else if (selectedTool === 'stock') {
         const name = this.getNewVariableName('New Stock');
         inCreation = {
           type: 'stock',
@@ -1767,6 +1786,19 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           isZeroRadius: false,
           inflows: [],
           outflows: [],
+        };
+      } else {
+        const name = this.getNewVariableName('New Module');
+        inCreation = {
+          type: 'module',
+          uid: inCreationUid,
+          var: undefined,
+          x: client.x - canvasOffset.x,
+          y: client.y - canvasOffset.y,
+          name,
+          ident: canonicalize(name),
+          labelSide: 'bottom',
+          isZeroRadius: false,
         };
       }
 
@@ -2089,6 +2121,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   buildLayers(displayElements: readonly ViewElement[]): React.ReactElement[][] {
+    // Compute once per render whether any module has a model reference,
+    // used by module() to suppress warnings when all modules are unconfigured.
+    this.hasAnyModuleReference = anyModuleHasModelReference(this.props.model.variables);
+
     // create different layers for each of the display types so that views compose together nicely
     const zLayers = new Array(ZMax) as React.ReactElement[][];
     for (let i = 0; i < ZMax; i++) {

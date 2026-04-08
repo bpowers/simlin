@@ -108,6 +108,107 @@
   flex: 0 0 auto;
 }
 
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 40%;
+  font-size: 13px;
+  color: var(--color-text-muted, #666);
+}
+
+.breadcrumbLink {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: var(--color-primary, #1976d2);
+  font-size: 13px;
+  font-family: inherit;
+  border-radius: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumbLink:hover {
+  background: rgba(25, 118, 210, 0.08);
+}
+
+.breadcrumbCurrent {
+  padding: 2px 4px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumbSeparator {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: #999;
+}
+
+.readOnlyBadge {
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .breadcrumbLink {
+  color: #90caf9;
+}
+
+[data-theme="dark"] .breadcrumbLink:hover {
+  background: rgba(144, 202, 249, 0.08);
+}
+
+[data-theme="dark"] .breadcrumbCurrent {
+  color: #e0e0e0;
+}
+
+[data-theme="dark"] .breadcrumbSeparator {
+  color: #666;
+}
+
+.sharedModelBanner {
+  position: absolute;
+  top: 60px;
+  right: 8px;
+  width: var(--panel-width-sm);
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #666;
+  background: #fff3e0;
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  text-align: center;
+  box-sizing: border-box;
+  z-index: 1;
+}
+
+@media (min-width: 900px) and (max-width: 1199.95px) {
+  .sharedModelBanner {
+    width: var(--panel-width-md);
+  }
+}
+
+@media (min-width: 1200px) {
+  .sharedModelBanner {
+    width: var(--panel-width-lg);
+  }
+}
+
+[data-theme="dark"] .sharedModelBanner {
+  background: #3e2723;
+  color: #ffcc80;
+}
+
 .editor {
   box-sizing: border-box;
   overflow: hidden;

@@ -47,6 +47,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
       onDeleteSelection={nullCb}
       onShowVariableDetails={nullCb}
       onViewBoxChange={nullCb}
+      onDrillIntoModule={nullCb}
     />
   );
 

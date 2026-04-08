@@ -503,6 +503,22 @@ export interface SetSimSpecsOp {
   payload: SetSimSpecsPayload;
 }
 
+/**
+ * Payload for adding a new model to the project.
+ */
+export interface AddModelPayload {
+  name: string;
+}
+
+/**
+ * Add a new model to the project.
+ * Matches the Rust JsonProjectOperation::AddModel variant in libsimlin/src/patch.rs.
+ */
+export interface AddModelOp {
+  type: 'addModel';
+  payload: AddModelPayload;
+}
+
 export interface UpdateStockFlowsOp {
   type: 'updateStockFlows';
   payload: UpdateStockFlowsPayload;
@@ -525,7 +541,7 @@ export type JsonModelOperation =
 /**
  * Union type for project operations.
  */
-export type JsonProjectOperation = SetSimSpecsOp;
+export type JsonProjectOperation = SetSimSpecsOp | AddModelOp;
 
 // Patch structures
 
@@ -581,4 +597,14 @@ export function isDeleteView(op: JsonModelOperation): op is DeleteViewOp {
 
 export function isUpdateStockFlows(op: JsonModelOperation): op is UpdateStockFlowsOp {
   return op.type === 'updateStockFlows';
+}
+
+// Type guards for project operations
+
+export function isSetSimSpecs(op: JsonProjectOperation): op is SetSimSpecsOp {
+  return op.type === 'setSimSpecs';
+}
+
+export function isAddModel(op: JsonProjectOperation): op is AddModelOp {
+  return op.type === 'addModel';
 }

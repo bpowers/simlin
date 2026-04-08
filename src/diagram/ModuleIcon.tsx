@@ -1,0 +1,23 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+// pattern: Functional Core
+
+import * as React from 'react';
+
+import SvgIcon from './components/SvgIcon';
+
+import styles from './ModuleIcon.module.css';
+
+export const ModuleIcon: React.FunctionComponent = (props) => {
+  return (
+    <SvgIcon viewBox="0 0 50 50" className={styles.moduleIcon} {...props}>
+      <g>
+        <rect x={2.5} y={7.5} width={45} height={35} rx={5} ry={5} />
+      </g>
+    </SvgIcon>
+  );
+};
+
+ModuleIcon.displayName = 'Module';
