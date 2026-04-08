@@ -5,11 +5,10 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import IconButton from './components/IconButton';
 import TextField from './components/TextField';
 import Autocomplete, { type AutocompleteRenderInputParams } from './components/Autocomplete';
 import Snackbar from './components/Snackbar';
-import { ClearIcon, EditIcon, MenuIcon } from './components/icons';
+import { ClearIcon, EditIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
 import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
@@ -70,6 +69,7 @@ import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
 import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel } from './module-navigation';
+import { BreadcrumbBar } from './BreadcrumbBar';
 
 import styles from './Editor.module.css';
 
@@ -1689,9 +1689,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     return (
       <div className={styles.searchBar}>
-        <IconButton className={styles.menuButton} aria-label="Menu" onClick={this.handleShowDrawer} size="small">
-          <MenuIcon />
-        </IconButton>
+        <BreadcrumbBar
+          modelStack={this.state.modelStack}
+          modelName={this.state.modelName}
+          onBack={this.handleNavigateBack}
+          onNavigateToLevel={this.handleNavigateToLevel}
+          onShowDrawer={this.handleShowDrawer}
+        />
         <div className={styles.searchBox}>
           <Autocomplete
             key={name}

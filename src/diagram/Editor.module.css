@@ -108,6 +108,58 @@
   flex: 0 0 auto;
 }
 
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 40%;
+  font-size: 13px;
+  color: var(--color-text-muted, #666);
+}
+
+.breadcrumbLink {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: var(--color-primary, #1976d2);
+  font-size: 13px;
+  font-family: inherit;
+  border-radius: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumbLink:hover {
+  background: rgba(25, 118, 210, 0.08);
+}
+
+.breadcrumbCurrent {
+  padding: 2px 4px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumbSeparator {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: #999;
+}
+
+.readOnlyBadge {
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
 .editor {
   box-sizing: border-box;
   overflow: hidden;
