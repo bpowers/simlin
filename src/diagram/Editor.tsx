@@ -1822,13 +1822,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     let op: JsonModelOperation;
     if (variable.type === 'stock') {
+      // Use stockToJson to preserve all fields (including compat flags
+      // like nonNegative, canBeModuleInput, isPublic), then override
+      // the fields being edited.
+      const base = stockToJson(variable);
       op = {
         type: 'upsertStock',
         payload: {
           stock: {
-            name: variable.ident,
-            inflows: [...variable.inflows],
-            outflows: [...variable.outflows],
+            ...base,
             initialEquation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? variable.units ?? undefined,
@@ -1837,24 +1839,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         },
       };
     } else if (variable.type === 'flow') {
-      const gf = variable.gf
-        ? {
-            yPoints: [...variable.gf.yPoints],
-            kind: variable.gf.kind,
-            xScale: variable.gf.xScale ? { min: variable.gf.xScale.min, max: variable.gf.xScale.max } : undefined,
-            yScale: variable.gf.yScale ? { min: variable.gf.yScale.min, max: variable.gf.yScale.max } : undefined,
-          }
-        : undefined;
+      const base = flowToJson(variable);
       op = {
         type: 'upsertFlow',
         payload: {
           flow: {
-            name: variable.ident,
+            ...base,
             equation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? variable.units ?? undefined,
             documentation: newDocs ?? variable.documentation ?? undefined,
-            graphicalFunction: gf,
           },
         },
       };
@@ -1874,24 +1868,16 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
     } else {
       const auxVar = variable as Aux;
-      const gf = auxVar.gf
-        ? {
-            yPoints: [...auxVar.gf.yPoints],
-            kind: auxVar.gf.kind,
-            xScale: auxVar.gf.xScale ? { min: auxVar.gf.xScale.min, max: auxVar.gf.xScale.max } : undefined,
-            yScale: auxVar.gf.yScale ? { min: auxVar.gf.yScale.min, max: auxVar.gf.yScale.max } : undefined,
-          }
-        : undefined;
+      const base = auxToJson(auxVar);
       op = {
         type: 'upsertAux',
         payload: {
           aux: {
-            name: auxVar.ident,
+            ...base,
             equation: newEquation ?? existingEqFields.equation,
             arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
             units: newUnits ?? auxVar.units ?? undefined,
             documentation: newDocs ?? auxVar.documentation ?? undefined,
-            graphicalFunction: gf,
           },
         },
       };
@@ -1942,32 +1928,32 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // Preserve the existing equation structure when updating the graphical function
     const existingEqFields = this.getEquationFields(variable);
 
+    // Use *ToJson to preserve all fields (including compat flags),
+    // then override the graphical function.
     let op: JsonModelOperation;
     if (variable.type === 'flow') {
+      const base = flowToJson(variable);
       op = {
         type: 'upsertFlow',
         payload: {
           flow: {
-            name: variable.ident,
+            ...base,
             equation: existingEqFields.equation,
             arrayedEquation: existingEqFields.arrayedEquation,
-            units: variable.units ?? undefined,
-            documentation: variable.documentation ?? undefined,
             graphicalFunction: gf,
           },
         },
       };
     } else {
       const auxVar = variable as Aux;
+      const base = auxToJson(auxVar);
       op = {
         type: 'upsertAux',
         payload: {
           aux: {
-            name: auxVar.ident,
+            ...base,
             equation: existingEqFields.equation,
             arrayedEquation: existingEqFields.arrayedEquation,
-            units: auxVar.units ?? undefined,
-            documentation: auxVar.documentation ?? undefined,
             graphicalFunction: gf,
           },
         },
@@ -2116,8 +2102,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   handleCreateModelForModule = async (moduleIdent: string) => {
     const engine = this.engine();
     if (!engine) return;
+    const project = this.project();
+    if (!project) return;
 
-    const newModelName = moduleIdent;
+    // Generate a unique model name to avoid collisions when the module
+    // ident already matches an existing model name.
+    let newModelName = moduleIdent;
+    if (project.models.has(newModelName)) {
+      newModelName = this.getUniqueDuplicateName(moduleIdent, project);
+    }
 
     // Look up existing module to preserve metadata through the model reference change
     const model = this.getModel();
