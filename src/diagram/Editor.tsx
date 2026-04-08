@@ -69,6 +69,7 @@ import { Point, searchableName } from './drawing/common';
 import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
+import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel } from './module-navigation';
 
 import styles from './Editor.module.css';
 
@@ -173,6 +174,7 @@ interface EditorState {
   projectHistory: readonly Readonly<Uint8Array>[];
   projectOffset: number;
   modelName: string;
+  modelStack: ReadonlyArray<ModuleStackEntry>;
   dialOpen: boolean;
   dialVisible: boolean;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
@@ -244,6 +246,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       projectOffset: 0,
       modelErrors: [],
       modelName: 'main',
+      modelStack: [],
       dialOpen: false,
       dialVisible: true,
       selectedTool: undefined,
@@ -1566,6 +1569,71 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   handleShowDrawer = () => {
     this.setState({
       drawerOpen: true,
+    });
+  };
+
+  handleDrillIntoModule = (moduleIdent: string, targetModelName: string): void => {
+    const view = this.getView();
+    if (!view) {
+      return;
+    }
+    const newStack = pushModule(
+      this.state.modelStack,
+      targetModelName,
+      moduleIdent,
+      this.state.selection,
+      view.viewBox,
+      view.zoom,
+    );
+    this.setState({
+      modelStack: newStack,
+      modelName: currentModelName(newStack),
+      selection: new Set<UID>(),
+      showDetails: undefined,
+    });
+  };
+
+  handleNavigateBack = (): void => {
+    const { modelStack } = this.state;
+    if (modelStack.length === 0) {
+      return;
+    }
+    const result = popModule(modelStack);
+    this.setState({
+      modelStack: result.newStack,
+      modelName: result.restoredModelName,
+      selection: result.restoredSelection,
+      showDetails: undefined,
+    });
+    // Restore the parent model's viewport asynchronously via queueViewUpdate.
+    // The parent model's view already exists in the project; we just need to
+    // apply the saved viewBox and zoom back onto it.
+    setTimeout(async () => {
+      const view = this.getView();
+      if (view) {
+        await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+      }
+    });
+  };
+
+  handleNavigateToLevel = (targetLevel: number): void => {
+    const { modelStack } = this.state;
+    if (targetLevel >= modelStack.length) {
+      return;
+    }
+    const result = navigateToLevel(modelStack, targetLevel);
+    this.setState({
+      modelStack: result.newStack,
+      modelName: result.restoredModelName,
+      selection: result.restoredSelection,
+      showDetails: undefined,
+    });
+    // Restore the target level's viewport asynchronously
+    setTimeout(async () => {
+      const view = this.getView();
+      if (view) {
+        await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
+      }
     });
   };
 
