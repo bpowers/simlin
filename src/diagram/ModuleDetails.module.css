@@ -168,6 +168,10 @@
   border-color: #555;
 }
 
+[data-theme="dark"] .modelRefLabel {
+  color: #aaa;
+}
+
 [data-theme="dark"] .sectionTitle {
   color: #aaa;
 }

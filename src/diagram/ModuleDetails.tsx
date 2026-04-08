@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// pattern: Mixed (React class component with side effects + pure rendering logic)
+// pattern: Mixed -- class component required by Slate editor lifecycle (same as VariableDetails)
 
 import * as React from 'react';
 

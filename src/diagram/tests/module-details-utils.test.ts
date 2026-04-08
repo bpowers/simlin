@@ -6,7 +6,7 @@
  * @jest-environment node
  */
 
-import type { Project, Model, Variable, Aux, Stock, Flow, Module } from '@simlin/core/datamodel';
+import type { Project, Model, Variable, Aux, Stock, Module } from '@simlin/core/datamodel';
 
 import {
   countModelInstances,
