@@ -706,6 +706,88 @@ describe('ModuleDetails', () => {
     });
   });
 
+  // AC2.4: Output ports with mixed variable types (stocks and auxes)
+  describe('output ports with mixed types', () => {
+    test('shows stocks and auxes as output ports', () => {
+      const variable = makeModule('eco_mod', 'ecosystem');
+      const project = makeProject([
+        makeModel('main', [variable]),
+        makeModel('ecosystem', [
+          makeAux('growth_rate', { isPublic: true }),
+          makeStock('population', { isPublic: true }),
+          makeStock('internal_level'),
+        ]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={variable}
+          viewElement={makeViewElement('eco_mod')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      expect(screen.getByText('growth_rate')).not.toBeNull();
+      expect(screen.getByText('population')).not.toBeNull();
+    });
+  });
+
+  // AC4.1: Instance count integration (the count is tested in utils;
+  // here we verify ModuleDetails renders correctly with shared model data)
+  describe('shared model awareness', () => {
+    test('renders with multiple module instances referencing same model', () => {
+      // Two modules reference 'hares' -- the banner is in Editor,
+      // but ModuleDetails should still render correctly.
+      const mod1 = makeModule('hares_mod_1', 'hares');
+      const mod2 = makeModule('hares_mod_2', 'hares');
+      const project = makeProject([
+        makeModel('main', [mod1, mod2]),
+        makeModel('hares', [makeAux('population', { isPublic: true })]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={mod1}
+          viewElement={makeViewElement('hares_mod_1')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      // Module should render normally even when model is shared
+      expect(screen.getByText('hares_mod_1')).not.toBeNull();
+      expect(screen.getByText('population')).not.toBeNull();
+    });
+  });
+
+  // Verify that referenced model not in project is handled gracefully
+  describe('missing model reference', () => {
+    test('shows empty output ports when referenced model is missing from project', () => {
+      const variable = makeModule('orphan_mod', 'nonexistent_model');
+      const project = makeProject([makeModel('main', [variable])]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={variable}
+          viewElement={makeViewElement('orphan_mod')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      // Should show empty states rather than crashing
+      expect(screen.getByText('No inputs configured')).not.toBeNull();
+      expect(screen.getByText('No public outputs')).not.toBeNull();
+    });
+  });
+
   // AC1.12: Cycle-creating models excluded from selector
   describe('cycle prevention in selector', () => {
     test('excludes models that would create a cycle', () => {
@@ -775,6 +857,91 @@ describe('ModuleDetails', () => {
       // main is available (main doesn't depend on model_a in a way that model_a->main creates cycle)
       // Actually: main -> model_a exists. So model_a -> main creates a cycle.
       expect(optionValues).not.toContain('main');
+    });
+
+    test('shows output ports from the deeply nested referenced model', () => {
+      // main -> model_a -> model_b. Viewing moduleB from model_a.
+      const moduleA = makeModule('module_a', 'model_a');
+      const moduleB = makeModule('module_b', 'model_b');
+      const project = makeProject([
+        makeModel('main', [moduleA]),
+        makeModel('model_a', [moduleB, makeAux('local_var')]),
+        makeModel('model_b', [
+          makeAux('deep_output', { isPublic: true }),
+          makeStock('deep_level', { isPublic: true }),
+          makeAux('deep_internal'),
+        ]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={moduleB}
+          viewElement={makeViewElement('module_b')}
+          project={project}
+          currentModelName="model_a"
+          {...callbacks}
+        />,
+      );
+
+      // Output ports should come from model_b (the referenced model)
+      expect(screen.getByText('deep_output')).not.toBeNull();
+      expect(screen.getByText('deep_level')).not.toBeNull();
+    });
+
+    test('shows wiring from the parent model context for nested module', () => {
+      const moduleA = makeModule('module_a', 'model_a');
+      const moduleB = makeModule('module_b', 'model_b', {
+        references: [{ src: 'local_var', dst: 'deep_input' }],
+      });
+      const project = makeProject([
+        makeModel('main', [moduleA]),
+        makeModel('model_a', [moduleB, makeAux('local_var')]),
+        makeModel('model_b', [
+          makeAux('deep_input', { canBeModuleInput: true }),
+        ]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={moduleB}
+          viewElement={makeViewElement('module_b')}
+          project={project}
+          currentModelName="model_a"
+          {...callbacks}
+        />,
+      );
+
+      // Wiring should show the reference from parent model (model_a)
+      expect(screen.getByText('local_var')).not.toBeNull();
+      expect(screen.getByText('deep_input')).not.toBeNull();
+    });
+  });
+
+  // Verify open model callback at nested depth
+  describe('open model at nested depth', () => {
+    test('clicking Open Model at depth 2 passes correct arguments', () => {
+      const moduleB = makeModule('module_b', 'model_b');
+      const project = makeProject([
+        makeModel('main', [makeModule('module_a', 'model_a')]),
+        makeModel('model_a', [moduleB]),
+        makeModel('model_b', [makeAux('x')]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={moduleB}
+          viewElement={makeViewElement('module_b')}
+          project={project}
+          currentModelName="model_a"
+          {...callbacks}
+        />,
+      );
+
+      fireEvent.click(screen.getByText('Open Model'));
+      expect(callbacks.onDrillIntoModule).toHaveBeenCalledWith('module_b', 'model_b');
     });
   });
 });

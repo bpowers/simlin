@@ -47,6 +47,10 @@ import {
   projectFromJson,
   projectAttachData,
   isNamedViewElement,
+  stockToJson,
+  flowToJson,
+  auxToJson,
+  moduleToJson,
 } from '@simlin/core/datamodel';
 import { defined, exists, mapSet, Series, setsEqual, toInt, uint8ArraysEqual } from '@simlin/core/common';
 import { first, getOrThrow, last, only } from '@simlin/core/collections';
@@ -62,6 +66,7 @@ import { Status } from './Status';
 import { StockIcon } from './StockIcon';
 import { UndoRedoBar } from './UndoRedoBar';
 import { VariableDetails } from './VariableDetails';
+import { ModuleDetails } from './ModuleDetails';
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
@@ -69,7 +74,8 @@ import { Point, searchableName } from './drawing/common';
 import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
-import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel } from './module-navigation';
+import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel, isStdlibModel } from './module-navigation';
+import { countModelInstances } from './module-details-utils';
 import { BreadcrumbBar } from './BreadcrumbBar';
 
 import styles from './Editor.module.css';
@@ -1829,6 +1835,20 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           },
         },
       };
+    } else if (variable.type === 'module') {
+      // Modules have no equations or graphical functions -- only units and docs
+      op = {
+        type: 'upsertModule',
+        payload: {
+          module: {
+            name: variable.ident,
+            modelName: variable.modelName,
+            references: variable.references.map((r) => ({ src: r.src, dst: r.dst })),
+            units: newUnits ?? variable.units ?? undefined,
+            documentation: newDocs ?? variable.documentation ?? undefined,
+          },
+        },
+      };
     } else {
       const auxVar = variable as Aux;
       const gf = auxVar.gf
@@ -1948,6 +1968,191 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     this.scheduleSimRun();
   };
 
+  // Updates the model reference for a module variable.
+  handleModuleModelReferenceChange = async (ident: string, newModelName: string) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const model = this.getModel();
+    if (!model) return;
+    const variable = model.variables.get(ident);
+    if (!variable || variable.type !== 'module') return;
+
+    const op: JsonModelOperation = {
+      type: 'upsertModule',
+      payload: {
+        module: {
+          name: variable.ident,
+          modelName: newModelName,
+          references: variable.references.map((r) => ({ src: r.src, dst: r.dst })),
+          units: variable.units || undefined,
+          documentation: variable.documentation || undefined,
+        },
+      },
+    };
+
+    const patch: JsonProjectPatch = {
+      models: [{ name: this.state.modelName, ops: [op] }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (model reference update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during model reference update');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Updates units and/or documentation for a module variable.
+  handleModuleUnitsDocsChange = async (ident: string, newUnits: string | undefined, newDocs: string | undefined) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const model = this.getModel();
+    if (!model) return;
+    const variable = model.variables.get(ident);
+    if (!variable || variable.type !== 'module') return;
+
+    const op: JsonModelOperation = {
+      type: 'upsertModule',
+      payload: {
+        module: {
+          name: variable.ident,
+          modelName: variable.modelName,
+          references: variable.references.map((r) => ({ src: r.src, dst: r.dst })),
+          units: newUnits ?? variable.units ?? undefined,
+          documentation: newDocs ?? variable.documentation ?? undefined,
+        },
+      },
+    };
+
+    const patch: JsonProjectPatch = {
+      models: [{ name: this.state.modelName, ops: [op] }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (module units/docs update):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during module update');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Creates a new empty model and sets it as the module's reference.
+  // The engine processes projectOps before model ops (see patch.rs),
+  // so AddModel creates the model before upsertModule references it.
+  handleCreateModelForModule = async (moduleIdent: string) => {
+    const engine = this.engine();
+    if (!engine) return;
+
+    const newModelName = moduleIdent;
+
+    const patch: JsonProjectPatch = {
+      projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
+      models: [{
+        name: this.state.modelName,
+        ops: [{
+          type: 'upsertModule',
+          payload: { module: { name: moduleIdent, modelName: newModelName } },
+        }],
+      }],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (create model for module):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during model creation');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  // Duplicates the source model and sets the copy as the module's reference.
+  // Copies all variables and the primary view from the source model.
+  handleDuplicateModelForModule = async (moduleIdent: string, sourceModelName: string) => {
+    const engine = this.engine();
+    if (!engine) return;
+    const project = this.project();
+    if (!project) return;
+
+    const sourceModel = project.models.get(sourceModelName);
+    if (!sourceModel) return;
+
+    const newModelName = this.getUniqueDuplicateName(sourceModelName, project);
+
+    // Build ops to copy all variables from source model
+    const variableOps: JsonModelOperation[] = [];
+    for (const variable of sourceModel.variables.values()) {
+      if (variable.type === 'stock') {
+        variableOps.push({ type: 'upsertStock', payload: { stock: stockToJson(variable) } });
+      } else if (variable.type === 'flow') {
+        variableOps.push({ type: 'upsertFlow', payload: { flow: flowToJson(variable) } });
+      } else if (variable.type === 'aux') {
+        variableOps.push({ type: 'upsertAux', payload: { aux: auxToJson(variable) } });
+      } else if (variable.type === 'module') {
+        variableOps.push({ type: 'upsertModule', payload: { module: moduleToJson(variable) } });
+      }
+    }
+
+    // Copy the primary view
+    if (sourceModel.views.length > 0) {
+      variableOps.push({
+        type: 'upsertView',
+        payload: { index: 0, view: stockFlowViewToJson(sourceModel.views[0]) },
+      });
+    }
+
+    // Combined patch: create model, copy contents, update module reference.
+    // Engine processes projectOps before model ops (patch.rs).
+    const patch: JsonProjectPatch = {
+      projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
+      models: [
+        { name: newModelName, ops: variableOps },
+        {
+          name: this.state.modelName,
+          ops: [{
+            type: 'upsertModule',
+            payload: { module: { name: moduleIdent, modelName: newModelName } },
+          }],
+        },
+      ],
+    };
+
+    try {
+      await engine.applyPatch(patch, { allowErrors: true });
+    } catch (e: unknown) {
+      const err = getErrorDetails(e);
+      console.error('applyPatch error (duplicate model):', err.code, err.message, err.details);
+      this.appendModelError(err.message ?? 'Unknown error during model duplication');
+      return;
+    }
+
+    await this.updateProject(await engine.serializeProtobuf());
+    this.scheduleSimRun();
+  };
+
+  private getUniqueDuplicateName(baseName: string, project: Project): string {
+    let name = `${baseName}_copy`;
+    let i = 2;
+    while (project.models.has(name)) {
+      name = `${baseName}_copy_${i}`;
+      i++;
+    }
+    return name;
+  }
+
   getErrorDetails() {
     const { cachedErrors } = this.state;
 
@@ -1960,6 +2165,37 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           varErrors={cachedErrors.varErrors}
           varUnitErrors={cachedErrors.unitErrors}
         />
+      </div>
+    );
+  }
+
+  // Shows a thin info banner when inside a module whose model is shared
+  // by multiple module instances, or when viewing a stdlib model.
+  getSharedModelBanner(): React.ReactNode {
+    const { modelStack, modelName } = this.state;
+    if (modelStack.length === 0) return undefined;
+
+    const project = this.project();
+    if (!project) return undefined;
+
+    // AC4.4: stdlib models show read-only message
+    if (isStdlibModel(modelName)) {
+      return (
+        <div className={styles.sharedModelBanner}>
+          Standard library model (read-only)
+        </div>
+      );
+    }
+
+    // AC4.1, AC4.2: count instances
+    const count = countModelInstances(project, modelName);
+
+    // AC4.3: single instance shows no banner
+    if (count <= 1) return undefined;
+
+    return (
+      <div className={styles.sharedModelBanner}>
+        This model is used by {count} modules &mdash; changes affect all instances
       </div>
     );
   }
@@ -1988,6 +2224,26 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const ident = defined(namedElement.ident);
     const variable = getOrThrow(model.variables, ident);
+
+    if (variable.type === 'module') {
+      return (
+        <div className={styles.varDetails}>
+          <ModuleDetails
+            key={`md-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
+            variable={variable}
+            viewElement={namedElement}
+            project={defined(this.project())}
+            currentModelName={this.state.modelName}
+            onDelete={this.handleVariableDelete}
+            onModelReferenceChange={this.handleModuleModelReferenceChange}
+            onUnitsDocsChange={this.handleModuleUnitsDocsChange}
+            onDrillIntoModule={this.handleDrillIntoModule}
+            onCreateModel={this.handleCreateModelForModule}
+            onDuplicateModel={this.handleDuplicateModelForModule}
+          />
+        </div>
+      );
+    }
 
     const activeTab = this.state.variableDetailsActiveTab;
 
@@ -2434,6 +2690,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         {this.getDrawer()}
         {this.getDetails()}
         {this.getSearchBar()}
+        {this.getSharedModelBanner()}
         {this.getCanvas()}
         {this.getSnackbar()}
         {this.getEditorControls()}

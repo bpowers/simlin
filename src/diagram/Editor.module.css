@@ -176,6 +176,39 @@
   color: #666;
 }
 
+.sharedModelBanner {
+  position: absolute;
+  top: 60px;
+  right: 8px;
+  width: var(--panel-width-sm);
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #666;
+  background: #fff3e0;
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  text-align: center;
+  box-sizing: border-box;
+  z-index: 1;
+}
+
+@media (min-width: 900px) and (max-width: 1199.95px) {
+  .sharedModelBanner {
+    width: var(--panel-width-md);
+  }
+}
+
+@media (min-width: 1200px) {
+  .sharedModelBanner {
+    width: var(--panel-width-lg);
+  }
+}
+
+[data-theme="dark"] .sharedModelBanner {
+  background: #3e2723;
+  color: #ffcc80;
+}
+
 .editor {
   box-sizing: border-box;
   overflow: hidden;
