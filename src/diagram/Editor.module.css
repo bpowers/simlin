@@ -160,6 +160,22 @@
   white-space: nowrap;
 }
 
+[data-theme="dark"] .breadcrumbLink {
+  color: #90caf9;
+}
+
+[data-theme="dark"] .breadcrumbLink:hover {
+  background: rgba(144, 202, 249, 0.08);
+}
+
+[data-theme="dark"] .breadcrumbCurrent {
+  color: #e0e0e0;
+}
+
+[data-theme="dark"] .breadcrumbSeparator {
+  color: #666;
+}
+
 .editor {
   box-sizing: border-box;
   overflow: hidden;
