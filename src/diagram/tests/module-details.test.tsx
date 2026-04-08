@@ -588,7 +588,79 @@ describe('ModuleDetails', () => {
     });
   });
 
-  // AC2.7: Delete button
+  // AC2.7: Units and documentation editors
+  describe('units and docs editors', () => {
+    test('renders units editor with placeholder', () => {
+      const variable = makeModule('hares_mod', 'hares');
+      const project = makeProject([
+        makeModel('main', [variable]),
+        makeModel('hares', [makeAux('x')]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      const { container } = render(
+        <ModuleDetails
+          variable={variable}
+          viewElement={makeViewElement('hares_mod')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      const unitsEditor = container.querySelector('.unitsEditor');
+      expect(unitsEditor).not.toBeNull();
+    });
+
+    test('renders docs editor with placeholder', () => {
+      const variable = makeModule('hares_mod', 'hares');
+      const project = makeProject([
+        makeModel('main', [variable]),
+        makeModel('hares', [makeAux('x')]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      const { container } = render(
+        <ModuleDetails
+          variable={variable}
+          viewElement={makeViewElement('hares_mod')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      const notesEditor = container.querySelector('.notesEditor');
+      expect(notesEditor).not.toBeNull();
+    });
+
+    test('initializes editors with existing units and docs', () => {
+      const variable = makeModule('hares_mod', 'hares', {
+        units: 'rabbits',
+        documentation: 'Number of hares in the system',
+      });
+      const project = makeProject([
+        makeModel('main', [variable]),
+        makeModel('hares', [makeAux('x')]),
+      ]);
+      const callbacks = defaultCallbacks();
+
+      render(
+        <ModuleDetails
+          variable={variable}
+          viewElement={makeViewElement('hares_mod')}
+          project={project}
+          currentModelName="main"
+          {...callbacks}
+        />,
+      );
+
+      expect(screen.getByText('rabbits')).not.toBeNull();
+      expect(screen.getByText('Number of hares in the system')).not.toBeNull();
+    });
+  });
+
+  // Delete button
   describe('delete button', () => {
     test('renders delete button', () => {
       const variable = makeModule('hares_mod', 'hares');
