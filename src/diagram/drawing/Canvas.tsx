@@ -45,6 +45,7 @@ import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows }
 import { applyGroupMovement } from '../group-movement';
 import { Group, groupBounds, GroupProps } from './Group';
 import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
+import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { shouldShowVariableDetails } from './pointer-utils';
@@ -224,6 +225,11 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   // visual, and stores the pointer type to distinguish mouse from touch.
   draggedLinkArc: number | undefined;
   dragPointerType: string | undefined;
+
+  // Cached per-render: whether any module in the current model has a model
+  // reference. When false, warning indicators on unconfigured modules are
+  // suppressed (AC1.6 -- new model scenario where user is sketching structure).
+  hasAnyModuleReference = false;
 
   constructor(props: CanvasProps) {
     super(props);
@@ -503,7 +509,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
 
   module(element: ModuleViewElement) {
     const variable = this.props.model.variables.get(element.ident);
-    const hasWarning = variable ? variableHasError(variable) : false;
+    const hasEngineError = variable ? variableHasError(variable) : false;
+    // AC1.6: suppress warning when no module in the model has a model reference
+    // yet (new model scenario where user is rapidly sketching structure).
+    const hasWarning = hasEngineError && this.hasAnyModuleReference;
     const isSelected = this.isSelected(element);
     const props: ModuleProps = {
       element,
@@ -2112,6 +2121,10 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   }
 
   buildLayers(displayElements: readonly ViewElement[]): React.ReactElement[][] {
+    // Compute once per render whether any module has a model reference,
+    // used by module() to suppress warnings when all modules are unconfigured.
+    this.hasAnyModuleReference = anyModuleHasModelReference(this.props.model.variables);
+
     // create different layers for each of the display types so that views compose together nicely
     const zLayers = new Array(ZMax) as React.ReactElement[][];
     for (let i = 0; i < ZMax; i++) {
