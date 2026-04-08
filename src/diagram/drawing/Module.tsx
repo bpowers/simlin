@@ -24,6 +24,7 @@ export interface ModuleProps {
   hasWarning?: boolean;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
+  onDoubleClick?: (element: ModuleViewElement) => void;
   element: ModuleViewElement;
 }
 
@@ -72,6 +73,14 @@ export class Module extends React.PureComponent<ModuleProps> {
     this.props.onSelection(this.props.element, e, true);
   };
 
+  handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (this.props.onDoubleClick) {
+      this.props.onDoubleClick(this.props.element);
+    }
+  };
+
   indicators() {
     if (!this.props.hasWarning) {
       return undefined;
@@ -118,7 +127,7 @@ export class Module extends React.PureComponent<ModuleProps> {
     });
 
     return (
-      <g className={groupClassName} onPointerDown={this.handlePointerDown}>
+      <g className={groupClassName} onPointerDown={this.handlePointerDown} onDoubleClick={this.handleDoubleClick}>
         <rect
           x={Math.ceil(cx - w / 2)}
           y={Math.ceil(cy - h / 2)}

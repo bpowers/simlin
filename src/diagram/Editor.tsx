@@ -1451,6 +1451,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const onDeleteSelection = !embedded ? this.handleSelectionDelete : () => {};
     const onShowVariableDetails = !embedded ? this.handleShowVariableDetails : () => {};
     const onViewBoxChange = !embedded ? this.handleViewBoxChange : () => {};
+    const onDrillIntoModule = !embedded
+      ? this.handleDrillIntoModule
+      : (_moduleIdent: string, _targetModelName: string): void => {};
 
     return (
       <Canvas
@@ -1472,6 +1475,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         onDeleteSelection={onDeleteSelection}
         onShowVariableDetails={onShowVariableDetails}
         onViewBoxChange={onViewBoxChange}
+        onDrillIntoModule={onDrillIntoModule}
       />
     );
   }

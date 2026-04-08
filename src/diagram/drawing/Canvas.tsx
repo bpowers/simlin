@@ -180,6 +180,7 @@ export interface CanvasProps {
   onDeleteSelection: () => void;
   onShowVariableDetails: () => void;
   onViewBoxChange: (viewBox: ViewRect, zoom: number) => void;
+  onDrillIntoModule: (moduleIdent: string, targetModelName: string) => void;
 }
 
 export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
@@ -511,6 +512,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       isValidTarget: this.isValidTarget(element),
       onSelection: this.handleSetSelection,
       onLabelDrag: this.handleLabelDrag,
+      onDoubleClick: this.handleModuleDoubleClick,
       hasWarning,
     };
 
@@ -1475,6 +1477,14 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
       y: (pointers[0].y + pointers[1].y) / 2,
     };
   }
+
+  handleModuleDoubleClick = (element: ModuleViewElement): void => {
+    const variable = this.props.model.variables.get(element.ident);
+    if (variable?.type !== 'module' || !variable.modelName) {
+      return;
+    }
+    this.props.onDrillIntoModule(element.ident, variable.modelName);
+  };
 
   handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
     this.pointerId = e.pointerId;
