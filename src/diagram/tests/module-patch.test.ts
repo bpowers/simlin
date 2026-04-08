@@ -219,4 +219,134 @@ describe('upsertModule patch operation', () => {
 
     await project.dispose();
   });
+
+  it('addModel + upsertView seeds a usable view for the new model', async () => {
+    const project = await Project.open(loadTestXmile());
+
+    // Simulate handleCreateModelForModule: addModel + seed view + upsertModule
+    const patch: JsonProjectPatch = {
+      projectOps: [{ type: 'addModel', payload: { name: 'population' } }],
+      models: [
+        {
+          name: 'population',
+          ops: [
+            {
+              type: 'upsertView',
+              payload: { index: 0, view: { elements: [] } },
+            },
+          ],
+        },
+        {
+          name: 'main',
+          ops: [
+            {
+              type: 'upsertModule',
+              payload: {
+                module: {
+                  name: 'pop_module',
+                  modelName: 'population',
+                  references: [],
+                },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    await project.applyPatch(patch, { allowErrors: true });
+
+    // The new model should have a view that can be serialized and accessed
+    const json = JSON.parse(await project.serializeJson());
+    const popModel = json.models.find((m: { name: string }) => m.name === 'population');
+    expect(popModel).toBeDefined();
+    expect(popModel.views).toBeDefined();
+    expect(popModel.views.length).toBeGreaterThanOrEqual(1);
+
+    await project.dispose();
+  });
+
+  it('upsertModule preserves existing metadata when changing modelName', async () => {
+    const project = await Project.open(loadTestXmile());
+
+    // Create model and module with references/docs/units
+    await project.applyPatch({
+      projectOps: [{ type: 'addModel', payload: { name: 'ecosystem' } }],
+    });
+    await project.applyPatch(
+      {
+        models: [
+          {
+            name: 'main',
+            ops: [
+              {
+                type: 'upsertModule',
+                payload: {
+                  module: {
+                    name: 'eco_module',
+                    modelName: 'ecosystem',
+                    references: [{ src: 'prey', dst: 'hares' }],
+                    units: 'animals',
+                    documentation: 'Ecosystem module',
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      { allowErrors: true },
+    );
+
+    // Verify the metadata via serialized JSON (getVariable doesn't return all module fields)
+    type JsonModelEntry = { name: string; modules?: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string }[] };
+    let json = JSON.parse(await project.serializeJson());
+    let mainModelJson = json.models.find((m: JsonModelEntry) => m.name === 'main') as JsonModelEntry;
+    let ecoModule = mainModelJson.modules?.find((m) => m.name === 'eco_module');
+    expect(ecoModule).toBeDefined();
+    expect(ecoModule!.references).toEqual([{ src: 'prey', dst: 'hares' }]);
+    expect(ecoModule!.units).toBe('animals');
+    expect(ecoModule!.documentation).toBe('Ecosystem module');
+
+    // Now change model reference, preserving existing metadata.
+    // Use allowErrors because the copy is empty and doesn't have the referenced variables.
+    await project.applyPatch({
+      projectOps: [{ type: 'addModel', payload: { name: 'ecosystem_copy' } }],
+    }, { allowErrors: true });
+    await project.applyPatch(
+      {
+        models: [
+          {
+            name: 'main',
+            ops: [
+              {
+                type: 'upsertModule',
+                payload: {
+                  module: {
+                    name: 'eco_module',
+                    modelName: 'ecosystem_copy',
+                    references: [{ src: 'prey', dst: 'hares' }],
+                    units: 'animals',
+                    documentation: 'Ecosystem module',
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      { allowErrors: true },
+    );
+
+    // Verify metadata survived the model reference change
+    json = JSON.parse(await project.serializeJson());
+    mainModelJson = json.models.find((m: JsonModelEntry) => m.name === 'main') as JsonModelEntry;
+    ecoModule = mainModelJson.modules?.find((m) => m.name === 'eco_module');
+    expect(ecoModule).toBeDefined();
+    expect(ecoModule!.modelName).toBe('ecosystem_copy');
+    expect(ecoModule!.references).toEqual([{ src: 'prey', dst: 'hares' }]);
+    expect(ecoModule!.units).toBe('animals');
+    expect(ecoModule!.documentation).toBe('Ecosystem module');
+
+    await project.dispose();
+  });
 });

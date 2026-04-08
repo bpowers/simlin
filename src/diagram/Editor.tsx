@@ -359,8 +359,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         }),
       );
       const project = defined(this.project());
+      // Simulation data comes from mainModel(), so variable idents are
+      // root-model-scoped. Only attach data when viewing the root model;
+      // otherwise child model variables would show wrong or empty series.
+      const isRootModel = this.state.modelStack.length === 0;
       this.setState({
-        activeProject: projectAttachData(project, data, this.state.modelName),
+        activeProject: isRootModel ? projectAttachData(project, data, this.state.modelName) : project,
         data,
       });
     } catch (e) {
@@ -387,7 +391,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
     const json = JSON.parse(await engine.serializeJson()) as JsonProject;
     let activeProject = await this.updateVariableErrors(projectFromJson(json));
-    if (this.state.data) {
+    if (this.state.data && this.state.modelStack.length === 0) {
       activeProject = projectAttachData(activeProject, this.state.data, this.state.modelName);
     }
 
@@ -1460,18 +1464,21 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    const onRenameVariable = !embedded ? this.handleRename : (_oldName: string, _newName: string): void => {};
+    // Stdlib models are read-only: disable all mutation handlers while
+    // keeping selection, viewbox, and drill-in navigation active.
+    const readOnly = embedded || isStdlibModel(this.state.modelName);
+    const onRenameVariable = !readOnly ? this.handleRename : (_oldName: string, _newName: string): void => {};
     const onSetSelection = !embedded ? this.handleSelection : (_selected: ReadonlySet<UID>): void => {};
-    const onMoveSelection = !embedded ? this.handleSelectionMove : (_position: Point): void => {};
-    const onMoveFlow = !embedded ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
-    const onMoveLabel = !embedded
+    const onMoveSelection = !readOnly ? this.handleSelectionMove : (_position: Point): void => {};
+    const onMoveFlow = !readOnly ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
+    const onMoveLabel = !readOnly
       ? this.handleMoveLabel
       : (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
-    const onAttachLink = !embedded ? this.handleLinkAttach : (_element: ViewElement, _to: string): void => {};
-    const onCreateVariable = !embedded ? this.handleCreateVariable : (_element: ViewElement): void => {};
-    const onClearSelectedTool = !embedded ? this.handleClearSelectedTool : () => {};
-    const onDeleteSelection = !embedded ? this.handleSelectionDelete : () => {};
-    const onShowVariableDetails = !embedded ? this.handleShowVariableDetails : () => {};
+    const onAttachLink = !readOnly ? this.handleLinkAttach : (_element: ViewElement, _to: string): void => {};
+    const onCreateVariable = !readOnly ? this.handleCreateVariable : (_element: ViewElement): void => {};
+    const onClearSelectedTool = !readOnly ? this.handleClearSelectedTool : () => {};
+    const onDeleteSelection = !readOnly ? this.handleSelectionDelete : () => {};
+    const onShowVariableDetails = !readOnly ? this.handleShowVariableDetails : () => {};
     const onViewBoxChange = !embedded ? this.handleViewBoxChange : () => {};
     const onDrillIntoModule = !embedded
       ? this.handleDrillIntoModule
@@ -1484,7 +1491,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         model={model}
         view={view}
         version={this.state.projectVersion}
-        selectedTool={this.state.selectedTool}
+        selectedTool={readOnly ? undefined : this.state.selectedTool}
         selection={this.state.selection}
         onRenameVariable={onRenameVariable}
         onSetSelection={onSetSelection}
@@ -1611,12 +1618,18 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       view.viewBox,
       view.zoom,
     );
+    const newModelName = currentModelName(newStack);
     this.setState({
       modelStack: newStack,
-      modelName: currentModelName(newStack),
+      modelName: newModelName,
       selection: new Set<UID>(),
       showDetails: undefined,
+      // Clear selected tool when entering a stdlib model (tool palette is hidden)
+      selectedTool: isStdlibModel(newModelName) ? undefined : this.state.selectedTool,
     });
+    // Refresh errors for the newly active model so warning dots and the
+    // error panel reflect the child model's state immediately.
+    setTimeout(() => void this.refreshCachedErrors());
   };
 
   handleNavigateBack = (): void => {
@@ -1640,6 +1653,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
       }
     });
+    // Refresh errors for the restored model
+    setTimeout(() => void this.refreshCachedErrors());
   };
 
   handleNavigateToLevel = (targetLevel: number): void => {
@@ -1661,6 +1676,8 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         await this.queueViewUpdate({ ...view, viewBox: result.restoredViewBox, zoom: result.restoredZoom });
       }
     });
+    // Refresh errors for the target level's model
+    setTimeout(() => void this.refreshCachedErrors());
   };
 
   handleSearchChange = async (_event: React.SyntheticEvent | null, newValue: string | null) => {
@@ -2097,15 +2114,34 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const newModelName = moduleIdent;
 
+    // Look up existing module to preserve metadata through the model reference change
+    const model = this.getModel();
+    const existingModule = model?.variables.get(moduleIdent);
+    const modulePayload: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string } = {
+      name: moduleIdent,
+      modelName: newModelName,
+    };
+    if (existingModule && existingModule.type === 'module') {
+      if (existingModule.references.length > 0) {
+        modulePayload.references = existingModule.references.map((r) => ({ src: r.src, dst: r.dst }));
+      }
+      if (existingModule.units) modulePayload.units = existingModule.units;
+      if (existingModule.documentation) modulePayload.documentation = existingModule.documentation;
+    }
+
     const patch: JsonProjectPatch = {
       projectOps: [{ type: 'addModel', payload: { name: newModelName } }],
-      models: [{
-        name: this.state.modelName,
-        ops: [{
-          type: 'upsertModule',
-          payload: { module: { name: moduleIdent, modelName: newModelName } },
-        }],
-      }],
+      models: [
+        // Seed a default empty view so getCanvas() works after drilling in
+        {
+          name: newModelName,
+          ops: [{ type: 'upsertView', payload: { index: 0, view: { elements: [] } } }],
+        },
+        {
+          name: this.state.modelName,
+          ops: [{ type: 'upsertModule', payload: { module: modulePayload } }],
+        },
+      ],
     };
 
     try {
@@ -2156,6 +2192,21 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       });
     }
 
+    // Preserve existing module metadata through the model reference change
+    const currentModel = this.getModel();
+    const existingModule = currentModel?.variables.get(moduleIdent);
+    const dupModulePayload: { name: string; modelName: string; references?: { src: string; dst: string }[]; units?: string; documentation?: string } = {
+      name: moduleIdent,
+      modelName: newModelName,
+    };
+    if (existingModule && existingModule.type === 'module') {
+      if (existingModule.references.length > 0) {
+        dupModulePayload.references = existingModule.references.map((r) => ({ src: r.src, dst: r.dst }));
+      }
+      if (existingModule.units) dupModulePayload.units = existingModule.units;
+      if (existingModule.documentation) dupModulePayload.documentation = existingModule.documentation;
+    }
+
     // Combined patch: create model, copy contents, update module reference.
     // Engine processes projectOps before model ops (patch.rs).
     const patch: JsonProjectPatch = {
@@ -2166,7 +2217,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           name: this.state.modelName,
           ops: [{
             type: 'upsertModule',
-            payload: { module: { name: moduleIdent, modelName: newModelName } },
+            payload: { module: dupModulePayload },
           }],
         },
       ],
@@ -2649,7 +2700,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const { embedded } = this.props;
     const { dialOpen, dialVisible, selectedTool } = this.state;
 
-    if (embedded) {
+    if (embedded || isStdlibModel(this.state.modelName)) {
       return undefined;
     }
 
