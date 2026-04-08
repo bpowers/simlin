@@ -2611,6 +2611,19 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     setTimeout(async () => {
       await this.openEngineProject(serializedProject);
+      // After undo/redo, the restored project may not contain the model
+      // we were viewing (e.g. undo after creating and drilling into a new
+      // submodel). Reset navigation state if the current model is gone.
+      const project = this.project();
+      if (project && this.state.modelStack.length > 0 && !project.models.has(this.state.modelName)) {
+        this.setState({
+          modelStack: [],
+          modelName: 'main',
+          selection: new Set<UID>(),
+          showDetails: undefined,
+          selectedTool: undefined,
+        });
+      }
       this.scheduleSimRun();
       this.scheduleSave();
     });

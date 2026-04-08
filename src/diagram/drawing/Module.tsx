@@ -127,7 +127,7 @@ export class Module extends React.PureComponent<ModuleProps> {
     });
 
     return (
-      <g className={groupClassName} onPointerDown={this.handlePointerDown} onDoubleClick={this.handleDoubleClick}>
+      <g className={groupClassName} onPointerDown={this.handlePointerDown}>
         <rect
           x={Math.ceil(cx - w / 2)}
           y={Math.ceil(cy - h / 2)}
@@ -135,6 +135,7 @@ export class Module extends React.PureComponent<ModuleProps> {
           height={h}
           rx={ModuleRadius}
           ry={ModuleRadius}
+          onDoubleClick={this.handleDoubleClick}
         />
         {indicator}
         {label}
