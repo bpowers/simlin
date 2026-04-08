@@ -227,14 +227,12 @@ describe('getAvailableModels', () => {
     expect(result.projectModels).toContain('foxes');
   });
 
-  it('includes stdlib models', () => {
+  it('returns empty stdlib list (not yet exposed through project serialization)', () => {
     const project = makeProject([
       makeModel('main', [makeAux('x')]),
     ]);
     const result = getAvailableModels(project, 'main');
-    expect(result.stdlibModels.length).toBeGreaterThan(0);
-    expect(result.stdlibModels).toContain('delay1');
-    expect(result.stdlibModels).toContain('smth3');
+    expect(result.stdlibModels).toEqual([]);
   });
 });
 

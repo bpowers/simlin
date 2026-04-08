@@ -6,7 +6,8 @@
 
 import type { Model, Project, Variable } from '@simlin/core/datamodel';
 
-import { STDLIB_MODEL_NAMES } from './module-navigation';
+// STDLIB_MODEL_NAMES import removed: stdlib models are not yet exposed
+// through the project serialization, so they can't be offered as options.
 
 /**
  * Counts how many module variables across all models in the project
@@ -87,7 +88,10 @@ export function getAvailableModels(
     projectModels.push(name);
   }
 
-  const stdlibModels = [...STDLIB_MODEL_NAMES];
+  // Stdlib models are not yet exposed through the project serialization,
+  // so they cannot be resolved, drilled into, or wired. Return an empty
+  // list until engine support for querying stdlib definitions is added.
+  const stdlibModels: ReadonlyArray<string> = [];
 
   return { projectModels, stdlibModels };
 }
