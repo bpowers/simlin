@@ -1162,6 +1162,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       };
     }
 
+    // AC5.2: patch targets this.state.modelName (not a hardcoded value), so
+    // module creation works at any nesting depth -- navigating into a child
+    // model updates modelName, and newly created modules land in that child.
     const patch: JsonProjectPatch = {
       models: [{ name: this.state.modelName, ops: [op] }],
     };
