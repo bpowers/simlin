@@ -160,7 +160,7 @@ export interface CanvasProps {
   model: Model;
   view: StockFlowView;
   version: number;
-  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   selection: ReadonlySet<UID>;
   onRenameVariable: (oldName: string, newName: string) => void;
   onSetSelection: (selected: ReadonlySet<UID>) => void;
@@ -194,7 +194,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
   selectionCenterOffset: Point | undefined;
   pointerId: number | undefined;
   elementBounds: Array<Rect | undefined> = [];
-  prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+  prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   // we have to regenerate selectionUpdates when selection !== props.selection
   selection: ReadonlySet<UID> = new Set<UID>();
   cachedVersion = -Infinity;

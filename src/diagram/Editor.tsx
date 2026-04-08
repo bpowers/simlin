@@ -55,6 +55,7 @@ import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
 import { FlowIcon } from './FlowIcon';
 import { LinkIcon } from './LinkIcon';
+import { ModuleIcon } from './ModuleIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
 import { renderSvgToString } from './render-common';
 import { Status } from './Status';
@@ -177,7 +178,7 @@ interface EditorState {
   modelStack: ReadonlyArray<ModuleStackEntry>;
   dialOpen: boolean;
   dialVisible: boolean;
-  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+  selectedTool: 'stock' | 'flow' | 'aux' | 'link' | 'module' | undefined;
   data: ReadonlyMap<string, Series>;
   selection: ReadonlySet<UID>;
   status: 'ok' | 'error' | 'disabled';
@@ -2046,6 +2047,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
   };
 
+  handleSelectModule = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.setState({
+      selectedTool: 'module',
+    });
+  };
+
   async refreshCachedErrors(): Promise<CachedErrorDetails | undefined> {
     const engine = this.engine();
     if (!engine) {
@@ -2364,6 +2373,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
           title="Link"
           onClick={this.handleSelectLink}
           selected={selectedTool === 'link'}
+        />
+        <SpeedDialAction
+          icon={<ModuleIcon />}
+          title="Module"
+          onClick={this.handleSelectModule}
+          selected={selectedTool === 'module'}
         />
       </SpeedDial>
     );
