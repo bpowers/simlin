@@ -16,6 +16,7 @@ import IconButton from './components/IconButton';
 import TextField from './components/TextField';
 import { AddIcon, RemoveIcon } from './components/icons';
 import { getAvailableModels, getInputPorts, getPublicVariables } from './module-details-utils';
+import { isStdlibModel } from './module-navigation';
 import { addReference, getAvailableSrcVariables, removeReference, updateReferenceDst, updateReferenceSrc } from './module-wiring';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import type { CustomEditor } from './drawing/SlateEditor';
@@ -106,9 +107,11 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
   renderModelRefSelector(): React.ReactNode {
     const { variable, project, currentModelName } = this.props;
     const { projectModels, stdlibModels } = getAvailableModels(project, currentModelName);
-    // Only show duplicate action when the model actually exists in the project
-    // (stdlib models are internal to the engine and not in project.models)
-    const hasModelRef = variable.modelName !== '' && project.models.has(variable.modelName);
+    // Show duplicate for user-defined models, not for stdlib models (read-only)
+    const hasModelRef =
+      variable.modelName !== '' &&
+      project.models.has(variable.modelName) &&
+      !isStdlibModel(variable.modelName);
 
     return (
       <div className={styles.modelRefSection}>

@@ -227,12 +227,75 @@ describe('getAvailableModels', () => {
     expect(result.projectModels).toContain('foxes');
   });
 
-  it('returns empty stdlib list (not yet exposed through project serialization)', () => {
+  it('returns empty stdlib list when project has no stdlib models', () => {
     const project = makeProject([
       makeModel('main', [makeAux('x')]),
     ]);
     const result = getAvailableModels(project, 'main');
     expect(result.stdlibModels).toEqual([]);
+  });
+
+  it('categorizes stdlib models separately from project models', () => {
+    const project = makeProject([
+      makeModel('main', [makeModule('rate_mod', 'stdlib\u{205A}systems_rate')]),
+      makeModel('hares', [makeAux('x')]),
+      makeModel('stdlib\u{205A}systems_rate', [makeAux('actual')]),
+    ]);
+    const result = getAvailableModels(project, 'main');
+    expect(result.projectModels).toContain('hares');
+    expect(result.projectModels).not.toContain('stdlib\u{205A}systems_rate');
+    expect(result.stdlibModels).toContain('stdlib\u{205A}systems_rate');
+  });
+
+  it('includes all referenced stdlib models in stdlib list', () => {
+    const project = makeProject([
+      makeModel('main', [
+        makeModule('rate_mod', 'stdlib\u{205A}systems_rate'),
+        makeModule('leak_mod', 'stdlib\u{205A}systems_leak'),
+      ]),
+      makeModel('stdlib\u{205A}systems_rate', [makeAux('actual')]),
+      makeModel('stdlib\u{205A}systems_leak', [makeAux('actual')]),
+    ]);
+    const result = getAvailableModels(project, 'main');
+    expect(result.stdlibModels).toContain('stdlib\u{205A}systems_rate');
+    expect(result.stdlibModels).toContain('stdlib\u{205A}systems_leak');
+    expect(result.projectModels).toHaveLength(0);
+  });
+});
+
+// Regression test: stdlib modules (hiring model scenario) should have
+// their model definitions accessible for input ports and public variables.
+describe('stdlib module wiring (regression)', () => {
+  it('can read input ports from a stdlib model in the project', () => {
+    const project = makeProject([
+      makeModel('main', [makeModule('outflows', 'stdlib\u{205A}systems_rate')]),
+      makeModel('stdlib\u{205A}systems_rate', [
+        makeAux('available', { canBeModuleInput: true }),
+        makeAux('requested', { canBeModuleInput: true }),
+        makeAux('dest_capacity', { canBeModuleInput: true }),
+        makeAux('actual', { isPublic: true }),
+      ]),
+    ]);
+    const stdlibModel = project.models.get('stdlib\u{205A}systems_rate')!;
+    expect(stdlibModel).toBeDefined();
+
+    const inputs = getInputPorts(stdlibModel);
+    expect(inputs).toHaveLength(3);
+    expect(inputs.map((v) => v.ident).sort()).toEqual(['available', 'dest_capacity', 'requested']);
+  });
+
+  it('can read public variables from a stdlib model in the project', () => {
+    const project = makeProject([
+      makeModel('main', [makeModule('outflows', 'stdlib\u{205A}systems_rate')]),
+      makeModel('stdlib\u{205A}systems_rate', [
+        makeAux('available', { canBeModuleInput: true }),
+        makeAux('actual', { isPublic: true }),
+      ]),
+    ]);
+    const stdlibModel = project.models.get('stdlib\u{205A}systems_rate')!;
+    const pubs = getPublicVariables(stdlibModel);
+    expect(pubs).toHaveLength(1);
+    expect(pubs[0].ident).toBe('actual');
   });
 });
 

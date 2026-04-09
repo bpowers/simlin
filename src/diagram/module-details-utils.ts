@@ -5,9 +5,7 @@
 // pattern: Functional Core
 
 import type { Model, Project, Variable } from '@simlin/core/datamodel';
-
-// STDLIB_MODEL_NAMES import removed: stdlib models are not yet exposed
-// through the project serialization, so they can't be offered as options.
+import { isStdlibModel } from './module-navigation';
 
 /**
  * Counts how many module variables across all models in the project
@@ -78,6 +76,7 @@ export function getAvailableModels(
   currentModelName: string,
 ): { projectModels: ReadonlyArray<string>; stdlibModels: ReadonlyArray<string> } {
   const projectModels: Array<string> = [];
+  const stdlibModels: Array<string> = [];
   for (const name of project.models.keys()) {
     if (name === currentModelName) {
       continue;
@@ -85,13 +84,12 @@ export function getAvailableModels(
     if (wouldCreateCycle(project, currentModelName, name)) {
       continue;
     }
-    projectModels.push(name);
+    if (isStdlibModel(name)) {
+      stdlibModels.push(name);
+    } else {
+      projectModels.push(name);
+    }
   }
-
-  // Stdlib models are not yet exposed through the project serialization,
-  // so they cannot be resolved, drilled into, or wired. Return an empty
-  // list until engine support for querying stdlib definitions is added.
-  const stdlibModels: ReadonlyArray<string> = [];
 
   return { projectModels, stdlibModels };
 }

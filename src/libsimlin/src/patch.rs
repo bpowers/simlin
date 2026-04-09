@@ -468,6 +468,10 @@ pub(crate) unsafe fn apply_project_patch_internal(
         );
         return;
     }
+    // A patch may add module variables that reference stdlib models
+    // (e.g. upsertModule with a stdlib modelName). Ensure those
+    // definitions are present so clients see them after serialization.
+    staged_datamodel.ensure_referenced_stdlib_models();
 
     // Hold the db lock for the entire sync-evaluate-decide cycle so that
     // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
