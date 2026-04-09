@@ -2537,7 +2537,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const serializedProject = await engine.serializeProtobuf();
 
-    const json = JSON.parse(await engine.serializeJson()) as JsonProject;
+    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
     const project = await this.updateVariableErrors(projectFromJson(json));
 
     this.setState({
@@ -2560,7 +2560,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
     this.engineProject = engine;
 
-    const json = JSON.parse(await engine.serializeJson()) as JsonProject;
+    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
     let project = projectFromJson(json);
 
     if (this.newEngineShouldPullView) {

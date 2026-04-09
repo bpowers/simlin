@@ -5,7 +5,7 @@
 // pattern: Functional Core
 
 import type { Model, Project, Variable } from '@simlin/core/datamodel';
-import { isStdlibModel, STDLIB_MODEL_NAMES, STDLIB_PREFIX } from './module-navigation';
+import { STDLIB_MODEL_NAMES, STDLIB_PREFIX } from './module-navigation';
 
 /**
  * Counts how many module variables across all models in the project
@@ -98,7 +98,10 @@ export function getAvailableModels(
       stdlibSet.delete(name);
       continue;
     }
-    if (isStdlibModel(name)) {
+    // Use prefix check (not isStdlibModel) so user models with bare
+    // stdlib names like "delay1" stay in projectModels. Only models
+    // with the engine's stdlib⁚ prefix are classified as stdlib.
+    if (name.startsWith(STDLIB_PREFIX)) {
       // Already in stdlibSet from the registry; nothing to do.
       continue;
     }

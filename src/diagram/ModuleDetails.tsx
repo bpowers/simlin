@@ -16,7 +16,7 @@ import IconButton from './components/IconButton';
 import TextField from './components/TextField';
 import { AddIcon, RemoveIcon } from './components/icons';
 import { getAvailableModels, getInputPorts, getPublicVariables } from './module-details-utils';
-import { isStdlibModel } from './module-navigation';
+import { STDLIB_PREFIX } from './module-navigation';
 import { addReference, getAvailableSrcVariables, removeReference, updateReferenceDst, updateReferenceSrc } from './module-wiring';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import type { CustomEditor } from './drawing/SlateEditor';
@@ -107,11 +107,13 @@ export class ModuleDetails extends React.PureComponent<ModuleDetailsProps, Modul
   renderModelRefSelector(): React.ReactNode {
     const { variable, project, currentModelName } = this.props;
     const { projectModels, stdlibModels } = getAvailableModels(project, currentModelName);
-    // Show duplicate for user-defined models, not for stdlib models (read-only)
+    // Show duplicate for user-defined models, not for stdlib models (read-only).
+    // Use prefix check so user models with bare stdlib names (e.g. "delay1")
+    // are still eligible for duplication.
     const hasModelRef =
       variable.modelName !== '' &&
       project.models.has(variable.modelName) &&
-      !isStdlibModel(variable.modelName);
+      !variable.modelName.startsWith(STDLIB_PREFIX);
 
     return (
       <div className={styles.modelRefSection}>

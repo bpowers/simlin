@@ -279,6 +279,17 @@ describe('getAvailableModels', () => {
     // systems_rate creates a cycle, so it should be excluded from the list
     expect(result.stdlibModels).not.toContain('stdlib\u{205A}systems_rate');
   });
+
+  it('treats user models with bare stdlib names as project models', () => {
+    // A user-created model named "delay1" (no stdlib prefix) should
+    // appear in projectModels, not stdlibModels.
+    const project = makeProject([
+      makeModel('main', [makeModule('d', 'delay1')]),
+      makeModel('delay1', [makeAux('x')]),
+    ]);
+    const result = getAvailableModels(project, 'main');
+    expect(result.projectModels).toContain('delay1');
+  });
 });
 
 // Regression test: stdlib modules (hiring model scenario) should have
