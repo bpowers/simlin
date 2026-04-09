@@ -350,10 +350,11 @@ def serialize_json(project_ptr: Any) -> bytes:
     output_len_ptr = ffi.new("uintptr_t *")
     err_ptr = ffi.new("SimlinError **")
 
-    # SimlinJsonFormat::Native = 0
+    # SimlinJsonFormat::Native = 0, include_stdlib = false
     lib.simlin_project_serialize_json(
         project_ptr,
         0,  # SIMLIN_JSON_FORMAT_NATIVE
+        False,  # include_stdlib
         output_ptr,
         output_len_ptr,
         err_ptr,

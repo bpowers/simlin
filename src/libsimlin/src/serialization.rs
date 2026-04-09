@@ -134,6 +134,7 @@ pub unsafe extern "C" fn simlin_project_serialize_protobuf(
 pub unsafe extern "C" fn simlin_project_serialize_json(
     project: *mut SimlinProject,
     format: u32,
+    include_stdlib: bool,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
@@ -171,16 +172,21 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
         }
     };
 
-    // Enrich a clone with stdlib model definitions so the TypeScript
-    // diagram editor can display and navigate into stdlib modules.
-    // The enrichment is only applied to the serialized JSON output,
-    // not to the in-memory datamodel or protobuf serialization, so
-    // stdlib models are never persisted to Firestore/disk.
-    let mut enriched = project_ref.datamodel.lock().unwrap().clone();
-    enriched.ensure_referenced_stdlib_models();
+    // When include_stdlib is true, enrich a clone with stdlib model
+    // definitions so the TypeScript diagram editor can display and
+    // navigate into stdlib modules. When false (e.g. for persistence),
+    // serialize the datamodel as-is to avoid storing engine internals.
+    let datamodel = project_ref.datamodel.lock().unwrap().clone();
+    let datamodel = if include_stdlib {
+        let mut enriched = datamodel;
+        enriched.ensure_referenced_stdlib_models();
+        enriched
+    } else {
+        datamodel
+    };
     let bytes = match format {
         ffi::SimlinJsonFormat::Native => {
-            let json_project: engine::json::Project = enriched.into();
+            let json_project: engine::json::Project = datamodel.into();
             match serde_json::to_vec(&json_project) {
                 Ok(data) => data,
                 Err(err) => {
@@ -194,7 +200,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
             }
         }
         ffi::SimlinJsonFormat::Sdai => {
-            let sdai_model: engine::json_sdai::SdaiModel = enriched.into();
+            let sdai_model: engine::json_sdai::SdaiModel = datamodel.into();
             match serde_json::to_vec(&sdai_model) {
                 Ok(data) => data,
                 Err(err) => {

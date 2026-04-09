@@ -224,11 +224,15 @@ export class Project {
   /**
    * Serialize this project to JSON format.
    * @param format JSON format (Native or SDAI)
+   * @param includeStdlib When true, inject referenced stdlib model
+   *   definitions into the output so the diagram editor can display
+   *   and navigate into stdlib modules. Use false (default) for
+   *   persistence to avoid storing engine internals.
    * @returns JSON string
    */
-  async serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native): Promise<string> {
+  async serializeJson(format: SimlinJsonFormat = SimlinJsonFormat.Native, includeStdlib: boolean = false): Promise<string> {
     this.checkDisposed();
-    const bytes = await this._backend.projectSerializeJson(this._handle, format);
+    const bytes = await this._backend.projectSerializeJson(this._handle, format, includeStdlib);
     return new TextDecoder().decode(bytes);
   }
 

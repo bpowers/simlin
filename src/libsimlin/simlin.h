@@ -726,6 +726,7 @@ void simlin_project_serialize_protobuf(SimlinProject *project,
 // - It is safe to serialize the same project multiple times.
 void simlin_project_serialize_json(SimlinProject *project,
                                    uint32_t format,
+                                   bool include_stdlib,
                                    uint8_t **out_buffer,
                                    uintptr_t *out_len,
                                    SimlinError **out_error);

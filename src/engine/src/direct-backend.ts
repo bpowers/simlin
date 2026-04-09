@@ -265,8 +265,8 @@ export class DirectBackend implements EngineBackend {
     return simlin_project_serialize_protobuf(this.getProjectPtr(handle));
   }
 
-  projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat): Uint8Array {
-    return simlin_project_serialize_json(this.getProjectPtr(handle), format);
+  projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat, includeStdlib: boolean = false): Uint8Array {
+    return simlin_project_serialize_json(this.getProjectPtr(handle), format, includeStdlib);
   }
 
   projectSerializeXmile(handle: ProjectHandle): Uint8Array {

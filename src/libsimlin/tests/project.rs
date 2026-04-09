@@ -1735,7 +1735,8 @@ fn test_stdlib_models_present_after_json_open() {
         err = ptr::null_mut();
         simlin_project_serialize_json(
             proj,
-            0, // Native format
+            0,    // Native format
+            true, // include stdlib models
             &mut out_buf as *mut *mut u8,
             &mut out_len as *mut usize,
             &mut err as *mut *mut SimlinError,

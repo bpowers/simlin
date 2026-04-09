@@ -33,6 +33,7 @@ fn test_project_json_roundtrip_sdai() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Sdai as u32,
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut out_error,
@@ -87,6 +88,7 @@ fn test_serialize_json_null_out_buffer() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Native as u32,
+            false,
             ptr::null_mut(),
             &mut out_len,
             &mut out_error,
@@ -111,6 +113,7 @@ fn test_serialize_json_null_out_len() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Native as u32,
+            false,
             &mut out_buffer,
             ptr::null_mut(),
             &mut out_error,
@@ -133,6 +136,7 @@ fn test_serialize_json_null_project() {
         simlin_project_serialize_json(
             ptr::null_mut(),
             SimlinJsonFormat::Native as u32,
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut out_error,
@@ -157,6 +161,7 @@ fn test_serialize_json_both_formats_work() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Native as u32,
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut out_error,
@@ -173,6 +178,7 @@ fn test_serialize_json_both_formats_work() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Sdai as u32,
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut out_error,
@@ -201,6 +207,7 @@ fn test_project_serialize_json_invalid_format() {
         simlin_project_serialize_json(
             proj,
             9999, // Invalid format discriminant
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut err,
@@ -240,6 +247,7 @@ fn test_project_serialize_json_native() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Native as u32,
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut out_error,
@@ -274,6 +282,7 @@ fn test_project_serialize_json_sdai() {
         simlin_project_serialize_json(
             proj,
             SimlinJsonFormat::Sdai as u32,
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut out_error,

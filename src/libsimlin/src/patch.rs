@@ -468,6 +468,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
         );
         return;
     }
+
     // Hold the db lock for the entire sync-evaluate-decide cycle so that
     // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
     // observe staged state for patches that are ultimately rejected or
