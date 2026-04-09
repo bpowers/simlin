@@ -1609,6 +1609,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!view) {
       return;
     }
+    // Guard: don't push a nonexistent model onto the navigation stack.
+    // Stdlib models are included in project.models by the engine's
+    // ensure_referenced_stdlib_models() enrichment.
     const project = this.project();
     if (!project || !project.models.has(targetModelName)) {
       return;

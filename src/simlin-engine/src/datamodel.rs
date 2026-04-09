@@ -1029,14 +1029,14 @@ pub struct Project {
 const STDLIB_PREFIX: &str = "stdlib\u{205A}";
 
 impl Project {
-    /// Ensures that any stdlib models referenced by module variables are
-    /// present in the project's `models` vec with up-to-date definitions.
-    /// Without this, clients that build their view of the project from
-    /// the serialized datamodel (e.g. the TypeScript diagram editor)
-    /// cannot display or navigate into stdlib modules.
+    /// Ensures the project's `models` vec contains definitions for every
+    /// stdlib model referenced by a module variable, and removes stdlib
+    /// definitions that are no longer referenced. Without this, clients
+    /// that build their view from the serialized datamodel (e.g. the
+    /// TypeScript diagram editor) cannot display or navigate into stdlib
+    /// modules.
     ///
-    /// Replaces stale stdlib model definitions with current ones and
-    /// adds any that are missing. Idempotent.
+    /// Idempotent. Preserves any user model that shadows a stdlib name.
     pub fn ensure_referenced_stdlib_models(&mut self) {
         // Collect the set of stdlib model names referenced by any module
         // variable across all models.
@@ -1052,36 +1052,33 @@ impl Project {
             }
         }
 
-        if referenced.is_empty() {
-            return;
-        }
-
-        // Replace existing stdlib models with current definitions (handles
-        // stale models from older project saves) and collect what's still
-        // missing.
-        for model in &mut self.models {
-            if referenced.contains(&model.name) {
-                let short_name = match model.name.strip_prefix(STDLIB_PREFIX) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                if let Some(current) = crate::stdlib::get(short_name) {
-                    *model = current;
-                    referenced.remove(&model.name);
-                }
+        // Prune stdlib models that are no longer referenced by any module.
+        // Only remove models whose name matches a known stdlib entry; user
+        // models that happen to start with the prefix are left alone.
+        self.models.retain(|model| {
+            if let Some(short) = model.name.strip_prefix(STDLIB_PREFIX)
+                && crate::stdlib::MODEL_NAMES.contains(&short)
+            {
+                return referenced.contains(&model.name);
             }
-        }
+            true
+        });
 
-        // Add stdlib models that weren't already in the project.
-        for full_name in referenced {
-            let short_name = match full_name.strip_prefix(STDLIB_PREFIX) {
-                Some(s) => s,
-                None => continue,
-            };
-            if let Some(stdlib_model) = crate::stdlib::get(short_name) {
-                self.models.push(stdlib_model);
-            }
-        }
+        // Add missing stdlib models from the embedded definitions.
+        // Collect into a Vec first to avoid borrowing self.models while
+        // pushing to it.
+        let existing: std::collections::HashSet<String> =
+            self.models.iter().map(|m| m.name.clone()).collect();
+        let to_add: Vec<Model> = referenced
+            .into_iter()
+            .filter(|name| !existing.contains(name.as_str()))
+            .filter_map(|full_name| {
+                full_name
+                    .strip_prefix(STDLIB_PREFIX)
+                    .and_then(crate::stdlib::get)
+            })
+            .collect();
+        self.models.extend(to_add);
     }
 }
 
@@ -1285,5 +1282,148 @@ mod tests {
         assert_eq!(project.models.len(), 3);
         assert!(project.get_model("stdlib\u{205A}systems_rate").is_some());
         assert!(project.get_model("stdlib\u{205A}systems_leak").is_some());
+    }
+
+    #[test]
+    fn ensure_stdlib_preserves_user_shadow_model() {
+        // A project may already contain a model whose name matches a stdlib
+        // name (e.g. imported from an older format). The enrichment must not
+        // overwrite it -- the user's model definition takes precedence.
+        let custom_var = Variable::Aux(Aux {
+            ident: "my_custom_var".to_string(),
+            equation: Equation::Scalar("42".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![Variable::Module(Module {
+                        ident: "rate_mod".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                // User-created model that shadows the stdlib name
+                Model {
+                    name: "stdlib\u{205A}systems_rate".to_string(),
+                    sim_specs: None,
+                    variables: vec![custom_var],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        project.ensure_referenced_stdlib_models();
+
+        // Should NOT add a duplicate -- the user's model already exists
+        assert_eq!(project.models.len(), 2);
+        // The user's custom variable should still be there (not replaced
+        // by the canonical stdlib definition)
+        let model = project.get_model("stdlib\u{205A}systems_rate").unwrap();
+        assert!(
+            model
+                .variables
+                .iter()
+                .any(|v| v.get_ident() == "my_custom_var"),
+            "user's custom variable should be preserved"
+        );
+    }
+
+    #[test]
+    fn ensure_stdlib_prunes_unreferenced_models() {
+        // Start with a project that has a stdlib model in its models vec
+        // but no module variable referencing it.
+        let stdlib_model = crate::stdlib::get("systems_rate").unwrap();
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                stdlib_model,
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        assert_eq!(project.models.len(), 2);
+        project.ensure_referenced_stdlib_models();
+        // The stdlib model should be removed since nothing references it
+        assert_eq!(project.models.len(), 1);
+        assert!(project.get_model("stdlib\u{205A}systems_rate").is_none());
+    }
+
+    #[test]
+    fn ensure_stdlib_keeps_referenced_prunes_unreferenced() {
+        let rate_model = crate::stdlib::get("systems_rate").unwrap();
+        let leak_model = crate::stdlib::get("systems_leak").unwrap();
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    // Only references systems_rate, not systems_leak
+                    variables: vec![Variable::Module(Module {
+                        ident: "rate_mod".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                rate_model,
+                leak_model,
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        assert_eq!(project.models.len(), 3);
+        project.ensure_referenced_stdlib_models();
+        // systems_rate stays (referenced), systems_leak is pruned
+        assert_eq!(project.models.len(), 2);
+        assert!(project.get_model("stdlib\u{205A}systems_rate").is_some());
+        assert!(project.get_model("stdlib\u{205A}systems_leak").is_none());
     }
 }

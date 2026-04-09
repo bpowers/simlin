@@ -5,7 +5,7 @@
 // pattern: Functional Core
 
 import type { Model, Project, Variable } from '@simlin/core/datamodel';
-import { isStdlibModel } from './module-navigation';
+import { isStdlibModel, STDLIB_MODEL_NAMES, STDLIB_PREFIX } from './module-navigation';
 
 /**
  * Counts how many module variables across all models in the project
@@ -76,7 +76,18 @@ export function getAvailableModels(
   currentModelName: string,
 ): { projectModels: ReadonlyArray<string>; stdlibModels: ReadonlyArray<string> } {
   const projectModels: Array<string> = [];
-  const stdlibModels: Array<string> = [];
+  // Start from the full stdlib registry so the "Standard Library"
+  // group is populated even before any stdlib module is referenced.
+  // Stdlib models don't need cycle checking because they never
+  // contain module variables that reference user models.
+  const stdlibSet = new Set<string>();
+  for (const shortName of STDLIB_MODEL_NAMES) {
+    const fullName = `${STDLIB_PREFIX}${shortName}`;
+    if (fullName !== currentModelName) {
+      stdlibSet.add(fullName);
+    }
+  }
+
   for (const name of project.models.keys()) {
     if (name === currentModelName) {
       continue;
@@ -85,13 +96,13 @@ export function getAvailableModels(
       continue;
     }
     if (isStdlibModel(name)) {
-      stdlibModels.push(name);
-    } else {
-      projectModels.push(name);
+      // Already in stdlibSet from the registry; nothing to do.
+      continue;
     }
+    projectModels.push(name);
   }
 
-  return { projectModels, stdlibModels };
+  return { projectModels, stdlibModels: [...stdlibSet] };
 }
 
 /**
