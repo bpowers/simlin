@@ -59,9 +59,7 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
                 .with_message(format!("failed to decode project protobuf: {decode_err}"))
         })?;
 
-        let mut datamodel_project: engine::datamodel::Project =
-            engine_serde::deserialize(pb_project);
-        datamodel_project.ensure_referenced_stdlib_models();
+        let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project);
         let (db, sync_state) = new_synced_db(&datamodel_project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             datamodel: Mutex::new(datamodel_project),
@@ -120,7 +118,7 @@ pub unsafe extern "C" fn simlin_project_open_json(
                 .with_message(format!("input JSON is not valid UTF-8: {utf8_err}"))
         })?;
 
-        let mut datamodel_project: engine::datamodel::Project = match format {
+        let datamodel_project: engine::datamodel::Project = match format {
             ffi::SimlinJsonFormat::Native => {
                 let json_project: engine::json::Project = engine::json::Project::from_reader(
                     json_str.as_bytes(),
@@ -141,7 +139,6 @@ pub unsafe extern "C" fn simlin_project_open_json(
                 sdai_model.into()
             }
         };
-        datamodel_project.ensure_referenced_stdlib_models();
 
         let (db, sync_state) = new_synced_db(&datamodel_project);
         Ok(Box::into_raw(Box::new(SimlinProject {
@@ -479,8 +476,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     let mut reader = BufReader::new(slice);
 
     match simlin_engine::open_xmile(&mut reader) {
-        Ok(mut datamodel_project) => {
-            datamodel_project.ensure_referenced_stdlib_models();
+        Ok(datamodel_project) => {
             let (db, sync_state) = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
@@ -540,8 +536,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
     };
 
     match simlin_engine::open_vensim(contents) {
-        Ok(mut datamodel_project) => {
-            datamodel_project.ensure_referenced_stdlib_models();
+        Ok(datamodel_project) => {
             let (db, sync_state) = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
@@ -637,8 +632,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
     };
 
     match result {
-        Ok(mut datamodel_project) => {
-            datamodel_project.ensure_referenced_stdlib_models();
+        Ok(datamodel_project) => {
             let (db, sync_state) = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
@@ -699,8 +693,7 @@ pub unsafe extern "C" fn simlin_project_open_systems(
     };
 
     match simlin_engine::open_systems(contents) {
-        Ok(mut datamodel_project) => {
-            datamodel_project.ensure_referenced_stdlib_models();
+        Ok(datamodel_project) => {
             let (db, sync_state) = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),

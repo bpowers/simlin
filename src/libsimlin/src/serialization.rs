@@ -171,10 +171,16 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
         }
     };
 
-    let datamodel_locked = project_ref.datamodel.lock().unwrap();
+    // Enrich a clone with stdlib model definitions so the TypeScript
+    // diagram editor can display and navigate into stdlib modules.
+    // The enrichment is only applied to the serialized JSON output,
+    // not to the in-memory datamodel or protobuf serialization, so
+    // stdlib models are never persisted to Firestore/disk.
+    let mut enriched = project_ref.datamodel.lock().unwrap().clone();
+    enriched.ensure_referenced_stdlib_models();
     let bytes = match format {
         ffi::SimlinJsonFormat::Native => {
-            let json_project: engine::json::Project = datamodel_locked.clone().into();
+            let json_project: engine::json::Project = enriched.into();
             match serde_json::to_vec(&json_project) {
                 Ok(data) => data,
                 Err(err) => {
@@ -188,7 +194,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
             }
         }
         ffi::SimlinJsonFormat::Sdai => {
-            let sdai_model: engine::json_sdai::SdaiModel = datamodel_locked.clone().into();
+            let sdai_model: engine::json_sdai::SdaiModel = enriched.into();
             match serde_json::to_vec(&sdai_model) {
                 Ok(data) => data,
                 Err(err) => {

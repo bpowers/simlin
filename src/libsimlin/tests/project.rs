@@ -1769,7 +1769,8 @@ fn test_stdlib_models_present_after_json_open() {
             model_names
         );
 
-        // Also verify model count reflects the added stdlib models
+        // The in-memory datamodel should NOT include stdlib models (they
+        // are only injected into the JSON serialization output).
         let mut model_count: usize = 0;
         err = ptr::null_mut();
         simlin_project_get_model_count(
@@ -1778,14 +1779,46 @@ fn test_stdlib_models_present_after_json_open() {
             &mut err as *mut *mut SimlinError,
         );
         assert!(err.is_null());
-        // main + 3 stdlib models
-        assert!(
-            model_count >= 4,
-            "expected at least 4 models (main + 3 stdlib), got {}",
-            model_count
+        assert_eq!(
+            model_count, 1,
+            "in-memory datamodel should only have 'main', not stdlib models"
+        );
+
+        // But the JSON output should have main + 3 stdlib models
+        assert_eq!(
+            model_names.len(),
+            4,
+            "JSON output should have main + 3 stdlib models: {:?}",
+            model_names
         );
 
         simlin_free(out_buf);
+
+        // Verify protobuf serialization does NOT include stdlib models
+        // (protobuf is used for Firestore persistence).
+        let mut pb_buf: *mut u8 = ptr::null_mut();
+        let mut pb_len: usize = 0;
+        err = ptr::null_mut();
+        simlin_project_serialize_protobuf(
+            proj,
+            &mut pb_buf as *mut *mut u8,
+            &mut pb_len as *mut usize,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null(), "protobuf serialize failed");
+        assert!(!pb_buf.is_null());
+
+        let pb_bytes = std::slice::from_raw_parts(pb_buf, pb_len);
+        let pb_project =
+            engine::project_io::Project::decode(pb_bytes).expect("protobuf decode failed");
+        let pb_model_names: Vec<&str> = pb_project.models.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            !pb_model_names.iter().any(|n| n.starts_with("stdlib")),
+            "protobuf output should NOT contain stdlib models: {:?}",
+            pb_model_names
+        );
+
+        simlin_free(pb_buf);
         simlin_project_unref(proj);
     }
 }
