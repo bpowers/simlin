@@ -93,6 +93,9 @@ export function getAvailableModels(
       continue;
     }
     if (wouldCreateCycle(project, currentModelName, name)) {
+      // Remove from stdlibSet too: a user-defined model that shadows
+      // a stdlib name and creates a cycle must not be offered.
+      stdlibSet.delete(name);
       continue;
     }
     if (isStdlibModel(name)) {

@@ -1053,8 +1053,14 @@ impl Project {
         }
 
         // Prune stdlib models that are no longer referenced by any module.
-        // Only remove models whose name matches a known stdlib entry; user
-        // models that happen to start with the prefix are left alone.
+        // Only removes models whose name matches both the stdlib prefix and
+        // one of the 9 known stdlib names from MODEL_NAMES. A user model
+        // that shadows a stdlib name (same prefix+name) is also pruned when
+        // unreferenced, which is correct: the stdlib prefix uses a special
+        // Unicode character that normal model creation never produces, so
+        // the only way a shadow model exists is through prior enrichment or
+        // an unusual import. When referenced, it is preserved (the add step
+        // below respects existing models).
         self.models.retain(|model| {
             if let Some(short) = model.name.strip_prefix(STDLIB_PREFIX)
                 && crate::stdlib::MODEL_NAMES.contains(&short)

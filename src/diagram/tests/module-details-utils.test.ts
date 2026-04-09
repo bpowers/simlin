@@ -265,6 +265,20 @@ describe('getAvailableModels', () => {
     expect(rateCount).toBe(1);
     expect(result.projectModels).toHaveLength(0);
   });
+
+  it('excludes stdlib shadow models that would create cycles', () => {
+    // A user model shadowing a stdlib name that would create a cycle
+    // must not be offered even though it appears in the stdlib registry.
+    const project = makeProject([
+      makeModel('main', [makeModule('rate_mod', 'stdlib\u{205A}systems_rate')]),
+      // Shadow model that references main -- selecting it from main
+      // would create a cycle: main -> systems_rate -> main
+      makeModel('stdlib\u{205A}systems_rate', [makeModule('back', 'main')]),
+    ]);
+    const result = getAvailableModels(project, 'main');
+    // systems_rate creates a cycle, so it should be excluded from the list
+    expect(result.stdlibModels).not.toContain('stdlib\u{205A}systems_rate');
+  });
 });
 
 // Regression test: stdlib modules (hiring model scenario) should have
