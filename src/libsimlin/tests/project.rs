@@ -1709,3 +1709,117 @@ fn test_error_offsets() {
         simlin_project_unref(proj);
     }
 }
+
+/// Verify that loading a project with stdlib module references (hiring model)
+/// includes the stdlib model definitions in the serialized JSON output.
+/// This is the regression test for the bug where the TypeScript diagram
+/// editor could not display or navigate into stdlib modules.
+#[test]
+fn test_stdlib_models_present_after_json_open() {
+    let hiring_json = std::fs::read("../../test/hiring.sd.json").unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_json(
+            hiring_json.as_ptr(),
+            hiring_json.len(),
+            0, // SimlinJsonFormat::Native
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(!proj.is_null(), "failed to open hiring model");
+        assert!(err.is_null(), "unexpected error opening hiring model");
+
+        // Serialize back to JSON and check that stdlib models are included
+        let mut out_buf: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        err = ptr::null_mut();
+        simlin_project_serialize_json(
+            proj,
+            0,    // Native format
+            true, // include stdlib models
+            &mut out_buf as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null(), "serialize failed");
+        assert!(!out_buf.is_null());
+        assert!(out_len > 0);
+
+        let json_bytes = std::slice::from_raw_parts(out_buf, out_len);
+        let json_str = std::str::from_utf8(json_bytes).unwrap();
+        let json: serde_json::Value = serde_json::from_str(json_str).unwrap();
+
+        let models = json["models"].as_array().unwrap();
+        let model_names: Vec<&str> = models.iter().map(|m| m["name"].as_str().unwrap()).collect();
+
+        // The hiring model references systems_rate, systems_conversion,
+        // and systems_leak stdlib modules. All should be present.
+        assert!(
+            model_names.contains(&"stdlib\u{205A}systems_rate"),
+            "stdlib systems_rate missing from serialized models: {:?}",
+            model_names
+        );
+        assert!(
+            model_names.contains(&"stdlib\u{205A}systems_conversion"),
+            "stdlib systems_conversion missing: {:?}",
+            model_names
+        );
+        assert!(
+            model_names.contains(&"stdlib\u{205A}systems_leak"),
+            "stdlib systems_leak missing: {:?}",
+            model_names
+        );
+
+        // The in-memory datamodel should NOT include stdlib models (they
+        // are only injected into the JSON serialization output).
+        let mut model_count: usize = 0;
+        err = ptr::null_mut();
+        simlin_project_get_model_count(
+            proj,
+            &mut model_count as *mut usize,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null());
+        assert_eq!(
+            model_count, 1,
+            "in-memory datamodel should only have 'main', not stdlib models"
+        );
+
+        // But the JSON output should have main + 3 stdlib models
+        assert_eq!(
+            model_names.len(),
+            4,
+            "JSON output should have main + 3 stdlib models: {:?}",
+            model_names
+        );
+
+        simlin_free(out_buf);
+
+        // Verify protobuf serialization does NOT include stdlib models
+        // (protobuf is used for Firestore persistence).
+        let mut pb_buf: *mut u8 = ptr::null_mut();
+        let mut pb_len: usize = 0;
+        err = ptr::null_mut();
+        simlin_project_serialize_protobuf(
+            proj,
+            &mut pb_buf as *mut *mut u8,
+            &mut pb_len as *mut usize,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(err.is_null(), "protobuf serialize failed");
+        assert!(!pb_buf.is_null());
+
+        let pb_bytes = std::slice::from_raw_parts(pb_buf, pb_len);
+        let pb_project =
+            engine::project_io::Project::decode(pb_bytes).expect("protobuf decode failed");
+        let pb_model_names: Vec<&str> = pb_project.models.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            !pb_model_names.iter().any(|n| n.starts_with("stdlib")),
+            "protobuf output should NOT contain stdlib models: {:?}",
+            pb_model_names
+        );
+
+        simlin_free(pb_buf);
+        simlin_project_unref(proj);
+    }
+}

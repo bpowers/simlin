@@ -5,9 +5,7 @@
 // pattern: Functional Core
 
 import type { Model, Project, Variable } from '@simlin/core/datamodel';
-
-// STDLIB_MODEL_NAMES import removed: stdlib models are not yet exposed
-// through the project serialization, so they can't be offered as options.
+import { STDLIB_MODEL_NAMES, STDLIB_PREFIX } from './module-navigation';
 
 /**
  * Counts how many module variables across all models in the project
@@ -78,22 +76,39 @@ export function getAvailableModels(
   currentModelName: string,
 ): { projectModels: ReadonlyArray<string>; stdlibModels: ReadonlyArray<string> } {
   const projectModels: Array<string> = [];
+  // Start from the full stdlib registry so the "Standard Library"
+  // group is populated even before any stdlib module is referenced.
+  // Stdlib models don't need cycle checking because they never
+  // contain module variables that reference user models.
+  const stdlibSet = new Set<string>();
+  for (const shortName of STDLIB_MODEL_NAMES) {
+    const fullName = `${STDLIB_PREFIX}${shortName}`;
+    if (fullName !== currentModelName) {
+      stdlibSet.add(fullName);
+    }
+  }
+
   for (const name of project.models.keys()) {
     if (name === currentModelName) {
       continue;
     }
     if (wouldCreateCycle(project, currentModelName, name)) {
+      // Remove from stdlibSet too: a user-defined model that shadows
+      // a stdlib name and creates a cycle must not be offered.
+      stdlibSet.delete(name);
+      continue;
+    }
+    // Use prefix check (not isStdlibModel) so user models with bare
+    // stdlib names like "delay1" stay in projectModels. Only models
+    // with the engine's stdlib⁚ prefix are classified as stdlib.
+    if (name.startsWith(STDLIB_PREFIX)) {
+      // Already in stdlibSet from the registry; nothing to do.
       continue;
     }
     projectModels.push(name);
   }
 
-  // Stdlib models are not yet exposed through the project serialization,
-  // so they cannot be resolved, drilled into, or wired. Return an empty
-  // list until engine support for querying stdlib definitions is added.
-  const stdlibModels: ReadonlyArray<string> = [];
-
-  return { projectModels, stdlibModels };
+  return { projectModels, stdlibModels: [...stdlibSet] };
 }
 
 /**

@@ -1434,6 +1434,7 @@ fn test_apply_patch_upsert_view_fast_path() {
         simlin_project_serialize_json(
             proj,
             0, // Native format
+            false,
             &mut out_buffer,
             &mut out_len,
             &mut serialize_err,

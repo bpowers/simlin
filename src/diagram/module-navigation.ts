@@ -144,7 +144,7 @@ export function breadcrumbSegments(stack: ReadonlyArray<ModuleStackEntry>): Read
 }
 
 // Unicode TWO DOT PUNCTUATION used as a separator in stdlib model names
-const STDLIB_PREFIX = 'stdlib\u{205A}';
+export const STDLIB_PREFIX = 'stdlib\u{205A}';
 
 /**
  * Returns true if the model name is one of the 9 stdlib models.

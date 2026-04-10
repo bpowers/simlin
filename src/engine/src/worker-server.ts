@@ -279,7 +279,7 @@ export class WorkerServer {
       }
       case 'projectSerializeJson': {
         const handle = this.getProjectHandle(request.handle);
-        const result = this.backend.projectSerializeJson(handle, request.format as SimlinJsonFormat);
+        const result = this.backend.projectSerializeJson(handle, request.format as SimlinJsonFormat, request.includeStdlib ?? false);
         this.sendBytesWithTransfer(requestId, result);
         return;
       }

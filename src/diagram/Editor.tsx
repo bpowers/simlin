@@ -388,7 +388,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!engine) {
       return;
     }
-    const json = JSON.parse(await engine.serializeJson()) as JsonProject;
+    // Include stdlib model definitions so the editor can display and
+    // navigate into stdlib modules. The save path does NOT pass
+    // includeStdlib, so stdlib models are never persisted.
+    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
     let activeProject = await this.updateVariableErrors(projectFromJson(json));
     if (this.state.data) {
       activeProject = projectAttachData(activeProject, this.state.data, 'main');
@@ -1609,8 +1612,9 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!view) {
       return;
     }
-    // Don't drill into models that aren't materialized in the project
-    // (e.g. stdlib models that are internal to the engine).
+    // Guard: don't push a nonexistent model onto the navigation stack.
+    // Stdlib models are included in project.models because the editor
+    // passes includeStdlib=true when calling serializeJson().
     const project = this.project();
     if (!project || !project.models.has(targetModelName)) {
       return;
@@ -1692,8 +1696,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
     const element = this.getNamedElement(canonicalize(newValue));
     this.handleSelection(element ? new Set([element.uid]) : new Set());
+    // Don't open the mutation-capable details panel for read-only
+    // models (stdlib models, embedded mode). The Canvas-level guard
+    // at line ~1480 handles double-click, but search bypasses it.
+    const readOnly = this.props.embedded || isStdlibModel(this.state.modelName);
     this.setState({
-      showDetails: 'variable',
+      showDetails: readOnly ? undefined : 'variable',
     });
     if (element) {
       await this.centerVariable(element);
@@ -2529,7 +2537,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
     const serializedProject = await engine.serializeProtobuf();
 
-    const json = JSON.parse(await engine.serializeJson()) as JsonProject;
+    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
     const project = await this.updateVariableErrors(projectFromJson(json));
 
     this.setState({
@@ -2552,7 +2560,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
     this.engineProject = engine;
 
-    const json = JSON.parse(await engine.serializeJson()) as JsonProject;
+    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
     let project = projectFromJson(json);
 
     if (this.newEngineShouldPullView) {

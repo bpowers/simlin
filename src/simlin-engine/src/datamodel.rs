@@ -1025,6 +1025,69 @@ pub struct Project {
     pub ai_information: Option<AiInformation>,
 }
 
+/// Unicode TWO DOT PUNCTUATION used as a separator in stdlib model names.
+const STDLIB_PREFIX: &str = "stdlib\u{205A}";
+
+impl Project {
+    /// Ensures the project's `models` vec contains definitions for every
+    /// stdlib model referenced by a module variable, and removes stdlib
+    /// definitions that are no longer referenced. Without this, clients
+    /// that build their view from the serialized datamodel (e.g. the
+    /// TypeScript diagram editor) cannot display or navigate into stdlib
+    /// modules.
+    ///
+    /// Idempotent. Preserves any user model that shadows a stdlib name.
+    pub fn ensure_referenced_stdlib_models(&mut self) {
+        // Collect the set of stdlib model names referenced by any module
+        // variable across all models.
+        let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for model in &self.models {
+            for var in &model.variables {
+                if let Variable::Module(m) = var
+                    && !m.model_name.is_empty()
+                    && m.model_name.starts_with(STDLIB_PREFIX)
+                {
+                    referenced.insert(m.model_name.clone());
+                }
+            }
+        }
+
+        // Prune stdlib models that are no longer referenced by any module.
+        // Only removes models whose name matches both the stdlib prefix and
+        // one of the 9 known stdlib names from MODEL_NAMES. A user model
+        // that shadows a stdlib name (same prefix+name) is also pruned when
+        // unreferenced, which is correct: the stdlib prefix uses a special
+        // Unicode character that normal model creation never produces, so
+        // the only way a shadow model exists is through prior enrichment or
+        // an unusual import. When referenced, it is preserved (the add step
+        // below respects existing models).
+        self.models.retain(|model| {
+            if let Some(short) = model.name.strip_prefix(STDLIB_PREFIX)
+                && crate::stdlib::MODEL_NAMES.contains(&short)
+            {
+                return referenced.contains(&model.name);
+            }
+            true
+        });
+
+        // Add missing stdlib models from the embedded definitions.
+        // Collect into a Vec first to avoid borrowing self.models while
+        // pushing to it.
+        let existing: std::collections::HashSet<String> =
+            self.models.iter().map(|m| m.name.clone()).collect();
+        let to_add: Vec<Model> = referenced
+            .into_iter()
+            .filter(|name| !existing.contains(name.as_str()))
+            .filter_map(|full_name| {
+                full_name
+                    .strip_prefix(STDLIB_PREFIX)
+                    .and_then(crate::stdlib::get)
+            })
+            .collect();
+        self.models.extend(to_add);
+    }
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq)]
 pub struct AiInformation {
@@ -1059,5 +1122,314 @@ impl Project {
         self.models
             .iter_mut()
             .find(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_project_with_module(model_name: &str) -> Project {
+        Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![Variable::Module(Module {
+                    ident: "my_module".to_string(),
+                    model_name: model_name.to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: Compat::default(),
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    #[test]
+    fn ensure_stdlib_adds_referenced_model() {
+        let mut project = minimal_project_with_module("stdlib\u{205A}systems_rate");
+        assert_eq!(project.models.len(), 1);
+
+        project.ensure_referenced_stdlib_models();
+
+        assert_eq!(project.models.len(), 2);
+        let stdlib_model = project.get_model("stdlib\u{205A}systems_rate");
+        assert!(
+            stdlib_model.is_some(),
+            "stdlib model should be present after enrichment"
+        );
+    }
+
+    #[test]
+    fn ensure_stdlib_idempotent() {
+        let mut project = minimal_project_with_module("stdlib\u{205A}systems_rate");
+        project.ensure_referenced_stdlib_models();
+        assert_eq!(project.models.len(), 2);
+
+        // Calling again should not duplicate
+        project.ensure_referenced_stdlib_models();
+        assert_eq!(project.models.len(), 2);
+    }
+
+    #[test]
+    fn ensure_stdlib_skips_user_models() {
+        let mut project = minimal_project_with_module("my_custom_model");
+        project.ensure_referenced_stdlib_models();
+
+        // Should not add anything for non-stdlib references
+        assert_eq!(project.models.len(), 1);
+    }
+
+    #[test]
+    fn ensure_stdlib_skips_empty_model_name() {
+        let mut project = minimal_project_with_module("");
+        project.ensure_referenced_stdlib_models();
+        assert_eq!(project.models.len(), 1);
+    }
+
+    #[test]
+    fn ensure_stdlib_handles_multiple_references_to_same_model() {
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    Variable::Module(Module {
+                        ident: "mod_a".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    }),
+                    Variable::Module(Module {
+                        ident: "mod_b".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        project.ensure_referenced_stdlib_models();
+        // Two modules referencing the same stdlib model should only add it once
+        assert_eq!(project.models.len(), 2);
+    }
+
+    #[test]
+    fn ensure_stdlib_adds_multiple_different_models() {
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    Variable::Module(Module {
+                        ident: "rate_mod".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    }),
+                    Variable::Module(Module {
+                        ident: "leak_mod".to_string(),
+                        model_name: "stdlib\u{205A}systems_leak".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        project.ensure_referenced_stdlib_models();
+        assert_eq!(project.models.len(), 3);
+        assert!(project.get_model("stdlib\u{205A}systems_rate").is_some());
+        assert!(project.get_model("stdlib\u{205A}systems_leak").is_some());
+    }
+
+    #[test]
+    fn ensure_stdlib_preserves_user_shadow_model() {
+        // A project may already contain a model whose name matches a stdlib
+        // name (e.g. imported from an older format). The enrichment must not
+        // overwrite it -- the user's model definition takes precedence.
+        let custom_var = Variable::Aux(Aux {
+            ident: "my_custom_var".to_string(),
+            equation: Equation::Scalar("42".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![Variable::Module(Module {
+                        ident: "rate_mod".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                // User-created model that shadows the stdlib name
+                Model {
+                    name: "stdlib\u{205A}systems_rate".to_string(),
+                    sim_specs: None,
+                    variables: vec![custom_var],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        project.ensure_referenced_stdlib_models();
+
+        // Should NOT add a duplicate -- the user's model already exists
+        assert_eq!(project.models.len(), 2);
+        // The user's custom variable should still be there (not replaced
+        // by the canonical stdlib definition)
+        let model = project.get_model("stdlib\u{205A}systems_rate").unwrap();
+        assert!(
+            model
+                .variables
+                .iter()
+                .any(|v| v.get_ident() == "my_custom_var"),
+            "user's custom variable should be preserved"
+        );
+    }
+
+    #[test]
+    fn ensure_stdlib_prunes_unreferenced_models() {
+        // Start with a project that has a stdlib model in its models vec
+        // but no module variable referencing it.
+        let stdlib_model = crate::stdlib::get("systems_rate").unwrap();
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                stdlib_model,
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        assert_eq!(project.models.len(), 2);
+        project.ensure_referenced_stdlib_models();
+        // The stdlib model should be removed since nothing references it
+        assert_eq!(project.models.len(), 1);
+        assert!(project.get_model("stdlib\u{205A}systems_rate").is_none());
+    }
+
+    #[test]
+    fn ensure_stdlib_keeps_referenced_prunes_unreferenced() {
+        let rate_model = crate::stdlib::get("systems_rate").unwrap();
+        let leak_model = crate::stdlib::get("systems_leak").unwrap();
+        let mut project = Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    // Only references systems_rate, not systems_leak
+                    variables: vec![Variable::Module(Module {
+                        ident: "rate_mod".to_string(),
+                        model_name: "stdlib\u{205A}systems_rate".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: Compat::default(),
+                    })],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                },
+                rate_model,
+                leak_model,
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        assert_eq!(project.models.len(), 3);
+        project.ensure_referenced_stdlib_models();
+        // systems_rate stays (referenced), systems_leak is pruned
+        assert_eq!(project.models.len(), 2);
+        assert!(project.get_model("stdlib\u{205A}systems_rate").is_some());
+        assert!(project.get_model("stdlib\u{205A}systems_leak").is_none());
     }
 }

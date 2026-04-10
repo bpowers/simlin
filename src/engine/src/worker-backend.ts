@@ -366,12 +366,13 @@ export class WorkerBackend implements EngineBackend {
     }));
   }
 
-  projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat): Promise<Uint8Array> {
+  projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat, includeStdlib: boolean = false): Promise<Uint8Array> {
     return this.sendRequest<Uint8Array>((requestId) => ({
       type: 'projectSerializeJson',
       requestId,
       handle,
       format,
+      includeStdlib,
     }));
   }
 
