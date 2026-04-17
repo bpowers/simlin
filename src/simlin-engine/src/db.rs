@@ -1525,6 +1525,146 @@ pub fn model_dependency_graph(
 
 // ── Diagnostic collection ──────────────────────────────────────────────
 
+/// Collect the identifiers that must share units because they sit in the
+/// "value branches" of an `if isModuleInput(x) then x else y` conditional.
+///
+/// Every stdlib delay/smooth module's stock-init equation selects between
+/// a caller-supplied `initial_value` and the module's `input`; the stdlib
+/// marks this choice with an `isModuleInput(initial_value)` predicate, so
+/// `initial_value` (then-branch) and `input` (else-branch) are the pair
+/// whose units must agree.  Other identifiers that appear elsewhere in
+/// the init AST -- notably `delay_time` in `delay1`/`delay3`, which is
+/// multiplied against the value-branch result -- are *coefficients*, not
+/// value-equivalents, and their units legitimately differ.  Grabbing every
+/// identifier with `identifier_set` (as the original code did) conflates
+/// these roles and produces spurious unit mismatches between `input`
+/// (units X/time) and `delay_time` (units of time) whenever both are
+/// module-input arguments.
+///
+/// We walk the entire AST looking for any `If(App(IsModuleInput(_)), ..)`
+/// subtree and return the union of identifiers from its then-branch and
+/// else-branch.  If no such subtree exists, we return an empty set, which
+/// causes the pairwise-compatibility check in `check_model_units` to skip
+/// this stock entirely (the check requires `>= 2` bound inputs to proceed).
+/// That is the correct behaviour: without the `isModuleInput` marker we
+/// have no structural signal that the init AST's identifiers must share
+/// units.
+fn init_value_equivalence_group(
+    ast: &crate::ast::Ast<crate::ast::Expr2>,
+) -> HashSet<Ident<Canonical>> {
+    use crate::ast::{Ast, Expr2};
+    use crate::builtins::BuiltinFn;
+
+    /// Collect every `Ident<Canonical>` referenced by `expr` (variables and
+    /// subscripts).  Does not descend into `BuiltinFn::IsModuleInput`
+    /// predicates because the argument there is a compile-time module-slot
+    /// name, not a runtime value.  All other builtin args are walked
+    /// normally so coefficients in the value branches are included too --
+    /// for example `x * 3` in the then-branch still records `x`.
+    fn collect_idents(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) {
+        match expr {
+            Expr2::Const(_, _, _) => {}
+            Expr2::Var(id, _, _) => {
+                out.insert(id.clone());
+            }
+            Expr2::Subscript(id, args, _, _) => {
+                out.insert(id.clone());
+                for arg in args {
+                    if let crate::ast::IndexExpr2::Expr(e) = arg {
+                        collect_idents(e, out);
+                    }
+                }
+            }
+            Expr2::Op1(_, e, _, _) => collect_idents(e, out),
+            Expr2::Op2(_, l, r, _, _) => {
+                collect_idents(l, out);
+                collect_idents(r, out);
+            }
+            Expr2::If(c, t, f, _, _) => {
+                collect_idents(c, out);
+                collect_idents(t, out);
+                collect_idents(f, out);
+            }
+            Expr2::App(builtin, _, _) => {
+                use crate::builtins::{BuiltinContents, walk_builtin_expr};
+                if let BuiltinFn::IsModuleInput(_, _) = builtin {
+                    return;
+                }
+                walk_builtin_expr(builtin, |c| {
+                    if let BuiltinContents::Expr(inner) = c {
+                        collect_idents(inner, out);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Walk the AST looking for an `If(App(IsModuleInput(_)), t, f, ..)`
+    /// subtree; on the first match append the identifiers of both value
+    /// branches to `out` and return.  We match only the first such
+    /// subtree -- stdlib modules use this pattern at most once per init
+    /// equation, and a second isModuleInput inside a branch would likely
+    /// indicate a different constraint we do not want to collapse.
+    fn find_value_branches(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) -> bool {
+        match expr {
+            Expr2::If(cond, t, f, _, _) => {
+                if let Expr2::App(BuiltinFn::IsModuleInput(_, _), _, _) = cond.as_ref() {
+                    collect_idents(t, out);
+                    collect_idents(f, out);
+                    return true;
+                }
+                find_value_branches(cond, out)
+                    || find_value_branches(t, out)
+                    || find_value_branches(f, out)
+            }
+            Expr2::Op2(_, l, r, _, _) => find_value_branches(l, out) || find_value_branches(r, out),
+            Expr2::Op1(_, e, _, _) => find_value_branches(e, out),
+            Expr2::App(builtin, _, _) => {
+                use crate::builtins::{BuiltinContents, walk_builtin_expr};
+                let mut found = false;
+                walk_builtin_expr(builtin, |c| {
+                    if let BuiltinContents::Expr(inner) = c
+                        && !found
+                    {
+                        found = find_value_branches(inner, &mut *out);
+                    }
+                });
+                found
+            }
+            Expr2::Subscript(_, args, _, _) => {
+                for arg in args {
+                    if let crate::ast::IndexExpr2::Expr(e) = arg
+                        && find_value_branches(e, out)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => false,
+        }
+    }
+
+    let mut out = HashSet::new();
+    match ast {
+        Ast::Scalar(expr) => {
+            find_value_branches(expr, &mut out);
+        }
+        Ast::ApplyToAll(_, expr) => {
+            find_value_branches(expr, &mut out);
+        }
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            for expr in elements.values() {
+                find_value_branches(expr, &mut out);
+            }
+            if let Some(default_expr) = default_expr {
+                find_value_branches(default_expr, &mut out);
+            }
+        }
+    }
+    out
+}
+
 /// Per-model tracked function that performs unit inference and checking,
 /// accumulating unit warnings/errors through the salsa accumulator.
 ///
@@ -1682,17 +1822,23 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                     None => continue,
                 };
                 // Find groups of inputs that must have compatible units.
-                // In smth1/delay1, the stock's init equation references both
-                // "input" and "initial_value", constraining them to the same units.
-                // We check all input argument pairs that bind to variables
-                // appearing together in a stock init equation.
+                //
+                // In smth1/smth3 the stock's init equation is
+                // `if isModuleInput(initial_value) then initial_value else input`,
+                // constraining `input` and `initial_value` (and nothing else) to
+                // share units.  In delay1/delay3 the same conditional is
+                // multiplied by `delay_time`, which is a coefficient whose units
+                // are independent.  We specifically extract the identifiers that
+                // sit in the value branches of the `if isModuleInput(...)` test
+                // (see `init_value_equivalence_group`); the simple textual
+                // `identifier_set` would also return `delay_time`, which is what
+                // produced the spurious delay3 mismatches in World3.
                 let stock_init_deps: Vec<HashSet<Ident<Canonical>>> = submodel
                     .variables
                     .values()
                     .filter_map(|sv| {
                         if matches!(sv, crate::variable::Variable::Stock { .. }) {
-                            sv.ast()
-                                .map(|ast| crate::variable::identifier_set(ast, &[], None))
+                            sv.ast().map(init_value_equivalence_group)
                         } else {
                             None
                         }

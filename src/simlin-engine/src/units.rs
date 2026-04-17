@@ -880,3 +880,34 @@ fn test_builtin_unit_equivalences() {
     let result = build_unit_components(&context, &expr).unwrap();
     assert_eq!(result, expected, "Units should resolve to unit");
 }
+
+#[test]
+fn debug_user_alias_with_underscore_identifiers() {
+    // Reproduce the WRLD3 situation: a user declares `Resource unit` with
+    // alias `Resource units`, and variables write `Resource_unit` and
+    // `Resource_units` (spaces → underscores) as their declared units.
+    // Both parses should produce the same UnitMap via alias resolution.
+    let units = vec![Unit {
+        name: "Resource unit".to_string(),
+        equation: None,
+        disabled: false,
+        aliases: vec!["Resource units".to_string()],
+    }];
+    let context = Context::new_with_builtins(&units, &Default::default()).unwrap();
+
+    let expr = Expr0::new("Resource_unit", LexerType::Units)
+        .unwrap()
+        .unwrap();
+    let result1 = build_unit_components(&context, &expr).unwrap();
+
+    let expr = Expr0::new("Resource_units", LexerType::Units)
+        .unwrap()
+        .unwrap();
+    let result2 = build_unit_components(&context, &expr).unwrap();
+
+    assert_eq!(
+        result1, result2,
+        "Resource_unit and Resource_units should resolve to the same unit map. \
+         Got result1={result1:?} result2={result2:?}"
+    );
+}
