@@ -210,6 +210,12 @@ impl XmileFormatter {
         quoted_space_to_underbar(name)
     }
 
+    // Each match arm has an inner `if args.len() >= N` guarding access to
+    // positional arguments before falling back to the default call formatting
+    // below. The uniform per-arm style keeps the transformation comments
+    // adjacent to the checks they describe, so we allow the lint here instead
+    // of spreading the guard across 17+ pattern lines.
+    #[allow(clippy::collapsible_match)]
     fn format_call_ctx(
         &self,
         name: &str,

@@ -2407,7 +2407,7 @@ fn find_cross_dimensional_offsets(
             None
         })
         .collect();
-    offsets.sort_by(|a, b| a.1.cmp(&b.1));
+    offsets.sort_by_key(|a| a.1);
     offsets
 }
 

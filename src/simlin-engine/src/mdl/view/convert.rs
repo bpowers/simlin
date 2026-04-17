@@ -225,11 +225,9 @@ fn adjust_takeoff_point(
 fn reassign_uids_sequential(elements: &mut [ViewElement]) -> HashMap<i32, i32> {
     // Build old_uid -> new_uid mapping
     let mut uid_map: HashMap<i32, i32> = HashMap::new();
-    let mut next_uid = 1;
-    for elem in elements.iter() {
+    for (next_uid, elem) in (1_i32..).zip(elements.iter()) {
         let old_uid = elem.get_uid();
         uid_map.insert(old_uid, next_uid);
-        next_uid += 1;
     }
 
     let remap = |uid: i32| -> i32 { uid_map.get(&uid).copied().unwrap_or(uid) };

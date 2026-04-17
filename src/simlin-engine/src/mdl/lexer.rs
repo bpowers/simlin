@@ -1035,7 +1035,7 @@ mod tests {
     fn test(input: &str, expected: Vec<(&str, RawToken)>) {
         let tokenizer = RawLexer::new(input);
         let len = expected.len();
-        for (token, (expected_span, expected_tok)) in tokenizer.zip(expected.into_iter()) {
+        for (token, (expected_span, expected_tok)) in tokenizer.zip(expected) {
             let expected_start = expected_span.find('~').unwrap();
             let expected_end = expected_span.rfind('~').unwrap() + 1;
             assert_eq!(Ok((expected_start, expected_tok, expected_end)), token);

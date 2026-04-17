@@ -4517,10 +4517,7 @@ fn make_positioning_state(
         flow_ident_to_clouds: HashMap::new(),
     };
 
-    let mut next_uid = 1;
-    for &(ident, x, y, kind) in existing {
-        let uid = next_uid;
-        next_uid += 1;
+    for (uid, &(ident, x, y, kind)) in (1_i32..).zip(existing.iter()) {
         state.uid_manager.add(uid, ident);
         state.positions.insert(uid, Position::new(x, y));
 

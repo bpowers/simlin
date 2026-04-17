@@ -33,9 +33,14 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 fn write_and_rename(tmp: &Path, target: &Path, contents: &[u8]) -> io::Result<()> {
     fs::write(tmp, contents)?;
 
-    let file = fs::File::open(tmp)?;
-    file.sync_all()?;
-    drop(file);
+    // Sync the written data to disk and close the handle before renaming.
+    // The scope block ensures the File is dropped (closing the fd) before the
+    // rename below, which matters on Windows where renames over open handles
+    // can fail.
+    {
+        let file = fs::File::open(tmp)?;
+        file.sync_all()?;
+    }
 
     // On Windows, rename does not atomically replace an existing file.
     // Remove the target first so rename succeeds.

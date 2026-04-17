@@ -183,7 +183,7 @@ fn normalize_project(mut project: Project) -> Project {
                 }
             })
             .collect();
-        dims_by_size.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        dims_by_size.sort_by_key(|(_, elems)| std::cmp::Reverse(elems.len()));
         for (dim_name, elems) in &dims_by_size {
             for elem in elems {
                 elem_to_dim

@@ -269,12 +269,10 @@ fn is_canonical(name: &str) -> bool {
             let b = bytes[i];
             match b {
                 b'"' | b'.' | b' ' | b'\n' | b'\r' | b'\t' => return false,
-                b'\\' => {
-                    if i + 1 < bytes.len() {
-                        let next = bytes[i + 1];
-                        if next == b'\\' || next == b'n' || next == b'r' {
-                            return false;
-                        }
+                b'\\' if i + 1 < bytes.len() => {
+                    let next = bytes[i + 1];
+                    if next == b'\\' || next == b'n' || next == b'r' {
+                        return false;
                     }
                 }
                 b if b.is_ascii_uppercase() => return false,

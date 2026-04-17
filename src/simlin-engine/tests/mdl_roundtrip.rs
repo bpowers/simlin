@@ -940,7 +940,7 @@ fn multiset(items: &[String]) -> HashMap<String, usize> {
 fn multiset_delta(lhs: &HashMap<String, usize>, rhs: &HashMap<String, usize>) -> Vec<String> {
     let mut delta = Vec::new();
     let mut items: Vec<_> = lhs.iter().collect();
-    items.sort_by(|(a, _), (b, _)| a.cmp(b));
+    items.sort_by_key(|(a, _)| *a);
     for (item, lhs_count) in items {
         let rhs_count = rhs.get(item).copied().unwrap_or(0);
         for _ in 0..lhs_count.saturating_sub(rhs_count) {
