@@ -645,16 +645,35 @@ impl IndexedGraph {
         false
     }
 
-    /// Deduplicate circuits by node-set.  Keys are sorted `Vec<u32>` so each
-    /// key is ~4 bytes per node rather than the per-character weight of the
-    /// old `String::join(",")` path.
+    /// Deduplicate circuits by node-set.
+    ///
+    /// Two distinct elementary circuits can share a node set when the same
+    /// nodes are visited in different rotations (e.g. `a->b->c->a` vs.
+    /// `a->c->b->a` in a graph with edges in both orientations); the LTM
+    /// semantics fold these into a single loop.  See
+    /// `test_layout_arms_race` for a graph where this actually fires.
+    ///
+    /// Keys are a 64-bit fingerprint of the sorted node-index vector via
+    /// the default SipHash-1-3 hasher seeded from process RNG.  This is
+    /// within-process deterministic (every circuit uses the same seed) and
+    /// the birthday-collision probability over wrld3's 1.86M circuits is
+    /// under 1e-7 -- well below any observable impact on loop counts.
+    /// Storing u64 fingerprints instead of full sorted `Vec<u32>` keys
+    /// drops the dedup footprint from ~440 MiB to ~30 MiB on wrld3 at
+    /// uncapped enumeration.
     fn dedup_circuits(circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-        let mut seen: HashSet<Vec<u32>> = HashSet::with_capacity(circuits.len());
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        let state = RandomState::new();
+        let mut seen: HashSet<u64> = HashSet::with_capacity(circuits.len());
         let mut unique = Vec::with_capacity(circuits.len());
+        let mut scratch: Vec<u32> = Vec::new();
         for c in circuits {
-            let mut key = c.clone();
-            key.sort_unstable();
-            if seen.insert(key) {
+            scratch.clear();
+            scratch.extend_from_slice(&c);
+            scratch.sort_unstable();
+            if seen.insert(state.hash_one(&scratch)) {
                 unique.push(c);
             }
         }
