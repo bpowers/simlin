@@ -1779,7 +1779,7 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
 /// circuits with different variable-level structures. Each gets its own
 /// scalar loop with a unique element-specific ID suffix.
 fn build_element_level_loops(
-    element_circuits: &[Vec<String>],
+    element_circuits: &super::LoopCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
     source_vars: &HashMap<String, super::SourceVariable>,
     db: &dyn Db,
@@ -1789,26 +1789,39 @@ fn build_element_level_loops(
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
+    // Materialize each circuit as a small `Vec<&str>` once so downstream
+    // grouping, name stripping, and node-wise comparisons don't pay the
+    // indexed-lookup cost repeatedly.  The backing storage stays in
+    // `element_circuits.names`, so these slices are all borrows into the
+    // existing name table rather than per-call allocations.
+    let circuit_strs: Vec<Vec<&str>> = (0..element_circuits.len())
+        .map(|i| element_circuits.circuit_names(i).collect())
+        .collect();
+
     // Group element-level circuits by their variable-level node sequence.
-    // The key is the joined stripped names; the value collects all circuits
-    // that share that variable-level structure.
-    let mut groups: HashMap<String, Vec<&Vec<String>>> = HashMap::new();
-    for circuit in element_circuits {
+    // The key is the joined stripped names; the value collects indices
+    // into `circuit_strs` that share that variable-level structure.
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (ci, circuit) in circuit_strs.iter().enumerate() {
         let var_level_key: String = circuit
             .iter()
             .map(|n| strip_subscript(n))
             .collect::<Vec<_>>()
             .join("\x00");
-        groups.entry(var_level_key).or_default().push(circuit);
+        groups.entry(var_level_key).or_default().push(ci);
     }
 
     // Sort groups deterministically by their key.
-    let mut sorted_groups: Vec<(String, Vec<&Vec<String>>)> = groups.into_iter().collect();
+    let mut sorted_groups: Vec<(String, Vec<usize>)> = groups.into_iter().collect();
     sorted_groups.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut all_loops: Vec<Loop> = Vec::new();
 
-    for (_group_key, circuits_in_group) in &sorted_groups {
+    for (_group_key, group_indices) in &sorted_groups {
+        let circuits_in_group: Vec<&[&str]> = group_indices
+            .iter()
+            .map(|&ci| circuit_strs[ci].as_slice())
+            .collect();
         // Determine if this is a pure-dimension group.
         //
         // A group is pure-dimension when:
@@ -1824,7 +1837,7 @@ fn build_element_level_loops(
         // When a model has no arrayed variables, circuits won't have
         // subscripts and each group has exactly one circuit -- they are
         // scalar loops.
-        let representative = circuits_in_group[0];
+        let representative: &[&str] = circuits_in_group[0];
         let all_subscripted = representative.iter().all(|n| n.contains('['));
 
         // Detect cross-element circuits that should NOT be collapsed
@@ -1893,7 +1906,7 @@ fn build_element_level_loops(
             // Look at the first subscripted node to find which dimensions
             // it carries, then map canonical dim names to original
             // datamodel names for equation parsing.
-            let first_var_name = strip_subscript(&representative[0]);
+            let first_var_name = strip_subscript(representative[0]);
             let dimensions = source_vars
                 .get(first_var_name)
                 .map(|sv| {
@@ -2097,7 +2110,7 @@ pub fn model_ltm_variables(
     // the element-level graph has no variable data populated.
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let circuits_result = model_element_loop_circuits(db, model, project);
-        if circuits_result.circuits.is_empty() {
+        if circuits_result.is_empty() {
             if !has_input_ports {
                 return LtmVariablesResult { vars: vec![] };
             }
@@ -2108,7 +2121,7 @@ pub fn model_ltm_variables(
             let var_graph = causal_graph_with_modules(db, model, project);
 
             let detected = build_element_level_loops(
-                &circuits_result.circuits,
+                circuits_result,
                 &var_graph,
                 source_vars,
                 db,

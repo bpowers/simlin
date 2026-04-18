@@ -206,7 +206,7 @@ fn generate_link_score_equation(
         generate_flow_to_stock_equation(from.as_str(), to.as_str(), to_var)
     } else if is_stock_to_flow {
         // Use stock-to-flow formula
-        generate_stock_to_flow_equation(from, to, to_var, all_vars)
+        generate_stock_to_flow_equation(from, to, to_var)
     } else {
         // Use standard auxiliary-to-auxiliary formula
         generate_auxiliary_to_auxiliary_equation(from, to, to_var)
@@ -328,7 +328,6 @@ fn generate_stock_to_flow_equation(
     stock: &Ident<Canonical>,
     flow: &Ident<Canonical>,
     flow_var: &Variable,
-    all_vars: &HashMap<Ident<Canonical>, Variable>,
 ) -> String {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
@@ -368,17 +367,6 @@ fn generate_stock_to_flow_equation(
     };
 
     let partial_eq = build_partial_equation(&flow_equation, &deps, stock);
-
-    // Check if this flow affects the stock (is it an inflow or outflow?)
-    let stock_var = all_vars.get(stock);
-    let _is_affecting_stock = if let Some(Variable::Stock {
-        inflows, outflows, ..
-    }) = stock_var
-    {
-        inflows.contains(flow) || outflows.contains(flow)
-    } else {
-        false
-    };
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
     // For stock-to-flow: x=stock, z=flow

@@ -581,10 +581,65 @@ fn expand_same_element(
     }
 }
 
-/// Deduplicated loop circuits as node name lists.
+/// Deduplicated loop circuits in an indexed form.
+///
+/// Flat `Vec<Vec<String>>` was O(circuits × path_len) in owned-string
+/// allocations, which dominated RSS on dense graphs like WRLD3 where a
+/// single 166-node SCC produced ~1.86M circuits × 47 nodes ≈ 87M strings
+/// over only ~166 distinct names.  The indexed form keeps a single shared
+/// `names` table (one `String` per unique node) plus `circuits` as
+/// `Vec<Vec<u32>>`; reconstructing named circuits is a one-liner lookup.
+///
+/// Consumers that need the legacy `Vec<Vec<String>>` view can call
+/// [`LoopCircuitsResult::to_named_circuits`].  Prefer
+/// [`LoopCircuitsResult::circuit_names`] or direct index iteration when
+/// you only need to read the names.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct LoopCircuitsResult {
-    pub circuits: Vec<Vec<String>>,
+    /// Unique variable names referenced by any circuit.  The integer
+    /// values inside `circuits` index into this vector.  Names are in
+    /// the canonical (lex-sorted) node ordering produced by the indexed
+    /// enumerator so identical models deterministically produce identical
+    /// results -- a prerequisite for salsa's pointer-equal caching.
+    pub names: Vec<String>,
+    /// Each circuit is a deduplicated sequence of indices into `names`.
+    /// Circuits are emitted in the enumerator's deterministic order.
+    pub circuits: Vec<Vec<u32>>,
+}
+
+impl LoopCircuitsResult {
+    /// Number of circuits.  Convenience wrapper around `circuits.len()`.
+    pub fn len(&self) -> usize {
+        self.circuits.len()
+    }
+
+    /// True when no circuits were found (or the enumerator exhausted its
+    /// budget and returned an empty placeholder).
+    pub fn is_empty(&self) -> bool {
+        self.circuits.is_empty()
+    }
+
+    /// Iterate the variable names of circuit `idx` as `&str` slices
+    /// without allocating a per-node `String`.
+    ///
+    /// Panics if `idx >= self.len()`, matching the behavior of a direct
+    /// `self.circuits[idx]` index.
+    pub fn circuit_names(&self, idx: usize) -> impl Iterator<Item = &str> {
+        self.circuits[idx]
+            .iter()
+            .map(|&i| self.names[i as usize].as_str())
+    }
+
+    /// Materialize the legacy `Vec<Vec<String>>` view.  Allocates one
+    /// `String` per referenced node; only use in tests or at API
+    /// boundaries that require owned strings -- prefer `circuit_names`
+    /// or index-based iteration otherwise.
+    pub fn to_named_circuits(&self) -> Vec<Vec<String>> {
+        self.circuits
+            .iter()
+            .map(|c| c.iter().map(|&i| self.names[i as usize].clone()).collect())
+            .collect()
+    }
 }
 
 /// A detected feedback loop with polarity and deterministic ID.
@@ -636,7 +691,7 @@ pub(super) fn normalize_module_ref_str(s: &str) -> String {
 /// Construct a lightweight CausalGraph from a CausalEdgesResult.
 /// Variables and module_graphs are empty -- suitable for graph algorithms
 /// (circuit finding, SCC computation) but not for polarity analysis.
-pub(crate) fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
+pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
     use crate::common::{Canonical, Ident};
     use std::collections::HashSet;
 
@@ -1009,13 +1064,8 @@ pub fn model_loop_circuits(
 ) -> LoopCircuitsResult {
     let edges_result = model_causal_edges(db, model, project);
     let graph = causal_graph_from_edges(edges_result);
-    let circuits = graph.find_circuit_node_lists();
-    LoopCircuitsResult {
-        circuits: circuits
-            .into_iter()
-            .map(|c| c.into_iter().map(|n| n.to_string()).collect())
-            .collect(),
-    }
+    let (names, circuits) = graph.find_indexed_circuits();
+    LoopCircuitsResult { names, circuits }
 }
 
 /// Detect feedback loops with polarity analysis and deterministic IDs.
@@ -1152,13 +1202,8 @@ pub fn model_element_loop_circuits(
 ) -> LoopCircuitsResult {
     let element_edges = model_element_causal_edges(db, model, project);
     let graph = causal_graph_from_element_edges(element_edges);
-    let circuits = graph.find_circuit_node_lists();
-    LoopCircuitsResult {
-        circuits: circuits
-            .into_iter()
-            .map(|c| c.into_iter().map(|n| n.to_string()).collect())
-            .collect(),
-    }
+    let (names, circuits) = graph.find_indexed_circuits();
+    LoopCircuitsResult { names, circuits }
 }
 
 /// Compute stock-to-stock cycle partitions at element granularity.
@@ -1481,6 +1526,107 @@ mod classify_element_dependency_tests {
         assert_eq!(
             classify(&project, "relative_pop", "population"),
             ElementDependencyKind::CrossElement
+        );
+    }
+}
+
+#[cfg(test)]
+mod loop_circuits_result_tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    /// Small feedback-loop project: population -> births -> population.
+    fn feedback_project() -> TestProject {
+        TestProject::new("loop_result_test")
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.1", None)
+    }
+
+    fn compute_loop_circuits(project: &TestProject) -> LoopCircuitsResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+        model_loop_circuits(&db, source_model, source_project).clone()
+    }
+
+    /// `to_named_circuits` must reconstruct the same owned-string lists
+    /// that the legacy `Vec<Vec<String>>` shape would have produced.
+    #[test]
+    fn test_loop_circuits_result_lookup_matches_legacy() {
+        let result = compute_loop_circuits(&feedback_project());
+
+        let legacy: Vec<Vec<String>> = result.to_named_circuits();
+        assert_eq!(legacy.len(), result.len());
+
+        for (ci, circuit_idx) in result.circuits.iter().enumerate() {
+            let names: Vec<&str> = result.circuit_names(ci).collect();
+            let legacy_names: Vec<&str> = legacy[ci].iter().map(String::as_str).collect();
+            assert_eq!(names, legacy_names);
+
+            // And each index resolves to the same name.
+            for (slot, &ni) in circuit_idx.iter().enumerate() {
+                assert_eq!(result.names[ni as usize], legacy[ci][slot]);
+            }
+        }
+
+        // The legacy loop has two nodes: population and births, both in
+        // the name table exactly once.
+        assert!(result.names.iter().any(|n| n == "population"));
+        assert!(result.names.iter().any(|n| n == "births"));
+    }
+
+    /// The shared name table should contain no duplicates and be sorted
+    /// lexicographically -- the enumerator relies on lex-sorted indices
+    /// for its small-start dedup, so the exposed table must preserve
+    /// that invariant.
+    #[test]
+    fn test_loop_circuits_result_names_are_unique_and_sorted() {
+        let project = TestProject::new("multi_node_loop")
+            .stock("a", "10", &["f1"], &[], None)
+            .flow("f1", "a * 0.1", None)
+            .stock("b", "20", &["f2"], &[], None)
+            .flow("f2", "b * 0.2", None);
+        let result = compute_loop_circuits(&project);
+
+        let mut sorted = result.names.clone();
+        sorted.sort();
+        assert_eq!(
+            result.names, sorted,
+            "names should be in lex-sorted order (the enumerator's canonical ordering)"
+        );
+
+        let mut dedup = result.names.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(
+            dedup.len(),
+            result.names.len(),
+            "names should contain no duplicates"
+        );
+    }
+
+    /// A pure DAG produces zero circuits and an empty names table.
+    /// Trimming names to cycle-participating nodes is what keeps the
+    /// salsa LoopCircuitsResult stable under renames of acyclic
+    /// variables -- see the `find_indexed_circuits_trims_names_to_cycle_participants`
+    /// regression test in `ltm.rs::tests` for the positive-side invariant.
+    #[test]
+    fn test_loop_circuits_result_empty_on_dag() {
+        let project = TestProject::new("dag_only")
+            .scalar_const("a", 1.0)
+            .scalar_aux("b", "a + 1")
+            .scalar_aux("c", "b * 2");
+        let result = compute_loop_circuits(&project);
+
+        assert!(result.is_empty(), "pure DAG must produce zero circuits");
+        assert_eq!(result.len(), 0);
+        assert_eq!(result.to_named_circuits().len(), 0);
+        assert!(
+            result.names.is_empty(),
+            "empty circuits must produce empty names table so salsa stays stable under acyclic-variable renames"
         );
     }
 }

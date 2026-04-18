@@ -168,3 +168,108 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Count**: 3 affected tests (as of 2026-02-24)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-24
+
+### 20. LTM FixedIndex References Expand to N-squared Edges
+
+- **Component**: simlin-engine (src/simlin-engine/src/db_analysis.rs)
+- **Severity**: high
+- **Description**: `classify_element_dependency` lumps both wildcard reducers (`population[*]`) and fixed-index references (`population[NYC]`) under `CrossElement`, which `expand_edge_to_elements` then expands to the full N-by-N element cross-product. For a pattern like `relative_pop[R] = population / population[NYC]` the true element structure is two N-edge patterns (same-element and broadcast from NYC), not N-squared. On arrays with tens of elements the spurious edges trigger combinatorial loop-enumeration blow-ups even though their runtime link scores are effectively zero. Fix: add a `FixedIndex(element)` classification and emit `source[element] -> target[d]` edges instead of the all-to-all expansion.
+- **Measure**: Build a test model with explicit subscript references and count element-level edges vs. `N + N` expected.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 21. LTM Polarity Analysis Has Reducer Blind Spots
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `analyze_expr_polarity_with_context`)
+- **Severity**: medium
+- **Description**: Only the scalar two-arg forms of `Max(a, Some(b))` / `Min(a, Some(b))` are handled; the array reducer forms (`Sum`, `Mean`, `Max(_, None)`, `Min(_, None)`, `Stddev`, `Rank`) fall through to `App(_, _, _) => Unknown`. Any variable computed via `SUM(x[*])` or `MEAN(x[*])` therefore contributes `Unknown` polarity, and every loop through it is classified `Undetermined`. For `Sum` and `Mean` polarity is trivially the argument's polarity (monotone in every element). Graphical-function monotonicity also uses a strict EPSILON=1e-10 check that flags numeric import noise as `Unknown`. Fix: add reducer cases (pass through for SUM/MEAN, Unknown for STDDEV/RANK) and consider a plateau-tolerant GF monotonicity check.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 22. LTM Dedup Keys Fold Distinct Directed Cycles with Matching Node Sets
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `IndexedGraph::dedup_circuits`, `CausalGraph::deduplicate_loops`)
+- **Severity**: medium
+- **Description**: Dedup hashes the sorted node-index vector. In a multidigraph a cycle A->B->C->A and the distinct cycle A->C->B->A share a node set and are silently merged into a single `Loop`. `test_layout_arms_race` exercises this today. For scalar SD models with asymmetric dependency structure the merge happens to be benign, but the semantics are wrong: the two cycles have distinct edge sequences and potentially distinct polarity products. Fix: key dedup by a canonical edge-sequence rotation (rotate so the lex-smallest node starts the cycle, then compare the ordered edge list) instead of the sorted node set.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 23. LTM Circuit Enumeration Is Tiernan-Style, Not Johnson's
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `IndexedGraph::enumerate_circuits_in_scc`)
+- **Severity**: RESOLVED
+- **Description**: (**Resolved** in commit aa56c5a1 on the reduce-ltm-mem branch.) Production code now implements Johnson 1975 with the blocked-set + B[w] unblock-list mechanism; the misnamed "Johnson-style" Tiernan variant is retained only under `#[cfg(test)]` as a test oracle for a Johnson-vs-Tiernan equivalence proptest.  Keeping the entry as a historical pointer to the commit that fixed it.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-18
+
+### 24. LTM SearchGraph Uses String-Backed Idents in Hot Path
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs `SearchGraph::check_outbound_uses`)
+- **Severity**: medium
+- **Description**: The per-timestep strongest-path DFS keys `best_score` and `visiting` on `Ident<Canonical>` (String-backed), cloning identifiers into hash maps on every recursive call. For a 1000-variable model with 500 saved timesteps this is ~5x10^7 map operations per run; element-level expansion makes it far worse. Apply the same NodeId indexing pattern that `IndexedGraph` uses in the exhaustive path: per-timestep `Vec<u32>`-indexed `SearchGraph`, dense `Vec<f64>` for `best_score`, `Vec<bool>` for `visiting`. Expected 5-10x speedup on large discovery runs.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 25. LTM Element-Level Loop Enumeration Runs at Wrong Granularity
+
+- **Component**: simlin-engine (src/simlin-engine/src/db_analysis.rs `model_element_loop_circuits`)
+- **Severity**: medium
+- **Description**: `model_element_loop_circuits` enumerates circuits on the element graph. For a pure-A2A model with 20 variables over a 100-element dimension, every variable-level circuit produces 100 element-level circuits that `build_element_level_loops` then collapses into one A2A loop. The multiplication hits MAX_LTM_CIRCUITS=100_000 far sooner than variable-level enumeration would. Fix: enumerate at the variable level first, tag each loop's edges by same-element / cross-element / scalar, and only element-level-enumerate the cross-element subgraph. Cost becomes additive in N for pure-A2A loops instead of multiplicative.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 26. LTM A2A Partial Equation Is Wrong When Target Mixes Same-Element and Cross-Element References
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs `build_partial_equation`)
+- **Severity**: medium
+- **Description**: For a target like `share[R] = population / SUM(population[*])` the source `population` appears both as a bare (same-element) reference and inside a wildcard reducer. The A2A ceteris-paribus wrapper leaves all `population` references unchanged, so when `share[nyc]` is evaluated in the partial, `SUM(population[*])` uses CURRENT populations for every element instead of PREV for the non-target elements. The partial equals the full expression, link-score magnitude is always 1, and dominance is misattributed. Fix: detect dual-mode references during AST analysis and either split into separate same-element and cross-element link scores or fall back to explicit per-element scalar scores for the edge.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 27. LTM STDDEV/RANK Fallback Scores Are Silently Wrong
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs `generate_nonlinear_partial`)
+- **Severity**: medium
+- **Description**: For STDDEV and RANK the "nonlinear" reducer path returns the target variable itself, yielding a delta-ratio `(target - PREV(target)) / (source[d] - PREV(source[d]))` instead of a ceteris-paribus partial. Under uniform scaling of all elements, STDDEV does not change, but the delta-ratio still reports nonzero per-element attributions. Fix: unroll STDDEV element-by-element with the standard formula `sqrt(((s[d] - mean_p)^2 + sum_{i!=d}(PREV(s[i]) - mean_p)^2) / N)` where `mean_p = (s[d] + sum_{i!=d}PREV(s[i]))/N`. Similar unroll applies to RANK.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 28. LTM Discovery Truncates Before Partition-Scoped Filtering
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs `rank_and_filter`)
+- **Severity**: low
+- **Description**: `rank_and_filter` sorts loops by average absolute score, truncates to MAX_LOOPS=200, and then applies MIN_CONTRIBUTION filtering per-partition. A loop that is dominant in a small partition but globally ranked below 200 is lost before the partition scope sees it. In practice MAX_LOOPS is generous enough that the case is rare; the comment already acknowledges the concern. Fix: filter first, truncate second.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 29. LTM LOOPSCORE / PATHSCORE Builtins Not Implemented
+
+- **Component**: simlin-engine (LTM augmentation layer)
+- **Severity**: low
+- **Description**: The reference treats `LOOPSCORE(path...)` and `PATHSCORE(path...)` as primitives users invoke to track loops the heuristic discovery may have missed. Simlin does not implement them. Given discovery is heuristic, users currently have no way to pin a specific loop and compare it across runs or parameter sweeps. Fix: generate one synthetic variable per user-named loop that computes the product of its constituent link scores; coexists cleanly with discovery.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 30. LTM Polarity Confidence Metric Missing
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `LoopPolarity::from_runtime_scores`)
+- **Severity**: low
+- **Description**: The paper's polarity-confidence metric `|r - |b|| / (r + |b|)` classifies loops as Rux/Bux when mostly one polarity. Simlin collapses any sign change to Undetermined, losing information on mostly-reinforcing loops that briefly dip balancing (or vice versa). Fix: retain the ratio alongside the categorical polarity and surface it in `DetectedLoopsResult`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 31. RK4 + LTM Combination Has No Hard-Error Guard
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs flow-to-stock path)
+- **Severity**: medium
+- **Description**: The 2023 flow-to-stock link-score formula assumes Euler integration: `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` aligns the numerator to the causal interval that drove the stock change from t-1 to t. Under RK2/RK4 this alignment breaks and link scores become mathematically nonsensical. Nothing currently prevents a user from setting `integration_method = RK4` and `ltm_enabled = true`; they'd get numbers that look plausible but are wrong. Fix: emit a compile-time diagnostic (preferably an Error) when LTM is enabled on a model whose sim specs select a non-Euler integrator.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17
+
+### 32. LTM Unused `_is_affecting_stock` Flag
+
+- **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs:374)
+- **Severity**: low
+- **Description**: `generate_stock_to_flow_equation` computes `_is_affecting_stock` and discards it. Either use it (e.g., zero out scores for non-connected stock->flow pairs) or delete. Trivial cleanup.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-17

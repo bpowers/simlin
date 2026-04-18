@@ -1723,14 +1723,11 @@ fn test_model_loop_circuits_finds_feedback() {
     let circuits = model_loop_circuits(&db, model, result.project);
 
     // population -> births -> population is the single feedback loop
-    assert!(
-        !circuits.circuits.is_empty(),
-        "should find at least one circuit"
-    );
-    let has_pop_births_loop = circuits
-        .circuits
-        .iter()
-        .any(|c| c.contains(&"population".to_string()) && c.contains(&"births".to_string()));
+    assert!(!circuits.is_empty(), "should find at least one circuit");
+    let has_pop_births_loop = (0..circuits.len()).any(|i| {
+        let names: Vec<&str> = circuits.circuit_names(i).collect();
+        names.contains(&"population") && names.contains(&"births")
+    });
     assert!(has_pop_births_loop, "should find population-births loop");
 }
 
@@ -1888,7 +1885,7 @@ fn test_ltm_caching_dep_change_recomputes_circuits() {
     // Prime the cache
     let circuits_before = model_loop_circuits(&db, source_model, source_project);
     assert!(
-        !circuits_before.circuits.is_empty(),
+        !circuits_before.is_empty(),
         "should have circuits initially"
     );
 
@@ -1899,7 +1896,7 @@ fn test_ltm_caching_dep_change_recomputes_circuits() {
 
     let circuits_after = model_loop_circuits(&db, source_model, source_project);
     assert!(
-        circuits_after.circuits.is_empty(),
+        circuits_after.is_empty(),
         "should have no circuits after breaking loop"
     );
 }
