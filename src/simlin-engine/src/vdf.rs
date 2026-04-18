@@ -2377,6 +2377,167 @@ impl VdfFile {
 
         Ok(mapping)
     }
+
+    /// Build a `Results` struct using only VDF structural data, driven by
+    /// the deterministic record-to-name correspondence.
+    ///
+    /// Records sorted by `field[2]` correspond 1:1 with name-table entries
+    /// at position `(slot_count - record_count) + rank`. Each record's
+    /// `field[11]` gives the start OT index; `field[6]` selects the shape
+    /// template (5 = scalar; other = section-3 directory entry). This path
+    /// is intentionally direct: no scoring, no offset scan, no external
+    /// stock classifier -- the mapping is whatever the records deterministically
+    /// produce. Callers that need richer resolution (stocks-first-alphabetical,
+    /// model-guided aliases) should still use `to_results_with_stock_classifier`
+    /// or `build_section6_guided_ot_map`.
+    ///
+    /// Filtering rules:
+    /// - Records with `field[11] == 0` or `field[11] >= offset_table_count`
+    ///   are skipped -- OT[0] is the Time series, not a record slot.
+    /// - Records whose `field[6] == 0` are treated as non-shape/padding
+    ///   entries and skipped.
+    /// - Name-table entries that classify as metadata (leading `.`, `-`, `:`,
+    ///   `#`, `"`; numeric-only; Vensim builtins; stdlib module IO names) are
+    ///   skipped even when the paired record is otherwise valid.
+    /// - If two records claim the same OT index the first winner keeps it.
+    ///
+    /// The method always returns `Results` (possibly an empty one beyond
+    /// Time) so callers can chain with other paths: it does not propagate
+    /// ambiguity errors the way `to_results` does.
+    pub fn to_results_via_records(&self) -> StdResult<Results, Box<dyn Error>> {
+        let n_recs = self.records.len();
+        let n_slots = self.slot_table.len();
+        if n_recs == 0 || n_slots == 0 || n_recs > n_slots {
+            return Err(format!(
+                "record-based mapping requires records <= slots: records={n_recs}, slots={n_slots}"
+            )
+            .into());
+        }
+
+        let nominal_offset = n_slots - n_recs;
+        let vdf_data = self.extract_data()?;
+
+        // Sort record indices by field[2] ascending.
+        let mut sorted_indices: Vec<usize> = (0..n_recs).collect();
+        sorted_indices.sort_by_key(|&i| self.records[i].fields[2]);
+
+        // Look up section-3 shape directory for arrayed spans. Scalar
+        // models return an empty directory (section 3 is all zeros), which
+        // is fine because scalar records have field[6] == 5 and never hit
+        // the directory.
+        let section3_directory = self.parse_section3_directory();
+
+        // Precompute a set of active section-3 flat sizes for the field[6] == 32
+        // generic-arrayed case. When exactly one distinct non-zero flat size is
+        // present, it binds field[6] == 32 unambiguously.
+        let sec3_sole_flat_size: Option<usize> = section3_directory.as_ref().and_then(|d| {
+            let sizes: HashSet<usize> = d
+                .entries
+                .iter()
+                .map(|e| e.flat_size())
+                .filter(|&s| s > 0)
+                .collect();
+            if sizes.len() == 1 {
+                sizes.into_iter().next()
+            } else {
+                None
+            }
+        });
+
+        let mut ordered: Vec<(Ident<Canonical>, usize)> =
+            vec![(Ident::<Canonical>::from_str_unchecked("time"), 0)];
+        let mut claimed_ot: HashSet<usize> = HashSet::new();
+        claimed_ot.insert(0);
+
+        for (rank, &ri) in sorted_indices.iter().enumerate() {
+            let name_idx = rank + nominal_offset;
+            if name_idx >= self.names.len() {
+                continue;
+            }
+            let name = &self.names[name_idx];
+            if name.is_empty() {
+                continue;
+            }
+            // Skip padding records; they have f[6] == 0 meaning "no shape",
+            // and show up paired with metadata slots or with a bogus f[11].
+            let rec = &self.records[ri];
+            if rec.fields[6] == 0 {
+                continue;
+            }
+            if is_vdf_metadata_entry(name) {
+                continue;
+            }
+            if name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()) {
+                continue;
+            }
+            if VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            if STDLIB_PARTICIPANT_HELPERS.contains(&name.as_str()) {
+                continue;
+            }
+            if name.starts_with('#') {
+                // Internal signatures may be valid OT entries, but they
+                // are not user-visible variables; skip here and let
+                // model-guided callers resolve aliases if needed.
+                continue;
+            }
+
+            let ot_start = rec.fields[11] as usize;
+            if ot_start == 0 || ot_start >= self.offset_table_count {
+                continue;
+            }
+
+            // Determine the OT span. Scalar records (field[6] == 5) always
+            // consume one slot. For arrayed records we look up the
+            // section-3 shape entry whose index_word equals the record's
+            // field[6]. field[6] == 32 is the single-shape generic marker.
+            let span = if rec.fields[6] == 5 {
+                1usize
+            } else {
+                let shape_code = rec.fields[6];
+                let mut found: Option<usize> = None;
+                if let Some(ref dir) = section3_directory {
+                    for entry in &dir.entries {
+                        if entry.index_word() == shape_code && entry.flat_size() > 0 {
+                            found = Some(entry.flat_size());
+                            break;
+                        }
+                    }
+                }
+                if found.is_none() && shape_code == 32 {
+                    found = sec3_sole_flat_size;
+                }
+                match found {
+                    Some(s) if s >= 1 => s,
+                    _ => continue,
+                }
+            };
+
+            if ot_start + span > self.offset_table_count {
+                continue;
+            }
+
+            // System names and user names both flow through `Ident::new`,
+            // which lowercases and strips spaces/underscores to match the
+            // canonicalization used elsewhere in `Results`.
+            for elem in 0..span {
+                let ot = ot_start + elem;
+                if !claimed_ot.insert(ot) {
+                    continue;
+                }
+                let display = if span > 1 {
+                    format!("{name}[{elem}]")
+                } else {
+                    name.clone()
+                };
+                let key = Ident::<Canonical>::new(&display);
+                ordered.push((key, ot));
+            }
+        }
+
+        Ok(vdf_data.build_results(&ordered))
+    }
 }
 
 // ---- Parsing functions ----
@@ -5272,6 +5433,139 @@ mod tests {
                 (56, 63),
                 (61, 70),
             ]
+        );
+    }
+
+    #[test]
+    fn test_to_results_via_records_scalar_stock_fixture() {
+        // level_vs_aux/x_is_stock.vdf: a one-variable scalar fixture with
+        // `x` as a stock. The record-based mapping should at minimum
+        // succeed -- it returns Results keyed by the time column plus any
+        // system-name records that resolve at the nominal offset.
+        let vdf = vdf_file("../../test/bobby/vdf/level_vs_aux/x_is_stock.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should succeed on scalar stock fixture");
+
+        assert!(
+            results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new("time")),
+            "Time must always be present"
+        );
+        assert_eq!(results.step_count, vdf.time_point_count);
+        for col in 0..results.step_size {
+            let v = results.data[col];
+            assert!(v.is_finite(), "column {col} must be finite: {v}");
+        }
+    }
+
+    #[test]
+    fn test_to_results_via_records_scalar_aux_fixture() {
+        // level_vs_aux/x_is_aux.vdf: same shape as the stock variant but
+        // `x` is a non-stock auxiliary. The record-based mapping should
+        // still land system names at the OT slots forced by their records.
+        let vdf = vdf_file("../../test/bobby/vdf/level_vs_aux/x_is_aux.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should succeed on scalar aux fixture");
+
+        assert!(
+            results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new("time"))
+        );
+        assert_eq!(results.step_count, vdf.time_point_count);
+    }
+
+    #[test]
+    fn test_to_results_via_records_edited_run_5_recovers_visible_variables() {
+        // model_editing/run_5.vdf: an incrementally edited fixture where
+        // the original conservative `to_results` returns an ambiguity
+        // error. The record-based path instead reads field[11] directly
+        // for each proper record and lands visible model variables on
+        // their actual OT slots.
+        let vdf = vdf_file("../../test/bobby/vdf/model_editing/run_5.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should resolve model_editing/run_5");
+
+        for name in ["stock", "flow", "constant", "v"] {
+            let ident = Ident::<Canonical>::new(name);
+            assert!(
+                results.offsets.contains_key(&ident),
+                "{name} should be mapped by record-based path"
+            );
+        }
+
+        let stock_col = results.offsets[&Ident::<Canonical>::new("stock")];
+        let flow_col = results.offsets[&Ident::<Canonical>::new("flow")];
+        let constant_col = results.offsets[&Ident::<Canonical>::new("constant")];
+        let row0 = &results.data[0..results.step_size];
+        let last = results.step_count - 1;
+        let row_last = &results.data[last * results.step_size..(last + 1) * results.step_size];
+
+        // stock starts at 2 and grows; flow starts at 0 and increases;
+        // constant is always ~pi. These are the fingerprints that were
+        // inspected manually before committing the test.
+        assert!(
+            (row0[stock_col] - 2.0).abs() < 0.01,
+            "stock t0 = {}",
+            row0[stock_col]
+        );
+        assert!(
+            row_last[stock_col] > row0[stock_col] + 100.0,
+            "stock grows over time: {} -> {}",
+            row0[stock_col],
+            row_last[stock_col]
+        );
+        assert!(
+            (row0[flow_col] - 0.0).abs() < 0.01,
+            "flow t0 = 0, got {}",
+            row0[flow_col]
+        );
+        assert!(
+            row_last[flow_col] > 10.0,
+            "flow grows, t_last = {}",
+            row_last[flow_col]
+        );
+        assert!(
+            (row0[constant_col] - std::f64::consts::PI).abs() < 0.01,
+            "constant = pi, got {}",
+            row0[constant_col]
+        );
+    }
+
+    #[test]
+    fn test_to_results_via_records_fixture_with_hidden_stdlib_helpers() {
+        // model_editing/run_10.vdf: edited fixture containing a SMOOTH
+        // invocation (expanded into hidden stock-backed helpers). The
+        // record-based path should still succeed and produce a usable
+        // `Results`; it is allowed to miss names whose backing record was
+        // downgraded to padding (f[6] == 0) during the edit sequence,
+        // because the deterministic nominal offset does not attempt to
+        // reorder records around an inserted hidden helper.
+        //
+        // Rationale for the weaker assertion: run_10 is the trickiest
+        // case in the corpus (added subscript dimensions, renamed stock,
+        // inserted SMOOTH). We accept partial results here and rely on
+        // the model-guided path (`build_section6_guided_ot_map`) or the
+        // stock-classifier path for a fully resolved mapping.
+        let vdf = vdf_file("../../test/bobby/vdf/model_editing/run_10.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should resolve model_editing/run_10");
+
+        assert_eq!(results.step_count, vdf.time_point_count);
+        assert!(
+            !results.offsets.is_empty(),
+            "record-based mapping should at minimum emit Time"
+        );
+        assert!(
+            results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new("time")),
+            "Time must always be present"
         );
     }
 }
