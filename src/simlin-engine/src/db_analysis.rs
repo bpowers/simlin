@@ -636,7 +636,7 @@ pub(super) fn normalize_module_ref_str(s: &str) -> String {
 /// Construct a lightweight CausalGraph from a CausalEdgesResult.
 /// Variables and module_graphs are empty -- suitable for graph algorithms
 /// (circuit finding, SCC computation) but not for polarity analysis.
-pub(crate) fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
+pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
     use crate::common::{Canonical, Ident};
     use std::collections::HashSet;
 
