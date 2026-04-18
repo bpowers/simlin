@@ -382,6 +382,41 @@ fn build_chain_scc_project(project_name: &str, total_nodes: usize) -> datamodel:
     builder.build_datamodel()
 }
 
+/// Build a scalar project with two *disjoint* cycles of `scc_size` nodes
+/// each, connected to no other subgraph.  Used to verify that the
+/// auto-flip gate fires on the *largest SCC*, not on the total node
+/// count or total SCC count across the model.
+///
+/// Each cycle has the shape: `stock_k -> aux_k_{N-3} -> ... -> aux_k_0
+/// -> flow_k -> stock_k`, parameterized by a distinct prefix
+/// `k in {"a", "b"}`.
+fn build_two_disjoint_sccs_project(project_name: &str, scc_size: usize) -> datamodel::Project {
+    assert!(
+        scc_size >= 3,
+        "each disjoint cycle needs >= 3 nodes, got {scc_size}"
+    );
+
+    let aux_count = scc_size - 2;
+    let mut builder = crate::test_common::TestProject::new(project_name);
+    for prefix in ["a", "b"] {
+        for i in 0..aux_count {
+            let name = format!("{prefix}_aux_{i}");
+            let equation = if i + 1 == aux_count {
+                format!("{prefix}_stock")
+            } else {
+                format!("{prefix}_aux_{}", i + 1)
+            };
+            builder = builder.scalar_aux(&name, &equation);
+        }
+        let flow_name = format!("{prefix}_flow");
+        let stock_name = format!("{prefix}_stock");
+        let flow_eq = format!("{prefix}_aux_0");
+        builder = builder.flow(&flow_name, &flow_eq, None);
+        builder = builder.stock(&stock_name, "0", &[flow_name.as_str()], &[], None);
+    }
+    builder.build_datamodel()
+}
+
 /// Auto-flip: a model whose element-level causal graph has an SCC of
 /// 51 nodes (one node over the 50-node threshold) must flip to
 /// discovery-mode shape: link scores for causal edges, no per-loop
@@ -562,5 +597,120 @@ fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
         !has_auto_flip_warning,
         "LTM-disabled project must not emit LTM diagnostics; got: {:?}",
         diags
+    );
+}
+
+/// Adversarial corner case for Option A: the auto-flip gate must key on
+/// the *largest* SCC, not on total SCC count or total node count.  Two
+/// disjoint 40-node cycles (80 nodes total) must stay exhaustive because
+/// the largest SCC is 40 <= 50.  A silent regression here (e.g.,
+/// accidentally summing SCC sizes) would crush any real model with
+/// several independent feedback subsystems.
+#[test]
+fn test_auto_flip_keys_on_largest_scc_not_total_nodes() {
+    let project = build_two_disjoint_sccs_project("two_sccs_exhaustive", 40);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let has_loop_score = ltm
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
+    assert!(
+        has_loop_score,
+        "two disjoint 40-node SCCs should stay exhaustive and emit \
+         loop_score vars (largest SCC is 40, <= 50 threshold); \
+         vars: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Adversarial corner case for Option A: when the user *explicitly*
+/// requests discovery mode, the auto-flip gate must short-circuit and
+/// NOT emit the auto-flip warning.  Discovery-by-user-choice and
+/// discovery-by-auto-flip look identical in the output shape (no loop
+/// score vars), but the diagnostic is the only signal the caller has
+/// that a mode change happened behind their back.  Emitting it when the
+/// user chose discovery themselves would be confusing noise.
+#[test]
+fn test_user_discovery_mode_does_not_emit_auto_flip_warning() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    let project = build_chain_scc_project("user_discovery_no_warning", 51);
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let _ = model_ltm_variables(&db, source_model, source_project);
+
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(
+        &db,
+        source_model,
+        source_project,
+    );
+
+    let has_auto_flip_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg) if msg.contains("auto-switched")
+            )
+    });
+    assert!(
+        !has_auto_flip_warning,
+        "user-requested discovery mode must NOT emit auto-flip warning; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}
+
+/// Adversarial corner case for Option A: auto-flip must key on the
+/// *element-level* graph, not the variable-level graph.  An arrayed
+/// single-variable stock-flow loop (e.g., `population[Region]` with 60
+/// dims) has a variable-level SCC of size 2 (stock + flow) but an
+/// element-level SCC of size 120 -- above the threshold.  Using the
+/// variable graph would let such a model through to exhaustive
+/// compilation and explode equation-text generation.
+#[test]
+fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
+    // Build 60-element arrayed population -> births -> population cycle.
+    // Variable graph: 2 nodes in cycle (births, population).
+    // Element graph: 60 per-element (stock, flow) pairs, each in its own
+    // 2-node cycle.  Largest element SCC is 2, not 120; A2A is same-element.
+    // So this model should *stay* exhaustive.  Keep it here as the
+    // baseline against which a cross-element variant (below) is
+    // contrasted.
+    let dim_size = 60usize;
+    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
+    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+
+    let project = crate::test_common::TestProject::new("arrayed_a2a_no_autoflip")
+        .named_dimension("Region", &elem_refs)
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let has_loop_score = ltm
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
+    assert!(
+        has_loop_score,
+        "a 60-element A2A stock-flow loop has element SCC size 2 \
+         (same-element edges), so auto-flip must NOT fire; \
+         got vars: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 }

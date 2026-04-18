@@ -293,6 +293,30 @@ mod tests {
     }
 
     #[test]
+    fn nan_loop_score_propagates_without_panic() {
+        // Non-finite upstream values must flow through normal IEEE-754
+        // arithmetic (the documented contract).  A panic or debug-assert
+        // on NaN would be a subtle regression because the exhaustive
+        // SAFEDIV equation silently propagated NaN via arithmetic.
+        let nan = f64::NAN;
+        let series_a = &[nan, 2.0][..];
+        let series_b = &[1.0, 3.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+
+        let scored = compute_rel_loop_scores(&results, &partitions);
+        let rel_a = scored.get("A").unwrap();
+        let rel_b = scored.get("B").unwrap();
+
+        // t=0: denom = |NaN| + |1| = NaN; NaN/NaN = NaN for both loops.
+        assert!(rel_a[0].is_nan(), "NaN numerator yields NaN result");
+        assert!(rel_b[0].is_nan(), "NaN denominator yields NaN result");
+        // t=1: well-defined; denom = 2 + 3 = 5.
+        assert!((rel_a[1] - 0.4).abs() < 1e-12);
+        assert!((rel_b[1] - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
     fn unpartitioned_loops_share_default_group() {
         // Loops with `None` partition (no parent-level stock) should share
         // a single default group, matching the old compile-time emitter's
