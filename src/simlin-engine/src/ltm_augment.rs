@@ -160,7 +160,7 @@ pub(crate) fn generate_loop_score_variables(
         loop_score_bytes += equation.len() as u64;
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
-        if trace_on && (i + 1) % 10_000 == 0 {
+        if trace_on && should_trace(i + 1) {
             eprintln!(
                 "[ltm-trace] pass=loop_score i={} cum_loop_bytes={} rss_mib={:.1}",
                 i + 1,
@@ -215,7 +215,7 @@ pub(crate) fn generate_loop_score_variables(
         rel_loop_score_bytes += equation.len() as u64;
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
-        if trace_on && (i + 1) % 10_000 == 0 {
+        if trace_on && should_trace(i + 1) {
             eprintln!(
                 "[ltm-trace] pass=rel_loop_score i={} partition={:?} part_size={} \
                  cum_rel_bytes={} cum_loop_bytes={} rss_mib={:.1}",
@@ -242,6 +242,26 @@ pub(crate) fn generate_loop_score_variables(
     }
 
     loop_vars
+}
+
+/// Decide whether iteration `n` (1-based) should emit a trace line.
+///
+/// We want early iterations densely (so we see the scaling curve
+/// even if we OOM before completing the first 10_000 loops on a dense
+/// partition) and later iterations sparsely (so we don't spam the log
+/// for millions of loops).  Rule: log on every power of two up to and
+/// including 8192, then every 10_000 after that.  Powers of two give
+/// ~14 lines of early-curve data; 10_000 cadence gives steady-state
+/// measurements during long runs.
+fn should_trace(n: usize) -> bool {
+    if n == 0 {
+        return false;
+    }
+    if n <= 8192 {
+        n.is_power_of_two()
+    } else {
+        n.is_multiple_of(10_000) || n.is_power_of_two()
+    }
 }
 
 /// Resident-set size in MiB, or `None` if the kernel does not expose
