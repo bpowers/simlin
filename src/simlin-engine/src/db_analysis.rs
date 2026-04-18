@@ -1608,11 +1608,11 @@ mod loop_circuits_result_tests {
         );
     }
 
-    /// A pure DAG produces zero circuits.  The `names` table still
-    /// reflects every node in the causal graph (the enumerator builds
-    /// the indexed graph before pruning SCCs), so we assert non-empty
-    /// -- callers that compare `names` to a legacy variable list should
-    /// use `to_named_circuits` for an exact match.
+    /// A pure DAG produces zero circuits and an empty names table.
+    /// Trimming names to cycle-participating nodes is what keeps the
+    /// salsa LoopCircuitsResult stable under renames of acyclic
+    /// variables -- see the `find_indexed_circuits_trims_names_to_cycle_participants`
+    /// regression test in `ltm.rs::tests` for the positive-side invariant.
     #[test]
     fn test_loop_circuits_result_empty_on_dag() {
         let project = TestProject::new("dag_only")
@@ -1624,6 +1624,10 @@ mod loop_circuits_result_tests {
         assert!(result.is_empty(), "pure DAG must produce zero circuits");
         assert_eq!(result.len(), 0);
         assert_eq!(result.to_named_circuits().len(), 0);
+        assert!(
+            result.names.is_empty(),
+            "empty circuits must produce empty names table so salsa stays stable under acyclic-variable renames"
+        );
     }
 }
 

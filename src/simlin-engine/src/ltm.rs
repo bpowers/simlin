@@ -26,8 +26,9 @@ use crate::variable::{Variable, identifier_set};
 /// enumeration itself is fast and small.
 ///
 /// Removing this cap cleanly would require first capping the synthetic
-/// variable count inside `model_ltm_variables` (or switching very
-/// large models to discovery mode).  See tech-debt #31 for the plan.
+/// variable count inside `model_ltm_variables`, or auto-falling back
+/// to discovery mode for very large models -- neither of which is on
+/// this branch's scope.
 pub(crate) const MAX_LTM_CIRCUITS: usize = 100_000;
 
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
@@ -759,23 +760,30 @@ impl IndexedGraph {
                 // edge v -> start is implicit -- downstream code
                 // (circuit_to_links) wraps from path[last] to path[0].
                 //
-                // Multidigraph graphs (e.g. arms-race 3-cliques) produce
-                // multiple distinct directed cycles over the same node
-                // set; LTM semantics fold those into a single loop.
-                // Dedup here rather than post-hoc so peak memory stays
-                // proportional to unique output.  Budget consumption
-                // only fires for unique emissions -- a duplicate
-                // traversal still marks `found_cycle = true` so the
+                // Multidigraph graphs (e.g. arms-race 3-cliques, K_n
+                // bidirectional cliques) produce multiple distinct
+                // directed cycles over the same node set; LTM semantics
+                // fold those into a single loop.  Dedup here rather than
+                // post-hoc so peak memory stays proportional to unique
+                // output.
+                //
+                // The budget is charged on every RAW cycle discovery,
+                // not just unique emissions: the cap exists to bound
+                // DFS work, and on a dense multidigraph the raw cycle
+                // count can far exceed the unique-node-set count (K9
+                // has 125,664 elementary directed cycles but only 502
+                // unique node sets).  `found_cycle = true` fires
+                // whether or not the circuit survives dedup so the
                 // blocked/B[] unblock machinery behaves correctly.
+                if *budget == 0 {
+                    return Err(TruncatedByBudgetInternal);
+                }
+                *budget -= 1;
                 state.hash_scratch.clear();
                 state.hash_scratch.extend_from_slice(&state.path);
                 state.hash_scratch.sort_unstable();
                 let fp = hash_u32_slice(&state.hash_scratch);
                 if state.seen.insert(fp) {
-                    if *budget == 0 {
-                        return Err(TruncatedByBudgetInternal);
-                    }
-                    *budget -= 1;
                     state.circuits.push(state.path.clone());
                 }
                 found_cycle = true;
@@ -5113,6 +5121,44 @@ mod tests {
         let err = cg
             .find_circuit_node_lists_with_limit(1)
             .expect_err("budget of 1 cannot fit both 2-cycles");
+        assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn johnson_budget_charges_duplicate_raw_cycles() {
+        // Complete directed graph on 4 nodes (K4) with every pair
+        // bidirectional.  The DFS discovers many raw elementary cycles
+        // that collapse to fewer distinct node-sets under dedup:
+        //   3 two-cycles: {a,b}, {a,c}, {a,d}, {b,c}, {b,d}, {c,d}
+        //   many three-cycles, all over three-node subsets
+        //   many four-cycles, all over {a,b,c,d}
+        // The raw DFS work -- not the unique output size -- is what
+        // can blow up compile time on dense multidigraphs, so
+        // `max_circuits` must bound raw cycle discovery, not post-
+        // dedup output.  Budget decrement fires on every raw emission
+        // so callers cannot have the DFS run for longer than the cap
+        // implies.
+        let cg = build_causal_graph(&[
+            ("a", &["b", "c", "d"]),
+            ("b", &["a", "c", "d"]),
+            ("c", &["a", "b", "d"]),
+            ("d", &["a", "b", "c"]),
+        ]);
+        // Unique node-sets: C(4,2) + C(4,3) + C(4,4) = 6 + 4 + 1 = 11.
+        let full = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(
+            full.len(),
+            11,
+            "K4 has exactly 11 distinct node-set circuits after dedup"
+        );
+
+        // Raw (pre-dedup) cycle count for K4 is much larger; a budget
+        // that fits unique output but not raw work must still trip.
+        // If budget is charged per unique circuit the enumeration runs
+        // past the cap -- exactly the regression we're guarding.
+        let err = cg
+            .find_circuit_node_lists_with_limit(11)
+            .expect_err("budget of 11 must trip because raw cycle discovery exceeds 11");
         assert_eq!(err, TruncatedByBudget);
     }
 
