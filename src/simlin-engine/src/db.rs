@@ -1903,12 +1903,17 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// all compilation stages. The salsa accumulator is the sole error source
 /// for diagnostic reporting -- this function does not read struct fields.
 ///
-/// Triggers two diagnostic sources:
+/// Triggers three diagnostic sources:
 /// 1. `compile_var_fragment` for each variable -- accumulates parse-level
 ///    equation errors (EmptyEquation, syntax errors), unit definition
 ///    syntax errors (bad unit strings), and compilation-level errors
 ///    (BadTable, MismatchedDimensions, etc.)
 /// 2. `check_model_units` -- accumulates unit inference/checking warnings
+/// 3. When LTM is enabled, `model_ltm_variables` -- accumulates LTM
+///    assembly diagnostics (notably the auto-flip warning that surfaces
+///    when the element-level largest SCC exceeds `MAX_LTM_SCC_NODES`).
+///    Gated on `ltm_enabled` so we don't run LTM synthesis on projects
+///    that never requested it.
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
     let source_vars = model.variables(db);
@@ -1933,6 +1938,16 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // that unit inference results are individually cached and
     // invalidated only when unit-relevant inputs change.
     check_model_units(db, model, project);
+
+    // When LTM is enabled, also trigger LTM variable generation so that
+    // any diagnostics accumulated by `model_ltm_variables` (e.g., the
+    // auto-flip warning from db_ltm.rs) surface through
+    // `collect_all_diagnostics`.  Without this call, the warning would
+    // be invisible to `simlin-mcp`/`libsimlin` callers even though
+    // `model_ltm_variables` had already emitted it.
+    if project.ltm_enabled(db) {
+        let _ = model_ltm_variables(db, model, project);
+    }
 }
 
 // ── LTM tracked functions ──────────────────────────────────────────────
