@@ -134,12 +134,40 @@ pub(crate) fn generate_loop_score_variables(
 ) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut loop_vars = HashMap::new();
 
+    // Tracing is opt-in via LTM_BENCH_TRACE=1.  When disabled, the only
+    // per-iteration overhead is an integer add for the byte counters and
+    // one branch-predictor-friendly zero-compare, so production cost is
+    // negligible; when enabled the tracer logs every 10_000 loops so we
+    // can slope-fit equation-text growth and correlate it with RSS.
+    let trace_on = std::env::var("LTM_BENCH_TRACE").is_ok();
+    let mut loop_score_bytes: u64 = 0;
+    let mut rel_loop_score_bytes: u64 = 0;
+
+    if trace_on {
+        eprintln!(
+            "[ltm-trace] generate_loop_score_variables start loops={} partitions={} \
+             rss_mib={:.1}",
+            loops.len(),
+            partitions.partitions.len(),
+            read_rss_mib().unwrap_or(0.0),
+        );
+    }
+
     // First, generate absolute loop scores (unchanged)
-    for loop_item in loops {
+    for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
         let equation = generate_loop_score_equation(loop_item);
+        loop_score_bytes += equation.len() as u64;
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
+        if trace_on && (i + 1) % 10_000 == 0 {
+            eprintln!(
+                "[ltm-trace] pass=loop_score i={} cum_loop_bytes={} rss_mib={:.1}",
+                i + 1,
+                loop_score_bytes,
+                read_rss_mib().unwrap_or(0.0),
+            );
+        }
     }
 
     // Group loops by partition for relative score computation
@@ -158,17 +186,83 @@ pub(crate) fn generate_loop_score_variables(
         })
         .collect();
 
+    if trace_on {
+        let mut sizes: Vec<(Option<usize>, usize)> = partition_groups
+            .iter()
+            .map(|(p, indices)| (*p, indices.len()))
+            .collect();
+        sizes.sort_by_key(|s| std::cmp::Reverse(s.1));
+        let sample: Vec<String> = sizes
+            .iter()
+            .take(5)
+            .map(|(p, s)| format!("{p:?}={s}"))
+            .collect();
+        eprintln!(
+            "[ltm-trace] partition_groups={} top5=[{}] loop_bytes_so_far={} rss_mib={:.1}",
+            sizes.len(),
+            sample.join(", "),
+            loop_score_bytes,
+            read_rss_mib().unwrap_or(0.0),
+        );
+    }
+
     // Generate relative loop scores with partition-scoped denominators
-    for loop_item in loops {
+    for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
         let partition = partitions.partition_for_loop(loop_item);
         let same_group_ids = &group_ids[&partition];
         let equation = generate_relative_loop_score_equation(&loop_item.id, same_group_ids);
+        rel_loop_score_bytes += equation.len() as u64;
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
+        if trace_on && (i + 1) % 10_000 == 0 {
+            eprintln!(
+                "[ltm-trace] pass=rel_loop_score i={} partition={:?} part_size={} \
+                 cum_rel_bytes={} cum_loop_bytes={} rss_mib={:.1}",
+                i + 1,
+                partition,
+                same_group_ids.len(),
+                rel_loop_score_bytes,
+                loop_score_bytes,
+                read_rss_mib().unwrap_or(0.0),
+            );
+        }
+    }
+
+    if trace_on {
+        eprintln!(
+            "[ltm-trace] generate_loop_score_variables done loops={} loop_bytes={} \
+             rel_bytes={} total_bytes={} rss_mib={:.1}",
+            loops.len(),
+            loop_score_bytes,
+            rel_loop_score_bytes,
+            loop_score_bytes + rel_loop_score_bytes,
+            read_rss_mib().unwrap_or(0.0),
+        );
     }
 
     loop_vars
+}
+
+/// Resident-set size in MiB, or `None` if the kernel does not expose
+/// `/proc/self/status` (e.g. non-Linux or wasm builds).  Used only by
+/// the `LTM_BENCH_TRACE` instrumentation above, so an unavailable
+/// reading degrades to a zero in the log rather than failing.
+#[cfg(target_os = "linux")]
+fn read_rss_mib() -> Option<f64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+            return Some(kb as f64 / 1024.0);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_rss_mib() -> Option<f64> {
+    None
 }
 
 /// Generate the equation for a link score variable.
