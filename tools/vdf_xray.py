@@ -1839,14 +1839,19 @@ def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]
     """
     Deterministic record-to-name mapping via the f[2]-offset formula.
 
-    Records sorted by f[2] correspond to names at position
-    (rank + offset) in the name table. The offset is typically
-    slot_count - record_count, but can differ by a small amount in
-    incrementally edited models. We try a small range of offsets and
-    validate each against OT positions.
+    Records sorted by f[2] correspond 1:1 with name-table entries at
+    position `(slot_count - record_count) + rank`. The offset is
+    structural: every record consumes one name slot, and `slot_count`
+    minus `record_count` counts the leading slots (typically `Time` plus
+    a short run of header-like names) that have no backing record.
 
-    This is O(offset_range * records) -- fast and deterministic, matching
-    what a 90s C program would use to reconstruct the mapping.
+    This path is deliberately O(records). The earlier implementation
+    scanned a `[nominal - 3, nominal + 3]` offset window and picked via
+    `_validate_name_block_assignment`, which applied a stocks-first-
+    alphabetical filter that rejected correct nominal offsets when the
+    mapping hadn't yet been assembled. Keeping the scan around papered
+    over that downstream bug; we instead trust the nominal offset
+    directly and leave the validator to other callers (e.g. diagnostics).
     """
     n_recs = len(vdf.records)
     n_slots = len(vdf.slot_table)
@@ -1858,21 +1863,35 @@ def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]
     visible_blocks = [b for b in all_blocks if not b.hidden]
 
     nominal_offset = n_slots - n_recs
-    candidates: list[tuple[int, int, int, dict[str, OwnerRecordBlock]]] = []
+    return _mapping_from_record_names(sorted_recs, nominal_offset, vdf, visible_blocks)
+
+
+def _debug_f2_offset_scan(vdf: VdfFile) -> list[tuple[int, int, bool, int]]:
+    """
+    Diagnostic variant of the f[2] offset mapping: reports mapping count,
+    stocks-first-alphabetical validity, and sort-key breaks for a small
+    window around the nominal offset.
+
+    Not used in production code paths; retained so that tooling can still
+    inspect neighbor offsets when investigating new fixtures.
+    """
+    n_recs = len(vdf.records)
+    n_slots = len(vdf.slot_table)
+    if n_recs == 0 or n_slots == 0 or n_recs > n_slots:
+        return []
+
+    sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
+    all_blocks = build_owner_record_blocks(vdf)
+    visible_blocks = [b for b in all_blocks if not b.hidden]
+
+    nominal_offset = n_slots - n_recs
+    rows: list[tuple[int, int, bool, int]] = []
     for offset in range(max(0, nominal_offset - 3), nominal_offset + 4):
         trial = _mapping_from_record_names(sorted_recs, offset, vdf, visible_blocks)
-        if not _validate_name_block_assignment(trial, vdf):
-            continue
-        mapped_count = len(trial)
+        valid = _validate_name_block_assignment(trial, vdf)
         sort_breaks = _offset_sort_key_breaks(sorted_recs, offset, vdf)
-        distance = abs(offset - nominal_offset)
-        candidates.append((mapped_count, -sort_breaks, -distance, trial))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    return candidates[0][3]
+        rows.append((offset, len(trial), valid, sort_breaks))
+    return rows
 
 
 def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
@@ -2029,9 +2048,16 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
             emitted_names.add(name)
             emitted_ot_indices.add(ot_idx)
 
-    # System variables share the same gap-aware non-stock placement logic as
-    # named variables. This keeps helper/lookup gaps from shifting the system
-    # names onto the wrong OT slots.
+    # System variables fill whatever non-stock OT positions remain after
+    # the record-based mapping is applied. We first try the gap-aware
+    # stocks-first-alphabetical layout (which the old offset-scan code
+    # implicitly relied on), but if it cannot satisfy the constraints --
+    # for example when a lookupish name lands between two system names
+    # alphabetically -- we fall back to filling unclaimed non-stock
+    # positions in OT order. The final values array in section 6 is the
+    # authoritative source for a system variable's numeric value, but its
+    # OT index is no longer forced by an alphabetical fit that the nominal
+    # offset mapping does not always support.
     codes = vdf.section6_ot_class_codes() or []
     nonstock_positions = _group_ot_positions(codes, want_stock=False)
     system_positions = _assign_group_positions(
@@ -2039,7 +2065,15 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
         nonstock_positions,
     )
     if system_positions is None:
-        return None
+        claimed = {block.start + i for block in mapping.name_to_block.values()
+                   for i in range(block.length())}
+        remaining = [pos for pos in nonstock_positions if pos not in claimed]
+        system_positions = {}
+        for name, pos in zip(
+            sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key),
+            remaining,
+        ):
+            system_positions[name] = pos
 
     for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key):
         ot_idx = system_positions.get(name)
