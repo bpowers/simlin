@@ -20,8 +20,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use simlin_engine::canonicalize;
 use simlin_engine::db::{
-    SimlinDb, compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+    model_element_causal_edges, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 
@@ -76,4 +78,48 @@ fn wrld3_ltm_compilation_finishes_in_time() {
             handle.join().expect("LTM compile thread panicked");
         }
     }
+}
+
+/// Regression test for the retired `MAX_LTM_CIRCUITS` cap.  With the cap
+/// removed, callers that ask for an uncapped enumeration (`usize::MAX`)
+/// must receive the full 1,863,803 elementary circuits of the World3
+/// element-level causal graph rather than a `TruncatedByBudget` signal or
+/// a silently truncated result.
+///
+/// `MAX_LTM_SCC_NODES` remains the real backstop: it gates the downstream
+/// synthetic-variable pipeline at `model_ltm_variables`.  Pure
+/// enumeration stays uncapped so diagnostic tools and future stress tests
+/// can measure the raw graph structure.
+#[test]
+fn wrld3_element_level_enumeration_is_uncapped() {
+    let project = load_wrld3();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    let root_name = project
+        .models
+        .first()
+        .map(|m| m.name.as_str())
+        .expect("wrld3 must have at least one model");
+    let root_canonical = canonicalize(root_name).into_owned();
+    let source_model = sync
+        .models
+        .get(&root_canonical)
+        .expect("root model must be in sync result")
+        .source_model;
+
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let graph = causal_graph_from_element_edges(element_edges);
+
+    let (_names, circuits) = graph
+        .find_indexed_circuits_with_limit(usize::MAX)
+        .expect("usize::MAX budget must not trip TruncatedByBudget");
+
+    assert_eq!(
+        circuits.len(),
+        1_863_803,
+        "wrld3-03 element-level enumeration count must match the \
+         post-dedup Johnson's output measured by the 2026-04-18 \
+         adversarial cap-lift validation"
+    );
 }
