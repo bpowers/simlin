@@ -490,3 +490,77 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
 }
+
+/// The auto-flip warning must also surface through the diagnostic
+/// collector that both `libsimlin` and `simlin-mcp` use to hand
+/// diagnostics to end users.  Accumulation on `model_ltm_variables`
+/// alone is not enough -- `model_all_diagnostics` must drive LTM
+/// synthesis when `ltm_enabled` so salsa's accumulator propagates the
+/// warning to the collector.  Without this guarantee, the auto-flip is
+/// silent from the user's perspective.
+///
+/// `collect_all_diagnostics` is a trivial wrapper over
+/// `collect_model_diagnostics`; we assert on the per-model collector
+/// here to sidestep `SyncResult`'s db borrow.
+#[test]
+fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use salsa::Setter;
+
+    let project = build_chain_scc_project("auto_flip_surface", 51);
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let has_auto_flip_warning = diags.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg) if msg.contains("discovery mode")
+            )
+    });
+    assert!(
+        has_auto_flip_warning,
+        "auto-flip warning must reach collect_model_diagnostics; got: {:?}",
+        diags
+    );
+}
+
+/// Counterpart to the surfacing test: when LTM is disabled,
+/// `collect_model_diagnostics` must not run LTM synthesis -- a silently
+/// auto-flipping model whose caller never asked for LTM should not emit
+/// LTM diagnostics.
+#[test]
+fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+
+    let project = build_chain_scc_project("auto_flip_disabled", 51);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    assert!(
+        !sync.project.ltm_enabled(&db),
+        "baseline: ltm_enabled must default to false"
+    );
+
+    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+
+    let has_auto_flip_warning = diags.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg) if msg.contains("discovery mode")
+            )
+    });
+    assert!(
+        !has_auto_flip_warning,
+        "LTM-disabled project must not emit LTM diagnostics; got: {:?}",
+        diags
+    );
+}
