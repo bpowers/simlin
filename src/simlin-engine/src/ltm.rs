@@ -528,10 +528,24 @@ impl IndexedGraph {
                 let ti = node_to_idx[to];
                 succ[fi].push(ti);
             }
-            // Dedup identical successor entries (the input may contain them
-            // if an edge was inserted twice during causal-graph construction)
-            // and sort so the DFS sees the same deterministic order as the
-            // old Ident-based iteration produced via lex sorting.
+            // Successor lists are sorted ascending and deduped.  Together
+            // with the lex-ascending node order, this pins a canonical
+            // *directed-cycle representative* for multidigraph cases
+            // (graphs where multiple elementary directed cycles share a
+            // node set, e.g. a fully-bidirectional K_n).  Starting DFS at
+            // the lex-min node in an SCC, visiting successors smallest-
+            // index-first, and dedup-by-node-set-fingerprint together
+            // yield the **lexicographically smallest sequence** among all
+            // rotations/orientations of a given node set as the surviving
+            // representative.  Downstream polarity and module-stock
+            // enrichment are derived from this representative, so pinning
+            // it is a strict improvement over the pre-refactor code --
+            // which iterated successors in HashMap-insertion order and
+            // therefore picked a **random representative across
+            // processes**, silently varying polarity on multidigraph
+            // inputs between builds.  See
+            // `johnson_canonical_multidigraph_representative` for the
+            // regression test.
             succ[fi].sort_unstable();
             succ[fi].dedup();
         }
@@ -5122,6 +5136,46 @@ mod tests {
             .find_circuit_node_lists_with_limit(1)
             .expect_err("budget of 1 cannot fit both 2-cycles");
         assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn johnson_canonical_multidigraph_representative() {
+        // On a multidigraph SCC where multiple elementary directed
+        // cycles share a node set, dedup picks a single representative.
+        // The choice must be deterministic and independent of
+        // HashMap iteration order or any other non-determinism source,
+        // because the representative's edge sequence feeds downstream
+        // polarity analysis and module-stock enrichment.
+        //
+        // IndexedGraph sorts both the node list (lex-ascending
+        // -> u32 index order) and each successor list, which together
+        // guarantee the surviving representative is the
+        // lexicographically smallest sequence among all rotations and
+        // orientations of the node-set.
+        //
+        // For the 3-clique K3 (all 6 directed edges) there are two
+        // three-cycles over {a,b,c}: [a,b,c] (a->b->c->a) and [a,c,b]
+        // (a->c->b->a).  Lex-smallest is [a,b,c].
+        let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let three_cycle: Vec<&Vec<Ident<Canonical>>> =
+            circuits.iter().filter(|c| c.len() == 3).collect();
+        assert_eq!(three_cycle.len(), 1, "K3 dedups to one 3-node circuit");
+        assert_eq!(
+            three_cycle[0]
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "surviving representative must be the lex-smallest sequence [a,b,c], \
+             not the equally-valid-but-larger rotation [a,c,b]"
+        );
+
+        // Two independent enumerations of the same graph must produce
+        // byte-identical representatives.  This is the invariant that
+        // keeps the salsa `LoopCircuitsResult` cache stable.
+        let again = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(circuits, again);
     }
 
     #[test]
