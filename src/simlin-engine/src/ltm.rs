@@ -12,6 +12,24 @@ use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 
+/// Safety cap on the number of elementary circuits the causal-graph DFS
+/// will enumerate before bailing out.  The circuit count in a dense SD
+/// model (e.g. World3, C-LEARN) can blow up exponentially; without this
+/// cap LTM compilation will consume tens of gigabytes of memory, which
+/// on WASM surfaces as `RuntimeError: unreachable` from the allocator.
+///
+/// 100_000 is deliberately generous: typical hand-built models have at
+/// most a few thousand loops, so this only trips on truly pathological
+/// graphs where LTM results would be illegible anyway.
+pub(crate) const MAX_LTM_CIRCUITS: usize = 100_000;
+
+/// Marker returned by circuit-enumeration helpers when the DFS bailed out
+/// because it would have exceeded the [`MAX_LTM_CIRCUITS`] budget.  The
+/// caller should treat this as "LTM analysis skipped for this model" and
+/// emit a user-visible diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TruncatedByBudget;
+
 /// Polarity of a causal link
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -418,19 +436,66 @@ impl CausalGraph {
         })
     }
 
-    /// Find all elementary circuits (feedback loops) using Johnson's algorithm
+    /// Find all elementary circuits (feedback loops) using DFS.
+    ///
+    /// Bounded by `MAX_LTM_CIRCUITS`.  On dense causal graphs (e.g. World3
+    /// with hundreds of nodes and interconnected feedbacks) the number of
+    /// elementary circuits can blow up into the millions, which would
+    /// exhaust WASM's 4 GiB linear-memory limit and surface as a
+    /// `RuntimeError: unreachable` in the UI.  When the budget is exceeded
+    /// we return an empty vector -- LTM compilation then short-circuits
+    /// to "no loops detected" and the simulation still runs without
+    /// annotation, giving callers a chance to render sparklines rather
+    /// than crash.
+    ///
+    /// Callers that care whether LTM analysis was skipped should use
+    /// [`Self::find_loops_with_limit`] to get an explicit `TruncatedByBudget`
+    /// signal.
     pub fn find_loops(&self) -> Vec<Loop> {
+        self.find_loops_with_limit(MAX_LTM_CIRCUITS)
+            .unwrap_or_default()
+    }
+
+    /// Bounded variant of [`Self::find_loops`].  Returns
+    /// `Err(TruncatedByBudget)` when the DFS would enumerate more than
+    /// `max_circuits` elementary circuits; otherwise `Ok(loops)`.
+    pub(crate) fn find_loops_with_limit(
+        &self,
+        max_circuits: usize,
+    ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
         let mut loops = Vec::new();
 
         // Get all nodes, including those that are module instances
         let mut nodes: Vec<_> = self.edges.keys().cloned().collect();
         nodes.sort_by(|a, b| a.as_str().cmp(b.as_str())); // Stable ordering
 
-        // Johnson's algorithm for finding elementary circuits.
-        // Module instances appear as regular nodes in the parent graph,
-        // so loops through modules are found naturally.
+        // Johnson-style enumeration: each start node only visits successors
+        // with a lexicographically equal-or-greater identifier so each
+        // elementary circuit is found exactly once (from its
+        // lexicographically-smallest node).  Module instances appear as
+        // regular nodes in the parent graph, so loops through modules are
+        // found naturally.
+        //
+        // The budget is shared across all start nodes so a handful of
+        // "popular" start nodes cannot silently exhaust the limit on their
+        // own; instead the whole analysis bails out cleanly.
+        let mut budget = max_circuits;
         for start_node in &nodes {
-            let circuits = self.find_circuits_from(start_node);
+            let mut circuits = Vec::new();
+            let mut path = vec![start_node.clone()];
+            let mut visited: HashSet<Ident<Canonical>> = HashSet::new();
+            visited.insert(start_node.clone());
+            let bailed = self.dfs_circuits(
+                start_node,
+                start_node,
+                &mut path,
+                &mut visited,
+                &mut circuits,
+                &mut budget,
+            );
+            if bailed {
+                return Err(TruncatedByBudget);
+            }
             for circuit in circuits {
                 if circuit.len() > 1 {
                     let links = self.circuit_to_links(&circuit);
@@ -455,20 +520,50 @@ impl CausalGraph {
         // Now assign deterministic IDs based on sorted loop content
         self.assign_deterministic_loop_ids(&mut unique_loops);
 
-        unique_loops
+        Ok(unique_loops)
     }
 
     /// Find all elementary circuits as deduplicated node lists.
     /// Only needs edges -- does not compute polarity or assign IDs.
+    ///
+    /// Same budget semantics as [`Self::find_loops`]: bounded by
+    /// `MAX_LTM_CIRCUITS`; empty result on budget exhaustion.  Use
+    /// [`Self::find_circuit_node_lists_with_limit`] when the caller needs
+    /// to distinguish "no loops" from "too many loops to enumerate".
     pub(crate) fn find_circuit_node_lists(&self) -> Vec<Vec<Ident<Canonical>>> {
+        self.find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .unwrap_or_default()
+    }
+
+    /// Bounded variant of [`Self::find_circuit_node_lists`] exposing the
+    /// budget-exhaustion signal explicitly.
+    pub(crate) fn find_circuit_node_lists_with_limit(
+        &self,
+        max_circuits: usize,
+    ) -> std::result::Result<Vec<Vec<Ident<Canonical>>>, TruncatedByBudget> {
         let mut nodes: Vec<_> = self.edges.keys().cloned().collect();
         nodes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
         let mut all_circuits = Vec::new();
         let mut seen_sets: HashSet<String> = HashSet::new();
 
+        let mut budget = max_circuits;
         for start_node in &nodes {
-            let circuits = self.find_circuits_from(start_node);
+            let mut circuits = Vec::new();
+            let mut path = vec![start_node.clone()];
+            let mut visited: HashSet<Ident<Canonical>> = HashSet::new();
+            visited.insert(start_node.clone());
+            let bailed = self.dfs_circuits(
+                start_node,
+                start_node,
+                &mut path,
+                &mut visited,
+                &mut circuits,
+                &mut budget,
+            );
+            if bailed {
+                return Err(TruncatedByBudget);
+            }
             for circuit in circuits {
                 if circuit.len() > 1 {
                     let mut node_set: Vec<&str> = circuit.iter().map(|n| n.as_str()).collect();
@@ -481,7 +576,7 @@ impl CausalGraph {
             }
         }
 
-        all_circuits
+        Ok(all_circuits)
     }
 
     /// Enrich a loop's stock list with stocks from inside any DynamicModule
@@ -540,19 +635,12 @@ impl CausalGraph {
         stocks
     }
 
-    /// Find all circuits starting from a given node using DFS
-    fn find_circuits_from(&self, start: &Ident<Canonical>) -> Vec<Vec<Ident<Canonical>>> {
-        let mut circuits = Vec::new();
-        let mut path = vec![start.clone()];
-        let mut visited = HashSet::new();
-        visited.insert(start.clone());
-
-        self.dfs_circuits(start, start, &mut path, &mut visited, &mut circuits);
-
-        circuits
-    }
-
-    /// DFS helper for finding circuits
+    /// DFS helper for finding circuits.
+    ///
+    /// `budget` is decremented each time a circuit is recorded; when it
+    /// would go below zero, the search short-circuits immediately and the
+    /// function returns `true` so the caller can propagate the bail-out.
+    /// Returns `false` for a complete (in-budget) search.
     fn dfs_circuits(
         &self,
         start: &Ident<Canonical>,
@@ -560,23 +648,33 @@ impl CausalGraph {
         path: &mut Vec<Ident<Canonical>>,
         visited: &mut HashSet<Ident<Canonical>>,
         circuits: &mut Vec<Vec<Ident<Canonical>>>,
-    ) {
+        budget: &mut usize,
+    ) -> bool {
         // First check direct edges in this graph
         if let Some(neighbors) = self.edges.get(current) {
             for neighbor in neighbors {
                 if neighbor == start && path.len() > 1 {
                     // Found a circuit back to start
+                    if *budget == 0 {
+                        return true;
+                    }
+                    *budget -= 1;
                     circuits.push(path.clone());
                 } else if !visited.contains(neighbor) && neighbor.as_str() >= start.as_str() {
                     // Only visit nodes that come after start (to avoid duplicates)
                     visited.insert(neighbor.clone());
                     path.push(neighbor.clone());
-                    self.dfs_circuits(start, neighbor, path, visited, circuits);
+                    let bailed =
+                        self.dfs_circuits(start, neighbor, path, visited, circuits, budget);
                     path.pop();
                     visited.remove(neighbor);
+                    if bailed {
+                        return true;
+                    }
                 }
             }
         }
+        false
     }
 
     /// Convert a circuit (list of nodes) to a list of links
@@ -3873,5 +3971,59 @@ mod tests {
             "Should find pathways with standard 'output' name"
         );
         assert!(pathways.contains_key(&Ident::new("input")));
+    }
+
+    /// Construct a three-node reinforcing cycle (A → B → C → A) for
+    /// budget-exhaustion tests.  Tiny by design: the graph has exactly one
+    /// elementary circuit, so a budget of zero MUST trip and a budget of
+    /// one MUST succeed.
+    fn tiny_cycle_graph() -> CausalGraph {
+        let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+        edges.insert(Ident::new("a"), vec![Ident::new("b")]);
+        edges.insert(Ident::new("b"), vec![Ident::new("c")]);
+        edges.insert(Ident::new("c"), vec![Ident::new("a")]);
+        CausalGraph {
+            edges,
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn find_circuit_node_lists_bails_out_past_budget() {
+        let graph = tiny_cycle_graph();
+        // Budget of zero: the very first circuit push should trip the
+        // bail-out and return TruncatedByBudget.
+        let err = graph
+            .find_circuit_node_lists_with_limit(0)
+            .expect_err("budget of 0 must bail");
+        assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn find_circuit_node_lists_succeeds_within_budget() {
+        let graph = tiny_cycle_graph();
+        let circuits = graph
+            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .expect("one-circuit graph must not exhaust the budget");
+        assert_eq!(
+            circuits.len(),
+            1,
+            "a three-node directed cycle has exactly one elementary circuit"
+        );
+    }
+
+    #[test]
+    fn find_loops_bails_out_past_budget() {
+        let graph = tiny_cycle_graph();
+        // Public `find_loops` hides the bail-out and returns an empty vec
+        // so that callers get a "no LTM loops" signal and simulation can
+        // still proceed.  Use the `_with_limit` variant to observe the
+        // TruncatedByBudget marker directly.
+        let err = graph
+            .find_loops_with_limit(0)
+            .expect_err("budget of 0 must bail");
+        assert_eq!(err, TruncatedByBudget);
     }
 }
