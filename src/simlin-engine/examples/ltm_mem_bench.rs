@@ -238,16 +238,20 @@ fn main() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
-    // Identify the root model (Vensim has a single unnamed / "main" model).
-    let (model_name, synced) = sync
+    // The root model is always the first entry of `datamodel.models`;
+    // looking it up by that exact name avoids the trap of "any non-stdlib
+    // model" which would match arbitrary submodels on projects that have
+    // them (sync.models is a HashMap, so .iter().find() is not stable).
+    let root_name = datamodel
         .models
-        .iter()
-        .find(|(n, m)| {
-            !m.is_stdlib && (n.as_str() == "main" || n.is_empty() || m.source.name(&db) != "main")
-        })
-        .or_else(|| sync.models.iter().find(|(_, m)| !m.is_stdlib))
-        .expect("root model");
-    eprintln!("root model: '{model_name}'");
+        .first()
+        .map(|m| m.name.as_str())
+        .expect("datamodel must contain at least one model");
+    let synced = sync
+        .models
+        .get(root_name)
+        .expect("root model must be present in sync result");
+    eprintln!("root model: '{root_name}'");
     print_mem("synced");
 
     let t0 = Instant::now();

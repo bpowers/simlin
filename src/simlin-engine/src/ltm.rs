@@ -936,6 +936,22 @@ impl IndexedGraph {
     }
 }
 
+/// Debug-only helper: verify every `Loop` has a distinct node-set.
+/// Used by `debug_assert!` in `find_loops_with_limit` to guard against
+/// future regressions of the inline dedup in `johnson_circuit`.  Release
+/// builds compile the call out via `debug_assert!`'s no-op expansion.
+fn loops_have_unique_node_sets(loops: &[Loop]) -> bool {
+    let mut seen: HashSet<Vec<&str>> = HashSet::with_capacity(loops.len());
+    for loop_item in loops {
+        let mut key: Vec<&str> = loop_item.links.iter().map(|l| l.from.as_str()).collect();
+        key.sort_unstable();
+        if !seen.insert(key) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Johnson 1975 UNBLOCK(u).  Iterative implementation so deeply nested
 /// B[] chains cannot overflow the recursion stack.
 ///
@@ -1101,16 +1117,20 @@ impl CausalGraph {
             }
         }
 
-        // Dedup by node-set at the Loop level.  Duplicates should already
-        // be impossible after `dedup_circuits`, but the classical Loop
-        // dedup also catches any distinct cyclic rotations that would
-        // produce the same set under the old algorithm.
-        let mut unique_loops = self.deduplicate_loops(loops);
+        // The per-SCC inline dedup in `johnson_circuit` already rejects
+        // multidigraph duplicates at the circuit (Vec<u32>) level, so
+        // every circuit that reaches this point has a unique node-set.
+        // A separate Loop-level dedup would be redundant; debug builds
+        // verify the invariant so a future regression trips a test.
+        debug_assert!(
+            loops_have_unique_node_sets(&loops),
+            "circuit enumerator must emit unique node-sets; duplicate loops reached find_loops_with_limit"
+        );
 
         // Assign deterministic IDs based on sorted loop content
-        self.assign_deterministic_loop_ids(&mut unique_loops);
+        self.assign_deterministic_loop_ids(&mut loops);
 
-        Ok(unique_loops)
+        Ok(loops)
     }
 
     /// Shared enumeration core used by both `find_loops_with_limit` and
@@ -1700,29 +1720,6 @@ impl CausalGraph {
     /// Assign deterministic IDs to loops based on their content
     fn assign_deterministic_loop_ids(&self, loops: &mut [Loop]) {
         assign_loop_ids(loops);
-    }
-
-    /// Remove duplicate loops (same set of nodes in different order)
-    fn deduplicate_loops(&self, loops: Vec<Loop>) -> Vec<Loop> {
-        let mut unique_loops = Vec::new();
-        let mut seen_sets = HashSet::new();
-
-        for loop_item in loops {
-            let mut node_set: Vec<_> = loop_item
-                .links
-                .iter()
-                .map(|link| link.from.as_str())
-                .collect();
-            node_set.sort();
-            let key = node_set.join(",");
-
-            if !seen_sets.contains(&key) {
-                seen_sets.insert(key);
-                unique_loops.push(loop_item);
-            }
-        }
-
-        unique_loops
     }
 }
 
