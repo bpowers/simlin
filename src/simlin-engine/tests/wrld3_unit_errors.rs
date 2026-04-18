@@ -524,3 +524,75 @@ fn wrld3_delay3_pollution_variable_has_no_spurious_unit_error() {
             .join("\n")
     );
 }
+
+/// Follow-up to Bug 1: the `trend` stdlib module has a stock-init equation of
+/// the form `if isModuleInput(initial_value) then input / (1 + delay_time *
+/// initial_value) else input`.  A naive implementation of the Bug 1 fix that
+/// recursively collects every identifier from both branches would pull
+/// `input`, `delay_time`, AND `initial_value` into the equivalence group and
+/// flag them as mutually unit-conflicting -- but semantically they have
+/// three different units (input: X/time, delay_time: time, initial_value:
+/// 1/time for a growth-rate).  The correct behaviour is to recognise that
+/// only identifiers appearing as *bare* variable references directly under
+/// the `if-then-else` branches express "these two inputs are
+/// interchangeable"; anything inside an arithmetic subtree is playing a
+/// coefficient or rate role, not a value-equivalence role.
+///
+/// No existing repo model exercises `trend`, so this is a forward-looking
+/// regression guard.
+#[test]
+fn trend_does_not_conflate_value_rate_and_delay_args() {
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("trend_valid_units")
+        .with_time_units("year")
+        .unit("dollar", None)
+        .unit("year", None)
+        .aux_with_units("revenue", "100", Some("dollar/year"))
+        .aux_with_units("averaging_time", "5", Some("year"))
+        .aux_with_units("initial_growth_rate", "0.05", Some("1/year"))
+        .aux_with_units(
+            "revenue_trend",
+            "TREND(revenue, averaging_time, initial_growth_rate)",
+            Some("1/year"),
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+
+    // Any pairwise mismatch involving two of (revenue, averaging_time,
+    // initial_growth_rate) is spurious -- none of them share units with
+    // each other, and TREND's stock-init equation does not require them to.
+    let triples = [
+        ("revenue", "averaging_time"),
+        ("revenue", "initial_growth_rate"),
+        ("averaging_time", "initial_growth_rate"),
+    ];
+    let spurious: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| {
+            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+                return false;
+            }
+            let details = diag_details(d);
+            triples
+                .iter()
+                .any(|(a, b)| details.contains(a) && details.contains(b))
+        })
+        .collect();
+
+    assert!(
+        spurious.is_empty(),
+        "TREND(input, delay, initial) must not pair any two of its arguments \
+         as unit-conflicting: input, delay_time, and initial_value legitimately \
+         carry three different units. Got {} diagnostic(s):\n{}",
+        spurious.len(),
+        spurious
+            .iter()
+            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

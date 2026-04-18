@@ -1536,81 +1536,51 @@ pub fn model_dependency_graph(
 /// the init AST -- notably `delay_time` in `delay1`/`delay3`, which is
 /// multiplied against the value-branch result -- are *coefficients*, not
 /// value-equivalents, and their units legitimately differ.  Grabbing every
-/// identifier with `identifier_set` (as the original code did) conflates
-/// these roles and produces spurious unit mismatches between `input`
-/// (units X/time) and `delay_time` (units of time) whenever both are
-/// module-input arguments.
+/// identifier (as an earlier version of this code did via `identifier_set`
+/// and then `collect_idents`) conflates these roles.
 ///
-/// We walk the entire AST looking for any `If(App(IsModuleInput(_)), ..)`
-/// subtree and return the union of identifiers from its then-branch and
-/// else-branch.  If no such subtree exists, we return an empty set, which
-/// causes the pairwise-compatibility check in `check_model_units` to skip
-/// this stock entirely (the check requires `>= 2` bound inputs to proceed).
-/// That is the correct behaviour: without the `isModuleInput` marker we
-/// have no structural signal that the init AST's identifiers must share
-/// units.
+/// We walk the AST looking for any `If(App(IsModuleInput(_)), t, f)` subtree
+/// and, on the first match, record *only the bare `Var` identifiers* that
+/// appear directly as `t` or `f`.  An identifier embedded in arithmetic --
+/// for example `trend`'s then-branch `input / (1 + delay_time *
+/// initial_value)` -- is playing a coefficient or rate role, not a
+/// value-equivalence role, and must NOT be collapsed into the equivalence
+/// group.  If the matched branches are both non-bare (or no `isModuleInput`
+/// subtree exists), we return an empty set and the pairwise-compatibility
+/// check in `check_model_units` skips this stock entirely.  That is the
+/// correct conservative behaviour: without a structural value-swap marker
+/// we have no basis for unit equivalence.
 fn init_value_equivalence_group(
     ast: &crate::ast::Ast<crate::ast::Expr2>,
 ) -> HashSet<Ident<Canonical>> {
     use crate::ast::{Ast, Expr2};
     use crate::builtins::BuiltinFn;
 
-    /// Collect every `Ident<Canonical>` referenced by `expr` (variables and
-    /// subscripts).  Does not descend into `BuiltinFn::IsModuleInput`
-    /// predicates because the argument there is a compile-time module-slot
-    /// name, not a runtime value.  All other builtin args are walked
-    /// normally so coefficients in the value branches are included too --
-    /// for example `x * 3` in the then-branch still records `x`.
-    fn collect_idents(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) {
-        match expr {
-            Expr2::Const(_, _, _) => {}
-            Expr2::Var(id, _, _) => {
-                out.insert(id.clone());
-            }
-            Expr2::Subscript(id, args, _, _) => {
-                out.insert(id.clone());
-                for arg in args {
-                    if let crate::ast::IndexExpr2::Expr(e) = arg {
-                        collect_idents(e, out);
-                    }
-                }
-            }
-            Expr2::Op1(_, e, _, _) => collect_idents(e, out),
-            Expr2::Op2(_, l, r, _, _) => {
-                collect_idents(l, out);
-                collect_idents(r, out);
-            }
-            Expr2::If(c, t, f, _, _) => {
-                collect_idents(c, out);
-                collect_idents(t, out);
-                collect_idents(f, out);
-            }
-            Expr2::App(builtin, _, _) => {
-                use crate::builtins::{BuiltinContents, walk_builtin_expr};
-                if let BuiltinFn::IsModuleInput(_, _) = builtin {
-                    return;
-                }
-                walk_builtin_expr(builtin, |c| {
-                    if let BuiltinContents::Expr(inner) = c {
-                        collect_idents(inner, out);
-                    }
-                });
-            }
+    /// If `expr` is a bare `Var`, insert its identifier into `out`.  A bare
+    /// reference directly under the if-then-else is the stdlib's signal
+    /// that a module-input slot is interchangeable with its sibling
+    /// branch's bare reference; anything wrapped in arithmetic (or a
+    /// builtin call, subscript, nested conditional, etc.) means the
+    /// identifier is playing a different role and should be left out of
+    /// the equivalence group.
+    fn try_insert_bare_var(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) {
+        if let Expr2::Var(id, _, _) = expr {
+            out.insert(id.clone());
         }
     }
 
     /// Walk the AST looking for an `If(App(IsModuleInput(_)), t, f, ..)`
-    /// subtree; on the first match append the identifiers of both value
-    /// branches to `out` and return.  We match only the first such
+    /// subtree; on the first match record the bare-Var idents (if any)
+    /// from both branches and return.  We match only the first such
     /// subtree -- stdlib modules use this pattern at most once per init
-    /// equation, and a second isModuleInput inside a branch would likely
+    /// equation, and a second isModuleInput inside a branch would
     /// indicate a different constraint we do not want to collapse.
     fn find_value_branches(expr: &Expr2, out: &mut HashSet<Ident<Canonical>>) -> bool {
         match expr {
             Expr2::If(cond, t, f, _, _) => {
                 if let Expr2::App(BuiltinFn::IsModuleInput(_, _), _, _) = cond.as_ref() {
-                    collect_idents(t, out);
-                    collect_idents(f, out);
+                    try_insert_bare_var(t, out);
+                    try_insert_bare_var(f, out);
                     return true;
                 }
                 find_value_branches(cond, out)
