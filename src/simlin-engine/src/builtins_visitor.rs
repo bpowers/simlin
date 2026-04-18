@@ -452,12 +452,15 @@ impl<'a> BuiltinVisitor<'a> {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
-                // TODO: make this a function call/hash lookup
-                if !crate::stdlib::MODEL_NAMES.contains(&func.as_str()) {
+                // `stdlib_args` is the authoritative per-name lookup: it both
+                // rejects unknown names and returns the input-port spec used
+                // below to wire the synthesized module. Folding the two
+                // lookups into one match also avoids a panic path for
+                // MODEL_NAMES entries without a `stdlib_args` spec (e.g.
+                // `systems_*`) if a user equation ever references them.
+                let Some(stdlib_model_inputs) = stdlib_args(&func) else {
                     return eqn_err!(UnknownBuiltin, loc.start, loc.end);
-                }
-
-                let stdlib_model_inputs = stdlib_args(&func).unwrap();
+                };
 
                 // In A2A context, add subscript suffix to module name for uniqueness
                 let subscript_suffix = self.subscript_suffix();
