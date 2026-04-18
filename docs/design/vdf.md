@@ -806,12 +806,20 @@ true format mechanism is simpler and direct; these approaches approximate it.
    name-table entries at position `rank + (slot_count - record_count)`.
    The offset is deterministic -- no scan needed -- and the path is exposed
    as `VdfFile::to_results_via_records()` in Rust and `_try_f2_offset_mapping`
-   in `tools/vdf_xray.py`. The remaining limitation is **coverage, not
-   correctness**: records are sparse in large models (only 23 of 296 OTs
-   in WRLD3 have records), so the record-based path resolves a subset of
-   OT entries rather than the full catalog. Fixtures without records for a
-   given variable must still fall back to model-guided mapping or to the
-   stocks-first-alphabetical path in `to_results_with_stock_classifier`.
+   in `tools/vdf_xray.py`. The only gating in this path is structural:
+   a record is dropped when its `field[6] == 0` (padding) or its
+   `field[11]` falls outside the offset-table range. Name category is
+   not filtered -- stdlib helpers (`DEL`, `LV1`, `LV2`, `LV3`, `ST`,
+   `RT1`, `RT2`, `DL`), internal signatures (`#SMOOTH(x, y)#`), metadata
+   markers (`.mark2`, `-months`), and Vensim builtin tokens (`MIN`,
+   `SMOOTH`, `DELAY1`) all retain their OT claims when a record legitimately
+   points to them. Vensim writes those records deliberately, so filtering
+   them out drops real OT data. Callers that want a cleaner user-facing
+   symbol table can strip these columns from the resulting `Results`.
+   Remaining limitations are mapping alignment (records can emit in
+   compilation order on large fixtures, off-by-one for econ-style
+   stdlib-expanded fixtures) rather than coverage; see follow-up
+   task #9 for the slot-ref-based record-to-name link.
 
 2. **OT-position validation for stock classification.** Given a proposed
    name-to-block assignment, the stocks-first-alphabetical ordering produces

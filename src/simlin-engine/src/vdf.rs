@@ -2378,15 +2378,25 @@ impl VdfFile {
     /// model-guided aliases) should still use `to_results_with_stock_classifier`
     /// or `build_section6_guided_ot_map`.
     ///
-    /// Filtering rules:
+    /// Filtering rules (structural only):
     /// - Records with `field[11] == 0` or `field[11] >= offset_table_count`
     ///   are skipped -- OT[0] is the Time series, not a record slot.
     /// - Records whose `field[6] == 0` are treated as non-shape/padding
     ///   entries and skipped.
-    /// - Name-table entries that classify as metadata (leading `.`, `-`, `:`,
-    ///   `#`, `"`; numeric-only; Vensim builtins; stdlib module IO names) are
-    ///   skipped even when the paired record is otherwise valid.
+    /// - Name-table entries that are empty or whose index is past the end
+    ///   of the name table are skipped (no name to assign).
     /// - If two records claim the same OT index the first winner keeps it.
+    ///
+    /// Name category is NOT filtered here: when a record legitimately
+    /// points to an OT entry, the name at its paired slot is honored as-is
+    /// even when it looks like a stdlib helper (`DEL`, `LV1`, `ST`, ...),
+    /// an internal signature (`#SMOOTH(x,y)#`), a metadata marker
+    /// (`.mark2`, `-months`), or a Vensim builtin token (`MIN`, `SMOOTH`).
+    /// Vensim writes those records deliberately -- they mark real runtime
+    /// slots -- so discarding them at read time would deterministically
+    /// drop real OT data. Callers that want a cleaner symbol table can
+    /// filter results-side (e.g., by dropping columns whose Ident begins
+    /// with a metadata-prefix character).
     ///
     /// The method always returns `Results` (possibly an empty one beyond
     /// Time) so callers can chain with other paths: it does not propagate
@@ -2456,27 +2466,11 @@ impl VdfFile {
                 continue;
             }
             // Skip padding records; they have f[6] == 0 meaning "no shape",
-            // and show up paired with metadata slots or with a bogus f[11].
+            // and typically come from the block-0..block-2 header region
+            // or from padded tail entries that Vensim has not bound to an
+            // OT slot.
             let rec = &self.records[ri];
             if rec.fields[6] == 0 {
-                continue;
-            }
-            if is_vdf_metadata_entry(name) {
-                continue;
-            }
-            if name.len() == 1 && name.starts_with(|c: char| !c.is_alphanumeric()) {
-                continue;
-            }
-            if VENSIM_BUILTINS.iter().any(|b| b.eq_ignore_ascii_case(name)) {
-                continue;
-            }
-            if STDLIB_PARTICIPANT_HELPERS.contains(&name.as_str()) {
-                continue;
-            }
-            if name.starts_with('#') {
-                // Internal signatures may be valid OT entries, but they
-                // are not user-visible variables; skip here and let
-                // model-guided callers resolve aliases if needed.
                 continue;
             }
 
@@ -2515,9 +2509,12 @@ impl VdfFile {
                 continue;
             }
 
-            // System names and user names both flow through `Ident::new`,
-            // which lowercases and strips spaces/underscores to match the
-            // canonicalization used elsewhere in `Results`.
+            // System and user names flow through `Ident::new`, which
+            // lowercases and strips spaces/underscores. `#`-prefixed
+            // internal signatures (and other names that carry
+            // non-canonicalizable characters) use `from_str_unchecked`
+            // so the raw name is preserved as the result column key;
+            // otherwise they would collapse into an empty Ident.
             for elem in 0..span {
                 let ot = ot_start + elem;
                 if !claimed_ot.insert(ot) {
@@ -2528,7 +2525,11 @@ impl VdfFile {
                 } else {
                     name.clone()
                 };
-                let key = Ident::<Canonical>::new(&display);
+                let key = if display.starts_with('#') {
+                    Ident::<Canonical>::from_str_unchecked(&display)
+                } else {
+                    Ident::<Canonical>::new(&display)
+                };
                 ordered.push((key, ot));
             }
         }
@@ -5645,22 +5646,20 @@ mod tests {
 
     #[test]
     fn test_to_results_via_records_covers_econ_base() {
-        // econ/base.vdf is the smallest fixture where the old record
-        // finder started its scan past the record region, so it
-        // drastically under-counted records. After the fix, record
-        // coverage rises from ~61% to the low-80s of non-Time OT slots.
+        // econ/base.vdf used to top out at ~64 non-Time OT slots because
+        // the old filter discarded records paired with stdlib-helper names
+        // (DEL, LV1, ST), Vensim builtin tokens (MIN, SMOOTH, DELAY1),
+        // unit/view markers (-months, .mark2), and single-char placeholders.
+        // Those records all have real `field[6] != 0` shapes and valid
+        // `field[11]` OT indices, so Vensim wrote them deliberately and
+        // the data belongs to whatever name the paired slot carries.
         //
-        // We do NOT hit 100% because the record sort (by f[2]) pairs
-        // some records with name-table entries that look like stdlib
-        // helpers (DEL, LV1, ...), hash-prefixed signatures, or Vensim
-        // builtins. Those get filtered out by `to_results_via_records`
-        // and leave their OT slots unclaimed. Realigning records to
-        // names via the slot-ref inversion is tracked as follow-up
-        // task #9.
+        // With the lexical filter gone, every structurally valid record
+        // claims an OT. We expect full coverage on econ/base (77/77).
         //
-        // This test pins the coverage floor so a regression in the
-        // record finder (or an over-aggressive filter) would trip the
-        // bound.
+        // This test pins the coverage floor so any regression in the
+        // record finder or a re-introduction of a name-category filter
+        // would trip the bound.
         let vdf = vdf_file("../../test/bobby/vdf/econ/base.vdf");
         let results = vdf
             .to_results_via_records()
@@ -5669,8 +5668,99 @@ mod tests {
         let non_time_ots = vdf.offset_table_count.saturating_sub(1);
         assert_eq!(non_time_ots, 77);
         assert!(
-            non_time_named >= 60,
-            "econ/base: expected >=60 non-Time OT mappings after record-region fix, \
+            non_time_named >= 73,
+            "econ/base: expected >=73 non-Time OT mappings, \
+             got {non_time_named}/{non_time_ots}"
+        );
+    }
+
+    #[test]
+    fn test_to_results_via_records_covers_econ_siblings() {
+        // The sibling econ fixtures share the same model structure (with
+        // policy/risk tweaks) as econ/base; they all top out below 85%
+        // with the old filter. Verify each clears the 95% coverage floor
+        // after the filter relaxation.
+        for (label, vdf_path, expected_ots) in [
+            ("econ/mark2", "../../test/bobby/vdf/econ/mark2.vdf", 83usize),
+            ("econ/policy", "../../test/bobby/vdf/econ/policy.vdf", 83),
+            ("econ/risk", "../../test/bobby/vdf/econ/risk.vdf", 86),
+        ] {
+            let vdf = vdf_file(vdf_path);
+            let results = vdf
+                .to_results_via_records()
+                .unwrap_or_else(|e| panic!("{label}: record-based mapping should succeed: {e}"));
+            let non_time_named = results.offsets.len().saturating_sub(1);
+            let non_time_ots = vdf.offset_table_count.saturating_sub(1);
+            assert_eq!(
+                non_time_ots, expected_ots,
+                "{label}: expected {expected_ots} non-Time OT slots"
+            );
+            let floor = ((expected_ots as f64) * 0.95).ceil() as usize;
+            assert!(
+                non_time_named >= floor,
+                "{label}: expected >={floor} non-Time OT mappings (>=95%), \
+                 got {non_time_named}/{non_time_ots}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_to_results_via_records_admits_stdlib_helper_names_on_econ() {
+        // Verify the filter-removal specifically: names that used to be
+        // discarded (stdlib helpers like DEL/LV1/ST, module IO names
+        // like IN, Vensim builtin tokens like MIN/SMOOTH/DELAY1, unit/view
+        // markers like -months/.mark2, single-char placeholders) now
+        // appear as result columns when their paired record has a valid
+        // f[6] and f[11]. Record-based mapping alone cannot reason about
+        // WHICH variable each name aliases -- that is a model-guided
+        // concern -- but the column must surface rather than be silently
+        // dropped.
+        //
+        // We assert that at least one such previously-filtered name is
+        // present, which is enough to catch a regression re-introducing
+        // the filter.
+        let vdf = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("econ/base: record-based mapping should succeed");
+        let has_stdlib_name = results.offsets.keys().any(|id| {
+            matches!(
+                id.as_str(),
+                "del" | "lv1" | "lv2" | "lv3" | "st" | "rt1" | "rt2" | "dl" | "in"
+            )
+        });
+        assert!(
+            has_stdlib_name,
+            "econ/base: expected at least one stdlib-helper name column \
+             (DEL/LV1/ST/IN/...) after filter relaxation; got columns \
+             {:?}",
+            results
+                .offsets
+                .keys()
+                .map(|id| id.as_str().to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_to_results_via_records_wrld3_scen01_above_floor() {
+        // WRLD3 SCEN01 is a compilation-order fixture (records > slots)
+        // where the sort-by-f[2]/offset pairing is known to misalign --
+        // see follow-up task #9. Despite that, removing the lexical
+        // filter lifts observable coverage from ~82% to ~96% because
+        // the records at the expected pairings all have real f[6]/f[11]
+        // values. Lock in the new floor with a little headroom.
+        let vdf = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+        let results = vdf
+            .to_results_via_records()
+            .expect("WRLD3 SCEN01: record-based mapping should succeed");
+        let non_time_named = results.offsets.len().saturating_sub(1);
+        let non_time_ots = vdf.offset_table_count.saturating_sub(1);
+        // Ratio around 0.90 gives ~5% headroom below the observed ~0.966.
+        let floor = ((non_time_ots as f64) * 0.90).ceil() as usize;
+        assert!(
+            non_time_named >= floor,
+            "WRLD3 SCEN01: expected >={floor} non-Time OT mappings (>=90%), \
              got {non_time_named}/{non_time_ots}"
         );
     }
