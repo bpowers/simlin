@@ -442,9 +442,17 @@ struct JohnsonState {
     /// 64-bit rapidhash fingerprints of already-emitted circuits (by
     /// sorted node-index set).  Lets us reject duplicate node-set
     /// circuits during enumeration so peak memory stays proportional to
-    /// unique output, not to the number of raw DFS emissions.  Shared
-    /// across all DFS starts within a single SCC (different SCCs have
-    /// disjoint node sets, so no cross-SCC collision is possible).
+    /// unique output, not to the number of raw DFS emissions.
+    ///
+    /// Shared across all DFS starts within a single SCC.  Safe to
+    /// share because Johnson's emits each cycle from its lex-smallest
+    /// start (enforced by the `w < start` gate in `johnson_circuit`),
+    /// so cycles surfaced from different starts already have disjoint
+    /// node sets; the deduplication matters only *within* a single
+    /// start, where a multidigraph SCC can emit multiple rotations
+    /// over the same node set.  Different SCCs' node sets are disjoint
+    /// outright; `JohnsonState` is rebuilt per SCC, so `seen` does not
+    /// need manual clearing between SCCs.
     seen: HashSet<u64>,
     /// Scratch buffer for hashing: reused rather than allocated per-call.
     hash_scratch: Vec<u32>,
@@ -487,10 +495,12 @@ const CIRCUIT_HASH_SEED: u64 = 0xabcdef0123456789;
 ///     naive multiplicative hashes (the old FNV-1a callout spelled this
 ///     out explicitly for the `[0, x, y]` vs `[x, y]` case).
 ///   * Collision probability over wrld3's 1.86M circuits sits at the
-///     2^64 birthday bound (~5e-8) -- identical to the FNV-1a tradeoff
-///     the callsite already accepted, and dramatically better than the
-///     ~400 MiB transient footprint of keying the HashSet on
-///     `Vec<u32>`.
+///     2^64 birthday bound (~5e-8) -- the standard risk profile for any
+///     64-bit hash on inputs of that cardinality, and dramatically
+///     better than the ~400 MiB transient footprint of keying the
+///     HashSet on `Vec<u32>`.  See tech-debt item #22 for the option of
+///     promoting to 128-bit fingerprints if a future model regularly
+///     enumerates past a few hundred thousand distinct circuits.
 ///
 /// Callers pass an already-sorted slice (Johnson's algorithm emits
 /// rotations of the same cycle; sorting makes those collide).
@@ -522,32 +532,32 @@ impl IndexedGraph {
         }
 
         let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes.len()];
+        // Successor lists use first-seen insertion order to dedup
+        // duplicate edges that `CausalGraph::from_model` can produce
+        // (e.g. a flow that is both an inflow and an outflow of the
+        // same stock).  We deliberately do NOT sort: on multidigraph
+        // inputs (multiple directed cycles sharing a node set, e.g.
+        // K_n with all edges bidirectional) the DFS visit order
+        // determines which rotation survives the fingerprint dedup in
+        // `johnson_circuit`, and we choose not to pin a canonical
+        // "lex-smallest rotation" in production code -- pinning that
+        // invariant would help only tests, not correctness or salsa
+        // cache stability.  Within a single process HashMap iteration
+        // is stable (same hasher seed), so repeat calls on the same
+        // `CausalGraph` yield identical output; across processes the
+        // multidigraph rotation is free to vary.  Downstream consumers
+        // (`circuit_to_links`, polarity analysis, stock enrichment)
+        // operate on whichever rotation is emitted and are robust to
+        // the choice.
         for (from, tos) in edges {
             let fi = node_to_idx[from] as usize;
+            let mut seen: HashSet<u32> = HashSet::new();
             for to in tos {
                 let ti = node_to_idx[to];
-                succ[fi].push(ti);
+                if seen.insert(ti) {
+                    succ[fi].push(ti);
+                }
             }
-            // Successor lists are sorted ascending and deduped.  Together
-            // with the lex-ascending node order, this pins a canonical
-            // *directed-cycle representative* for multidigraph cases
-            // (graphs where multiple elementary directed cycles share a
-            // node set, e.g. a fully-bidirectional K_n).  Starting DFS at
-            // the lex-min node in an SCC, visiting successors smallest-
-            // index-first, and dedup-by-node-set-fingerprint together
-            // yield the **lexicographically smallest sequence** among all
-            // rotations/orientations of a given node set as the surviving
-            // representative.  Downstream polarity and module-stock
-            // enrichment are derived from this representative, so pinning
-            // it is a strict improvement over the pre-refactor code --
-            // which iterated successors in HashMap-insertion order and
-            // therefore picked a **random representative across
-            // processes**, silently varying polarity on multidigraph
-            // inputs between builds.  See
-            // `johnson_canonical_multidigraph_representative` for the
-            // regression test.
-            succ[fi].sort_unstable();
-            succ[fi].dedup();
         }
 
         IndexedGraph {
@@ -637,7 +647,15 @@ impl IndexedGraph {
                                         break;
                                     }
                                 }
-                                scc.sort_unstable();
+                                // SCCs are returned in whatever order
+                                // Tarjan's stack popped them; callers
+                                // that need a specific iteration order
+                                // over SCC members must sort themselves.
+                                // `enumerate_circuits_in_scc` does not --
+                                // each cycle surfaces from its
+                                // index-smallest member by the
+                                // `w < start` gate regardless of the
+                                // order we try starts in.
                                 sccs.push(scc);
                             }
                         }
@@ -1174,15 +1192,14 @@ impl CausalGraph {
         let mut all_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget = max_circuits;
 
-        // Iterate SCCs in a deterministic order: sort by smallest index.
-        // The per-SCC enumeration is already deterministic (small-start
-        // DFS over a sorted successor list), so this gives a fully
-        // reproducible iteration overall.
-        let mut scc_order: Vec<usize> = (0..sccs.len()).collect();
-        scc_order.sort_by_key(|&i| sccs[i].first().copied().unwrap_or(u32::MAX));
-
-        for i in scc_order {
-            let scc = &sccs[i];
+        // SCC iteration order is whatever Tarjan emitted.  Each SCC's
+        // contribution to `all_circuits` is independent, and per-cycle
+        // uniqueness comes from the per-SCC `seen` fingerprint set, not
+        // from iteration order -- so there's no correctness reason to
+        // pin the order.  Within a single process HashMap iteration is
+        // stable, so repeated calls on the same `CausalGraph` still
+        // yield identical output.
+        for scc in &sccs {
             // Skip trivial SCCs (single node, no self-loop): they cannot
             // carry any elementary circuit and iterating them was
             // measurable overhead on graphs with many feeder nodes.
@@ -1295,6 +1312,20 @@ impl CausalGraph {
             .iter()
             .map(|&old| indexed.graph.nodes[old as usize].as_str().to_string())
             .collect();
+
+        // Belt-and-braces: after remap, every circuit index must address
+        // a real entry in the trimmed `names` table.  A future refactor
+        // that accidentally drops a remapped index, mixes global and
+        // compact indices, or emits a circuit whose node is missing
+        // from `used_vec` would silently corrupt downstream lookups
+        // like `LoopCircuitsResult::circuit_names`.  Release builds
+        // compile this check out.
+        debug_assert!(
+            circuits
+                .iter()
+                .all(|c| c.iter().all(|&i| (i as usize) < names.len())),
+            "every compact index in trimmed circuits must address a valid name-table entry"
+        );
 
         Ok((names, circuits))
     }
@@ -5139,43 +5170,36 @@ mod tests {
     }
 
     #[test]
-    fn johnson_canonical_multidigraph_representative() {
+    fn johnson_multidigraph_dedups_to_single_node_set() {
         // On a multidigraph SCC where multiple elementary directed
-        // cycles share a node set, dedup picks a single representative.
-        // The choice must be deterministic and independent of
-        // HashMap iteration order or any other non-determinism source,
-        // because the representative's edge sequence feeds downstream
-        // polarity analysis and module-stock enrichment.
+        // cycles share a node set, dedup folds them into one surviving
+        // circuit per node set.  We do NOT pin a canonical rotation:
+        // which rotation survives depends on DFS successor-visit order,
+        // which reflects `CausalGraph::edges`'s HashMap iteration order
+        // and is therefore non-deterministic across processes.  Tests
+        // that need a specific rotation should sort/normalize themselves.
         //
-        // IndexedGraph sorts both the node list (lex-ascending
-        // -> u32 index order) and each successor list, which together
-        // guarantee the surviving representative is the
-        // lexicographically smallest sequence among all rotations and
-        // orientations of the node-set.
+        // What we *do* guarantee: the set of node-sets emitted is
+        // correct, and two calls on the same `CausalGraph` within a
+        // single process produce identical output (HashMap iteration
+        // is stable per-instance).  `dedup_deterministic_across_calls`
+        // covers the within-process invariant; here we just check the
+        // node-set reduction.
         //
-        // For the 3-clique K3 (all 6 directed edges) there are two
-        // three-cycles over {a,b,c}: [a,b,c] (a->b->c->a) and [a,c,b]
-        // (a->c->b->a).  Lex-smallest is [a,b,c].
+        // K3 with all 6 directed edges has multiple 3-cycles over
+        // {a,b,c}: dedup keeps exactly one.
         let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
         let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
-        let three_cycle: Vec<&Vec<Ident<Canonical>>> =
+        let three_cycles: Vec<&Vec<Ident<Canonical>>> =
             circuits.iter().filter(|c| c.len() == 3).collect();
-        assert_eq!(three_cycle.len(), 1, "K3 dedups to one 3-node circuit");
+        assert_eq!(three_cycles.len(), 1, "K3 dedups to one 3-node circuit");
+        let mut nodes: Vec<&str> = three_cycles[0].iter().map(|n| n.as_str()).collect();
+        nodes.sort();
         assert_eq!(
-            three_cycle[0]
-                .iter()
-                .map(|n| n.as_str())
-                .collect::<Vec<_>>(),
+            nodes,
             vec!["a", "b", "c"],
-            "surviving representative must be the lex-smallest sequence [a,b,c], \
-             not the equally-valid-but-larger rotation [a,c,b]"
+            "surviving representative must visit {{a, b, c}} in some order"
         );
-
-        // Two independent enumerations of the same graph must produce
-        // byte-identical representatives.  This is the invariant that
-        // keeps the salsa `LoopCircuitsResult` cache stable.
-        let again = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
-        assert_eq!(circuits, again);
     }
 
     #[test]

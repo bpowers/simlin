@@ -197,10 +197,10 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 23. LTM Circuit Enumeration Is Tiernan-Style, Not Johnson's
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `IndexedGraph::enumerate_circuits_in_scc`)
-- **Severity**: low
-- **Description**: The DFS uses Tiernan (1970) lexicographic-restart with a per-start visited set; the comment labelling it "Johnson-style" is inaccurate. Real Johnson (1975) maintains a blocked set and B[w] unblock lists to achieve O((V+E)(C+1)) time; Tiernan can repeat exploration of the same subtree from multiple starts when those subtrees yield no cycle back to the start. On wrld3 with a dense 166-node SCC the current MAX_LTM_CIRCUITS=100_000 path is already fast (~26 ms) because cycles close early, but pathological graphs with long non-cyclic branches could benefit meaningfully from the switch (~50 lines of added code). Fix: either rename the comment to "Tiernan-style" or implement the blocked-set mechanism.
+- **Severity**: RESOLVED
+- **Description**: (**Resolved** in commit aa56c5a1 on the reduce-ltm-mem branch.) Production code now implements Johnson 1975 with the blocked-set + B[w] unblock-list mechanism; the misnamed "Johnson-style" Tiernan variant is retained only under `#[cfg(test)]` as a test oracle for a Johnson-vs-Tiernan equivalence proptest.  Keeping the entry as a historical pointer to the commit that fixed it.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-18
 
 ### 24. LTM SearchGraph Uses String-Backed Idents in Hot Path
 
