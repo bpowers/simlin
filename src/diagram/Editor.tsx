@@ -347,30 +347,48 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (!(await engine.isSimulatable())) {
       return;
     }
+    // Sparklines don't need Loops-That-Matter analysis, and LTM compilation
+    // can blow up WASM memory on dense causal graphs (World3: ~1.8M
+    // elementary circuits → `RuntimeError: unreachable` from the allocator).
+    // We ask for a plain simulation first; on any failure we retry with LTM
+    // explicitly disabled so a future default flip cannot starve the UI of
+    // sparkline data.  The first failure is surfaced as a warning-style
+    // entry in `modelErrors` so the error panel still shows the user what
+    // went wrong.
+    const model = await engine.mainModel();
+    let run;
     try {
-      const model = await engine.mainModel();
-      const run = await model.run();
-      const idents = run.varNames;
-      const time = run.getSeries('time') ?? new Float64Array(0);
-      const data = new Map<string, Series>(
-        idents.map((ident) => {
-          const values = run.getSeries(ident) ?? new Float64Array(0);
-          return [ident, { name: ident, time, values }];
-        }),
-      );
-      const project = defined(this.project());
-      // Simulation data comes from mainModel(), so variable idents are
-      // root-model-scoped. Always attach data to 'main' so root sparklines
-      // stay populated even when a sim runs while viewing a child model.
-      this.setState({
-        activeProject: projectAttachData(project, data, 'main'),
-        data,
-      });
+      run = await model.run();
     } catch (e) {
       this.setState({
         modelErrors: [...this.state.modelErrors, e as Error],
       });
+      try {
+        run = await model.run({}, { analyzeLtm: false });
+      } catch (e2) {
+        this.setState({
+          modelErrors: [...this.state.modelErrors, e2 as Error],
+        });
+        await this.refreshCachedErrors();
+        return;
+      }
     }
+    const idents = run.varNames;
+    const time = run.getSeries('time') ?? new Float64Array(0);
+    const data = new Map<string, Series>(
+      idents.map((ident) => {
+        const values = run.getSeries(ident) ?? new Float64Array(0);
+        return [ident, { name: ident, time, values }];
+      }),
+    );
+    const project = defined(this.project());
+    // Simulation data comes from mainModel(), so variable idents are
+    // root-model-scoped. Always attach data to 'main' so root sparklines
+    // stay populated even when a sim runs while viewing a child model.
+    this.setState({
+      activeProject: projectAttachData(project, data, 'main'),
+      data,
+    });
     // Refresh cached errors after simulation so the error panel reflects
     // any new simulation errors (e.g. runtime divide-by-zero).
     await this.refreshCachedErrors();

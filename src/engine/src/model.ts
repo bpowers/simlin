@@ -435,13 +435,19 @@ export class Model {
 
   /**
    * Run simulation with optional variable overrides.
+   *
+   * Defaults to `analyzeLtm=false` (matching `simulate()`): LTM analysis is
+   * opt-in because it can blow up compile time and memory on dense causal
+   * graphs (e.g. World3).  Callers that need Loops-That-Matter link/loop
+   * scores must pass `{ analyzeLtm: true }` explicitly.
+   *
    * @param overrides Override values for any model variables
    * @param options Run options
    * @returns Run object with results and analysis
    */
   async run(overrides: Record<string, number> = {}, options: { analyzeLtm?: boolean } = {}): Promise<Run> {
     this.checkDisposed();
-    const { analyzeLtm = true } = options;
+    const { analyzeLtm = false } = options;
 
     const sim = await this.simulate(overrides, { enableLtm: analyzeLtm });
     await sim.runToEnd();
