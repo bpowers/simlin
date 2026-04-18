@@ -5129,7 +5129,7 @@ mod tests {
         // Complete directed graph on 4 nodes (K4) with every pair
         // bidirectional.  The DFS discovers many raw elementary cycles
         // that collapse to fewer distinct node-sets under dedup:
-        //   3 two-cycles: {a,b}, {a,c}, {a,d}, {b,c}, {b,d}, {c,d}
+        //   6 two-cycles: {a,b}, {a,c}, {a,d}, {b,c}, {b,d}, {c,d}
         //   many three-cycles, all over three-node subsets
         //   many four-cycles, all over {a,b,c,d}
         // The raw DFS work -- not the unique output size -- is what
