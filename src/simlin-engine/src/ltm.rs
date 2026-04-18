@@ -31,6 +31,39 @@ use crate::variable::{Variable, identifier_set};
 /// this branch's scope.
 pub(crate) const MAX_LTM_CIRCUITS: usize = 100_000;
 
+/// Runtime-overridable mirror of [`MAX_LTM_CIRCUITS`] used by the default-budget
+/// wrappers ([`CausalGraph::find_loops`], [`CausalGraph::find_circuit_node_lists`],
+/// [`CausalGraph::find_indexed_circuits`]).
+///
+/// Production code leaves this at the default; the mechanism exists solely so
+/// diagnostic harnesses (see `examples/ltm_full_bench.rs`) can measure how the
+/// downstream LTM pipeline scales across caps without rebuilding or mutating
+/// the documented [`MAX_LTM_CIRCUITS`] value.  Changing the budget does not
+/// invalidate salsa caches, so callers re-measuring at a new cap must also
+/// use a fresh `SimlinDb`.
+static RUNTIME_LTM_CIRCUIT_BUDGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(MAX_LTM_CIRCUITS);
+
+/// Current runtime budget for the default-budget enumeration wrappers.
+fn current_ltm_circuit_budget() -> usize {
+    RUNTIME_LTM_CIRCUIT_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Override the default LTM circuit budget for diagnostic measurement.
+///
+/// Intended for the `ltm_full_bench` harness and similar measurement tools.
+/// Pass [`MAX_LTM_CIRCUITS`] to restore the default.  Has no effect on
+/// already-cached salsa results -- create a fresh database if re-measurement
+/// at the new cap is required.
+pub fn set_max_ltm_circuits(budget: usize) {
+    RUNTIME_LTM_CIRCUIT_BUDGET.store(budget, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read the documented default cap (ignores any runtime override).
+pub fn default_max_ltm_circuits() -> usize {
+    MAX_LTM_CIRCUITS
+}
+
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the [`MAX_LTM_CIRCUITS`] budget.
 /// The caller should treat this as "LTM analysis skipped for this
@@ -1116,7 +1149,7 @@ impl CausalGraph {
     /// Callers that need an explicit truncation signal should use
     /// [`Self::find_loops_with_limit`].
     pub fn find_loops(&self) -> Vec<Loop> {
-        self.find_loops_with_limit(MAX_LTM_CIRCUITS)
+        self.find_loops_with_limit(current_ltm_circuit_budget())
             .unwrap_or_default()
     }
 
@@ -1234,7 +1267,7 @@ impl CausalGraph {
     /// when the caller needs to distinguish "no loops" from "too many
     /// loops to enumerate".
     pub fn find_circuit_node_lists(&self) -> Vec<Vec<Ident<Canonical>>> {
-        self.find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+        self.find_circuit_node_lists_with_limit(current_ltm_circuit_budget())
             .unwrap_or_default()
     }
 
@@ -1334,7 +1367,7 @@ impl CausalGraph {
     /// bounded by [`MAX_LTM_CIRCUITS`].  Returns `(names, [])` when the
     /// DFS budget is exhausted so callers have a uniform empty response.
     pub fn find_indexed_circuits(&self) -> (Vec<String>, Vec<Vec<u32>>) {
-        self.find_indexed_circuits_with_limit(MAX_LTM_CIRCUITS)
+        self.find_indexed_circuits_with_limit(current_ltm_circuit_budget())
             .unwrap_or_else(|_| (Vec::new(), Vec::new()))
     }
 
