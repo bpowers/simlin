@@ -52,6 +52,8 @@ mod project;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
+#[doc(hidden)]
+pub mod rapidhash;
 mod results;
 #[cfg(test)]
 mod rk_integration_tests;

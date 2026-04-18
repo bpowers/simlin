@@ -100,4 +100,8 @@ harness = false
 name = "compiler"
 harness = false
 
+[[bench]]
+name = "rapidhash_bench"
+harness = false
+
 [build-dependencies]

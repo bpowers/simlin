@@ -438,6 +438,64 @@ struct JohnsonState {
     path: Vec<u32>,
     in_scc: Vec<bool>,
     circuits: Vec<Vec<u32>>,
+    /// 64-bit rapidhash fingerprints of already-emitted circuits (by
+    /// sorted node-index set).  Lets us reject duplicate node-set
+    /// circuits during enumeration so peak memory stays proportional to
+    /// unique output, not to the number of raw DFS emissions.  Shared
+    /// across all DFS starts within a single SCC (different SCCs have
+    /// disjoint node sets, so no cross-SCC collision is possible).
+    seen: HashSet<u64>,
+    /// Scratch buffer for hashing: reused rather than allocated per-call.
+    hash_scratch: Vec<u32>,
+}
+
+/// Fixed seed for the LTM circuit fingerprint hash.
+///
+/// rapidhash mixes this into the state alongside the default secret;
+/// the only property we care about is that it's non-zero and stable
+/// across runs, because the resulting fingerprint set is stored in a
+/// salsa-cached `LoopCircuitsResult`.  Changing this value invalidates
+/// every cached circuit-enumeration result (the hashes change even
+/// though the underlying circuits don't), so treat it as a schema-level
+/// constant and bump it only when that invalidation is desired.
+const CIRCUIT_HASH_SEED: u64 = 0xabcdef0123456789;
+
+/// Deterministic 64-bit rapidhash V3 (HashMicro variant) fingerprint
+/// over a slice of `u32`s, hashed as their little-endian byte
+/// representation.
+///
+/// rapidhash replaces an earlier u32-wise FNV-1a implementation.  At
+/// the LTM hot path's size distribution (mean ~188 bytes, max 320
+/// bytes) the `HashMicro` variant sustains ~34 GiB/s on x86-64 vs.
+/// FNV-1a's ~10 GiB/s, a 3.5x throughput improvement per-hash.  On the
+/// wrld3 `ltm_mem_bench` the end-to-end enumeration speedup is ~4%
+/// (hashing is a small but non-negligible share of total time; the
+/// rest is Johnson's DFS, Vec/HashSet bookkeeping, and sort_unstable
+/// on the scratch buffer).  See `benches/rapidhash_bench.rs`.
+///
+/// rapidhash is preferred here for correctness as much as speed:
+///   * It is deterministic given a fixed seed and secret, which matters
+///     because `LoopCircuitsResult` is a salsa cache value -- a
+///     randomized hasher could silently reshuffle surviving circuits on
+///     a rare collision and invalidate the cache even when the input
+///     didn't change.  We pass `CIRCUIT_HASH_SEED` (a fixed non-zero
+///     constant) and the default rapidhash secret from the port.
+///   * It has strong avalanche behavior: single-bit input flips spread
+///     across ~32 output bits, so leading-zero elements and common
+///     prefixes do not collapse into the seed the way they do with
+///     naive multiplicative hashes (the old FNV-1a callout spelled this
+///     out explicitly for the `[0, x, y]` vs `[x, y]` case).
+///   * Collision probability over wrld3's 1.86M circuits sits at the
+///     2^64 birthday bound (~5e-8) -- identical to the FNV-1a tradeoff
+///     the callsite already accepted, and dramatically better than the
+///     ~400 MiB transient footprint of keying the HashSet on
+///     `Vec<u32>`.
+///
+/// Callers pass an already-sorted slice (Johnson's algorithm emits
+/// rotations of the same cycle; sorting makes those collide).
+#[inline]
+fn hash_u32_slice(vals: &[u32]) -> u64 {
+    crate::rapidhash::hash_u32_slice(vals, CIRCUIT_HASH_SEED)
 }
 
 impl IndexedGraph {
@@ -621,6 +679,8 @@ impl IndexedGraph {
             path: Vec::with_capacity(scc.len()),
             in_scc: vec![false; n],
             circuits: Vec::new(),
+            seen: HashSet::new(),
+            hash_scratch: Vec::with_capacity(scc.len()),
         };
         for &v in scc {
             state.in_scc[v as usize] = true;
@@ -698,13 +758,26 @@ impl IndexedGraph {
                 // rules out the self-loop-at-root case).  The closing
                 // edge v -> start is implicit -- downstream code
                 // (circuit_to_links) wraps from path[last] to path[0].
-                // Budget is checked before the push so zero budget bails
-                // cleanly.
-                if *budget == 0 {
-                    return Err(TruncatedByBudgetInternal);
+                //
+                // Multidigraph graphs (e.g. arms-race 3-cliques) produce
+                // multiple distinct directed cycles over the same node
+                // set; LTM semantics fold those into a single loop.
+                // Dedup here rather than post-hoc so peak memory stays
+                // proportional to unique output.  Budget consumption
+                // only fires for unique emissions -- a duplicate
+                // traversal still marks `found_cycle = true` so the
+                // blocked/B[] unblock machinery behaves correctly.
+                state.hash_scratch.clear();
+                state.hash_scratch.extend_from_slice(&state.path);
+                state.hash_scratch.sort_unstable();
+                let fp = hash_u32_slice(&state.hash_scratch);
+                if state.seen.insert(fp) {
+                    if *budget == 0 {
+                        return Err(TruncatedByBudgetInternal);
+                    }
+                    *budget -= 1;
+                    state.circuits.push(state.path.clone());
                 }
-                *budget -= 1;
-                state.circuits.push(state.path.clone());
                 found_cycle = true;
             } else if w == start {
                 // Pure self-loop at the DFS root (v == start).  Excluded
@@ -738,14 +811,19 @@ impl IndexedGraph {
             // in each successor w's b_list, so that if w is later
             // unblocked (because another DFS branch found a cycle
             // through w), v will also be unblocked and retried.
+            //
+            // Classical Johnson's does not guard against duplicate
+            // entries in b_list[w]: `johnson_unblock` short-circuits on
+            // already-unblocked nodes, so at worst we pay one extra
+            // pop+check per duplicate rather than an O(|b_list|) scan
+            // per insertion.  Dropping the linear `contains` check is a
+            // pure win on dense SCCs.
             for i in 0..succs_len {
                 let w = self.succ[v as usize][i];
                 if !state.in_scc[w as usize] || w < start {
                     continue;
                 }
-                if !state.b_list[w as usize].contains(&v) {
-                    state.b_list[w as usize].push(v);
-                }
+                state.b_list[w as usize].push(v);
             }
         }
 
@@ -832,39 +910,20 @@ impl IndexedGraph {
         false
     }
 
-    /// Deduplicate circuits by node-set.
-    ///
-    /// Two distinct elementary circuits can share a node set when the same
-    /// nodes are visited in different rotations (e.g. `a->b->c->a` vs.
-    /// `a->c->b->a` in a graph with edges in both orientations); the LTM
-    /// semantics fold these into a single loop.  See
-    /// `test_layout_arms_race` for a graph where this actually fires.
-    ///
-    /// Keys are a 64-bit fingerprint of the sorted node-index vector via
-    /// the default SipHash-1-3 hasher seeded from process RNG.  This is
-    /// within-process deterministic (every circuit uses the same seed) and
-    /// the birthday-collision probability over wrld3's 1.86M circuits is
-    /// under 1e-7 -- well below any observable impact on loop counts.
-    /// Storing u64 fingerprints instead of full sorted `Vec<u32>` keys
-    /// drops the dedup footprint from ~440 MiB to ~30 MiB on wrld3 at
-    /// uncapped enumeration.
-    fn dedup_circuits(circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-        use std::collections::hash_map::RandomState;
-        use std::hash::BuildHasher;
-
-        let state = RandomState::new();
-        let mut seen: HashSet<u64> = HashSet::with_capacity(circuits.len());
-        let mut unique = Vec::with_capacity(circuits.len());
-        let mut scratch: Vec<u32> = Vec::new();
+    /// Debug-only helper: confirm the invariant that
+    /// `enumerate_circuits_in_scc` emits each node-set at most once per
+    /// SCC.  Used by `debug_assert!` callers; release builds compile
+    /// the call out via `debug_assert!`'s no-op expansion.
+    fn has_no_duplicate_node_sets(circuits: &[Vec<u32>]) -> bool {
+        let mut seen: HashSet<Vec<u32>> = HashSet::with_capacity(circuits.len());
         for c in circuits {
-            scratch.clear();
-            scratch.extend_from_slice(&c);
-            scratch.sort_unstable();
-            if seen.insert(state.hash_one(&scratch)) {
-                unique.push(c);
+            let mut key = c.clone();
+            key.sort_unstable();
+            if !seen.insert(key) {
+                return false;
             }
         }
-        unique
+        true
     }
 
     /// Convert a circuit of indices back to the caller-facing
@@ -874,16 +933,6 @@ impl IndexedGraph {
             .iter()
             .map(|&i| self.nodes[i as usize].clone())
             .collect()
-    }
-
-    /// Materialize the canonical node-name table as a `Vec<String>`.
-    /// Index `i` corresponds to `NodeIdx(i as u32)` in the indexed
-    /// circuit output.  Allocates one `String` per unique node; the
-    /// dense `Vec<Vec<u32>>` circuit output shares this table so the
-    /// aggregate memory footprint is O(unique_nodes + total_circuit_len)
-    /// rather than O(unique_nodes × circuits × path_len).
-    fn node_name_strings(&self) -> Vec<String> {
-        self.nodes.iter().map(|i| i.as_str().to_string()).collect()
     }
 }
 
@@ -1104,10 +1153,17 @@ impl CausalGraph {
             }
         }
 
-        let unique = IndexedGraph::dedup_circuits(all_circuits);
+        // Each SCC's enumerator already deduplicates by sorted node-set,
+        // and different SCCs share no nodes -- so `all_circuits` has no
+        // cross-SCC duplicates.  Debug builds verify the invariant.
+        debug_assert!(
+            IndexedGraph::has_no_duplicate_node_sets(&all_circuits),
+            "enumerate_circuits_in_scc should emit unique node-sets per SCC"
+        );
+
         Ok(IndexedCircuits {
             graph,
-            circuits: unique,
+            circuits: all_circuits,
         })
     }
 
@@ -1144,16 +1200,61 @@ impl CausalGraph {
     /// length-check, or group circuits -- all of which work on the
     /// integer form without paying the per-name allocation cost.
     ///
+    /// The returned name table is trimmed to **only the nodes that
+    /// actually appear in a circuit**: non-cyclic feeder variables are
+    /// omitted, and `circuits` use compact indices into the trimmed
+    /// table.  This matters for salsa cache stability -- otherwise a
+    /// rename of any acyclic variable would change the (full) name
+    /// table and invalidate every downstream LTM query even though the
+    /// loop structure is unchanged.  `names` is empty when `circuits`
+    /// is empty (pure DAG / truncated budget).
+    ///
     /// Same budget semantics as [`Self::find_circuit_node_lists_with_limit`];
-    /// returns `Err(TruncatedByBudget)` when the enumeration would exceed
-    /// `max_circuits`.
+    /// returns `Err(TruncatedByBudget)` when the enumeration would
+    /// exceed `max_circuits`.
     pub fn find_indexed_circuits_with_limit(
         &self,
         max_circuits: usize,
     ) -> std::result::Result<(Vec<String>, Vec<Vec<u32>>), TruncatedByBudget> {
         let indexed = self.enumerate_indexed_circuits(max_circuits)?;
-        let names = indexed.graph.node_name_strings();
-        Ok((names, indexed.circuits))
+        let mut circuits = indexed.circuits;
+
+        if circuits.is_empty() {
+            return Ok((Vec::new(), circuits));
+        }
+
+        // Compact the name table to only the indices that appear in a
+        // circuit.  Using BTreeSet preserves ascending order so the
+        // trimmed `names` stays lex-sorted (the enumerator's canonical
+        // ordering, which downstream tests rely on).
+        let mut used: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for c in &circuits {
+            for &n in c {
+                used.insert(n);
+            }
+        }
+        let used_vec: Vec<u32> = used.into_iter().collect();
+
+        // Sparse mapping old_idx -> new_idx.  used_vec.len() is bounded
+        // by the (non-trivial) SCC size -- at most a few hundred even
+        // on dense SD models -- so a Vec<i32> keyed by old index is
+        // both faster and denser than a HashMap.
+        let mut old_to_new: Vec<i32> = vec![-1; indexed.graph.nodes.len()];
+        for (new_i, &old_i) in used_vec.iter().enumerate() {
+            old_to_new[old_i as usize] = new_i as i32;
+        }
+        for c in &mut circuits {
+            for n in c {
+                *n = old_to_new[*n as usize] as u32;
+            }
+        }
+
+        let names: Vec<String> = used_vec
+            .iter()
+            .map(|&old| indexed.graph.nodes[old as usize].as_str().to_string())
+            .collect();
+
+        Ok((names, circuits))
     }
 
     /// Default-budget variant of [`Self::find_indexed_circuits_with_limit`];
@@ -4827,27 +4928,28 @@ mod tests {
     //       max_circuits + 1st circuit,
     //   (5) cross-SCC edges never traversed.
 
-    /// Helper: canonicalize a list of circuits for comparison.  Rotates
-    /// each circuit so that its lex-smallest node comes first, then sorts
-    /// the outer list.  Used by the equivalence test to compare Johnson's
-    /// output against Tiernan's ignoring rotation differences (both
-    /// algorithms SHOULD produce identical rotations under our
-    /// small-start discipline, but being rotation-insensitive in the test
-    /// hardens against future refactors).
-    fn canonicalize_circuits(mut circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-        for c in &mut circuits {
-            if c.is_empty() {
-                continue;
-            }
-            let min_idx = c.iter().enumerate().min_by_key(|(_, v)| **v).unwrap().0;
-            c.rotate_left(min_idx);
-        }
-        circuits.sort();
-        circuits
+    /// Canonicalize a list of circuits to the set of sorted node-sets.
+    /// LTM semantics fold distinct rotations with the same node-set into
+    /// one loop (see `deduplicate_loops` and the multidigraph handling
+    /// in `johnson_circuit`).  The post-refactor Johnson's deduplicates
+    /// inline during emission; the Tiernan oracle still emits every
+    /// rotation.  Reducing to sorted + deduped node-sets puts them on
+    /// equal footing for equivalence comparisons.
+    fn canonicalize_circuits(circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+        let mut keys: Vec<Vec<u32>> = circuits
+            .into_iter()
+            .map(|mut c| {
+                c.sort_unstable();
+                c
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// Run both Johnson's (production) and Tiernan (oracle) on a graph
-    /// and assert their canonicalized outputs are equal.
+    /// and assert their canonicalized node-set coverage is equal.
     fn assert_johnson_matches_tiernan(cg: &CausalGraph) {
         let graph = IndexedGraph::from_edges(cg.edges());
         let sccs = graph.tarjan_scc();
@@ -4868,16 +4970,12 @@ mod tests {
             tiernan_circuits.append(&mut part);
         }
 
-        // Both should emit each cycle exactly once with the same total
-        // count.  Dedup (at the IndexedGraph::dedup_circuits layer) would
-        // normally fold multidigraph duplicates, but here we compare the
-        // raw output of each algorithm to confirm they're on equal footing.
         let johnson_canon = canonicalize_circuits(johnson_circuits);
         let tiernan_canon = canonicalize_circuits(tiernan_circuits);
         assert_eq!(
             johnson_canon,
             tiernan_canon,
-            "Johnson's and Tiernan enumerations disagree on edges {:?}",
+            "Johnson's and Tiernan node-set coverage disagrees on edges {:?}",
             cg.edges()
         );
     }
@@ -5103,6 +5201,114 @@ mod tests {
                 vec!["a".to_string(), "b".to_string()],
                 vec!["x".to_string(), "y".to_string()],
             ]
+        );
+    }
+
+    #[test]
+    fn dedup_deterministic_across_calls() {
+        // Multidigraph (K3 with all 6 directed edges) yields two
+        // distinct directed 3-cycles sharing node set {a,b,c}; LTM
+        // semantics fold those into one.  A non-deterministic hasher
+        // could pick different representatives between calls on rare
+        // collisions, which would silently invalidate the salsa
+        // LoopCircuitsResult cache.  The rapidhash fingerprint is
+        // content-addressed and deterministic (fixed seed, fixed
+        // secret); calling twice on the same graph must produce
+        // byte-identical output.
+        let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+        let r1 = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let r2 = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(
+            r1, r2,
+            "repeated enumeration of the same graph must be byte-identical"
+        );
+
+        // The indexed form must also be byte-identical, including the
+        // trimmed name table and compact indices.
+        let i1 = cg.find_indexed_circuits();
+        let i2 = cg.find_indexed_circuits();
+        assert_eq!(
+            i1, i2,
+            "repeated indexed enumeration must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn find_indexed_circuits_trims_names_to_cycle_participants() {
+        // Graph: non-cyclic feeder -> entry -> [ entry <-> loop_a <-> loop_b ]
+        // feeder is acyclic and must NOT appear in the names table.
+        // Keeping it would invalidate salsa caching whenever an acyclic
+        // variable elsewhere in the project is renamed, even though the
+        // loop structure is unchanged.
+        let cg = build_causal_graph(&[
+            ("feeder", &["entry"]),
+            ("entry", &["loop_a"]),
+            ("loop_a", &["loop_b"]),
+            ("loop_b", &["entry"]),
+        ]);
+        let (names, circuits) = cg.find_indexed_circuits();
+        assert_eq!(circuits.len(), 1, "exactly one elementary cycle");
+        assert!(
+            !names.iter().any(|n| n == "feeder"),
+            "non-cyclic feeder must be excluded from the names table: {names:?}"
+        );
+        let mut expected = vec![
+            "entry".to_string(),
+            "loop_a".to_string(),
+            "loop_b".to_string(),
+        ];
+        expected.sort();
+        let mut got = names.clone();
+        got.sort();
+        assert_eq!(
+            got, expected,
+            "names table must contain exactly the cycle participants"
+        );
+
+        // Compact indices must all resolve to valid names-table entries.
+        for c in &circuits {
+            for &idx in c {
+                assert!(
+                    (idx as usize) < names.len(),
+                    "compact index {idx} out of range"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_indexed_circuits_empty_on_dag_returns_empty_names() {
+        // Pure DAG has no circuits; the (names, circuits) pair must both
+        // be empty so salsa sees a stable "no LTM" result across any
+        // rename/reshape of the DAG.
+        let cg = build_causal_graph(&[("a", &["b"]), ("b", &["c"])]);
+        let (names, circuits) = cg.find_indexed_circuits();
+        assert!(circuits.is_empty(), "DAG has no circuits");
+        assert!(
+            names.is_empty(),
+            "empty circuits must produce empty names table: {names:?}"
+        );
+    }
+
+    #[test]
+    fn find_loops_and_find_circuit_node_lists_agree_on_count() {
+        // Both public APIs share `enumerate_indexed_circuits`, so their
+        // circuit counts must remain in lock-step.  This guards against
+        // accidental drift if future refactors thread a separate dedup
+        // or filter through one path but not the other.
+        let cg = build_causal_graph(&[
+            ("a", &["b", "c"]),
+            ("b", &["a", "c"]),
+            ("c", &["a", "b"]),
+            ("x", &["y"]),
+            ("y", &["x"]),
+        ]);
+        let loops = cg.find_loops_with_limit(usize::MAX).unwrap();
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(
+            loops.len(),
+            circuits.len(),
+            "find_loops and find_circuit_node_lists must produce the same count"
         );
     }
 

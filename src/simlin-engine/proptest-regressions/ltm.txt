@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc aad5c5bd10ca677b11c57fa6bc9142d7fa3799c3878b948d032e8f07171c2147 # shrinks to n = 2, edges = [(30, 61), (103, 138), (20, 12)]
+cc a1eea11f004d2fd257c93cee2c4aa965d9be18f6a94d5ce533f2113eb1f5f117 # shrinks to n = 4, edges = [(88, 217), (142, 19), (20, 202), (193, 26), (181, 123), (62, 37), (3, 192)]
