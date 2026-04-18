@@ -206,9 +206,7 @@ fn test_model_ltm_variables_sort_order_respects_dependencies() {
             3
         } else if var.name.contains("\u{205A}path\u{205A}") {
             2
-        } else if var.name.contains("\u{205A}loop_score\u{205A}")
-            || var.name.contains("\u{205A}rel_loop_score\u{205A}")
-        {
+        } else if var.name.contains("\u{205A}loop_score\u{205A}") {
             1
         } else {
             0
@@ -387,7 +385,8 @@ fn build_chain_scc_project(project_name: &str, total_nodes: usize) -> datamodel:
 /// Auto-flip: a model whose element-level causal graph has an SCC of
 /// 51 nodes (one node over the 50-node threshold) must flip to
 /// discovery-mode shape: link scores for causal edges, no per-loop
-/// `loop_score` / `rel_loop_score` synthetic variables.
+/// `loop_score` synthetic variables.  (`rel_loop_score` is never
+/// materialized now that Option B moved it to post-sim.)
 ///
 /// See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` for the
 /// compile-time equation-text blow-up that motivates this threshold.
@@ -421,6 +420,8 @@ fn test_model_ltm_variables_auto_flip_above_scc_threshold() {
         loop_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 
+    // rel_loop_score is never materialized as a VM variable after Option B;
+    // guard against any future regression that re-introduces the emitter.
     let rel_loop_scores: Vec<_> = ltm
         .vars
         .iter()
@@ -428,7 +429,7 @@ fn test_model_ltm_variables_auto_flip_above_scc_threshold() {
         .collect();
     assert!(
         rel_loop_scores.is_empty(),
-        "auto-flipped LTM must NOT materialize rel_loop_score vars; got: {:?}",
+        "LTM must never materialize rel_loop_score vars (Option B); got: {:?}",
         rel_loop_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 }

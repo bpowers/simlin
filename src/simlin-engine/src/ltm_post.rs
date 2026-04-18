@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 
 use crate::common::{Canonical, Ident};
-use crate::ltm::{CyclePartitions, Loop};
 use crate::results::Results;
 
 /// Build the canonical identifier of a loop's `loop_score` synthetic variable.
@@ -41,10 +40,12 @@ pub(crate) fn loop_score_ident(loop_id: &str) -> Ident<Canonical> {
 /// rel_loop_score[i, t] = loop_score[i, t] / sum_j∈partition(|loop_score[j, t]|)
 /// ```
 ///
-/// Loops are grouped by `CyclePartitions::partition_for_loop`, mirroring
-/// the grouping the (now-removed) compile-time emitter used.  Loops with
-/// no parent-level stock (which return `None` from `partition_for_loop`)
-/// form a single default group, again matching the prior behaviour.
+/// `loop_partitions` maps each loop ID to its cycle-partition key (as
+/// produced by `model_ltm_variables`).  Loops sharing a partition key
+/// (including the `None` "no parent-level stock" group) form the
+/// denominator.  This matches the grouping the (now-removed)
+/// compile-time emitter used, but sources the mapping from salsa-cached
+/// LTM compilation instead of rebuilding `Vec<Loop>` at each call site.
 ///
 /// The denominator uses SAFEDIV-0 semantics: when
 /// `sum_j(|loop_score_j, t|) == 0` the result is `0` rather than `NaN`.
@@ -57,25 +58,28 @@ pub(crate) fn loop_score_ident(loop_id: &str) -> Ident<Canonical> {
 /// mode) are omitted from the returned map.
 pub fn compute_rel_loop_scores(
     results: &Results,
-    loops: &[Loop],
-    partitions: &CyclePartitions,
+    loop_partitions: &HashMap<String, Option<usize>>,
 ) -> HashMap<String, Vec<f64>> {
-    let offsets: Vec<Option<usize>> = loops
+    // Stable iteration order keeps partition grouping deterministic even
+    // though the result map is itself unordered; callers that diff
+    // timeseries across runs benefit from the predictable emit order.
+    let mut loop_ids: Vec<&String> = loop_partitions.keys().collect();
+    loop_ids.sort();
+
+    let offsets: Vec<Option<usize>> = loop_ids
         .iter()
-        .map(|l| results.offsets.get(&loop_score_ident(&l.id)).copied())
+        .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
         .collect();
 
     let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-    for (i, l) in loops.iter().enumerate() {
-        partition_groups
-            .entry(partitions.partition_for_loop(l))
-            .or_default()
-            .push(i);
+    for (i, id) in loop_ids.iter().enumerate() {
+        let key = loop_partitions.get(*id).copied().unwrap_or(None);
+        partition_groups.entry(key).or_default().push(i);
     }
 
-    // One output series per loop, parallel to `loops`.  Loops without a
-    // known offset get an empty Vec so we can skip them when assembling
-    // the final map.
+    // One output series per loop, parallel to `loop_ids`.  Loops without
+    // a known offset get an empty Vec so we can skip them when
+    // assembling the final map.
     let mut series: Vec<Vec<f64>> = offsets
         .iter()
         .map(|o| {
@@ -103,10 +107,10 @@ pub fn compute_rel_loop_scores(
         }
     }
 
-    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loops.len());
-    for (i, l) in loops.iter().enumerate() {
+    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loop_ids.len());
+    for (i, id) in loop_ids.iter().enumerate() {
         if offsets[i].is_some() {
-            out.insert(l.id.clone(), std::mem::take(&mut series[i]));
+            out.insert((*id).clone(), std::mem::take(&mut series[i]));
         }
     }
     out
@@ -116,7 +120,6 @@ pub fn compute_rel_loop_scores(
 mod tests {
     use super::*;
     use crate::datamodel::{Dt, SimMethod, SimSpecs};
-    use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
     use crate::results::Specs;
     use proptest::prelude::*;
 
@@ -166,39 +169,13 @@ mod tests {
         }
     }
 
-    /// Build a `Loop` with a single stock dependency.
-    fn make_loop(id: &str, stock: &str) -> Loop {
-        Loop {
-            id: id.to_string(),
-            links: vec![Link {
-                from: Ident::new(stock),
-                to: Ident::new(stock),
-                polarity: LinkPolarity::Positive,
-            }],
-            stocks: vec![Ident::new(stock)],
-            polarity: LoopPolarity::Reinforcing,
-            dimensions: vec![],
-        }
-    }
-
-    /// Build `CyclePartitions` from a stocks -> partition index mapping.
-    fn make_partitions(stock_to_partition: &[(&str, usize)]) -> CyclePartitions {
-        let mut stock_partition: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        let mut by_partition: HashMap<usize, Vec<Ident<Canonical>>> = HashMap::new();
-        for (stock, p) in stock_to_partition {
-            let id = Ident::new(stock);
-            stock_partition.insert(id.clone(), *p);
-            by_partition.entry(*p).or_default().push(id);
-        }
-        let mut partitions: Vec<Vec<Ident<Canonical>>> = Vec::new();
-        let max_p = by_partition.keys().copied().max().unwrap_or(0);
-        for p in 0..=max_p {
-            partitions.push(by_partition.remove(&p).unwrap_or_default());
-        }
-        CyclePartitions {
-            partitions,
-            stock_partition,
-        }
+    /// Build a `loop_partitions` mapping directly from `(loop_id, partition)` pairs.
+    /// This matches the shape produced by `model_ltm_variables` at the call site.
+    fn mapping(pairs: &[(&str, Option<usize>)]) -> HashMap<String, Option<usize>> {
+        pairs
+            .iter()
+            .map(|(id, p)| ((*id).to_string(), *p))
+            .collect()
     }
 
     /// Inlined reference implementation of the SAFEDIV formula previously
@@ -208,19 +185,17 @@ mod tests {
     /// compares against it to catch any numeric divergence from the old
     /// compile-time behaviour.
     fn reference_rel_loop_scores(
-        loops: &[Loop],
-        partitions: &CyclePartitions,
+        loop_ids: &[String],
+        loop_partitions: &HashMap<String, Option<usize>>,
         series: &[Vec<f64>],
     ) -> Vec<Vec<f64>> {
         let step_count = series.first().map(|s| s.len()).unwrap_or(0);
         let mut groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-        for (i, l) in loops.iter().enumerate() {
-            groups
-                .entry(partitions.partition_for_loop(l))
-                .or_default()
-                .push(i);
+        for (i, id) in loop_ids.iter().enumerate() {
+            let key = loop_partitions.get(id).copied().unwrap_or(None);
+            groups.entry(key).or_default().push(i);
         }
-        let mut out: Vec<Vec<f64>> = (0..loops.len())
+        let mut out: Vec<Vec<f64>> = (0..loop_ids.len())
             .map(|_| Vec::with_capacity(step_count))
             .collect();
         // `t` is an index into every per-loop series simultaneously, so
@@ -241,15 +216,14 @@ mod tests {
 
     #[test]
     fn two_loops_single_partition_normalizes() {
-        // Two loops, both touching stock "s0", so they share a partition.
+        // Two loops sharing partition 0.
         // rel[i, t] = ls[i, t] / (|ls[0, t]| + |ls[1, t]|).
         let series_a = &[1.0, 2.0, -4.0][..];
         let series_b = &[3.0, -4.0, 0.0][..];
         let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
-        let loops = vec![make_loop("A", "s0"), make_loop("B", "s0")];
-        let partitions = make_partitions(&[("s0", 0)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
 
-        let scored = compute_rel_loop_scores(&results, &loops, &partitions);
+        let scored = compute_rel_loop_scores(&results, &partitions);
 
         let rel_a = scored.get("A").expect("loop A should have a series");
         let rel_b = scored.get("B").expect("loop B should have a series");
@@ -271,10 +245,9 @@ mod tests {
         // SAFEDIV-0 guard this would produce NaN.
         let series = &[0.0, 0.0, 0.0][..];
         let results = make_results_for_loops(&[("only", series)]);
-        let loops = vec![make_loop("only", "s0")];
-        let partitions = make_partitions(&[("s0", 0)]);
+        let partitions = mapping(&[("only", Some(0))]);
 
-        let scored = compute_rel_loop_scores(&results, &loops, &partitions);
+        let scored = compute_rel_loop_scores(&results, &partitions);
         let rel = scored.get("only").expect("loop should have a series");
         for (t, v) in rel.iter().enumerate() {
             assert_eq!(*v, 0.0, "SAFEDIV-0 should yield 0 at t={t}, got {v}");
@@ -289,10 +262,9 @@ mod tests {
         let series_a = &[2.0, -5.0][..];
         let series_b = &[10.0, 0.0][..];
         let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
-        let loops = vec![make_loop("A", "sa"), make_loop("B", "sb")];
-        let partitions = make_partitions(&[("sa", 0), ("sb", 1)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(1))]);
 
-        let scored = compute_rel_loop_scores(&results, &loops, &partitions);
+        let scored = compute_rel_loop_scores(&results, &partitions);
         let rel_a = scored.get("A").unwrap();
         let rel_b = scored.get("B").unwrap();
 
@@ -310,10 +282,9 @@ mod tests {
         // Loop "A" has a series; loop "B" does not (offset lookup fails).
         // The returned map should only contain "A".
         let results = make_results_for_loops(&[("A", &[1.0, 2.0][..])]);
-        let loops = vec![make_loop("A", "s0"), make_loop("B", "s0")];
-        let partitions = make_partitions(&[("s0", 0)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
 
-        let scored = compute_rel_loop_scores(&results, &loops, &partitions);
+        let scored = compute_rel_loop_scores(&results, &partitions);
         assert!(scored.contains_key("A"));
         assert!(
             !scored.contains_key("B"),
@@ -323,18 +294,15 @@ mod tests {
 
     #[test]
     fn unpartitioned_loops_share_default_group() {
-        // Loops that `partition_for_loop` returns `None` for (no
-        // parent-level stock) should share a single default group, just
-        // like the old compile-time emitter grouped them.
+        // Loops with `None` partition (no parent-level stock) should share
+        // a single default group, matching the old compile-time emitter's
+        // grouping of `partition_for_loop` -> `None` loops.
         let series_a = &[3.0][..];
         let series_b = &[1.0][..];
         let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
-        // Loops reference a stock that is NOT in `stock_partition`, so
-        // `partition_for_loop` returns `None` for both.
-        let loops = vec![make_loop("A", "unknown"), make_loop("B", "unknown")];
-        let partitions = make_partitions(&[("other", 0)]);
+        let partitions = mapping(&[("A", None), ("B", None)]);
 
-        let scored = compute_rel_loop_scores(&results, &loops, &partitions);
+        let scored = compute_rel_loop_scores(&results, &partitions);
         let rel_a = scored.get("A").unwrap();
         let rel_b = scored.get("B").unwrap();
         // Shared denom of 3 + 1 = 4.
@@ -374,31 +342,26 @@ mod tests {
                 prop_assume!(s.len() == num_steps);
             }
 
-            // Build loops: loop i has stock "s{i}" mapped to partition
-            // `raw_partitions[i] % num_partitions`.
-            let loops: Vec<Loop> = (0..num_loops)
-                .map(|i| make_loop(&format!("L{i}"), &format!("s{i}")))
+            let loop_ids: Vec<String> = (0..num_loops).map(|i| format!("L{i}")).collect();
+            let loop_partitions: HashMap<String, Option<usize>> = loop_ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (id.clone(), Some(raw_partitions[i] % num_partitions)))
                 .collect();
-            let mapping: Vec<(String, usize)> = (0..num_loops)
-                .map(|i| (format!("s{i}"), raw_partitions[i] % num_partitions))
-                .collect();
-            let mapping_refs: Vec<(&str, usize)> =
-                mapping.iter().map(|(s, p)| (s.as_str(), *p)).collect();
-            let partitions = make_partitions(&mapping_refs);
 
             // Build Results matching the series.
-            let pair_refs: Vec<(&str, &[f64])> = loops
+            let pair_refs: Vec<(&str, &[f64])> = loop_ids
                 .iter()
                 .zip(series.iter())
-                .map(|(l, s)| (l.id.as_str(), s.as_slice()))
+                .map(|(id, s)| (id.as_str(), s.as_slice()))
                 .collect();
             let results = make_results_for_loops(&pair_refs);
 
-            let scored = compute_rel_loop_scores(&results, &loops, &partitions);
-            let expected = reference_rel_loop_scores(&loops, &partitions, &series);
+            let scored = compute_rel_loop_scores(&results, &loop_partitions);
+            let expected = reference_rel_loop_scores(&loop_ids, &loop_partitions, &series);
 
-            for (i, l) in loops.iter().enumerate() {
-                let actual_series = scored.get(&l.id).expect("every loop has a series");
+            for (i, id) in loop_ids.iter().enumerate() {
+                let actual_series = scored.get(id).expect("every loop has a series");
                 prop_assert_eq!(actual_series.len(), num_steps);
                 for t in 0..num_steps {
                     let a = actual_series[t];
@@ -410,7 +373,7 @@ mod tests {
                     }
                     prop_assert!(
                         (a - e).abs() <= 1e-10,
-                        "loop {} t={}: actual={} expected={}", l.id, t, a, e
+                        "loop {} t={}: actual={} expected={}", id, t, a, e
                     );
                 }
             }

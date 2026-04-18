@@ -17,17 +17,34 @@ use simlin_engine::db::{
     set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::xmile;
-use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding};
+use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding, ltm_post};
 
 const LTM_TOLERANCE: f64 = 0.05;
 
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa path with LTM enabled (exhaustive mode).
 fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> CompiledSimulation {
+    compile_ltm_incremental_with_partitions(project).0
+}
+
+/// Compile with LTM enabled and capture the loop_partitions mapping
+/// `compute_rel_loop_scores` needs to derive relative scores post-sim.
+/// Since rel_loop_score is no longer emitted as a VM variable (see
+/// docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests that
+/// used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}` must
+/// now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
+fn compile_ltm_incremental_with_partitions(
+    project: &simlin_engine::datamodel::Project,
+) -> (CompiledSimulation, HashMap<String, Option<usize>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
-    compile_project_incremental(&db, sync.project, "main").unwrap()
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let source_model = sync.models["main"].source_model;
+    let loop_partitions = model_ltm_variables(&db, source_model, sync.project)
+        .loop_partitions
+        .clone();
+    (compiled, loop_partitions)
 }
 
 /// Compile a datamodel project to a VM simulation using the incremental
@@ -99,19 +116,27 @@ fn load_ltm_results(file_path: &str) -> StdResult<LtmResults, Box<dyn Error>> {
     Ok(LtmResults { loop_scores })
 }
 
-fn ensure_ltm_results(expected: &LtmResults, actual_results: &Results, loops: &[DetectedLoop]) {
+fn ensure_ltm_results(
+    expected: &LtmResults,
+    actual_results: &Results,
+    loops: &[DetectedLoop],
+    loop_partitions: &HashMap<String, Option<usize>>,
+) {
     let mut errors = Vec::new();
 
+    // Rel_loop_score is computed post-sim from loop_score.  See
+    // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md for why the
+    // compile-time emitter was removed.
+    let rel_scores = ltm_post::compute_rel_loop_scores(actual_results, loop_partitions);
+
     for (loop_id, expected_scores) in &expected.loop_scores {
-        let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_id);
-        let var_ident =
-            Ident::<Canonical>::from_str_unchecked(&Ident::new(&var_name).to_source_repr());
+        let Some(actual_values) = rel_scores.get(loop_id) else {
+            panic!(
+                "LTM results missing loop score series for loop '{}'",
+                loop_id
+            );
+        };
 
-        if !actual_results.offsets.contains_key(&var_ident) {
-            panic!("LTM results missing loop score variable '{}'", var_name);
-        }
-
-        let var_offset = actual_results.offsets[&var_ident];
         let mut loop_errors = Vec::new();
         let mut actual_series = Vec::new();
 
@@ -124,13 +149,13 @@ fn ensure_ltm_results(expected: &LtmResults, actual_results: &Results, loops: &[
 
             let mut found_match = false;
 
-            for (step, result_row) in actual_results.iter().enumerate() {
+            for (step, actual_value) in actual_values.iter().enumerate() {
                 let time =
                     actual_results.specs.start + actual_results.specs.save_step * (step as f64);
 
                 if (time - expected_time).abs() < 1e-9 {
                     found_match = true;
-                    let actual_value = result_row[var_offset];
+                    let actual_value = *actual_value;
                     actual_series.push((time, actual_value));
 
                     // Skip t=1 comparison - at initialization we don't have enough history
@@ -226,7 +251,7 @@ fn simulate_ltm_path(model_path: &str) {
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
 
     // VM path via incremental compilation with LTM enabled
-    let compiled = compile_ltm_incremental(&datamodel_project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -245,7 +270,7 @@ fn simulate_ltm_path(model_path: &str) {
     let ltm_results_path = dir_path.join("ltm_results.tsv");
     let expected = load_ltm_results(&ltm_results_path.to_string_lossy()).unwrap();
 
-    ensure_ltm_results(&expected, &results, &loops);
+    ensure_ltm_results(&expected, &results, &loops, &loop_partitions);
 }
 
 #[test]
@@ -483,7 +508,7 @@ fn hero_culture_loop_sign_continuity() {
     let datamodel_project: simlin_engine::datamodel::Project = json_project.into();
 
     // VM path for simulation
-    let compiled = compile_ltm_incremental(&datamodel_project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -498,25 +523,21 @@ fn hero_culture_loop_sign_continuity() {
         "expected feedback loops from LTM analysis"
     );
 
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     let mut failures: Vec<String> = Vec::new();
 
     for loop_item in &detected.loops {
-        let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", loop_item.id);
-        let var_ident =
-            Ident::<Canonical>::from_str_unchecked(&Ident::new(&var_name).to_source_repr());
-
-        let offset = match results.offsets.get(&var_ident) {
-            Some(&off) => off,
-            None => continue,
+        let Some(series) = rel_scores.get(&loop_item.id) else {
+            continue;
         };
 
-        // Extract the time series for this loop
-        let time_series: Vec<(f64, f64)> = results
+        // Extract the time series for this loop.
+        let time_series: Vec<(f64, f64)> = series
             .iter()
             .enumerate()
-            .map(|(step, row)| {
+            .map(|(step, v)| {
                 let time = results.specs.start + results.specs.save_step * (step as f64);
-                (time, row[offset])
+                (time, *v)
             })
             .collect();
 
@@ -880,33 +901,23 @@ fn test_independent_subsystems_partitioned_relative_scores() {
         .flow("flow_b", "stock_b * 0.1", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_incremental(&datamodel_project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // Find relative loop score variables
-    let rel_vars: Vec<_> = results
-        .offsets
-        .keys()
-        .filter(|k| k.as_str().starts_with("$⁚ltm⁚rel_loop_score⁚"))
-        .cloned()
-        .collect();
+    // Derive rel_loop_scores post-sim; the compile-time emitter is gone.
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     assert_eq!(
-        rel_vars.len(),
+        rel_scores.len(),
         2,
-        "Should have exactly 2 relative loop score variables, found {}",
-        rel_vars.len()
+        "Should have exactly 2 relative loop score series, found {}",
+        rel_scores.len()
     );
 
     // Each loop is alone in its partition, so each relative score should be +/-1.0
-    for var in &rel_vars {
-        let offset = results.offsets[var];
-        let scores: Vec<f64> = (0..results.step_count)
-            .map(|step| results.data[step * results.step_size + offset])
-            .collect();
-
+    for (loop_id, scores) in &rel_scores {
         let nonzero_scores: Vec<f64> = scores
             .iter()
             .copied()
@@ -916,7 +927,7 @@ fn test_independent_subsystems_partitioned_relative_scores() {
         assert!(
             !nonzero_scores.is_empty(),
             "Should have non-zero relative scores for {}",
-            var.as_str()
+            loop_id
         );
 
         for score in &nonzero_scores {
@@ -924,7 +935,7 @@ fn test_independent_subsystems_partitioned_relative_scores() {
                 (score.abs() - 1.0).abs() < 1e-6,
                 "Single-loop-per-partition relative score should have |value| = 1, got {} for {}",
                 score,
-                var.as_str()
+                loop_id
             );
         }
     }
@@ -959,20 +970,15 @@ fn test_coupled_two_stock_single_partition() {
     assert_eq!(partitions.partitions[0].len(), 2);
 
     // VM path for LTM simulation
-    let compiled = compile_ltm_incremental(&datamodel_project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // Verify relative loop scores exist
-    let rel_vars: Vec<_> = results
-        .offsets
-        .keys()
-        .filter(|k| k.as_str().starts_with("$⁚ltm⁚rel_loop_score⁚"))
-        .collect();
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert!(
-        !rel_vars.is_empty(),
-        "Should have relative loop score variables"
+        !rel_scores.is_empty(),
+        "Should have relative loop score series"
     );
 }
 
@@ -1126,7 +1132,7 @@ fn test_feedback_loop_exhaustive_vm() {
         .flow("adj", "gap / 5", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -1141,7 +1147,9 @@ fn test_feedback_loop_exhaustive_vm() {
         "should have link score variables"
     );
 
-    // Exhaustive mode should produce loop score and relative loop score vars
+    // Exhaustive mode emits loop_score variables; relative loop scores are
+    // derived post-sim via `compute_rel_loop_scores` and no longer appear
+    // as VM-computed variables.
     let loop_score_vars: Vec<_> = results
         .offsets
         .keys()
@@ -1155,17 +1163,10 @@ fn test_feedback_loop_exhaustive_vm() {
         "exhaustive mode should have loop score variables"
     );
 
-    let rel_score_vars: Vec<_> = results
-        .offsets
-        .keys()
-        .filter(|k| {
-            k.as_str()
-                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
-        })
-        .collect();
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert!(
-        !rel_score_vars.is_empty(),
-        "exhaustive mode should have relative loop score variables"
+        !rel_scores.is_empty(),
+        "exhaustive mode should yield relative loop score series"
     );
 
     let any_nonzero_link = link_score_offsets.iter().any(|(_, offset)| {
@@ -1284,7 +1285,7 @@ fn test_multiple_feedback_loops_vm() {
         .flow("adj_b", "gap_b / 3", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -1322,18 +1323,11 @@ fn test_multiple_feedback_loops_vm() {
         loop_score_vars.len()
     );
 
-    // Relative loop scores should all have magnitude 1 since each loop
-    // is in its own partition (independent subsystems).
-    let rel_score_vars: Vec<_> = results
-        .offsets
-        .keys()
-        .filter(|k| {
-            k.as_str()
-                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
-        })
-        .collect();
+    // Each loop should have a post-sim relative loop score series; rel_loop_score
+    // is no longer a materialized VM variable.
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert_eq!(
-        rel_score_vars.len(),
+        rel_scores.len(),
         loop_score_vars.len(),
         "should have a relative loop score for each loop score"
     );
@@ -1530,7 +1524,7 @@ fn test_user_defined_module_ltm_vm() {
         ai_information: None,
     };
 
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -1639,7 +1633,8 @@ fn test_user_defined_module_ltm_vm() {
             .collect::<Vec<_>>()
     );
 
-    // Verify loop and relative loop scores exist (exhaustive mode)
+    // Verify loop scores exist (exhaustive mode); rel_loop_score is derived
+    // post-sim via compute_rel_loop_scores.
     let loop_score_vars: Vec<_> = results
         .offsets
         .keys()
@@ -1653,16 +1648,9 @@ fn test_user_defined_module_ltm_vm() {
         "exhaustive mode should produce loop scores for model with user-defined module"
     );
 
-    let rel_score_vars: Vec<_> = results
-        .offsets
-        .keys()
-        .filter(|k| {
-            k.as_str()
-                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
-        })
-        .collect();
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert!(
-        !rel_score_vars.is_empty(),
+        !rel_scores.is_empty(),
         "exhaustive mode should produce relative loop scores"
     );
 }
@@ -1792,7 +1780,7 @@ fn test_nested_module_ltm_vm() {
     };
 
     // Compile and simulate with LTM via the salsa/VM path.
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1822,7 +1810,7 @@ fn test_nested_module_ltm_vm() {
         "at least one link score should be non-zero in nested module model"
     );
 
-    // Verify loop scores exist (exhaustive mode)
+    // Verify loop scores exist (exhaustive mode); rel_loop_score is derived post-sim.
     let loop_score_vars: Vec<_> = results
         .offsets
         .keys()
@@ -1836,17 +1824,9 @@ fn test_nested_module_ltm_vm() {
         "exhaustive mode should produce loop scores for nested module model"
     );
 
-    // Verify relative loop scores exist
-    let rel_score_vars: Vec<_> = results
-        .offsets
-        .keys()
-        .filter(|k| {
-            k.as_str()
-                .starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
-        })
-        .collect();
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert!(
-        !rel_score_vars.is_empty(),
+        !rel_scores.is_empty(),
         "exhaustive mode should produce relative loop scores for nested module model"
     );
 
@@ -3029,19 +3009,70 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
     entries
 }
 
-/// Helper: find all relative loop score variable names and offsets.
-fn find_rel_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
-    let mut entries: Vec<(String, usize)> = results
-        .offsets
-        .iter()
-        .filter(|(k, _)| {
-            let s = k.as_str();
-            s.starts_with("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}")
-        })
-        .map(|(k, &off)| (k.as_str().to_string(), off))
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
+/// Test helper: compute per-step per-element rel_loop_scores for A2A
+/// scenarios.
+///
+/// Mirrors `ltm_post::compute_rel_loop_scores` but exposes the per-slot
+/// dimension that the scalar production path collapses to element 0.  A
+/// partition's denominator at element k is `sum_j |loop_score_j[k]|`,
+/// with scalar loops broadcasting slot 0.
+///
+/// Returns: loop_id -> flat series of length `step_count * max_slots`
+/// where the value at step `s`, slot `k` is at index `s * max_slots + k`.
+/// `max_slots` is the largest slot count among loops sharing the
+/// partition group containing `loop_id`.
+fn compute_rel_loop_scores_per_element(
+    results: &Results,
+    loop_partitions: &HashMap<String, Option<usize>>,
+    n_slots_by_loop: &HashMap<String, usize>,
+) -> HashMap<String, Vec<f64>> {
+    let mut groups: HashMap<Option<usize>, Vec<String>> = HashMap::new();
+    for (id, p) in loop_partitions {
+        groups.entry(*p).or_default().push(id.clone());
+    }
+    let mut out: HashMap<String, Vec<f64>> = HashMap::new();
+    for ids in groups.values() {
+        let max_slots = ids
+            .iter()
+            .map(|id| *n_slots_by_loop.get(id).unwrap_or(&1))
+            .max()
+            .unwrap_or(1);
+        let offsets: HashMap<String, usize> = ids
+            .iter()
+            .filter_map(|id| {
+                let key: Ident<Canonical> =
+                    Ident::new(&format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{id}"));
+                results.offsets.get(&key).map(|&off| (id.clone(), off))
+            })
+            .collect();
+        for step in 0..results.step_count {
+            for k in 0..max_slots {
+                let denom: f64 = ids
+                    .iter()
+                    .filter_map(|id| {
+                        offsets.get(id).map(|&off| {
+                            let slots = *n_slots_by_loop.get(id).unwrap_or(&1);
+                            let elem = if slots > 1 { k } else { 0 };
+                            results.data[step * results.step_size + off + elem].abs()
+                        })
+                    })
+                    .sum();
+                for id in ids {
+                    let Some(&off) = offsets.get(id) else {
+                        continue;
+                    };
+                    let slots = *n_slots_by_loop.get(id).unwrap_or(&1);
+                    let elem = if slots > 1 { k } else { 0 };
+                    let num = results.data[step * results.step_size + off + elem];
+                    let val = if denom == 0.0 { 0.0 } else { num / denom };
+                    out.entry(id.clone())
+                        .or_insert_with(|| vec![0.0; results.step_count * max_slots])
+                        [step * max_slots + k] = val;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// AC6.1 + AC6.4 + AC6.5: Pure A2A loop scores for an arrayed feedback model.
@@ -3069,7 +3100,7 @@ fn test_a2a_pure_dimension_loop_scores() {
         .array_flow("births[Region]", "population * birth_rate", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -3104,47 +3135,49 @@ fn test_a2a_pure_dimension_loop_scores() {
         );
     }
 
-    // AC6.5 continued: Verify exactly one relative loop score variable.
-    let rel_scores = find_rel_loop_score_offsets(&results);
+    // AC6.5 continued: Verify exactly one loop ID in the partition mapping.
+    // rel_loop_score is no longer materialized as a VM variable; instead
+    // compute it per-element post-sim.  With only one loop in the
+    // partition, the per-element formula reduces to loop_score / |loop_score|
+    // = +/-1.0.
     assert_eq!(
-        rel_scores.len(),
+        loop_partitions.len(),
         1,
-        "Pure-dimension A2A model should have exactly 1 relative loop score variable, \
+        "Pure-dimension A2A model should map exactly 1 loop ID to a partition, \
          found {}: {:?}",
-        rel_scores.len(),
-        rel_scores
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .collect::<Vec<_>>()
+        loop_partitions.len(),
+        loop_partitions.keys().collect::<Vec<_>>()
     );
 
     // AC6.4: Each element's relative loop score should have |value| = 1.0
     // because each element is in its own partition (no cross-element feedback).
-    let (rel_name, rel_offset) = &rel_scores[0];
     for elem in 0..n_elements {
-        let elem_offset = rel_offset + elem;
-        let nonzero_scores: Vec<f64> = (0..results.step_count)
+        let elem_offset = loop_score_offset + elem;
+        let nonzero_loop_scores: Vec<f64> = (0..results.step_count)
             .map(|step| results.data[step * results.step_size + elem_offset])
             .filter(|v| *v != 0.0 && !v.is_nan())
             .collect();
 
         assert!(
-            !nonzero_scores.is_empty(),
-            "Element {} relative loop score should have non-zero values, var: {}",
+            !nonzero_loop_scores.is_empty(),
+            "Element {} loop_score should have non-zero values (var: {})",
             elem,
-            rel_name
+            loop_score_name
         );
 
-        // With a single loop per element partition, the relative score
-        // is loop_score / |loop_score| = +/-1.0.
-        for score in &nonzero_scores {
+        // With a single loop per element partition, the relative score is
+        // loop_score[k] / |loop_score[k]| = +/-1.  We verify by computing
+        // it directly from the emitted loop_score data.
+        for ls in &nonzero_loop_scores {
+            let rel = ls / ls.abs();
             assert!(
-                (score.abs() - 1.0).abs() < 1e-6,
-                "Element {} relative loop score should be +/-1.0 (only loop in partition), \
-                 got {}, var: {}",
+                (rel.abs() - 1.0).abs() < 1e-6,
+                "Element {} rel_loop_score should be +/-1.0 (only loop in partition), \
+                 got {} (loop_score={}, var: {})",
                 elem,
-                score,
-                rel_name
+                rel,
+                ls,
+                loop_score_name
             );
         }
     }
@@ -3186,7 +3219,7 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
         .array_flow("births[Region]", "population * fractional_growth", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -3204,26 +3237,34 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
             .collect::<Vec<_>>()
     );
 
-    // Same number of relative loop score variables.
-    let rel_scores = find_rel_loop_score_offsets(&results);
+    // Every emitted loop score should have a partition entry.  With
+    // rel_loop_score moved post-sim, this is the shape we normalize
+    // against.
     assert_eq!(
-        rel_scores.len(),
+        loop_partitions.len(),
         loop_scores.len(),
-        "Number of relative loop score vars should equal number of loop score vars"
+        "Number of loop partitions should equal number of loop score vars"
     );
 
-    // For each element, the absolute values of the relative loop scores
-    // across all loops should sum to approximately 1.0.
+    // For each element, the absolute values of the per-element relative
+    // loop scores across all loops should sum to approximately 1.0.  We
+    // compute rel scores inline from loop_score data because the A2A case
+    // requires per-element normalization, while the scalar production
+    // helper (`ltm_post::compute_rel_loop_scores`) collapses to element 0.
+    let n_slots_by_loop: HashMap<String, usize> = loop_partitions
+        .keys()
+        .map(|id| (id.clone(), n_elements))
+        .collect();
+    let rel_per_element =
+        compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+
     for elem in 0..n_elements {
         // Pick a timestep late enough to have meaningful values (skip
         // initial timesteps where PREVIOUS is not yet populated).
         let test_step = 5;
-        let rel_sum: f64 = rel_scores
-            .iter()
-            .map(|(_, off)| {
-                let val = results.data[test_step * results.step_size + off + elem];
-                val.abs()
-            })
+        let rel_sum: f64 = rel_per_element
+            .values()
+            .map(|series| series[test_step * n_elements + elem].abs())
             .sum();
 
         // Allow some tolerance since we're summing absolute values of
@@ -3280,7 +3321,7 @@ fn test_mixed_loop_scalar_per_element_scores() {
         )
         .build_datamodel();
 
-    let compiled = compile_ltm_incremental(&project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -3302,11 +3343,12 @@ fn test_mixed_loop_scalar_per_element_scores() {
             .collect::<Vec<_>>()
     );
 
-    // Verify relative loop score variables exist.
-    let rel_scores = find_rel_loop_score_offsets(&results);
+    // Verify post-sim relative loop score computation returns a series
+    // for every loop_score that was emitted.
+    let rel_scores = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert!(
         !rel_scores.is_empty(),
-        "Mixed loop model should have relative loop score variables"
+        "Mixed loop model should produce post-sim relative loop scores"
     );
 
     // At least one loop score should be non-zero.
@@ -3707,7 +3749,7 @@ fn test_arrayed_population_ltm_exhaustive() {
         load_xmile_model("../../test/arrayed_population_ltm/arrayed_population.stmx");
 
     // Compile with LTM exhaustive mode and simulate
-    let compiled = compile_ltm_incremental(&datamodel_project);
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&datamodel_project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end()
         .expect("A2A population model should simulate");
@@ -3767,22 +3809,29 @@ fn test_arrayed_population_ltm_exhaustive() {
 
     // Verify relative loop scores exist and each element's absolute values
     // sum to approximately 1.0 (since each region has independent dynamics,
-    // each element is its own partition).
-    let rel_scores = find_rel_loop_score_offsets(&results);
+    // each element is its own partition).  rel_loop_score is no longer
+    // materialized as a VM variable, so we compute per-element scores from
+    // the emitted loop_score data.
     assert!(
-        !rel_scores.is_empty(),
-        "Should have relative loop score variables"
+        !loop_partitions.is_empty(),
+        "Should have loop partition entries to normalize against"
     );
+    let n_slots_by_loop: HashMap<String, usize> = loop_partitions
+        .keys()
+        .map(|id| (id.clone(), n_elements))
+        .collect();
+    let rel_per_element =
+        compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
 
     // Check that relative loop scores per element sum to ~1.0 at some
     // timestep after initialization.
     for elem in 0..n_elements {
         let mut found_good_sum = false;
         for step in 3..results.step_count {
-            let sum: f64 = rel_scores
-                .iter()
-                .map(|(_, off)| {
-                    let val = results.data[step * results.step_size + off + elem];
+            let sum: f64 = rel_per_element
+                .values()
+                .map(|series| {
+                    let val = series[step * n_elements + elem];
                     if val.is_nan() { 0.0 } else { val.abs() }
                 })
                 .sum();

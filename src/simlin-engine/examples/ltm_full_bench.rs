@@ -277,14 +277,14 @@ fn main() {
     );
 
     // Stage 7: LTM synthetic variables (link scores, loop scores,
-    // relative loop scores, pathways, composites).  This is where the
-    // hypothesized blow-up shows up when the cap is raised.
+    // pathways, composites).  Relative loop scores are computed
+    // post-simulation via `ltm_post::compute_rel_loop_scores`, so they
+    // no longer contribute to this stage's equation-text footprint.
     let t0 = Instant::now();
     let ltm_vars = model_ltm_variables(&db, root_source_model, sync.project);
     let n_ltm = ltm_vars.vars.len();
     let mut n_link = 0usize;
     let mut n_loop = 0usize;
-    let mut n_rel = 0usize;
     let mut n_path = 0usize;
     let mut n_comp = 0usize;
     let mut n_a2a = 0usize;
@@ -293,8 +293,6 @@ fn main() {
             n_link += 1;
         } else if v.name.contains("\u{205A}loop_score\u{205A}") {
             n_loop += 1;
-        } else if v.name.contains("\u{205A}rel_loop_score\u{205A}") {
-            n_rel += 1;
         } else if v.name.contains("\u{205A}path\u{205A}") {
             n_path += 1;
         } else if v.name.contains("\u{205A}composite\u{205A}") {
@@ -309,7 +307,7 @@ fn main() {
         "ltm_variables",
         t0.elapsed().as_secs_f64() * 1000.0,
         format!(
-            "ltm_vars={n_ltm} (link={n_link} loop={n_loop} rel={n_rel} path={n_path} \
+            "ltm_vars={n_ltm} (link={n_link} loop={n_loop} path={n_path} \
              comp={n_comp} a2a={n_a2a})  eq_bytes={total_eqn_bytes}"
         ),
     );
