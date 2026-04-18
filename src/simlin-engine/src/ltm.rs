@@ -669,6 +669,16 @@ impl IndexedGraph {
             .map(|&i| self.nodes[i as usize].clone())
             .collect()
     }
+
+    /// Materialize the canonical node-name table as a `Vec<String>`.
+    /// Index `i` corresponds to `NodeIdx(i as u32)` in the indexed
+    /// circuit output.  Allocates one `String` per unique node; the
+    /// dense `Vec<Vec<u32>>` circuit output shares this table so the
+    /// aggregate memory footprint is O(unique_nodes + total_circuit_len)
+    /// rather than O(unique_nodes × circuits × path_len).
+    fn node_name_strings(&self) -> Vec<String> {
+        self.nodes.iter().map(|i| i.as_str().to_string()).collect()
+    }
 }
 
 impl CausalGraph {
@@ -896,6 +906,34 @@ impl CausalGraph {
             .into_iter()
             .map(|c| indexed.graph.circuit_to_idents(&c))
             .collect())
+    }
+
+    /// Indexed view of the elementary circuits: a shared `Vec<String>`
+    /// name table plus circuits as `Vec<Vec<u32>>` indices into that
+    /// table.  Callers that want the named view can reconstruct it on
+    /// demand via the indices, but many consumers only need to iterate,
+    /// length-check, or group circuits -- all of which work on the
+    /// integer form without paying the per-name allocation cost.
+    ///
+    /// Same budget semantics as [`Self::find_circuit_node_lists_with_limit`];
+    /// returns `Err(TruncatedByBudget)` when the enumeration would exceed
+    /// `max_circuits`.
+    pub fn find_indexed_circuits_with_limit(
+        &self,
+        max_circuits: usize,
+    ) -> std::result::Result<(Vec<String>, Vec<Vec<u32>>), TruncatedByBudget> {
+        let indexed = self.enumerate_indexed_circuits(max_circuits)?;
+        let names = indexed.graph.node_name_strings();
+        Ok((names, indexed.circuits))
+    }
+
+    /// Unbounded (default-budget) variant of
+    /// [`Self::find_indexed_circuits_with_limit`]; returns `(names, [])`
+    /// when the DFS budget is exhausted so callers have a uniform empty
+    /// response.
+    pub fn find_indexed_circuits(&self) -> (Vec<String>, Vec<Vec<u32>>) {
+        self.find_indexed_circuits_with_limit(MAX_LTM_CIRCUITS)
+            .unwrap_or_else(|_| (Vec::new(), Vec::new()))
     }
 
     /// Enrich a loop's stock list with stocks from inside any DynamicModule

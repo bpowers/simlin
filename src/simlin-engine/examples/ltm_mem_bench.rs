@@ -291,12 +291,21 @@ fn main() {
 
     eprintln!("\n--- enumerating circuits ---");
     let t0 = Instant::now();
-    let result = graph.find_circuit_node_lists_with_limit(budget);
+    // Use the indexed API (names table + u32 paths) so the benchmark
+    // reflects the post-H13 memory profile -- the legacy
+    // `Vec<Vec<Ident<Canonical>>>` path still exists for callers that
+    // need owned idents, but production LTM flows through the indexed
+    // view exclusively.
+    let result = graph.find_indexed_circuits_with_limit(budget);
     let elapsed = t0.elapsed();
 
     match result {
-        Ok(circuits) => {
-            eprintln!("circuits (deduplicated): {}", circuits.len());
+        Ok((names, circuits)) => {
+            eprintln!(
+                "circuits (deduplicated): {}  unique node names: {}",
+                circuits.len(),
+                names.len(),
+            );
             let lens: Vec<usize> = circuits.iter().map(|c| c.len()).collect();
             if !lens.is_empty() {
                 let min = *lens.iter().min().unwrap();

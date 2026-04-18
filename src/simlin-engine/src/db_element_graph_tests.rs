@@ -369,14 +369,15 @@ fn normalize_circuit(mut circuit: Vec<String>) -> Vec<String> {
 }
 
 /// Check that `circuits` contains a circuit matching `expected_nodes`
-/// (after normalization of both).
-fn assert_has_circuit(circuits: &[Vec<String>], expected_nodes: &[&str]) {
+/// (after normalization of both).  Accepts the indexed `LoopCircuitsResult`
+/// directly; materializing the owned-string view only happens for the
+/// test assertion path.
+fn assert_has_circuit(circuits: &super::LoopCircuitsResult, expected_nodes: &[&str]) {
     let expected: Vec<String> = expected_nodes.iter().map(|s| s.to_string()).collect();
     let normalized_expected = normalize_circuit(expected);
 
-    let normalized_circuits: Vec<Vec<String>> = circuits
-        .iter()
-        .map(|c| normalize_circuit(c.clone()))
+    let normalized_circuits: Vec<Vec<String>> = (0..circuits.len())
+        .map(|i| normalize_circuit(circuits.circuit_names(i).map(String::from).collect()))
         .collect();
 
     assert!(
@@ -414,9 +415,9 @@ fn a2a_produces_n_element_identical_loops() {
     );
 
     // Each loop should be a 2-node circuit: [population[r], births[r]]
-    assert_has_circuit(&result.circuits, &["population[nyc]", "births[nyc]"]);
-    assert_has_circuit(&result.circuits, &["population[boston]", "births[boston]"]);
-    assert_has_circuit(&result.circuits, &["population[la]", "births[la]"]);
+    assert_has_circuit(&result, &["population[nyc]", "births[nyc]"]);
+    assert_has_circuit(&result, &["population[boston]", "births[boston]"]);
+    assert_has_circuit(&result, &["population[la]", "births[la]"]);
 }
 
 // ---- Test 9: AC3.2 (cross-element loop detection) ----
@@ -452,12 +453,12 @@ fn cross_element_loop_through_sum_reducer() {
     );
 
     // Same-element loops
-    assert_has_circuit(&result.circuits, &["population[nyc]", "births[nyc]"]);
-    assert_has_circuit(&result.circuits, &["population[boston]", "births[boston]"]);
+    assert_has_circuit(&result, &["population[nyc]", "births[nyc]"]);
+    assert_has_circuit(&result, &["population[boston]", "births[boston]"]);
 
     // Cross-element loop: 4-node circuit through both regions
     assert_has_circuit(
-        &result.circuits,
+        &result,
         &[
             "population[nyc]",
             "births[boston]",
@@ -594,15 +595,17 @@ fn scalar_model_loops_and_partitions_identical() {
     let var_circuits = var_loop_circuits(&project);
     let elem_circuits = element_loop_circuits(&project);
 
-    // Normalize both for comparison (circuit ordering may differ)
+    // Normalize both for comparison (circuit ordering may differ).  The
+    // indexed form doesn't produce owned strings, so materialize the
+    // legacy shape once for the normalization dance.
     let mut var_normalized: Vec<Vec<String>> = var_circuits
-        .circuits
+        .to_named_circuits()
         .into_iter()
         .map(normalize_circuit)
         .collect();
     var_normalized.sort();
     let mut elem_normalized: Vec<Vec<String>> = elem_circuits
-        .circuits
+        .to_named_circuits()
         .into_iter()
         .map(normalize_circuit)
         .collect();

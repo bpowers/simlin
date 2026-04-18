@@ -3494,17 +3494,21 @@ fn test_discovery_cross_validates_with_exhaustive_arrayed() {
     // Discovery mode: find loops post-simulation
     let found = discover_loops_element_level(&project);
 
+    // Materialize the named view once for error messages and per-circuit
+    // iteration; production callers avoid this allocation entirely.
+    let exhaustive_named = exhaustive_circuits.to_named_circuits();
+
     // Both modes should find the same number of loops
     assert_eq!(
         found.len(),
-        exhaustive_circuits.circuits.len(),
+        exhaustive_named.len(),
         "Discovery ({}) should find the same number of loops as exhaustive ({}) \
          for a small arrayed model. \
          Exhaustive circuits: {:?}. \
          Discovery loops: {:?}",
         found.len(),
-        exhaustive_circuits.circuits.len(),
-        exhaustive_circuits.circuits,
+        exhaustive_named.len(),
+        exhaustive_named,
         found
             .iter()
             .map(|l| l
@@ -3518,7 +3522,7 @@ fn test_discovery_cross_validates_with_exhaustive_arrayed() {
 
     // Verify that every exhaustive circuit's node set appears in
     // the discovery results
-    for circuit in &exhaustive_circuits.circuits {
+    for circuit in &exhaustive_named {
         let mut exhaustive_nodes: Vec<String> = circuit.clone();
         exhaustive_nodes.sort();
 
