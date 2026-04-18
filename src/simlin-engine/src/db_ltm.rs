@@ -2055,12 +2055,15 @@ pub fn model_ltm_variables(
 ) -> super::LtmVariablesResult {
     use crate::common::Ident;
     use crate::ltm::{CyclePartitions, Loop};
+    use salsa::Accumulator;
     use std::collections::HashSet;
 
     use super::{
-        LtmLinkId, LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules,
-        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
-        model_element_loop_circuits, module_input_pathways_from_edges,
+        CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
+        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_element_edges,
+        causal_graph_with_modules, generate_max_abs_chain_str, model_causal_edges,
+        model_element_causal_edges, model_element_cycle_partitions, model_element_loop_circuits,
+        module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
@@ -2068,7 +2071,45 @@ pub fn model_ltm_variables(
         return LtmVariablesResult { vars: vec![] };
     }
 
-    let is_discovery = project.ltm_discovery_mode(db);
+    // When the user explicitly requested discovery mode, honor it directly.
+    // Otherwise gate on the element-level graph's largest SCC so we avoid
+    // Cliff A (~17 GB in `build_element_level_loops`) and Cliff B (~140 TB
+    // of `rel_loop_score` equation text at WRLD3 scale) *before* paying
+    // for Johnson's circuit enumeration.  See
+    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
+    let is_discovery_user = project.ltm_discovery_mode(db);
+    let max_scc_size = if is_discovery_user {
+        0
+    } else {
+        let element_edges = model_element_causal_edges(db, model, project);
+        causal_graph_from_element_edges(element_edges).largest_scc_size()
+    };
+    let auto_flipped = !is_discovery_user && max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
+    let is_discovery = is_discovery_user || auto_flipped;
+
+    if auto_flipped {
+        let msg = format!(
+            "LTM analysis auto-switched from exhaustive to discovery mode: \
+             the element-level causal graph's largest SCC has {} nodes, \
+             exceeding MAX_LTM_SCC_NODES = {}.  Exhaustive compilation at \
+             this scale would allocate gigabytes of synthetic-variable \
+             equation text (see \
+             docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+             Per-loop scores are ranked post-simulation via the \
+             strongest-path search; see \
+             docs/design/ltm--loops-that-matter.md for the two-tier \
+             strategy.",
+            max_scc_size,
+            crate::ltm::MAX_LTM_SCC_NODES,
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
 
     // Determine output ports for this model. Stdlib models always use
     // the "output" convention. For user-defined models, output ports are

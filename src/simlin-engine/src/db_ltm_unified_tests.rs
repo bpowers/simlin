@@ -353,3 +353,139 @@ fn test_model_ltm_variables_scalar_link_scores_have_empty_dimensions() {
         );
     }
 }
+
+/// Build a scalar project whose element-level causal graph is a single
+/// cycle of `total_nodes` nodes (1 stock + 1 flow + (total_nodes - 2)
+/// auxiliary variables).  Used by the auto-flip tests below.
+///
+/// Chain: `cap_stock -> aux_{N-3} -> aux_{N-4} -> ... -> aux_0 ->
+/// cap_flow -> cap_stock`.  `cap_flow` is `cap_stock`'s only inflow, so
+/// the flow-to-stock edge closes the cycle.  Every node lives in a
+/// single `total_nodes`-sized SCC.
+fn build_chain_scc_project(project_name: &str, total_nodes: usize) -> datamodel::Project {
+    assert!(
+        total_nodes >= 3,
+        "chain SCC needs >= 3 nodes (stock + flow + >=1 aux), got {total_nodes}"
+    );
+
+    let aux_count = total_nodes - 2;
+    let mut builder = crate::test_common::TestProject::new(project_name);
+    for i in 0..aux_count {
+        let name = format!("aux_{i}");
+        let equation = if i + 1 == aux_count {
+            "cap_stock".to_string()
+        } else {
+            format!("aux_{}", i + 1)
+        };
+        builder = builder.scalar_aux(&name, &equation);
+    }
+    builder = builder.flow("cap_flow", "aux_0", None);
+    builder = builder.stock("cap_stock", "0", &["cap_flow"], &[], None);
+    builder.build_datamodel()
+}
+
+/// Auto-flip: a model whose element-level causal graph has an SCC of
+/// 51 nodes (one node over the 50-node threshold) must flip to
+/// discovery-mode shape: link scores for causal edges, no per-loop
+/// `loop_score` / `rel_loop_score` synthetic variables.
+///
+/// See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` for the
+/// compile-time equation-text blow-up that motivates this threshold.
+#[test]
+fn test_model_ltm_variables_auto_flip_above_scc_threshold() {
+    let project = build_chain_scc_project("auto_flip_above", 51);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert!(
+        !ltm.vars.is_empty(),
+        "auto-flipped LTM should still produce link score variables"
+    );
+    let has_link_score = ltm.vars.iter().any(|v| v.name.contains("link_score"));
+    assert!(
+        has_link_score,
+        "auto-flipped LTM should have link score variables"
+    );
+
+    let loop_scores: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert!(
+        loop_scores.is_empty(),
+        "auto-flipped LTM must NOT materialize loop_score vars; got: {:?}",
+        loop_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    let rel_loop_scores: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}rel_loop_score\u{205A}"))
+        .collect();
+    assert!(
+        rel_loop_scores.is_empty(),
+        "auto-flipped LTM must NOT materialize rel_loop_score vars; got: {:?}",
+        rel_loop_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Counterpart: at 49 nodes (under the 50-node threshold) the
+/// exhaustive path still runs and emits per-loop `loop_score` vars.
+/// Guards against the threshold drifting too low and breaking LTM on
+/// realistically sized models.
+#[test]
+fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
+    let project = build_chain_scc_project("auto_flip_below", 49);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let has_loop_score = ltm
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
+    assert!(
+        has_loop_score,
+        "below-threshold model should stay on the exhaustive path and emit \
+         loop_score vars; got: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Auto-flip must surface a `CompilationDiagnostic::Warning` so the
+/// caller can explain the mode change to the user.  The diagnostic is
+/// accumulated by `model_ltm_variables` itself (not via
+/// `model_all_diagnostics`), so we collect it directly from the
+/// tracked function.
+#[test]
+fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let project = build_chain_scc_project("auto_flip_diag", 51);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let _ = model_ltm_variables(&db, model, sync.project);
+
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+
+    let has_auto_flip_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg) if msg.contains("discovery mode")
+            )
+    });
+    assert!(
+        has_auto_flip_warning,
+        "auto-flip should emit a Warning diagnostic mentioning 'discovery mode'; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}

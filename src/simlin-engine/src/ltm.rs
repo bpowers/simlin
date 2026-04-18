@@ -31,6 +31,38 @@ use crate::variable::{Variable, identifier_set};
 /// this branch's scope.
 pub(crate) const MAX_LTM_CIRCUITS: usize = 100_000;
 
+/// Maximum number of nodes in any single strongly-connected component
+/// of a model's element-level causal graph before
+/// [`crate::db::model_ltm_variables`] auto-flips from exhaustive to
+/// discovery mode.
+///
+/// The gate is applied **before** Johnson's circuit enumeration so that
+/// the downstream `build_element_level_loops` /
+/// `generate_loop_score_variables` pipeline is never entered on inputs
+/// whose per-partition materialization would exceed WASM's 4 GiB linear
+/// memory budget.
+///
+/// ## Why 50
+///
+/// The 2026-04-18 LTM cap-lift diagnosis
+/// (`docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`) measured
+/// two structural cliffs on WRLD3's 166-node SCC:
+///
+/// - Cliff A: `build_element_level_loops` allocates ~17 GB of
+///   `Loop`/`Link` structs for 1.86M enumerated circuits.
+/// - Cliff B: each `rel_loop_score` equation is 75,303,840 bytes
+///   (~75.3 MB); full emission projects to ~140 TB of equation text.
+///
+/// The diagnosis recommends gating on largest-SCC size rather than
+/// total circuit count because the O(P²) rel_loop_score term binds on
+/// partition size (each partition maps to one SCC), and the size of
+/// the largest SCC upper-bounds the worst-case partition size.
+/// Threshold 50 keeps every existing LTM test model on the exhaustive
+/// path while catching dense feedback graphs like WRLD3 (166-node SCC)
+/// well before they reach the cliffs.  Revisit after
+/// `MAX_LTM_CIRCUITS` is raised or removed.
+pub const MAX_LTM_SCC_NODES: usize = 50;
+
 /// Runtime-overridable mirror of [`MAX_LTM_CIRCUITS`] used by the default-budget
 /// wrappers ([`CausalGraph::find_loops`], [`CausalGraph::find_circuit_node_lists`],
 /// [`CausalGraph::find_indexed_circuits`]).
@@ -1060,6 +1092,27 @@ impl CausalGraph {
     /// Read-only access to the stock set (for benchmarks / debugging).
     pub fn stocks(&self) -> &HashSet<Ident<Canonical>> {
         &self.stocks
+    }
+
+    /// Return the number of nodes in the largest strongly-connected
+    /// component, or 0 when the graph has no edges.  Singletons without
+    /// self-loops count as size-1 SCCs, so an acyclic graph's return
+    /// value is at most 1 and never triggers [`MAX_LTM_SCC_NODES`].
+    ///
+    /// Used as the auto-flip gate in
+    /// [`crate::db::model_ltm_variables`]: if any SCC exceeds
+    /// [`MAX_LTM_SCC_NODES`], LTM compilation switches to discovery
+    /// mode before paying for full circuit enumeration.  Runs in
+    /// O(V + E) via the iterative Tarjan implementation that backs
+    /// Johnson's enumerator.
+    pub fn largest_scc_size(&self) -> usize {
+        let indexed = IndexedGraph::from_edges(&self.edges);
+        indexed
+            .tarjan_scc()
+            .into_iter()
+            .map(|scc| scc.len())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Build a causal graph from a model with project context for modules
