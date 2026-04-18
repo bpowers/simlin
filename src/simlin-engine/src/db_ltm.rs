@@ -2068,7 +2068,10 @@ pub fn model_ltm_variables(
 
     let edges_result = model_causal_edges(db, model, project);
     if edges_result.stocks.is_empty() {
-        return LtmVariablesResult { vars: vec![] };
+        return LtmVariablesResult {
+            vars: vec![],
+            loop_partitions: HashMap::new(),
+        };
     }
 
     // When the user explicitly requested discovery mode, honor it directly.
@@ -2153,7 +2156,10 @@ pub fn model_ltm_variables(
         let circuits_result = model_element_loop_circuits(db, model, project);
         if circuits_result.is_empty() {
             if !has_input_ports {
-                return LtmVariablesResult { vars: vec![] };
+                return LtmVariablesResult {
+                    vars: vec![],
+                    loop_partitions: HashMap::new(),
+                };
             }
             None
         } else {
@@ -2174,6 +2180,8 @@ pub fn model_ltm_variables(
     } else {
         None
     };
+
+    let mut loop_partitions: HashMap<String, Option<usize>> = HashMap::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
@@ -2450,6 +2458,13 @@ pub fn model_ltm_variables(
                 .collect(),
         };
 
+        // Capture each loop's partition index before consuming `partitions`
+        // so post-sim `compute_rel_loop_scores` can group loops into the
+        // same denominator bins the removed compile-time SAFEDIV formula did.
+        for l in detected_loops.iter() {
+            loop_partitions.insert(l.id.clone(), partitions.partition_for_loop(l));
+        }
+
         let loop_vars =
             crate::ltm_augment::generate_loop_score_variables(detected_loops, &partitions);
         for (name, var) in loop_vars {
@@ -2535,9 +2550,7 @@ pub fn model_ltm_variables(
                 3
             } else if name.contains("\u{205A}path\u{205A}") {
                 2
-            } else if name.contains("\u{205A}loop_score\u{205A}")
-                || name.contains("\u{205A}rel_loop_score\u{205A}")
-            {
+            } else if name.contains("\u{205A}loop_score\u{205A}") {
                 1
             } else {
                 0 // link_score and anything else
@@ -2547,7 +2560,10 @@ pub fn model_ltm_variables(
             .cmp(&category(&b.name))
             .then_with(|| a.name.cmp(&b.name))
     });
-    LtmVariablesResult { vars }
+    LtmVariablesResult {
+        vars,
+        loop_partitions,
+    }
 }
 
 #[cfg(test)]

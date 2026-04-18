@@ -405,33 +405,67 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
-    let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{loop_id}");
-    let var_ident = canonicalize(&var_name);
-
-    let state = sim_ref.state.lock().unwrap();
-    if let Some(ref results) = state.results {
-        if let Some(&offset) = results.offsets.get(&*var_ident) {
-            let count = std::cmp::min(results.step_count, len);
-            for (i, row) in results.iter().take(count).enumerate() {
-                *results_ptr.add(i) = row[offset];
-            }
-            *out_written = count;
-        } else {
+    // `rel_loop_score` is no longer materialized as a VM-computed variable
+    // (it caused O(P²) compile-time text blowup on dense models; see
+    // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md). We derive it
+    // post-hoc from the `loop_score` series the VM does write, using the
+    // cycle-partition mapping cached by salsa on `model_ltm_variables`.
+    let model_ref = &*sim_ref.model;
+    let project_ref = &*model_ref.project;
+    let db_locked = project_ref.db.lock().unwrap();
+    let sync_state = project_ref.sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
             store_error(
                 out_error,
-                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                    "loop '{}' does not have relative score data",
-                    loop_id
-                )),
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
             );
+            return;
         }
-    } else {
+    };
+
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    let ltm = engine::db::model_ltm_variables(&*db_locked, synced_model.source, sync.project);
+
+    let state = sim_ref.state.lock().unwrap();
+    let Some(ref results) = state.results else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
                 .with_message("simulation has no results; run the simulation first"),
         );
+        return;
+    };
+
+    let scored = engine::ltm_post::compute_rel_loop_scores(results, &ltm.loop_partitions);
+    let Some(series) = scored.get(loop_id) else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                "loop '{loop_id}' does not have relative score data"
+            )),
+        );
+        return;
+    };
+
+    let count = std::cmp::min(series.len(), len);
+    for (i, v) in series.iter().take(count).enumerate() {
+        *results_ptr.add(i) = *v;
     }
+    *out_written = count;
 }
 
 /// # Safety

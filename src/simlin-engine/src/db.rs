@@ -1949,9 +1949,18 @@ pub struct LtmSyntheticVar {
 }
 
 /// Result of LTM variable generation for a model.
+///
+/// `loop_partitions` maps each loop ID (as used in the `$⁚ltm⁚loop_score⁚{id}`
+/// synthetic variable name) to its cycle-partition index.  `None` values denote
+/// loops whose stocks are all below the parent-level graph (e.g., pure
+/// module-internal loops); they share a default grouping when
+/// `compute_rel_loop_scores` normalizes across a partition.  Populated only in
+/// exhaustive LTM mode; discovery mode emits no loop_score variables and
+/// leaves this map empty.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
+    pub loop_partitions: HashMap<String, Option<usize>>,
 }
 
 /// Compute the link score equation text for a single causal link.

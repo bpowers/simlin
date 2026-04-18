@@ -30,7 +30,7 @@ use self::placement::{
 use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
 use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
-use crate::common::{Ident, canonicalize};
+use crate::common::canonicalize;
 use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
@@ -3821,10 +3821,11 @@ fn try_detect_ltm_loops_incremental(
     let actual_name_owned = actual_name.to_string();
 
     // Phase 1: Model lookup and loop detection.
-    let detected = {
+    let (source_model, detected) = {
         let canonical_name = crate::canonicalize(&actual_name_owned);
         let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
-        crate::db::model_detected_loops(db, source_model, source_project)
+        let detected = crate::db::model_detected_loops(db, source_model, source_project);
+        (source_model, detected)
     };
 
     if detected.loops.is_empty() {
@@ -3840,9 +3841,29 @@ fn try_detect_ltm_loops_incremental(
             vm.run_to_end().ok()?;
             Some(vm)
         });
+
+    // Capture the loop_partitions mapping while LTM is still enabled so the
+    // cached `model_ltm_variables` query sees the same flag value the VM ran
+    // under.  The rel_loop_score computation below consumes the mapping
+    // directly; it is not re-read from the db after the LTM flag flips back.
+    let loop_partitions = if vm_result.is_some() {
+        crate::db::model_ltm_variables(db, source_model, source_project)
+            .loop_partitions
+            .clone()
+    } else {
+        HashMap::new()
+    };
+
     source_project.set_ltm_enabled(db).to(false);
 
     let vm = vm_result?;
+    let results = vm.into_results();
+
+    // `rel_loop_score` is no longer a VM variable; derive it post-sim from
+    // the `loop_score` series the VM does emit, using the partition mapping
+    // cached on `model_ltm_variables`.  See
+    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
+    let rel_scores = crate::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     // Phase 3: Build feedback loop structs from VM results.
     let mut feedback_loops = Vec::new();
@@ -3861,11 +3882,9 @@ fn try_detect_ltm_loops_incremental(
             vars
         };
 
-        // Extract the relative loop score time series.
-        let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", dl.id);
-        let var_ident = Ident::new(&var_name);
-        let importance_series = vm
-            .get_series(&var_ident)
+        let importance_series: Vec<f64> = rel_scores
+            .get(&dl.id)
+            .cloned()
             .unwrap_or_default()
             .into_iter()
             .map(|v| if v.is_finite() { v } else { 0.0 })
