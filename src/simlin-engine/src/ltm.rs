@@ -13,20 +13,27 @@ use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 
 /// Safety cap on the number of elementary circuits the causal-graph DFS
-/// will enumerate before bailing out.  The circuit count in a dense SD
-/// model (e.g. World3, C-LEARN) can blow up exponentially; without this
-/// cap LTM compilation will consume tens of gigabytes of memory, which
-/// on WASM surfaces as `RuntimeError: unreachable` from the allocator.
+/// will enumerate before bailing out.
 ///
-/// 100_000 is deliberately generous: typical hand-built models have at
-/// most a few thousand loops, so this only trips on truly pathological
-/// graphs where LTM results would be illegible anyway.
+/// After the reduce-ltm-mem branch brought wrld3's uncapped enumeration
+/// memory from ~8.5 GiB down to ~490 MiB and cut wall time to ~1.2 s
+/// (Johnson's), the cap is no longer needed to keep enumeration itself
+/// inside WASM's 4 GiB linear memory.  It still serves a second
+/// purpose: preventing the *downstream* LTM variable-generation pipeline
+/// (~2 synthetic variables per loop) from blowing up when the circuit
+/// count is in the millions.  wrld3 has ~1.86M elementary circuits;
+/// generating ~3.7M synthetic variables OOMs the compiler even though
+/// enumeration itself is fast and small.
+///
+/// Removing this cap cleanly would require first capping the synthetic
+/// variable count inside `model_ltm_variables` (or switching very
+/// large models to discovery mode).  See tech-debt #31 for the plan.
 pub(crate) const MAX_LTM_CIRCUITS: usize = 100_000;
 
-/// Marker returned by circuit-enumeration helpers when the DFS bailed out
-/// because it would have exceeded the [`MAX_LTM_CIRCUITS`] budget.  The
-/// caller should treat this as "LTM analysis skipped for this model" and
-/// emit a user-visible diagnostic.
+/// Marker returned by circuit-enumeration helpers when the DFS bailed
+/// out because it would have exceeded the [`MAX_LTM_CIRCUITS`] budget.
+/// The caller should treat this as "LTM analysis skipped for this
+/// model" and emit a user-visible diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TruncatedByBudget;
 
@@ -391,6 +398,7 @@ struct IndexedGraph {
 /// Marker that DFS exceeded the shared circuit budget.  Used internally by
 /// `enumerate_circuits_in_scc` to propagate bail-out without confusion with
 /// a successful empty-result enumeration.
+#[derive(Debug)]
 struct TruncatedByBudgetInternal;
 
 /// Result bundle from the shared indexed-circuit enumerator: the
@@ -402,14 +410,34 @@ struct IndexedCircuits {
     circuits: Vec<Vec<u32>>,
 }
 
-/// Shared mutable state for the per-SCC DFS, bundled to keep the recursive
-/// helper's argument list short and the per-call overhead low.  All four
-/// fields are reset between starts by the enclosing loop.
+/// State for the per-SCC Tiernan DFS (kept as a test oracle -- the
+/// production path now uses Johnson's, see [`JohnsonState`]).
+#[cfg(test)]
 struct DfsState {
     visited: Vec<bool>,
     path: Vec<u32>,
     circuits: Vec<Vec<u32>>,
     in_scc: Vec<bool>,
+}
+
+/// State for the per-SCC Johnson 1975 circuit enumerator.
+///
+/// The core difference from Tiernan: nodes are `blocked` when entered on
+/// the DFS stack and STAY blocked on backtrack if their subtree didn't
+/// close a cycle.  Only when a cycle is later discovered through them --
+/// or through something they were waiting on (tracked via `b_list`) --
+/// are they unblocked for re-exploration.  This avoids Tiernan's repeated
+/// traversal of dead-end subtrees from different parent branches.
+///
+/// `blocked` and `b_list` are reset for every start node within an SCC,
+/// but `in_scc` is fixed for the whole SCC.  `path` and `circuits` are
+/// reused across starts to amortize allocation.
+struct JohnsonState {
+    blocked: Vec<bool>,
+    b_list: Vec<Vec<u32>>,
+    path: Vec<u32>,
+    in_scc: Vec<bool>,
+    circuits: Vec<Vec<u32>>,
 }
 
 impl IndexedGraph {
@@ -548,14 +576,25 @@ impl IndexedGraph {
         sccs
     }
 
-    /// Enumerate elementary circuits inside a single SCC using small-start
-    /// DFS.  Only edges whose target is also in the SCC are followed (others
-    /// cannot close a cycle), and starts are restricted to SCC members in
-    /// ascending index order so each cycle is found exactly once from its
-    /// lex-smallest node.
+    /// Enumerate elementary circuits inside a single SCC using Johnson 1975.
     ///
-    /// `budget` is the **remaining** circuit budget; it is decremented each
-    /// time a circuit of length > 1 is emitted.  Returns
+    /// Only edges whose target is inside the current SCC with index >=
+    /// `start` are followed, preserving the "each cycle emitted from its
+    /// lex-smallest node" invariant that downstream code
+    /// (`enrich_with_module_stocks`, `assign_loop_ids`, deterministic
+    /// salsa caching) depends on.
+    ///
+    /// The algorithm's efficiency vs. Tiernan-style lexicographic restart
+    /// comes from the blocked-set mechanism: once a node is visited on
+    /// the DFS stack it is `blocked`, and stays blocked on backtrack
+    /// unless a cycle was discovered through it.  Nodes that fail to
+    /// close a cycle register themselves as waiters in their successors'
+    /// `b_list`s; they're unblocked transitively when any of those
+    /// successors later participates in a cycle.  This avoids repeated
+    /// exploration of dead-end subtrees that Tiernan can fall into.
+    ///
+    /// `budget` is the **remaining** circuit budget; it is decremented
+    /// each time a circuit is emitted.  Returns
     /// `Err(TruncatedByBudgetInternal)` the moment the budget would go
     /// negative so the caller can stop immediately.
     fn enumerate_circuits_in_scc(
@@ -567,10 +606,165 @@ impl IndexedGraph {
             return Ok(Vec::new());
         }
 
-        // Trivial 1-node SCC with no self-loop: no circuits possible.  We
-        // still accept the 1-node-with-self-loop case but then `circuit.len()
-        // > 1` below rejects it -- pure self-loops were excluded by the
-        // old implementation and we preserve that contract.
+        // Size-1 SCC: the only possible circuit is a pure self-loop, and
+        // those are excluded by the `path.len() > 1` contract (a circuit
+        // is encoded as the list of stack nodes without the closing edge,
+        // so a length-1 list represents a self-loop we do not emit).
+        if scc.len() == 1 {
+            return Ok(Vec::new());
+        }
+
+        let n = self.nodes.len();
+        let mut state = JohnsonState {
+            blocked: vec![false; n],
+            b_list: vec![Vec::new(); n],
+            path: Vec::with_capacity(scc.len()),
+            in_scc: vec![false; n],
+            circuits: Vec::new(),
+        };
+        for &v in scc {
+            state.in_scc[v as usize] = true;
+        }
+
+        for &start in scc {
+            // Reset blocked/B[] for this start's search.  Reusing the
+            // allocations across starts saves a per-start Vec<bool>/Vec<Vec>
+            // construction cost.  O(|SCC|) per start; wrld3's 166-node SCC
+            // and 166 starts is 27 K bool writes total -- trivial.
+            for &v in scc {
+                state.blocked[v as usize] = false;
+                state.b_list[v as usize].clear();
+            }
+
+            // Push start onto the DFS stack and block it before entering
+            // the recursive CIRCUIT() subroutine -- the subroutine assumes
+            // its caller has already done this.
+            state.blocked[start as usize] = true;
+            state.path.push(start);
+
+            let result = self.johnson_circuit(start, start, &mut state, budget);
+
+            // Always restore the path stack even on bail-out so nested
+            // state is coherent if we ever chose to retry; since we
+            // currently abort the full enumeration on budget exhaustion
+            // this is defense-in-depth.
+            state.path.pop();
+
+            result?;
+        }
+
+        Ok(state.circuits)
+    }
+
+    /// Recursive CIRCUIT() of Johnson 1975.  Caller must have already:
+    ///   * pushed `v` onto `state.path`
+    ///   * set `state.blocked[v] = true`
+    ///
+    /// Returns `Ok(true)` if any cycle was discovered through `v` (direct
+    /// or via a descendant's recursive call); `Ok(false)` otherwise.
+    /// The caller decides whether to unblock `v` based on this return
+    /// value -- callers typically only need to concern themselves with
+    /// that when `v == start` at the outermost frame, where unblocking
+    /// happens inside the function itself.
+    fn johnson_circuit(
+        &self,
+        v: u32,
+        start: u32,
+        state: &mut JohnsonState,
+        budget: &mut usize,
+    ) -> std::result::Result<bool, TruncatedByBudgetInternal> {
+        let mut found_cycle = false;
+
+        // Successor list is already sorted ascending by
+        // `IndexedGraph::from_edges`.  Index iteration avoids holding an
+        // immutable borrow on `self.succ` across the recursive call.
+        let succs_len = self.succ[v as usize].len();
+        for i in 0..succs_len {
+            let w = self.succ[v as usize][i];
+
+            // Induced-subgraph gate: only traverse targets that are
+            // inside the current SCC AND have index >= start.  Targets
+            // with index < start would re-find cycles that were already
+            // emitted when their lex-smallest node was the start.
+            // Targets outside the SCC can never close a cycle back to
+            // start.
+            if !state.in_scc[w as usize] || w < start {
+                continue;
+            }
+
+            if w == start && state.path.len() > 1 {
+                // Elementary cycle: `state.path` currently holds
+                // [start, ..., v] with v != start (because path.len() > 1
+                // rules out the self-loop-at-root case).  The closing
+                // edge v -> start is implicit -- downstream code
+                // (circuit_to_links) wraps from path[last] to path[0].
+                // Budget is checked before the push so zero budget bails
+                // cleanly.
+                if *budget == 0 {
+                    return Err(TruncatedByBudgetInternal);
+                }
+                *budget -= 1;
+                state.circuits.push(state.path.clone());
+                found_cycle = true;
+            } else if w == start {
+                // Pure self-loop at the DFS root (v == start).  Excluded
+                // from the public contract (`circuit.len() > 1`).  We
+                // deliberately do NOT set `found_cycle = true` here --
+                // treating a self-loop as a discovered cycle would be
+                // semantically misleading even though in this case
+                // unblocking v is harmless (we're about to return from
+                // the outermost frame anyway).
+            } else if !state.blocked[w as usize] {
+                // Recurse into w: caller contract is "block and push
+                // before call, pop after call, unblock only via the
+                // Johnson unblock machinery".
+                state.blocked[w as usize] = true;
+                state.path.push(w);
+                let sub_found = self.johnson_circuit(w, start, state, budget)?;
+                state.path.pop();
+                if sub_found {
+                    found_cycle = true;
+                }
+            }
+        }
+
+        if found_cycle {
+            // Cycle found through v: unblock v and everything waiting
+            // on v (transitively).  Next exploration from a different
+            // branch might close a cycle through v and those waiters.
+            johnson_unblock(v, state);
+        } else {
+            // No cycle through v on this branch.  Register v as a waiter
+            // in each successor w's b_list, so that if w is later
+            // unblocked (because another DFS branch found a cycle
+            // through w), v will also be unblocked and retried.
+            for i in 0..succs_len {
+                let w = self.succ[v as usize][i];
+                if !state.in_scc[w as usize] || w < start {
+                    continue;
+                }
+                if !state.b_list[w as usize].contains(&v) {
+                    state.b_list[w as usize].push(v);
+                }
+            }
+        }
+
+        Ok(found_cycle)
+    }
+
+    /// Tiernan 1970 enumeration kept as the test oracle for the
+    /// Johnson-vs-Tiernan equivalence test.  Compiled only under
+    /// `cfg(test)`; production code uses `enumerate_circuits_in_scc`
+    /// (Johnson's).
+    #[cfg(test)]
+    fn enumerate_circuits_in_scc_tiernan(
+        &self,
+        scc: &[u32],
+        budget: &mut usize,
+    ) -> std::result::Result<Vec<Vec<u32>>, TruncatedByBudgetInternal> {
+        if scc.is_empty() {
+            return Ok(Vec::new());
+        }
         if scc.len() == 1 {
             let v = scc[0];
             if !self.succ[v as usize].contains(&v) {
@@ -578,8 +772,6 @@ impl IndexedGraph {
             }
         }
 
-        // Membership as a dense bitset for O(1) intra-SCC checks.  Using a
-        // Vec<bool> avoids pulling in `fixedbitset` as a dep.
         let mut in_scc: Vec<bool> = vec![false; self.nodes.len()];
         for &v in scc {
             in_scc[v as usize] = true;
@@ -595,7 +787,7 @@ impl IndexedGraph {
         for &start in scc {
             state.visited[start as usize] = true;
             state.path.push(start);
-            let bailed = self.dfs_circuits_indexed(start, start, &mut state, budget);
+            let bailed = self.dfs_tiernan_indexed(start, start, &mut state, budget);
             state.path.pop();
             state.visited[start as usize] = false;
             if bailed {
@@ -606,12 +798,10 @@ impl IndexedGraph {
         Ok(state.circuits)
     }
 
-    /// Recursive DFS mirroring the old `CausalGraph::dfs_circuits` but on
-    /// integer indices.  Returns `true` if the search bailed out on budget
-    /// so the caller can propagate immediately.  The "neighbor >= start"
-    /// test relies on `nodes` being lex-sorted: then index ordering matches
-    /// string ordering and each circuit emerges from its lex-smallest node.
-    fn dfs_circuits_indexed(
+    /// Tiernan DFS body, retained as oracle for the equivalence test.
+    /// See `enumerate_circuits_in_scc_tiernan` for rationale.
+    #[cfg(test)]
+    fn dfs_tiernan_indexed(
         &self,
         start: u32,
         current: u32,
@@ -619,9 +809,6 @@ impl IndexedGraph {
         budget: &mut usize,
     ) -> bool {
         for &neighbor in &self.succ[current as usize] {
-            // Restrict traversal to the current SCC: cross-SCC edges never
-            // close a cycle back to `start`, so exploring them is wasted
-            // work (and was a significant portion of WRLD3's runtime).
             if !state.in_scc[neighbor as usize] {
                 continue;
             }
@@ -634,7 +821,7 @@ impl IndexedGraph {
             } else if !state.visited[neighbor as usize] && neighbor >= start {
                 state.visited[neighbor as usize] = true;
                 state.path.push(neighbor);
-                let bailed = self.dfs_circuits_indexed(start, neighbor, state, budget);
+                let bailed = self.dfs_tiernan_indexed(start, neighbor, state, budget);
                 state.path.pop();
                 state.visited[neighbor as usize] = false;
                 if bailed {
@@ -697,6 +884,32 @@ impl IndexedGraph {
     /// rather than O(unique_nodes × circuits × path_len).
     fn node_name_strings(&self) -> Vec<String> {
         self.nodes.iter().map(|i| i.as_str().to_string()).collect()
+    }
+}
+
+/// Johnson 1975 UNBLOCK(u).  Iterative implementation so deeply nested
+/// B[] chains cannot overflow the recursion stack.
+///
+/// Called from `johnson_circuit` when a cycle has been found through `u`.
+/// Sets `blocked[u] = false` and drains `b_list[u]`, cascading to unblock
+/// every waiter that is still blocked.  `std::mem::take` empties the B[]
+/// list so that if `u` is re-blocked later, its list is ready for a fresh
+/// round of waiters.
+fn johnson_unblock(u: u32, state: &mut JohnsonState) {
+    let mut stack: Vec<u32> = vec![u];
+    while let Some(v) = stack.pop() {
+        // A vertex can appear in multiple B[] lists; the first pop
+        // transitions it to unblocked and any subsequent pop is a no-op.
+        if !state.blocked[v as usize] {
+            continue;
+        }
+        state.blocked[v as usize] = false;
+        let waiters = std::mem::take(&mut state.b_list[v as usize]);
+        for w in waiters {
+            if state.blocked[w as usize] {
+                stack.push(w);
+            }
+        }
     }
 }
 
@@ -785,21 +998,18 @@ impl CausalGraph {
         })
     }
 
-    /// Find all elementary circuits (feedback loops) using DFS.
+    /// Find all elementary circuits (feedback loops).
     ///
-    /// Bounded by `MAX_LTM_CIRCUITS`.  On dense causal graphs (e.g. World3
-    /// with hundreds of nodes and interconnected feedbacks) the number of
-    /// elementary circuits can blow up into the millions, which would
-    /// exhaust WASM's 4 GiB linear-memory limit and surface as a
-    /// `RuntimeError: unreachable` in the UI.  When the budget is exceeded
-    /// we return an empty vector -- LTM compilation then short-circuits
-    /// to "no loops detected" and the simulation still runs without
-    /// annotation, giving callers a chance to render sparklines rather
-    /// than crash.
+    /// Bounded by [`MAX_LTM_CIRCUITS`] because the downstream LTM
+    /// variable-generation pipeline synthesizes ~2 variables per loop;
+    /// at wrld3's ~1.86M circuits that's too many variables for the
+    /// compiler to handle even though the enumeration itself now
+    /// finishes in ~1.2 s and uses under 500 MiB.  On budget exhaustion
+    /// the public API returns an empty vec -- LTM compilation short-
+    /// circuits to "no loops detected" and simulation proceeds normally.
     ///
-    /// Callers that care whether LTM analysis was skipped should use
-    /// [`Self::find_loops_with_limit`] to get an explicit `TruncatedByBudget`
-    /// signal.
+    /// Callers that need an explicit truncation signal should use
+    /// [`Self::find_loops_with_limit`].
     pub fn find_loops(&self) -> Vec<Loop> {
         self.find_loops_with_limit(MAX_LTM_CIRCUITS)
             .unwrap_or_default()
@@ -904,10 +1114,10 @@ impl CausalGraph {
     /// Find all elementary circuits as deduplicated node lists.
     /// Only needs edges -- does not compute polarity or assign IDs.
     ///
-    /// Same budget semantics as [`Self::find_loops`]: bounded by
-    /// `MAX_LTM_CIRCUITS`; empty result on budget exhaustion.  Use
-    /// [`Self::find_circuit_node_lists_with_limit`] when the caller needs
-    /// to distinguish "no loops" from "too many loops to enumerate".
+    /// Bounded by [`MAX_LTM_CIRCUITS`]; empty result on budget
+    /// exhaustion.  Use [`Self::find_circuit_node_lists_with_limit`]
+    /// when the caller needs to distinguish "no loops" from "too many
+    /// loops to enumerate".
     pub fn find_circuit_node_lists(&self) -> Vec<Vec<Ident<Canonical>>> {
         self.find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
             .unwrap_or_default()
@@ -946,10 +1156,9 @@ impl CausalGraph {
         Ok((names, indexed.circuits))
     }
 
-    /// Unbounded (default-budget) variant of
-    /// [`Self::find_indexed_circuits_with_limit`]; returns `(names, [])`
-    /// when the DFS budget is exhausted so callers have a uniform empty
-    /// response.
+    /// Default-budget variant of [`Self::find_indexed_circuits_with_limit`];
+    /// bounded by [`MAX_LTM_CIRCUITS`].  Returns `(names, [])` when the
+    /// DFS budget is exhausted so callers have a uniform empty response.
     pub fn find_indexed_circuits(&self) -> (Vec<String>, Vec<Vec<u32>>) {
         self.find_indexed_circuits_with_limit(MAX_LTM_CIRCUITS)
             .unwrap_or_else(|_| (Vec::new(), Vec::new()))
@@ -4339,7 +4548,7 @@ mod tests {
     fn find_circuit_node_lists_succeeds_within_budget() {
         let graph = tiny_cycle_graph();
         let circuits = graph
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("one-circuit graph must not exhaust the budget");
         assert_eq!(
             circuits.len(),
@@ -4414,7 +4623,7 @@ mod tests {
             module_graphs: HashMap::new(),
         };
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("empty graph must not trip the budget");
         assert!(circuits.is_empty(), "empty graph has no circuits");
     }
@@ -4436,7 +4645,7 @@ mod tests {
         }
 
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("small graph must not exhaust budget");
         assert_eq!(
             circuits_as_sorted_name_sets(&circuits),
@@ -4449,7 +4658,7 @@ mod tests {
         // A -> B -> C -> A: exactly one elementary circuit.
         let cg = build_causal_graph(&[("a", &["b"]), ("b", &["c"]), ("c", &["a"])]);
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("tiny cycle must not exhaust budget");
         assert_eq!(
             circuits_as_sorted_name_sets(&circuits),
@@ -4470,7 +4679,7 @@ mod tests {
             ("z", &["x"]),
         ]);
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("small disjoint graphs must not exhaust budget");
         let sorted = circuits_as_sorted_name_sets(&circuits);
         assert_eq!(
@@ -4489,7 +4698,7 @@ mod tests {
         // so only the A<->B cycle is returned.
         let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"]), ("s", &["s"])]);
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("small graph must not exhaust budget");
         assert_eq!(
             circuits_as_sorted_name_sets(&circuits),
@@ -4514,9 +4723,7 @@ mod tests {
             );
         }
         // And `find_circuit_node_lists_with_limit` agrees: zero circuits.
-        let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
-            .unwrap();
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
         assert!(circuits.is_empty());
     }
 
@@ -4573,7 +4780,7 @@ mod tests {
         // self-loops (circuit.len() == 1) are intentionally excluded.
         let cg = build_causal_graph(&[("a", &["a"])]);
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("tiny graph must not exhaust budget");
         assert!(
             circuits.is_empty(),
@@ -4597,8 +4804,431 @@ mod tests {
         // with an ample budget must succeed and return exactly one circuit.
         let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"])]);
         let circuits = cg
-            .find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
+            .find_circuit_node_lists_with_limit(usize::MAX)
             .expect("ample budget must succeed");
         assert_eq!(circuits.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Johnson 1975 circuit-enumeration tests
+    // ------------------------------------------------------------------
+    //
+    // The tests below exercise the production Johnson's enumerator on
+    // targeted graph shapes and cross-check it against the Tiernan oracle
+    // retained under cfg(test) in the main IndexedGraph impl.  The
+    // invariants we care about match the LTM public contract:
+    //
+    //   (1) exactly the same set of circuits as Tiernan (after
+    //       canonicalizing each circuit's rotation),
+    //   (2) each circuit emitted rotated to start at its lex-smallest
+    //       node,
+    //   (3) pure self-loops excluded (circuit.len() > 1 contract),
+    //   (4) budget semantics: TruncatedByBudget on exactly the
+    //       max_circuits + 1st circuit,
+    //   (5) cross-SCC edges never traversed.
+
+    /// Helper: canonicalize a list of circuits for comparison.  Rotates
+    /// each circuit so that its lex-smallest node comes first, then sorts
+    /// the outer list.  Used by the equivalence test to compare Johnson's
+    /// output against Tiernan's ignoring rotation differences (both
+    /// algorithms SHOULD produce identical rotations under our
+    /// small-start discipline, but being rotation-insensitive in the test
+    /// hardens against future refactors).
+    fn canonicalize_circuits(mut circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+        for c in &mut circuits {
+            if c.is_empty() {
+                continue;
+            }
+            let min_idx = c.iter().enumerate().min_by_key(|(_, v)| **v).unwrap().0;
+            c.rotate_left(min_idx);
+        }
+        circuits.sort();
+        circuits
+    }
+
+    /// Run both Johnson's (production) and Tiernan (oracle) on a graph
+    /// and assert their canonicalized outputs are equal.
+    fn assert_johnson_matches_tiernan(cg: &CausalGraph) {
+        let graph = IndexedGraph::from_edges(cg.edges());
+        let sccs = graph.tarjan_scc();
+
+        let mut johnson_circuits: Vec<Vec<u32>> = Vec::new();
+        let mut budget_j = usize::MAX;
+        for scc in &sccs {
+            let mut part = graph.enumerate_circuits_in_scc(scc, &mut budget_j).unwrap();
+            johnson_circuits.append(&mut part);
+        }
+
+        let mut tiernan_circuits: Vec<Vec<u32>> = Vec::new();
+        let mut budget_t = usize::MAX;
+        for scc in &sccs {
+            let mut part = graph
+                .enumerate_circuits_in_scc_tiernan(scc, &mut budget_t)
+                .unwrap();
+            tiernan_circuits.append(&mut part);
+        }
+
+        // Both should emit each cycle exactly once with the same total
+        // count.  Dedup (at the IndexedGraph::dedup_circuits layer) would
+        // normally fold multidigraph duplicates, but here we compare the
+        // raw output of each algorithm to confirm they're on equal footing.
+        let johnson_canon = canonicalize_circuits(johnson_circuits);
+        let tiernan_canon = canonicalize_circuits(tiernan_circuits);
+        assert_eq!(
+            johnson_canon,
+            tiernan_canon,
+            "Johnson's and Tiernan enumerations disagree on edges {:?}",
+            cg.edges()
+        );
+    }
+
+    #[test]
+    fn johnson_empty_graph_no_circuits() {
+        let cg = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert!(circuits.is_empty(), "empty graph must have zero circuits");
+    }
+
+    #[test]
+    fn johnson_pure_dag_no_circuits() {
+        let cg = build_causal_graph(&[("a", &["b"]), ("b", &["c"]), ("a", &["c"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert!(circuits.is_empty(), "pure DAG has no circuits");
+    }
+
+    #[test]
+    fn johnson_single_self_loop_excluded() {
+        // Pure self-loop A -> A: path.len() == 1 is filtered.
+        let cg = build_causal_graph(&[("a", &["a"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert!(circuits.is_empty(), "pure self-loop must not be emitted");
+    }
+
+    #[test]
+    fn johnson_two_node_back_edge_single_circuit() {
+        let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(circuits.len(), 1);
+        assert_eq!(
+            circuits[0].iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "circuit must be rotated to start at lex-smallest node"
+        );
+    }
+
+    #[test]
+    fn johnson_three_node_cycle_single_circuit() {
+        let cg = build_causal_graph(&[("a", &["b"]), ("b", &["c"]), ("c", &["a"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(circuits.len(), 1);
+        assert_eq!(
+            circuits[0].iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn johnson_two_disjoint_cycles_two_circuits() {
+        let cg = build_causal_graph(&[
+            ("a", &["b"]),
+            ("b", &["c"]),
+            ("c", &["a"]),
+            ("x", &["y"]),
+            ("y", &["z"]),
+            ("z", &["x"]),
+        ]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let names = circuits_as_sorted_name_sets(&circuits);
+        assert_eq!(
+            names,
+            vec![
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                vec!["x".to_string(), "y".to_string(), "z".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn johnson_figure_8_shared_vertex_two_circuits() {
+        // Two cycles sharing node `m`:
+        //   cycle 1: a -> m -> b -> a
+        //   cycle 2: c -> m -> d -> c
+        let cg = build_causal_graph(&[
+            ("a", &["m"]),
+            ("m", &["b", "d"]),
+            ("b", &["a"]),
+            ("c", &["m"]),
+            ("d", &["c"]),
+        ]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let names = circuits_as_sorted_name_sets(&circuits);
+        assert_eq!(
+            names,
+            vec![
+                vec!["a".to_string(), "b".to_string(), "m".to_string()],
+                vec!["c".to_string(), "d".to_string(), "m".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn johnson_complete_k3_all_directed_cycles() {
+        // K3 with all 6 directed edges.  Elementary directed cycles:
+        //   3 two-cycles: {a,b}, {a,c}, {b,c}
+        //   2 three-cycles: a->b->c->a, a->c->b->a
+        // Dedup merges the two 3-cycles (same node set {a,b,c}) so the
+        // public API reports 4 circuits.
+        let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let names = circuits_as_sorted_name_sets(&circuits);
+        assert_eq!(
+            names,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                vec!["a".to_string(), "c".to_string()],
+                vec!["b".to_string(), "c".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn johnson_zero_budget_bails_immediately() {
+        let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"])]);
+        let err = cg
+            .find_circuit_node_lists_with_limit(0)
+            .expect_err("zero budget on a cycle must truncate");
+        assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn johnson_respects_shared_budget_across_sccs() {
+        // Two disjoint 2-cycles and a generous-but-finite budget.  Both
+        // cycles fit; budget remains positive at the end.
+        let cg = build_causal_graph(&[("a", &["b"]), ("b", &["a"]), ("c", &["d"]), ("d", &["c"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(2).unwrap();
+        assert_eq!(circuits.len(), 2);
+
+        // Budget of 1 can emit only one of the two cycles before bailing.
+        let err = cg
+            .find_circuit_node_lists_with_limit(1)
+            .expect_err("budget of 1 cannot fit both 2-cycles");
+        assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn johnson_circuit_emitted_from_lex_smallest_node() {
+        // Construct a cycle where the lex-smallest node is NOT the first
+        // in the edge declarations so we can confirm rotation handling.
+        // Edges listed starting from "c": c -> a -> b -> c.  The cycle's
+        // lex-min is "a", so the emitted circuit is [a, b, c].
+        let cg = build_causal_graph(&[("c", &["a"]), ("a", &["b"]), ("b", &["c"])]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        assert_eq!(circuits.len(), 1);
+        assert_eq!(
+            circuits[0].iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "circuit must be rotated to start at 'a'"
+        );
+    }
+
+    #[test]
+    fn johnson_unblock_transitive_chain() {
+        // Graph designed to exercise the B[] chain unblocking.
+        //
+        //   a -> b
+        //   b -> c, b -> e
+        //   c -> a        (closes 1st cycle via b->c)
+        //   c -> d
+        //   d -> e        (d/e won't close by themselves from start=a)
+        //   e -> a        (closes 2nd cycle via b->e)
+        //
+        // When DFS from start=a descends a->b->c->d->e, e has no cycle
+        // back in its initial exploration; e registers as waiter of a in
+        // its B[]. Later when b->e is explored and closes via e->a,
+        // unblock cascades and correct cycle enumeration is preserved.
+        let cg = build_causal_graph(&[
+            ("a", &["b"]),
+            ("b", &["c", "e"]),
+            ("c", &["a", "d"]),
+            ("d", &["e"]),
+            ("e", &["a"]),
+        ]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let names = circuits_as_sorted_name_sets(&circuits);
+        // Elementary directed cycles:
+        //   a -> b -> c -> a            -> {a,b,c}
+        //   a -> b -> e -> a            -> {a,b,e}
+        //   a -> b -> c -> d -> e -> a  -> {a,b,c,d,e}
+        assert_eq!(
+            names,
+            vec![
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                    "c".to_string(),
+                    "d".to_string(),
+                    "e".to_string()
+                ],
+                vec!["a".to_string(), "b".to_string(), "e".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn johnson_cross_scc_edges_not_traversed() {
+        // Two SCCs connected by a cross-SCC edge.
+        //   SCC 1: a <-> b
+        //   SCC 2: x <-> y
+        //   cross: b -> x (one-way; does not close any cycle)
+        // Elementary circuits: {a,b} and {x,y}; the cross edge b->x
+        // must NOT be traversed into SCC 2 when enumerating from SCC 1.
+        let cg = build_causal_graph(&[
+            ("a", &["b"]),
+            ("b", &["a", "x"]),
+            ("x", &["y"]),
+            ("y", &["x"]),
+        ]);
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let names = circuits_as_sorted_name_sets(&circuits);
+        assert_eq!(
+            names,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["x".to_string(), "y".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn johnson_matches_tiernan_on_fixture_corpus() {
+        // Hand-curated corpus of graphs that exercise the Johnson/Tiernan
+        // equivalence invariant.  Each entry is a list of (from, [to,...])
+        // edge-list fragments, compared after canonicalization.
+        let corpus: Vec<Vec<(&str, &[&str])>> = vec![
+            // Empty graph
+            vec![],
+            // Single cycle
+            vec![("a", &["b"]), ("b", &["c"]), ("c", &["a"])],
+            // Two 2-cycles
+            vec![("a", &["b"]), ("b", &["a"]), ("c", &["d"]), ("d", &["c"])],
+            // Figure-8
+            vec![
+                ("a", &["m"]),
+                ("m", &["b", "d"]),
+                ("b", &["a"]),
+                ("c", &["m"]),
+                ("d", &["c"]),
+            ],
+            // K3 with all edges (multi-digraph, dedup exercises)
+            vec![("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])],
+            // Bowtie: two triangles sharing a single vertex
+            vec![
+                ("a", &["b"]),
+                ("b", &["c"]),
+                ("c", &["a"]),
+                ("c", &["d"]),
+                ("d", &["e"]),
+                ("e", &["c"]),
+            ],
+            // Self-loop + non-trivial SCC (excluded self-loop)
+            vec![("a", &["a"]), ("b", &["c"]), ("c", &["b"])],
+            // Long chain with side spurs that don't close
+            vec![
+                ("a", &["b"]),
+                ("b", &["c"]),
+                ("c", &["d"]),
+                ("d", &["a", "e"]),
+                ("e", &["f"]),
+                ("f", &["g"]),
+            ],
+            // Graph with many dead-end branches forcing Johnson's blocking to matter
+            vec![
+                ("a", &["b"]),
+                ("b", &["c", "d", "e"]),
+                ("c", &["a"]),
+                ("d", &["f"]),
+                ("e", &["g"]),
+                ("f", &["h"]),
+                ("g", &["h"]),
+                ("h", &["a"]),
+            ],
+            // Arms race style: three-clique (every pair bidirectional)
+            vec![
+                ("alpha", &["beta", "gamma"]),
+                ("beta", &["alpha", "gamma"]),
+                ("gamma", &["alpha", "beta"]),
+            ],
+        ];
+
+        for edges in &corpus {
+            let cg = build_causal_graph(edges);
+            assert_johnson_matches_tiernan(&cg);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Property-based equivalence test: random small graphs.
+    //
+    // For each randomly generated graph, assert Johnson's and Tiernan
+    // agree on the canonicalized set of elementary circuits.  The tight
+    // bound (nodes <= 8, edges up to 16) keeps enumeration cheap while
+    // giving the generator room to produce interesting SCC structures,
+    // bidirectional edges, and self-loops.
+    // ------------------------------------------------------------------
+
+    use proptest::prelude::*;
+
+    fn build_graph_from_pairs(n: usize, pairs: &[(u8, u8)]) -> CausalGraph {
+        // Node names are "v0", "v1", ...  Use two-digit zero-padded
+        // names so lex order matches numeric order (v01 < v02 < ... < v10).
+        let names: Vec<String> = (0..n).map(|i| format!("v{i:02}")).collect();
+        let mut edge_pairs: Vec<(String, String)> = Vec::new();
+        for &(from_raw, to_raw) in pairs {
+            let from = from_raw as usize % n;
+            let to = to_raw as usize % n;
+            edge_pairs.push((names[from].clone(), names[to].clone()));
+        }
+        // Deduplicate: HashMap::entry will overwrite but we need to
+        // aggregate the adjacency list instead.
+        let mut map: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (f, t) in edge_pairs {
+            if seen.insert((f.clone(), t.clone())) {
+                map.entry(Ident::new(&f)).or_default().push(Ident::new(&t));
+            }
+        }
+        CausalGraph {
+            edges: map,
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Johnson's must agree with Tiernan on any random small graph.
+        /// The generator draws a node count 2..=8 and up to 16 directed
+        /// edges (possibly self-loops, possibly duplicates that we
+        /// deduplicate).  Canonicalized circuit lists must match exactly.
+        #[test]
+        fn johnson_matches_tiernan_on_random_small_graphs(
+            n in 2usize..=8,
+            edges in prop::collection::vec((any::<u8>(), any::<u8>()), 0..=16),
+        ) {
+            let cg = build_graph_from_pairs(n, &edges);
+            // Exercise via the CausalGraph public API in addition to the
+            // direct IndexedGraph inspection, to catch divergences at the
+            // API boundary (rotation, SCC ordering, empty-SCC handling).
+            assert_johnson_matches_tiernan(&cg);
+        }
     }
 }
