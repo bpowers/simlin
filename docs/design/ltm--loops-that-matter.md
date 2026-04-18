@@ -614,11 +614,19 @@ computational interval" strategy.
    `save_step` in sim specs), which may be coarser. This is an intentional
    simplification that trades completeness for speed.
 
-2. **No composite network fallback**: The papers describe a two-tier strategy
-   where models with fewer than ~1000 loops use exhaustive enumeration on a
-   composite (max-score) network. The implementation keeps the two modes entirely
-   separate: `ltm_enabled` for exhaustive and `ltm_discovery_mode` + `discover_loops()`
-   for discovery. There is no automatic switching based on loop count.
+2. **Auto-flip on large SCCs, no composite-network pre-reduction**: The papers
+   describe a two-tier strategy in which models with fewer than ~1000 loops use
+   exhaustive enumeration on a composite (max-score) network. The implementation
+   does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
+   enumeration and `ltm_discovery_mode` runs `discover_loops()`. However,
+   `model_ltm_variables` in `src/simlin-engine/src/db_ltm.rs` does automatically
+   switch from exhaustive to discovery when the largest SCC of the element-level
+   causal graph exceeds `MAX_LTM_SCC_NODES` (currently 50, defined in
+   `src/simlin-engine/src/ltm.rs`). Above this size, Johnson circuit enumeration
+   and the downstream `rel_loop_score` emission blow past reasonable memory and
+   time budgets; see `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`
+   for the measurements. Auto-flip emits a `CompilationDiagnostic` at
+   `Warning` severity so callers can surface the fallback to users.
 
 3. **Module handling**: The papers describe composite link scores for macros
    (DELAY, SMOOTH) but do not discuss module boundaries as an implementation
