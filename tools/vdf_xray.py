@@ -31,6 +31,14 @@ SECTION_HEADER_SIZE = 24
 RECORD_SIZE = 64
 SECTION3_ENTRY_WORDS = 27
 
+# Section 1 (or section 0 in dataset VDFs) begins with a 12-byte preamble
+# followed by three 64-byte "header" blocks (string-pool pointer array and
+# misc runtime state). Real 64-byte variable metadata records start at
+# data_offset + 12 + 3*64 = data_offset + 204. Validated across 40 fixtures.
+RECORD_PREAMBLE_BYTES = 12
+RECORD_HEADER_BLOCKS = 3
+RECORD_REGION_START_OFFSET = RECORD_PREAMBLE_BYTES + RECORD_HEADER_BLOCKS * RECORD_SIZE
+
 VDF_FILE_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x52])
 VDF_DATASET_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x41])
 VDF_SECTION_MAGIC = bytes([0xA1, 0x37, 0x4C, 0xBF])
@@ -1134,6 +1142,19 @@ def record_shape_length(vdf: VdfFile, rec: VdfRecord) -> Optional[int]:
     return None
 
 
+# Canonical f[2] values for system records. INITIAL TIME = 9, FINAL TIME = 13,
+# TIME STEP = 17, SAVEPER = 21. INITIAL TIME and FINAL TIME records carry the
+# sentinel pair; TIME STEP and SAVEPER do not. All four point at system OT
+# slots rather than at model-variable spans, so record-derived block builders
+# filter them here so downstream analyses (MDL alignment, stock
+# classification, name mapping) see only model variables. Values documented
+# in docs/design/vdf.md and stable across every observed fixture (small
+# models, edited models, and large models). Before the record-region fix,
+# the buggy search-start happened to skip most of these records; they are
+# now always present in `vdf.records` and must be filtered explicitly.
+_CANONICAL_SYSTEM_RECORD_F2: frozenset[int] = frozenset({9, 13, 17, 21})
+
+
 def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
     """
     Group records by decoded shape span instead of raw ot_index.
@@ -1163,6 +1184,12 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
             block.slot_refs.append(slot_ref)
 
     for rec_idx, rec in enumerate(vdf.records):
+        # Canonical system records (INITIAL TIME, FINAL TIME, TIME STEP,
+        # SAVEPER) point at system OT slots, not model-variable spans.
+        # Filter them here so that record-shape blocks reflect only model
+        # owners.
+        if rec.fields[2] in _CANONICAL_SYSTEM_RECORD_F2:
+            continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count:
             continue
@@ -1182,6 +1209,8 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
         add_record(block, rec_idx, rec, is_shape_record=True)
 
     for rec_idx, rec in enumerate(vdf.records):
+        if rec.fields[2] in _CANONICAL_SYSTEM_RECORD_F2:
+            continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count or rec.fields[10] <= 0:
             continue
@@ -1206,14 +1235,25 @@ def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
     Return indices of records that are structurally model-variable owners.
 
     The sentinel pair (f[8]=f[9]=0xf6800000) is a strong signal, but not
-    exclusive to model variables: system records (FINAL TIME, SAVEPER, etc.)
-    can also carry sentinels, especially in small/empty models. After reformat,
-    model records can carry f[0]=0 or f[1]=23, so those fields cannot be used
-    as filters. System-record discrimination is handled at the mapping layer.
+    exclusive to model variables: INITIAL TIME (f[2]=9) and FINAL TIME
+    (f[2]=13) system records carry sentinels too and pair (via the
+    f[2]-offset formula) with the matching system name-table entries. They
+    point at the OT slots that store those system values but they are not
+    owners of *model* variables, so we drop them before constructing
+    owner blocks. After the record-region fix (docs/design/vdf.md) those
+    records are always present in `vdf.records`; the old skipped-record
+    behavior happened to mask them, but they exist in the file.
+
+    After reformat, model records can carry f[0]=0 or f[1]=23, so those
+    fields cannot be used as filters. Further system-record discrimination
+    (lookup definitions, stdlib-helper records) is handled at the mapping
+    layer.
     """
     out: list[int] = []
     for rec_idx, rec in enumerate(vdf.records):
         if not rec.has_sentinel():
+            continue
+        if rec.fields[2] in _CANONICAL_SYSTEM_RECORD_F2:
             continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count:
@@ -1855,14 +1895,21 @@ def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]
     """
     n_recs = len(vdf.records)
     n_slots = len(vdf.slot_table)
-    if n_recs == 0 or n_slots == 0 or n_recs > n_slots:
+    if n_recs == 0 or n_slots == 0:
         return None
 
     sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
     all_blocks = build_owner_record_blocks(vdf)
     visible_blocks = [b for b in all_blocks if not b.hidden]
 
-    nominal_offset = n_slots - n_recs
+    # When records <= slots (small/medium fixtures) the nominal offset
+    # `n_slots - n_recs` is the deterministic delta. Large fixtures where
+    # Vensim emits records in compilation order can have n_recs > n_slots
+    # (e.g., WRLD3 SCEN01 after the record-region fix). In that case we
+    # saturate the offset to zero so the remaining pairings still surface
+    # the partial coverage that existed before the fix. Follow-up task #9
+    # will replace this with a slot-ref-based record->name link.
+    nominal_offset = max(0, n_slots - n_recs)
     return _mapping_from_record_names(sorted_recs, nominal_offset, vdf, visible_blocks)
 
 
@@ -1877,14 +1924,14 @@ def _debug_f2_offset_scan(vdf: VdfFile) -> list[tuple[int, int, bool, int]]:
     """
     n_recs = len(vdf.records)
     n_slots = len(vdf.slot_table)
-    if n_recs == 0 or n_slots == 0 or n_recs > n_slots:
+    if n_recs == 0 or n_slots == 0:
         return []
 
     sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
     all_blocks = build_owner_record_blocks(vdf)
     visible_blocks = [b for b in all_blocks if not b.hidden]
 
-    nominal_offset = n_slots - n_recs
+    nominal_offset = max(0, n_slots - n_recs)
     rows: list[tuple[int, int, bool, int]] = []
     for offset in range(max(0, nominal_offset - 3), nominal_offset + 4):
         trial = _mapping_from_record_names(sorted_recs, offset, vdf, visible_blocks)
@@ -2279,6 +2326,23 @@ def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
 
 
 def find_records(data: bytes, search_start: int, search_end: int) -> list[VdfRecord]:
+    """
+    Enumerate 64-byte variable metadata records between `search_start`
+    (inclusive) and `search_end` (exclusive).
+
+    Callers pass `search_start = sec_data_offset + RECORD_REGION_START_OFFSET`;
+    the layout guarantees every 64-byte block from there on is part of the
+    record array. Some records carry the sentinel pair (0xf6800000 at
+    fields 8 and 9); others -- padding, lookup table metadata, subscript
+    elements -- do not. All are valid records at the same stride, so we
+    walk the region in 64-byte steps and return every block.
+
+    The function still anchors the forward walk to the first sentinel pair
+    it finds as a cross-check, and scans backward through recordish blocks
+    up to (but never past) `search_start`. On well-formed files the fixed
+    record-region offset makes the backward scan a no-op; on malformed
+    input it prevents emitting garbage aligned against random prefix bytes.
+    """
     if search_start >= search_end:
         return []
 
@@ -2347,15 +2411,13 @@ def parse_vdf(data: bytes) -> VdfFile:
         slot_table_offset, slot_table = find_slot_table(
             data, sections[name_section_idx], len(names), sec1_data_size)
 
-    # Find records
-    if slot_table:
-        sec1_data_start = sections[1].data_offset() if len(sections) > 1 else FILE_HEADER_SIZE
-        sorted_slots = sorted(slot_table)
-        max_offset = sorted_slots[-1]
-        last_stride = sorted_slots[-1] - sorted_slots[-2] if len(sorted_slots) >= 2 else max_offset
-        search_start = sec1_data_start + max_offset + last_stride
-    else:
-        search_start = sections[1].data_offset() if len(sections) > 1 else FILE_HEADER_SIZE
+    # Find records. The record region lives at a fixed offset within section
+    # 1's data: the first 12 bytes are a preamble and the next three 64-byte
+    # blocks are header blocks (string-pool pointer array and misc state).
+    # Real 64-byte variable metadata records start at
+    # `sec1.data_offset() + 204` and extend to `slot_table_offset`.
+    sec1_data_start = sections[1].data_offset() if len(sections) > 1 else FILE_HEADER_SIZE
+    search_start = sec1_data_start + RECORD_REGION_START_OFFSET
 
     search_bound = sections[1].region_end if len(sections) > 1 else len(data)
     records_end = slot_table_offset if 0 < slot_table_offset < search_bound else search_bound

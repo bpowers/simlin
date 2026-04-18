@@ -247,10 +247,16 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             for match in vdf_xray.match_mdl_definitions_to_blocks(run7, model)
         }
 
+        # Pre-fix, SAVEPER's OT[8..9) system block appeared as a shape block
+        # and matched the "constant"/"v" definitions as a spurious candidate.
+        # The record-region fix plus the canonical-system-f[2] filter drop
+        # that block before shape-block construction, so MDL alignment now
+        # only proposes genuine model-variable candidates. `flow` and `stock`
+        # were unaffected because their previous indices matched model blocks.
         self.assertEqual(matches["flow"], [3])
         self.assertEqual(matches["stock"], [0])
-        self.assertEqual(matches["constant"], [2, 4, 5])
-        self.assertEqual(matches["v"], [2, 4, 5])
+        self.assertEqual(matches["constant"], [2, 4])
+        self.assertEqual(matches["v"], [2, 4])
 
     def test_run8_mdl_alignment_finds_unique_arrayed_block_owners(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
@@ -261,10 +267,13 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             for match in vdf_xray.match_mdl_definitions_to_blocks(run8, model)
         }
 
+        # Same dynamic as run_7: SAVEPER's OT[8..9) is filtered out at the
+        # shape-block layer, so "constant" and "v" no longer pick up the
+        # system block as a match candidate.
         self.assertEqual(matches["flow"], [2])
         self.assertEqual(matches["stock"], [0])
-        self.assertEqual(matches["constant"], [1, 3, 4])
-        self.assertEqual(matches["v"], [1, 3, 4])
+        self.assertEqual(matches["constant"], [1, 3])
+        self.assertEqual(matches["v"], [1, 3])
 
     def test_run9_record_shape_blocks_split_hidden_and_visible_stock_regions(self) -> None:
         run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
@@ -310,10 +319,13 @@ class VdfXrayModelEditingTests(unittest.TestCase):
 
         stock_block = blocks[0]
         self.assertFalse(stock_block.hidden)
-        self.assertEqual(stock_block.sentinel_record_indices, [13])
+        # Record indices shifted by +3 after the record-region fix exposed
+        # the three previously-missed header-region records; sort_anchors
+        # moved from [8] to [11] for the same reason.
+        self.assertEqual(stock_block.sentinel_record_indices, [16])
         self.assertEqual(stock_block.direct_sort_keys, [])
         self.assertEqual(stock_block.attached_sort_keys, [11])
-        self.assertEqual(stock_block.sort_anchor_record_indices, [8])
+        self.assertEqual(stock_block.sort_anchor_record_indices, [11])
 
     def test_run9_owner_blocks_separate_hidden_helper_and_transfer_visible_stock_sort(self) -> None:
         run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
@@ -327,18 +339,21 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             (11, 12, False),
         ])
 
+        # Record indices shifted by +4 after the record-region fix exposed
+        # four previously-missed leading records (INITIAL TIME sentinel
+        # plus three header-region blocks).
         hidden_block = blocks[0]
-        self.assertEqual(hidden_block.sentinel_record_indices, [18])
+        self.assertEqual(hidden_block.sentinel_record_indices, [22])
         self.assertEqual(hidden_block.direct_sort_keys, [5])
         self.assertEqual(hidden_block.attached_sort_keys, [5])
         self.assertEqual(hidden_block.slot_refs, [412])
         self.assertEqual(hidden_block.hidden_slot_refs, [412])
 
         visible_stock_block = blocks[1]
-        self.assertEqual(visible_stock_block.sentinel_record_indices, [12])
+        self.assertEqual(visible_stock_block.sentinel_record_indices, [16])
         self.assertEqual(visible_stock_block.direct_sort_keys, [])
         self.assertEqual(visible_stock_block.attached_sort_keys, [13])
-        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [14])
+        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [18])
 
     def test_run9_owner_mdl_alignment_keeps_hidden_helper_out_of_visible_candidates(self) -> None:
         run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
@@ -354,20 +369,24 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(matches["constant"], [2, 4])
         self.assertEqual(matches["v"], [2, 4])
 
-    def test_water_owner_blocks_drop_unanchored_system_only_const_block(self) -> None:
+    def test_water_owner_blocks_drop_system_records_at_source(self) -> None:
         water = parse_fixture("test/bobby/vdf/water/Current.vdf")
         blocks = vdf_xray.build_owner_record_blocks(water)
 
-        # The INITIAL TIME block at OT 4..5 should be marked hidden: it has a
-        # unique slot_ref (not shared by any model variable view), no sort keys,
-        # and only constant OT codes.
+        # INITIAL TIME (f[2]=9) and FINAL TIME (f[2]=13) records carry
+        # sentinels but point at system OT slots (OT[7] and OT[4] here).
+        # `sentinel_model_record_indices` filters them out by f[2] so the
+        # owner-block set contains only the five visible model variables:
+        # water_level (stock), two dynamics, two consts. The system OT
+        # slots they would have anchored are still reachable through
+        # other VDF-native paths (section-6 class codes, name-table
+        # filtering), so there is no loss of information.
         self.assertEqual(
             [(block.start, block.end, block.hidden) for block in blocks],
             [
                 (1, 2, False),
                 (2, 3, False),
                 (3, 4, False),
-                (4, 5, True),
                 (5, 6, False),
                 (6, 7, False),
             ],
@@ -400,7 +419,10 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         visible_stock_block = blocks[1]
         self.assertEqual(visible_stock_block.direct_sort_keys, [])
         self.assertEqual(visible_stock_block.attached_sort_keys, [13])
-        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [3])
+        # Record index shifted by +4 after the record-region fix exposed the
+        # three previously-missed header-region records plus the leading
+        # INITIAL TIME sentinel record.
+        self.assertEqual(visible_stock_block.sort_anchor_record_indices, [7])
 
         self.assertEqual(blocks[2].attached_sort_keys, [7])
         self.assertEqual(blocks[3].attached_sort_keys, [9])
@@ -584,30 +606,37 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(slot_to_names[204], ["SAVEPER"])
         self.assertEqual(slot_to_names[220], ["sub1"])
 
-    def test_run2_name_mapping_treats_visible_const_block_as_system_only(self) -> None:
+    def test_run2_name_mapping_emits_empty_mapping_when_no_model_records(self) -> None:
         run2 = parse_fixture("test/bobby/vdf/model_editing/run_2.vdf")
 
         mapping = vdf_xray.map_names_to_owner_blocks(run2)
 
+        # run_2 has only system and padding records; after the record-region
+        # fix the two sentinel system records (INITIAL TIME, FINAL TIME) are
+        # filtered out of `sentinel_model_record_indices` by canonical f[2]
+        # value, and the remaining records all have f[6]=0 (padding) so no
+        # model-variable owner blocks survive.
         self.assertIsNotNone(mapping)
         assert mapping is not None
         self.assertEqual(mapping.variable_names, [])
-        self.assertEqual(mapping.system_ot_indices, {1})
-        self.assertEqual(
-            [(block.start, block.end) for block in mapping.unmapped_blocks],
-            [(1, 2)],
-        )
+        self.assertEqual(mapping.system_ot_indices, set())
+        self.assertEqual(mapping.unmapped_blocks, [])
 
     def test_run3_name_mapping_prefers_nominal_offset_and_recovers_v(self) -> None:
         run3 = parse_fixture("test/bobby/vdf/model_editing/run_3.vdf")
 
         mapping = vdf_xray.map_names_to_owner_blocks(run3)
 
+        # `v` still maps to OT[5..6). The previous expectation
+        # `system_ot_indices == {1}` came from a visible FINAL TIME block
+        # at OT[1..2) that is now filtered out of owner blocks at source
+        # (canonical f[2]=13 system records never become model-variable
+        # owners after the record-region fix).
         self.assertIsNotNone(mapping)
         assert mapping is not None
         self.assertEqual(mapping.variable_names, ["v"])
         self.assertEqual(mapping.name_to_block["v"].start, 5)
-        self.assertEqual(mapping.system_ot_indices, {1})
+        self.assertEqual(mapping.system_ot_indices, set())
 
     def test_mark2_name_mapping_uses_nominal_offset_and_leaves_inner_lookup_wiring_unresolved(self) -> None:
         # After tightening `_try_f2_offset_mapping` to the nominal offset

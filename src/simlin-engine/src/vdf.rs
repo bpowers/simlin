@@ -353,6 +353,16 @@ pub const RECORD_SIZE: usize = 64;
 /// Size of the VDF file header in bytes.
 pub const FILE_HEADER_SIZE: usize = 0x80;
 
+/// Offset of the first 64-byte variable metadata record within section 1's
+/// data (or section 0's data for dataset VDFs).
+///
+/// Sections store a 12-byte preamble followed by three 64-byte "header"
+/// blocks (a string-pool pointer array and misc runtime state) before the
+/// real record array begins. The rule "blocks 0..2 are header, blocks 3..
+/// are records" is validated across every observed simulation and dataset
+/// VDF fixture. Expressed explicitly as `12 + 3 * 64 = 204`.
+pub const RECORD_REGION_START_OFFSET: usize = 12 + 3 * RECORD_SIZE;
+
 /// Vensim system variable names that appear in every VDF name table.
 pub const SYSTEM_NAMES: [&str; 5] = ["Time", "INITIAL TIME", "FINAL TIME", "TIME STEP", "SAVEPER"];
 
@@ -813,21 +823,10 @@ impl VdfDatasetFile {
         let (slot_table_offset, slot_table) =
             find_slot_table(&data, &sections[1], names.len(), section0_data_size);
 
-        let search_start = if !slot_table.is_empty() {
-            let sec0_data_start = sections[0].data_offset();
-            let mut sorted_slots = slot_table.clone();
-            sorted_slots.sort_unstable();
-            let max_offset = *sorted_slots.last().unwrap() as usize;
-            let last_stride = if sorted_slots.len() >= 2 {
-                let n = sorted_slots.len();
-                (sorted_slots[n - 1] - sorted_slots[n - 2]) as usize
-            } else {
-                max_offset
-            };
-            sec0_data_start + max_offset + last_stride
-        } else {
-            sections[0].data_offset()
-        };
+        // Dataset VDFs share the "12-byte preamble + three header blocks,
+        // then records" layout with simulation VDFs. The only difference is
+        // that the record region sits in section 0 instead of section 1.
+        let search_start = sections[0].data_offset() + RECORD_REGION_START_OFFSET;
         let records_end = if slot_table_offset > 0 && slot_table_offset < sections[0].region_end {
             slot_table_offset
         } else {
@@ -995,31 +994,19 @@ impl VdfFile {
             })
             .unwrap_or((0, Vec::new()));
 
-        // Find records between the slot data end and the slot/name table
-        // boundary within section 1's region.  The slot table entries are
-        // byte offsets into section 1's data area; the maximum sorted
-        // entry plus one stride marks where records begin.
-        let search_start = if !slot_table.is_empty() {
-            let sec1_data_start = sections
-                .get(1)
-                .map(|s| s.data_offset())
-                .unwrap_or(FILE_HEADER_SIZE);
-            let mut sorted_slots: Vec<u32> = slot_table.clone();
-            sorted_slots.sort();
-            let max_offset = *sorted_slots.last().unwrap() as usize;
-            let last_stride = if sorted_slots.len() >= 2 {
-                let n = sorted_slots.len();
-                (sorted_slots[n - 1] - sorted_slots[n - 2]) as usize
-            } else {
-                max_offset
-            };
-            sec1_data_start + max_offset + last_stride
-        } else {
-            sections
-                .get(1)
-                .map(|s| s.data_offset())
-                .unwrap_or(FILE_HEADER_SIZE)
-        };
+        // Find records. The record region lives at a fixed offset within
+        // section 1's data: `RECORD_REGION_START_OFFSET` bytes past
+        // `data_offset()` (12-byte preamble + three 64-byte header blocks).
+        // Real 64-byte variable metadata records extend from there to the
+        // slot table. The slot table does not fence the record region on the
+        // low side (that job belongs to the header blocks), so deriving the
+        // search start from slot offsets would skip over records in medium+
+        // fixtures; use the fixed offset instead.
+        let sec1_data_start = sections
+            .get(1)
+            .map(|s| s.data_offset())
+            .unwrap_or(FILE_HEADER_SIZE);
+        let search_start = sec1_data_start + RECORD_REGION_START_OFFSET;
         let search_bound = sections.get(1).map(|s| s.region_end).unwrap_or(data.len());
         let records_end = if slot_table_offset > 0 && slot_table_offset < search_bound {
             slot_table_offset
@@ -2407,14 +2394,24 @@ impl VdfFile {
     pub fn to_results_via_records(&self) -> StdResult<Results, Box<dyn Error>> {
         let n_recs = self.records.len();
         let n_slots = self.slot_table.len();
-        if n_recs == 0 || n_slots == 0 || n_recs > n_slots {
+        if n_recs == 0 || n_slots == 0 {
             return Err(format!(
-                "record-based mapping requires records <= slots: records={n_recs}, slots={n_slots}"
+                "record-based mapping requires non-empty records and slots: records={n_recs}, slots={n_slots}"
             )
             .into());
         }
 
-        let nominal_offset = n_slots - n_recs;
+        // When records <= slots (small/medium fixtures) the nominal offset
+        // `n_slots - n_recs` is the deterministic delta for records[k]
+        // pairing with names[k + offset]. Large fixtures where Vensim
+        // emits records in compilation order can have n_recs > n_slots
+        // (e.g., WRLD3 SCEN01 has 419 records vs 404 slots after the
+        // record-region fix). In that case we saturate the offset to zero
+        // so records still pair with some name-table entries. The result
+        // has known quality issues on compilation-order files -- see
+        // follow-up task #9 for the proper fix -- but saturating keeps
+        // whatever partial coverage the callers relied on before.
+        let nominal_offset = n_slots.saturating_sub(n_recs);
         let vdf_data = self.extract_data()?;
 
         // Sort record indices by field[2] ascending.
@@ -2732,20 +2729,32 @@ pub fn find_slot_table(
     (0, Vec::new())
 }
 
-/// Find 64-byte variable records in the gap between section data and the
-/// slot/name table region.
+/// Find 64-byte variable records between `search_start` (inclusive) and
+/// `search_end` (exclusive).
 ///
-/// Records are identified by first finding a sentinel pair (two consecutive
-/// 0xf6800000 values at byte offsets +32 and +36) to establish alignment,
-/// then parsing ALL 64-byte blocks at that alignment. Some records lack
-/// sentinels (e.g., lookup table entries or subscript elements) but are
-/// still valid 64-byte records at the same stride.
+/// Callers pass `search_start = sec_data_offset + RECORD_REGION_START_OFFSET`;
+/// the layout guarantees that every 64-byte block at that stride is part of
+/// the record array. Some records carry the sentinel pair (two consecutive
+/// `0xf6800000` values at field offsets 8 and 9), while others (padding
+/// records, lookup table metadata, subscript elements) do not. All of them
+/// are valid records at the same stride, so this function simply walks the
+/// region in 64-byte steps and returns every block.
+///
+/// As a defensive cross-check, the function still anchors its forward walk
+/// to the first sentinel pair it finds, then scans backward through blocks
+/// that look recordish (`f[0] <= 64` or either sentinel half set) up to --
+/// but never past -- `search_start`. With a correct `search_start` this
+/// backward scan is a no-op on well-formed files; on malformed inputs it
+/// prevents emitting garbage aligned against random section prefix bytes.
 pub fn find_records(data: &[u8], search_start: usize, search_end: usize) -> Vec<VdfRecord> {
     if search_start >= search_end {
         return Vec::new();
     }
 
-    // Find first sentinel pair to establish alignment
+    // Find first sentinel pair to anchor the forward walk. If the region
+    // contains no sentinels at all (e.g., a corrupt or truncated file), we
+    // have no trusted alignment and return no records rather than emitting
+    // random 64-byte slices.
     let mut first_record_start = None;
     let mut pos = search_start;
     while pos + 40 <= search_end {
@@ -2762,8 +2771,10 @@ pub fn find_records(data: &[u8], search_start: usize, search_end: usize) -> Vec<
         return Vec::new();
     };
 
-    // Scan backwards to find records before the first sentinel we found,
-    // but never before search_start (which marks the end of sec[1] data).
+    // Scan backwards through blocks that look recordish, but never past
+    // `search_start`. With the fixed record-region offset this normally
+    // drops us straight back to `search_start`; on malformed files it stops
+    // before the header blocks.
     let mut actual_start = rec_start;
     while actual_start >= RECORD_SIZE {
         let candidate = actual_start - RECORD_SIZE;
@@ -4030,10 +4041,14 @@ mod tests {
         let econ = vdf_file("../../test/bobby/vdf/econ/base.vdf");
         let wrld3 = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
 
+        // After the record-region start was fixed to skip only the three
+        // header blocks (rather than being derived from slot-table offsets),
+        // records cover every non-Time OT slot in these fixtures, so the
+        // range count is exactly `ot_count - 1` for each.
         for (label, vdf, expected_ranges) in [
-            ("water", &water, 8usize),
-            ("econ", &econ, 61usize),
-            ("wrld3", &wrld3, 234usize),
+            ("water", &water, 9usize),
+            ("econ", &econ, 77usize),
+            ("wrld3", &wrld3, 296usize),
         ] {
             let ranges = vdf.record_ot_ranges();
             assert_eq!(
@@ -5566,6 +5581,97 @@ mod tests {
                 .offsets
                 .contains_key(&Ident::<Canonical>::new("time")),
             "Time must always be present"
+        );
+    }
+
+    #[test]
+    fn test_to_results_via_records_covers_all_non_time_ots_on_small_models() {
+        // With the fixed record-region start (`sec1.data_offset() + 204`),
+        // the record finder returns every metadata record -- including the
+        // header-like records that precede the first sentinel pair. For
+        // small, non-arrayed fixtures that gives one record per OT slot
+        // beyond Time, so the record-based mapping now resolves 100% of
+        // those OT slots.
+        //
+        // This locks in the coverage gain we now expect on well-shaped
+        // small models; regressions here would indicate either a
+        // search-start drift or a new filtering rule swallowing
+        // previously-valid records.
+        for (label, path) in [
+            ("water", "../../test/bobby/vdf/water/Current.vdf"),
+            ("pop", "../../test/bobby/vdf/pop/Current.vdf"),
+        ] {
+            let vdf = vdf_file(path);
+            let results = vdf
+                .to_results_via_records()
+                .unwrap_or_else(|e| panic!("{label}: record-based mapping should succeed: {e}"));
+            let non_time_named = results.offsets.len().saturating_sub(1);
+            let non_time_ots = vdf.offset_table_count.saturating_sub(1);
+            assert_eq!(
+                non_time_named, non_time_ots,
+                "{label}: expected record-based coverage to hit every non-Time OT \
+                 ({non_time_named}/{non_time_ots} named)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_to_results_via_records_handles_records_exceeding_slots() {
+        // WRLD3-03/SCEN01.VDF emits records in Vensim's internal
+        // compilation order, and after the record-region fix the record
+        // count (419) exceeds the slot count (404). The earlier guard
+        // `n_recs > n_slots -> error` would have produced zero coverage
+        // for this fixture, a regression from the 202-of-297 OTs it
+        // resolved before the fix. The current code saturates the nominal
+        // offset to zero so records still pair with name-table entries,
+        // keeping partial coverage alive. Follow-up task #9 will replace
+        // the offset with a slot-ref-based link so the pairings are
+        // actually correct on compilation-order files.
+        let vdf = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+        assert!(
+            vdf.records.len() > vdf.slot_table.len(),
+            "test assumes records > slots for WRLD3 SCEN01",
+        );
+        let results = vdf
+            .to_results_via_records()
+            .expect("WRLD3 SCEN01: record-based mapping should not error when records > slots");
+        let non_time_named = results.offsets.len().saturating_sub(1);
+        assert!(
+            non_time_named >= 150,
+            "WRLD3 SCEN01: expected >=150 non-Time OT mappings to avoid regressing \
+             below the pre-fix baseline (~202), got {non_time_named}"
+        );
+    }
+
+    #[test]
+    fn test_to_results_via_records_covers_econ_base() {
+        // econ/base.vdf is the smallest fixture where the old record
+        // finder started its scan past the record region, so it
+        // drastically under-counted records. After the fix, record
+        // coverage rises from ~61% to the low-80s of non-Time OT slots.
+        //
+        // We do NOT hit 100% because the record sort (by f[2]) pairs
+        // some records with name-table entries that look like stdlib
+        // helpers (DEL, LV1, ...), hash-prefixed signatures, or Vensim
+        // builtins. Those get filtered out by `to_results_via_records`
+        // and leave their OT slots unclaimed. Realigning records to
+        // names via the slot-ref inversion is tracked as follow-up
+        // task #9.
+        //
+        // This test pins the coverage floor so a regression in the
+        // record finder (or an over-aggressive filter) would trip the
+        // bound.
+        let vdf = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("econ/base: record-based mapping should succeed");
+        let non_time_named = results.offsets.len().saturating_sub(1);
+        let non_time_ots = vdf.offset_table_count.saturating_sub(1);
+        assert_eq!(non_time_ots, 77);
+        assert!(
+            non_time_named >= 60,
+            "econ/base: expected >=60 non-Time OT mappings after record-region fix, \
+             got {non_time_named}/{non_time_ots}"
         );
     }
 }

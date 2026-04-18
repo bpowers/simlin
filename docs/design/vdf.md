@@ -240,12 +240,34 @@ see structural signal #10 and the `to_results_via_records` path.
 
 ### Variable metadata records
 
-Each record is 64 bytes (16 x u32 fields). Records are located within
-section 1's region and found by scanning for sentinel pairs: two consecutive
-`0xf6800000` values at field offsets 8 and 9. Records are then extended at
-64-byte alignment from that anchor point.
+Each record is 64 bytes (16 x u32 fields). The record array lives at a
+fixed offset within section 1's data region:
 
-Records are sparse -- most names do NOT have a corresponding record.
+```
+record[k].file_offset = sec1.data_offset() + 12 + k * 64, for k >= 3
+```
+
+The 12-byte preamble and the first three 64-byte blocks are reserved as
+a **header region**. Block 0 contains runtime pointer state, block 1
+holds a small counter word plus a constant `0x64`, and block 2 carries a
+float-1.0 marker and other metadata. They never represent variable
+records and carry no sentinel pair. Blocks 3 and later are the real
+records. This layout is validated across every observed simulation and
+dataset VDF fixture (small models, edited models, WRLD3, C-LEARN).
+
+The sentinel pair (two consecutive `0xf6800000` values at field offsets
+8 and 9) is still useful for distinguishing a "real" model record from a
+padding record (the latter carry `f[6] = 0` and zeroed-out sentinel
+fields). The parser's search **start** is no longer derived from the
+slot-table offsets: it is the fixed `sec1.data_offset() + 12 + 3*64`
+offset, so every record past the header region is returned. The
+previous slot-offset-derived search start skipped large portions of the
+record array in medium and large models.
+
+Records are sparse in the sense that not every name has a corresponding
+record (stdlib helpers and internal `#`-prefixed signature names often
+do not), but the record array itself is dense and contiguous within the
+declared region.
 
 #### Record fields
 
