@@ -129,9 +129,13 @@ section-4 block list.
   0x60    4     u32 offset_table_offset: absolute file offset to the
                 section-7 offset table
   0x64    4     u32 offset_table_offset (duplicate, always same as 0x60)
-  0x68    4     Zero in most files; meaning unknown
-  0x6C    4     Nonzero in some files; meaning unknown
-  0x70    4     Varies; possibly lookup-related count
+  0x68    4     Always zero (128/128 files observed); meaning unknown
+  0x6C    4     Save/version marker: nonzero only in re-saved *Current.vdf
+                files; zero for fresh simulation output
+  0x70    4     Lookup-table definition count. Zero when the model has no
+                lookup tables; correlates with section-7 lookup-data size
+                (observed data points: 0 -> 12 bytes, 5 -> 52, 8 -> 76,
+                228 -> 3796)
   0x74    4     Zero
   0x78    4     u32 time_point_count
   0x7C    4     u32 time_point_count (duplicate, always same value)
@@ -209,12 +213,30 @@ A small section (~39-40 bytes) containing the simulation command string
 Section 1's region contains three distinct sub-structures packed together:
 string table entries, variable metadata records, and the slot table.
 
-### String table entries
+### String table entries (runtime descriptor dump)
 
-One 16-byte entry (4 x u32 values) per name in the name table. The entries'
-per-field purpose is not fully decoded, though they serve as a cross-reference
-key between names and variable metadata records via the record's `slot_ref`
-field (see below).
+One 16-byte entry (4 x u32 values) per name in the name table. The entries
+are a **direct dump of a Vensim C runtime struct**, not stable persistent
+data: observed u32 values contain absolute 32-bit RAM addresses in the
+`0x0b3xxxxx` range and change across reruns of the same model. They are
+NOT a stable "has OT entry" flag, OT index, or record back-pointer, and
+they cannot be used as durable keys for name-to-record linking.
+
+Two side observations from this region ARE stable across all 37 observed
+non-dataset fixtures, and are useful as cross-checks during parsing:
+
+- `section[1].data[0..4] == 124` -- a canonical base-slot offset constant.
+- `section[1].data[4..8] == offset_table_count - 1 - stock_count` -- a
+  compact cardinality check against the section-6 class codes.
+
+Additionally, `#`-prefixed internal signature names (for example
+`#SMOOTH(x, 3)#` or `#LV1<SMOOTH3...>#`) participate in OT entries but do
+NOT have slot-table entries (validated on `econ/base.vdf`). The hash-
+prefixed region sits past the slotted prefix in the name table.
+
+Records and the name table are bound together structurally through
+`name_key` (record field[2]) rather than through these 16-byte blobs;
+see structural signal #10 and the `to_results_via_records` path.
 
 ### Variable metadata records
 
@@ -231,7 +253,7 @@ Records are sparse -- most names do NOT have a corresponding record.
 |-----------------|-------|---------|
 | type_flags      | 0     | Variable type/flags; 0 = padding record |
 | classification  | 1     | 23 = system variable; 15 = initial-time constant; see below |
-| name_key        | 2     | **Name-table position key.** Records sorted by f[2] correspond to name-table entries at position `rank + offset`, where offset is nominally `slot_count - record_count`. Stable across simulation reruns of the same model; encodes name-table position, not variable structure. See structural signal #10. |
+| name_key        | 2     | **Name-table position key.** Records sorted by f[2] correspond to name-table entries at position `rank + (slot_count - record_count)`. The offset is deterministic; there is no drift across re-saved, edited, or stdlib-expanded fixtures. System records have canonical f[2] values (INITIAL TIME=9, FINAL TIME=13, TIME STEP=17, SAVEPER=21), matching the pattern `4*rank + 5` for the first four variables. Stable across simulation reruns of the same model; encodes name-table position, not variable structure. See structural signal #10. |
 | (unknown)       | 3     | Varies per variable; meaning unknown |
 | (unknown)       | 4-5   | Usually zero |
 | arrayed_flag    | 6     | Shape binding. `5` = scalar variable. `32` = arrayed variable (unambiguous when only one sec3 entry exists; in multi-shape files, 32 is a generic "arrayed" marker whose shape must be resolved elsewhere). Other values = section-3 directory `index_word`, directly binding the record to a specific shape template. Confirmed in `Ref.vdf` where field[6] takes values matching sec3 index_words: 59, 86, 113, 140, 167, 194, 221, 275, 302, plus 0 for the last entry with index_word=0. |
@@ -353,7 +375,7 @@ In `Ref.vdf`, the first few records begin:
 
 | Word(s) | Observed meaning |
 |---------|------------------|
-| 0       | `index_word`: encodes the word offset of the entry within the directory. In `Ref.vdf`, the first ten records form the arithmetic progression `59, 86, 113, ... , 302` with step = 27 (the entry width in words), providing a structural checksum. The last entry has `index_word=0`. Some of those values also reappear in section 4, but not consistently enough yet to treat the bridge as decoded. Record field[6] references these `index_word` values to bind records to specific shape templates. |
+| 0       | `index_word`: **self-positional**, equals `(entry_file_offset - sec3_file_offset) / 4` (word offset of this entry within section 3). In `Ref.vdf`, the first ten records form the arithmetic progression `59, 86, 113, ... , 302` with step = 27 (the entry width in words), providing a structural checksum. The last entry has `index_word=0`. Record field[6] references these `index_word` values to bind records to specific shape templates. Any numeric overlap with section-4 `index_word` values is an arithmetic coincidence (section 4 uses the same self-positional convention, see below), not a cross-section binding. |
 | 1..3    | Packed shape words. One-dimensional entries duplicate the flattened size (`3, 3` -> one axis of size 3). Composite entries use `flattened_size + axis factors` (`21, 7, 3` -> two axes of sizes 7 and 3). In validated fixtures, `flattened_size = product(axis_sizes)`. |
 | 10      | Packing hint. It is `1` for one-dimensional entries; for composite entries it equals the trailing axis size (`3` in `[21, 7, 3]`, `4` in `[12, 3, 4]`). |
 | 11      | Small axis counter word. `0` on one-dimensional entries, `1` on the validated two-axis entries. |
@@ -386,12 +408,18 @@ multiple OT blocks can share the same flat size, and repeated sizes like 3 and
 21 remain ambiguous without another signal (likely section 1, 4, or 6).
 
 
-## Section 4: view/group membership
+## Section 4: view/sketch metadata (not a shape-owner directory)
 
 Variable-length structured entries that reference section-1 slot table
-values, encoding view/group membership. Section 4 grows proportionally
+values and encode view/sketch information. Section 4 grows proportionally
 with model complexity (20 bytes in water, 88 bytes in econ, 600 bytes
 in WRLD3, 1540 bytes in `Ref.vdf`).
+
+**Section 4 is empty or terminator-only in every small and single-shape
+fixture we have parsed**, so it cannot be the directory that binds
+base variables to shape templates. The large models that do populate it
+(WRLD3, `Ref.vdf`) emit view/sketch connector metadata here, not
+variable-owner records.
 
 ### Structure
 
@@ -400,9 +428,11 @@ Each entry contains:
 
 1. A packed word `p`
 2. `refs[p_hi + p_lo]`, where `p_hi = p >> 16` and `p_lo = p & 0xffff`
-3. A trailing `index_word`
+3. A trailing `index_word`, **self-positional** and equal to
+   `(entry_file_offset - sec4_file_offset) / 4`. The last entry in every
+   observed file has `index_word = 0`, acting as a terminator.
 
-This framing now parses the validated corpus end-to-end:
+This framing parses the validated corpus end-to-end:
 
 | File | Entries | Distinct `p_lo` values | Distinct `p_hi` values |
 |------|---------|-------------------------|------------------------|
@@ -413,25 +443,22 @@ This framing now parses the validated corpus end-to-end:
 | `Ref.vdf` | 94 | `{0,1,2,3}` | `{0,1,2,3,4}` |
 
 The exact semantics of `p_lo`/`p_hi` are still unknown, but their **sum**
-is now validated as the ref count in all of those fixtures. All parsed refs
-resolve to in-range section-1 offsets, and in the validated fixtures every
-ref is also present in the slot table.
+is validated as the ref count in all of those fixtures. All parsed refs
+resolve to in-range section-1 offsets, and every ref is also present in
+the slot table.
 
-The `index_word` rises through most of the stream and ends with a final
-`0` entry in all observed fixtures. In `Ref.vdf`, a subset of section-3
-directory indices (`59, 194, 248, 275, 302, 0`) reappear here, which makes
-section 4 the strongest decoded bridge so far from section-3 shape indices
-toward view/slot clusters.
+Apparent numeric overlap between section-4 `index_word` values and
+section-3 directory indices (for example `59, 194, 248, 275, 302, 0` in
+`Ref.vdf`) is an **arithmetic coincidence**: both sections encode
+`index_word` as self-positional (`(entry_file_offset - section_base) / 4`).
+The match does not represent a cross-section binding from sec3 shape
+templates to sec4 entries.
 
-The slot refs in section 4 consistently resolve to names in the slot table
-(view markers like `.Control`, `.mark2`, unit annotations like `-Month`,
-and model variable names). The structure encodes which variables belong
-to which views/groups in the model.
-
-What remains open is the **meaning** of the packed halves and the precise
-semantics of `index_word`. We can parse the entry stream structurally now,
-but do not yet know which entry type binds a section-3 shape to a specific
-base variable / OT block.
+The slot refs in section 4 consistently resolve to names in the slot
+table (view markers like `.Control`, `.mark2`, unit annotations like
+`-Month`, and model variable names). The structure therefore encodes
+view/sketch groupings; it is NOT the shape-owner directory we were
+previously hoping for.
 
 
 ## Section 5: dimension sets
@@ -670,16 +697,24 @@ small/medium test fixtures; what we need is the actual formula.
    hidden SMOOTH helper).
 
 10. **Record field[2] as deterministic record-to-name link**. Records sorted
-    by f[2] correspond to names at position `rank + offset` in the name
-    table. The nominal offset is `slot_count - record_count`, though
-    incrementally edited models may shift it by +/-1-2. Trying a small
-    range of offsets and validating via OT positions deterministically
-    resolves the mapping in O(offset_range * records) time. Validated
-    across the full test corpus including all `model_editing/` runs,
-    `water`, `pop`, `consts`, `subscripts`, `lookups`, and `bact`.
+    by f[2] correspond to names at position `rank + (slot_count - record_count)`
+    in the name table. The offset is **exact** -- there is no drift.
+    Validated across the full test corpus including all `model_editing/`
+    runs, `water`, `pop`, `consts`, `subscripts`, `lookups`, and `bact`.
+    Apparent "drift" observed previously on `model_editing/run_*.vdf`
+    was a downstream validator bug in Python `_validate_name_block_assignment`
+    (it applied stocks-first-alphabetical ordering during offset selection),
+    not a real offset shift.
+
+    System-variable records have canonical f[2] values: `INITIAL TIME=9`,
+    `FINAL TIME=13`, `TIME STEP=17`, `SAVEPER=21`. These match the pattern
+    `4*rank + 5` for the first four standard variables.
+
     The f[2] value is stable across simulation runs of the same model
-    (verified with `water/*.vdf` variants) and encodes name-table
-    position, not variable structure.
+    (verified with `water/*.vdf` variants) and encodes name-table position,
+    not variable structure. The Rust `to_results_via_records()` method
+    relies on this directly; the Python `_try_f2_offset_mapping` uses the
+    same nominal formula.
 
 ### VDF-structural path (stock classifier required)
 
@@ -746,13 +781,15 @@ true format mechanism is simpler and direct; these approaches approximate it.
 
 1. **f[2]-offset record-to-name mapping.** Record field[2] (the `name_key`)
    encodes name-table position. Records sorted by f[2] correspond to
-   name-table entries at position `rank + offset`, where the nominal offset is
-   `slot_count - record_count`. This works on all small/medium test fixtures,
-   but incrementally edited models shift the offset by +/-1-2, requiring a
-   scan of nearby offsets validated by OT-position checking. The scan is a
-   workaround: a C programmer would have had one formula, not a range search.
-   The true offset derivation likely involves a field or header value we have
-   not decoded yet.
+   name-table entries at position `rank + (slot_count - record_count)`.
+   The offset is deterministic -- no scan needed -- and the path is exposed
+   as `VdfFile::to_results_via_records()` in Rust and `_try_f2_offset_mapping`
+   in `tools/vdf_xray.py`. The remaining limitation is **coverage, not
+   correctness**: records are sparse in large models (only 23 of 296 OTs
+   in WRLD3 have records), so the record-based path resolves a subset of
+   OT entries rather than the full catalog. Fixtures without records for a
+   given variable must still fall back to model-guided mapping or to the
+   stocks-first-alphabetical path in `to_results_with_stock_classifier`.
 
 2. **OT-position validation for stock classification.** Given a proposed
    name-to-block assignment, the stocks-first-alphabetical ordering produces
@@ -770,38 +807,46 @@ true format mechanism is simpler and direct; these approaches approximate it.
 
 ### The core unsolved problem
 
-We have not found a general, deterministic method to extract named results
-from arbitrary VDF files. The partial approaches above work on test fixtures
-but involve heuristic steps (offset scanning, candidate scoring, name-table
-filtering) that a C program would not have used. The actual format almost
-certainly contains a direct index path from records to names -- we have strong
-evidence that field[2] is part of it, but we do not have the complete formula.
+We still do not have a general, deterministic method to extract named
+results from arbitrary large VDF files. The record-based path
+(`to_results_via_records`) is deterministic and correct for every OT
+entry that is backed by a metadata record, but records are **sparse**
+in large models, so the path covers only a subset of variables. Closing
+the gap requires a separate mechanism for OT entries that are owned by
+names which have no variable metadata record.
 
 Specific manifestations of this gap:
 
-1. **The f[2] offset formula is not fully decoded.** The nominal offset
-   `slot_count - record_count` works for fresh models but drifts on
-   incrementally edited ones. Rather than scanning a range, there is likely a
-   header or section field that gives the exact offset (or f[2] directly
-   encodes an absolute name-table index and we have the wrong interpretation).
+1. **Sparse-record coverage for large models.** For WRLD3, the name
+   table has ~340 candidates for 296 OT slots, but only 23 of those 296
+   OT entries have backing records. The record-based path resolves the
+   23, and the other 273 need another structural signal. A C program
+   would not filter by name heuristics -- it would use an index or flag
+   to identify which names are OT participants. We have confirmed that
+   the section-1 16-byte per-name entries are a direct dump of a C
+   runtime struct (RAM pointers and sequence numbers), NOT a durable
+   participation flag, so that candidate is ruled out. The flag may
+   still live elsewhere (section 4 view metadata, or an unparsed
+   subregion of section 6).
 
-2. **Participant filtering for large models.** For WRLD3, the name table has
-   ~340 candidates for 296 OT slots. The excess includes unsaved variables.
-   Records are sparse (23 of 296 OTs in WRLD3). A C program would not filter
-   by name heuristics -- it would use an index or flag to identify which names
-   are OT participants. That flag or index is likely already in the file
-   (perhaps in the section-1 string table entries, which have 16 bytes of
-   undecoded per-name data).
+2. **Multi-dimension array composition.** The structural path from
+   records through section-3 shapes to section-5 dimension sets is
+   confirmed, but assigning named elements to each axis of a
+   multi-dimensional variable is not wired up.
 
-3. **Multi-dimension array composition.** The structural path from records
-   through section-3 shapes to section-5 dimension sets is confirmed, but
-   assigning named elements to each axis of a multi-dimensional variable is
-   not wired up.
+3. **Lookup-record payload structure.** Section-6 lookup records
+   identify lookup definitions and their OT indices, but the internal
+   payload is not fully decoded. On small fixtures, parsed lookup-record
+   OT indices overlap already-owned variable slots, so extraction is
+   kept conservative.
 
-4. **Lookup-record payload structure.** Section-6 lookup records identify
-   lookup definitions and their OT indices, but the internal payload is not
-   fully decoded. On small fixtures, parsed lookup-record OT indices overlap
-   already-owned variable slots, so extraction is kept conservative.
+4. **Large-model visible-variable ordering.** Even when records resolve
+   a block of variables, we rely on stocks-first-alphabetical to place
+   the **remaining** names (those without records) into the remaining
+   OT slots. That property is validated on 7 of 8 test files but breaks
+   on `Ref.vdf` (C-LEARN), where 209 stock entries split across 8
+   non-contiguous ranges. A per-name participation signal would
+   decouple this step from alphabetical fitting.
 
 
 ## Appendix: reverse-engineering notes
@@ -821,8 +866,21 @@ mapping problem:
 - **Record slot_ref (field 12) groups as name anchors**: records are sparse
   (23 of 296 OTs have records in WRLD3). Not enough coverage.
 
-- **String table 16-byte payloads as durable keys**: change across Vensim
-  versions/reruns. Not stable.
+- **Section-1 16-byte per-name entries as durable keys**: the entries are a
+  direct dump of a Vensim C runtime struct containing absolute 32-bit RAM
+  addresses (`0x0b3xxxxx`) and sequence numbers. The raw bytes change across
+  reruns of the same model, so they cannot serve as a stable "has OT entry"
+  flag, OT index, or record back-pointer. Two side observations from the
+  same region ARE stable (documented under "Section 1 string table entries"):
+  `data[0..4] == 124` and `data[4..8] == OT_count - 1 - stock_count`.
+
+- **Section 4 as the shape-owner directory**: section 4 is empty or
+  terminator-only in every small and single-shape fixture, so it cannot be
+  the structure that binds base variables to section-3 shape templates.
+  Apparent numeric overlap between sec3 and sec4 `index_word` values is
+  an arithmetic coincidence: both encode `index_word` as self-positional
+  (`(entry_file_offset - section_base) / 4`). Section 4 carries
+  view/sketch connector metadata, not variable-owner records.
 
 - **Section-6 leading refs as a save list**: Resolved refs include model
   variables, unit annotations (e.g., `-Month`), view markers (`.Control`),
