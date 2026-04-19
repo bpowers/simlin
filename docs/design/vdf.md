@@ -884,17 +884,57 @@ Specific manifestations of this gap:
 ### Hypotheses tested and ruled out
 
 These approaches were investigated and found unreliable for the name-to-OT
-mapping problem:
+mapping problem. The list is organized by target region; within each region
+the most recent findings come first.
 
-- **Record sort_key (field 10) on raw records**: Kendall's tau = 0.46
-  against alphabetical order on WRLD3 when applied to raw records. However,
-  when applied to visible owner blocks (excluding system sentinels and hidden
-  helper records), sort keys DO reliably encode global alphabetical order.
-  See structural signal #8. The earlier failure was from comparing against
-  the wrong record population.
+#### Claims about records
 
-- **Record slot_ref (field 12) groups as name anchors**: records are sparse
-  (23 of 296 OTs have records in WRLD3). Not enough coverage.
+- **Record field[2] as a direct name-table byte offset or simple index
+  formula**: for the four system records (INITIAL TIME, FINAL TIME, TIME
+  STEP, SAVEPER) `f[2]` follows `4*rank + 5`. On all other records the
+  stride is irregular (2..19 on econ, 1..16 on wrld3_experiment) and `f[2]`
+  values reach 6716 on WRLD3 with 400 records. f[2] is byte-offset-sized
+  but does NOT equal the byte offset of a specific name in section 2
+  (hit rate 14-18% on large fixtures). f[2]-sort + `(slot_count -
+  record_count)` offset pairs records with names correctly on
+  name-ordered fixtures (water, pop, bact, etc.) but fails on
+  compilation-order fixtures.
+
+- **Record sort_key (field 10) as a GLOBAL alphabetical key**: sorting ALL
+  non-padding records by `f[10]` on compilation-order fixtures produces
+  names in multiple short alphabetical runs (~54 runs in WRLD3 SCEN01, each
+  8-36 members). f[10] is alphabetical WITHIN view blocks (signal #8) but
+  restarts at view boundaries; it is NOT a global key. The earlier
+  Kendall's-tau result (0.46) reflects the same view-local structure.
+
+- **Record slot_ref (field 12) as a per-name pointer**: previously
+  misdescribed as "sparse record coverage"; post record-finder fix every
+  slotted name has a record (see `to_results_via_records`). The actual
+  reason f[12] cannot drive name mapping is that it is a view/sector
+  anchor with 2-30 unique values per file (2 on water/pop, 30-31 on
+  WRLD3), and records with the same f[12] are NOT contiguous in file
+  order. Within a f[12]-anchored group, f[10] is not monotonic on large
+  fixtures (only 7 of 31 groups strictly increasing on wrld3_experiment).
+
+- **Record slot_ref (field 12) inverts to slot_table[rank]**: refuted.
+  Of WRLD3's 404 slot_table entries, 10 point to the pre-record header
+  region and 394 point INTO record memory at 16-byte-aligned offsets
+  {0, 16, 32, 48} within 64-byte records. Because all four positions
+  within a single record share one `f[11]`, at most 1 of the up-to-4
+  slot_table entries landing in one record could carry the correct OT
+  for that record's variable. Empirical hit rate 0-0.7% on
+  compilation-order fixtures. The slot_table entries are 16-byte runtime
+  string-descriptor cells whose POSITION happens to fall in record
+  memory when slot count exceeds the 12-entry pre-record pool, but the
+  landing position has no semantic meaning.
+
+- **Record undecoded fields (f[3], f[7], f[13..15]) as name-rank holders**:
+  f[13] and f[15] are 0 on >=99% of records; f[14] is usually the sentinel
+  `0xF6800000`. f[3] and f[7] vary but zero correlation with rank on
+  econ/WRLD3 (exhaustive per-field test across 2119 records on 9
+  fixtures yielded 2 coincidental matches).
+
+#### Claims about sections 1 / 2
 
 - **Section-1 16-byte per-name entries as durable keys**: the entries are a
   direct dump of a Vensim C runtime struct containing absolute 32-bit RAM
@@ -904,6 +944,23 @@ mapping problem:
   same region ARE stable (documented under "Section 1 string table entries"):
   `data[0..4] == 124` and `data[4..8] == OT_count - 1 - stock_count`.
 
+- **Section-1 bytes 8..44 (36-byte undecoded header slice) as a structural
+  counts/offsets table**: contains RAM pointer residue on fresh-simulation
+  files and tight-packed small ints on re-saved files (`econ/base.vdf`,
+  `WRLD3-03/SCEN01.VDF`). The small ints (e.g. `[77,78,79,38,39,40,41,42]`
+  on WRLD3 SCEN01) do not equal OT count, record count, section offsets,
+  or any permutation of OT indices; they are reallocated save-allocator
+  RAM descriptor indices, not file-structural metadata.
+
+- **Gap between the last record and `slot_table_offset` as a
+  compilation-order-to-name-order translation table**: on `WRLD3
+  experiment.vdf` the gap is zero bytes, so no such region exists there.
+  On `WRLD3 SCEN01.VDF` the 60-byte gap decodes to 15 u32s of
+  section-1-internal byte offsets that do not correspond to slot_table
+  entries, f[12] anchors, or record file offsets.
+
+#### Claims about section 4
+
 - **Section 4 as the shape-owner directory**: section 4 is empty or
   terminator-only in every small and single-shape fixture, so it cannot be
   the structure that binds base variables to section-3 shape templates.
@@ -912,6 +969,8 @@ mapping problem:
   (`(entry_file_offset - section_base) / 4`). Section 4 carries
   view/sketch connector metadata, not variable-owner records.
 
+#### Claims about section 6
+
 - **Section-6 leading refs as a save list**: Resolved refs include model
   variables, unit annotations (e.g., `-Month`), view markers (`.Control`),
   builtin function names (`SMOOTH`, `DELAY1`, `if then else`), system
@@ -919,6 +978,31 @@ mapping problem:
   clean variable save list. WRLD3's 342 entries correlate with the
   candidate population but cannot be used directly for participant
   filtering without further classification of entry types.
+
+- **Section-6 bytes after the lookup-mapping terminator as a per-OT name
+  array**: measured remainder is zero bytes on every tested fixture. The
+  lookup_mapping terminator zero-word ends exactly at
+  `sec6.region_end`; there is no trailing data.
+
+#### Claims about view-block structure
+
+- **Hypothesis F: f[12] as view anchor + alphabetical within group**:
+  refuted. The algorithm (group records by f[12], sort each group by
+  f[10], pair with names[anchor_rank+1 .. next_anchor_rank)) reaches
+  0.7-4.8% agreement on compilation-order fixtures -- strictly worse
+  than `to_results_via_records`. The structural premises (records with
+  same f[12] are contiguous; all f[12] values are valid slot_table
+  offsets; f[10] monotonic within a group) all fail on large files.
+
+- **Hypothesis G: f[10]-sorted records pair 1:1 with
+  alphabetically-sorted visible names**: refuted at global scope. f[10]
+  IS alphabetical within view blocks but restarts at view boundaries:
+  WRLD3 SCEN01 exhibits 54 alphabetical runs (sizes 8..36) after
+  f[10]-sort, consistent with one run per sketch view. Global
+  alphabetical sort is not the right shape for the mapping on
+  compilation-order fixtures.
+
+#### Name-based claims
 
 - **Name-based lookup heuristics**: names containing " table" were initially
   assumed to lack OT entries, but section-6 lookup mapping records proved all
