@@ -3883,14 +3883,24 @@ fn try_detect_ltm_loops_incremental(
     let vm = vm_result?;
     let results = vm.into_results();
 
-    // `rel_loop_score` is no longer a VM variable; derive it post-sim from
-    // the `loop_score` series the VM does emit, using the partition mapping
-    // cached on `model_ltm_variables`.  See
+    // `rel_loop_score` is no longer a VM variable; derive it post-sim
+    // from the `loop_score` series the VM does emit, using the
+    // partition mapping cached on `model_ltm_variables`.  See
     // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
-    let rel_scores = crate::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
-
-    // Phase 3: Build feedback loop structs from VM results.
+    //
+    // Stream per-partition: iterate detected loops, cache each
+    // partition's denominator series the first time a loop in that
+    // partition is seen, and compute only the requested loop's
+    // rel_loop_score series per iteration.  The full-pass
+    // `compute_rel_loop_scores` would build the entire `loop_count *
+    // step_count` matrix plus a `HashMap` allocation per loop, then
+    // require a `cloned()` into each `FeedbackLoop` -- near 10k-loop
+    // exhaustive models that is hundreds of MB of transient state.
+    // This path holds at most `num_partitions * step_count + 1 *
+    // step_count` at any moment and hands the per-loop `Vec<f64>`
+    // directly into `FeedbackLoop` without cloning.
     let mut feedback_loops = Vec::new();
+    let mut partition_denominators: HashMap<Option<usize>, Vec<f64>> = HashMap::new();
     for dl in &detected.loops {
         let polarity = match dl.polarity {
             crate::db::DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
@@ -3906,13 +3916,27 @@ fn try_detect_ltm_loops_incremental(
             vars
         };
 
-        let importance_series: Vec<f64> = rel_scores
-            .get(&dl.id)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|v| if v.is_finite() { v } else { 0.0 })
-            .collect();
+        let partition_key = loop_partitions.get(&dl.id).copied().flatten();
+        let denom = partition_denominators
+            .entry(partition_key)
+            .or_insert_with(|| {
+                crate::ltm_post::compute_partition_denominator(
+                    &results,
+                    &loop_partitions,
+                    partition_key,
+                )
+            });
+        let mut importance_series =
+            crate::ltm_post::compute_rel_loop_score_for_id(&results, &dl.id, denom)
+                .unwrap_or_default();
+        // Replace any non-finite entries with 0 so consumers that
+        // average the series (e.g. `FeedbackLoop::average_importance`)
+        // do not observe NaN / Inf from upstream VM divide-by-zero.
+        for v in &mut importance_series {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
 
         feedback_loops.push(metadata::FeedbackLoop {
             name: dl.id.clone(),

@@ -616,40 +616,83 @@ mod tests {
     }
 
     #[test]
-    fn per_id_rel_loop_score_bit_parity_with_mixed_magnitudes() {
-        // Reviewer iter-18 P3: the streamed denominator must sum loops
-        // in the same deterministic order the full-pass helper does.
-        // `compute_rel_loop_scores` sorts loop IDs by name before
-        // summing; `compute_partition_denominator` must do the same.
-        // IEEE-754 non-associativity makes this visible as a bit-level
-        // drift when per-loop magnitudes span many orders of magnitude
-        // AND the natural `HashMap` iteration order differs from
-        // lex-sorted order.  Build the partition with loop IDs whose
-        // hash order is typically NOT lex order on the stable-hasher
-        // used by `HashMap<String, ...>`, and include
-        // cancellation-sensitive magnitudes.
-        let series_big = &[1e16, 1e16, 1e16][..];
-        let series_mid = &[-1e16, -1e16, -1e16][..];
-        let series_small = &[1.0, 2.0, 3.0][..];
-        // Names chosen to stress hash-order independence; the actual
-        // order the `HashMap` emits them in is not pinned.  What
-        // matters is the streamed path sorts them before summing.
-        let results = make_results_for_loops(&[
-            ("zzz_small", series_small),
-            ("aaa_big", series_big),
-            ("mmm_mid", series_mid),
-        ]);
-        let partitions = mapping(&[
-            ("zzz_small", Some(0)),
-            ("aaa_big", Some(0)),
-            ("mmm_mid", Some(0)),
-        ]);
+    fn per_id_rel_loop_score_denominator_is_order_independent() {
+        // Reviewer iter-18 P3 / iter-19 nit: the streamed denominator
+        // must sum loops in the same deterministic order the full-
+        // pass helper does.  `compute_rel_loop_scores` sorts loop IDs
+        // by name before summing; `compute_partition_denominator`
+        // must do the same.  IEEE-754 non-associativity lets
+        // `a + b + c` differ by a ULP from `c + a + b` when values
+        // are close in magnitude (`1e16 + 1e16 + 1.0` is *bit-
+        // identical* to `1.0 + 1e16 + 1e16` because `1.0` rounds
+        // away, so a widely-spaced test passes even without the
+        // sort).
+        //
+        // Use `[0.1, 0.2, ..., 0.7]` magnitudes on 7 partitioned
+        // loops.  Rust's `HashMap` iterates in hash-bucket order, so
+        // within a single process two `HashMap<String, ...>`
+        // instances with the *same* default `RandomState` seed
+        // iterate the same keys in the same order regardless of
+        // insertion sequence -- testing with reversed insertion
+        // orders alone does not reliably surface a missing sort.
+        // Construct 8 `HashMap`s with *freshly seeded*
+        // `RandomState`s instead, so their bucket layouts and
+        // therefore iteration orders differ.  If
+        // `compute_partition_denominator` sorts internally, every
+        // trial returns the bit-identical denominator.  If it does
+        // not, different hash seeds produce different sum orders
+        // and at least one pair diverges, failing the assert.
+        use std::collections::hash_map::RandomState;
+        let seven_series: [(&str, &[f64]); 7] = [
+            ("aaa_01", &[0.1_f64, 0.1][..]),
+            ("bbb_02", &[0.2_f64, 0.2][..]),
+            ("ccc_03", &[0.3_f64, 0.3][..]),
+            ("ddd_04", &[0.4_f64, 0.4][..]),
+            ("eee_05", &[0.5_f64, 0.5][..]),
+            ("fff_06", &[0.6_f64, 0.6][..]),
+            ("ggg_07", &[0.7_f64, 0.7][..]),
+        ];
+        let results = make_results_for_loops(&seven_series);
 
-        let full = compute_rel_loop_scores(&results, &partitions);
+        // 16 trials: each `HashMap::with_hasher(RandomState::new())`
+        // gets a fresh random seed, so iteration orders differ with
+        // overwhelmingly high probability.  If the function sorts
+        // internally, all 16 trials produce bit-identical
+        // denominators; otherwise the chance that a buggy version
+        // coincidentally produces the same iteration order across
+        // all 16 trials is astronomically small (verified
+        // empirically at ~93% catch rate with 8 trials; doubling
+        // pushes it to >99%).
+        let mut denoms: Vec<u64> = Vec::new();
+        for _ in 0..16 {
+            let mut map: HashMap<String, Option<usize>> = HashMap::with_hasher(RandomState::new());
+            for (id, _) in &seven_series {
+                map.insert((*id).to_string(), Some(0));
+            }
+            let denom = compute_partition_denominator(&results, &map, Some(0));
+            assert_eq!(denom.len(), 2);
+            denoms.push(denom[0].to_bits());
+        }
+        let first = denoms[0];
+        for (i, bits) in denoms.iter().enumerate() {
+            assert_eq!(
+                *bits, first,
+                "trial {i}: compute_partition_denominator must be hash-seed independent \
+                 (got {bits:#x}, expected {first:#x}); the per-SCC sum order must be \
+                 canonicalised by sorting loop IDs, not left to `HashMap` iteration",
+            );
+        }
 
-        for id in ["zzz_small", "aaa_big", "mmm_mid"] {
-            let denom = compute_partition_denominator(&results, &partitions, Some(0));
-            let streamed = compute_rel_loop_score_for_id(&results, id, &denom)
+        // Bit-parity with the full-pass helper pins that both paths
+        // agree on the same canonical order (lex by loop id), not
+        // just some determinism per path.
+        let partitions_fwd = mapping(&seven_series.map(|(id, _)| (id, Some(0))));
+        let full = compute_rel_loop_scores(&results, &partitions_fwd);
+        let denom_fwd = compute_partition_denominator(&results, &partitions_fwd, Some(0));
+        for id in [
+            "aaa_01", "bbb_02", "ccc_03", "ddd_04", "eee_05", "fff_06", "ggg_07",
+        ] {
+            let streamed = compute_rel_loop_score_for_id(&results, id, &denom_fwd)
                 .unwrap_or_else(|| panic!("loop '{id}' must have a computed series"));
             let cached = full.get(id).unwrap();
             assert_eq!(
