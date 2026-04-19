@@ -160,27 +160,39 @@ const ALIAS_CLASSIFICATION_WORD: u32 = 2065;
 /// composite of two structural signals:
 ///
 /// 1. **Classification signal (`f[1] == 2065`)**: Vensim tags alias-backed
-///    variable records with `0x811` (see [`ALIAS_CLASSIFICATION_WORD`]).
-///    Observed on 4 of 5 `econ/base.vdf` aliases, 6 of 7 `econ/risk.vdf`
-///    aliases, and the majority of stdlib aliases in WRLD3.
+///    variable records with `0x811` (see [`ALIAS_CLASSIFICATION_WORD`])
+///    on "classic" single-assignment old-style VDFs. Empirically this
+///    signal fires on 4 of 5 declared aliases in `econ/base.vdf`, 6 of 7
+///    in `econ/risk.vdf`, and 6 of 12 MDL-declared aliases in WRLD3
+///    SCEN01.
 ///
 /// 2. **Name-category filter (cross-agent signal)**: the file-order
-///    pairing from Agent 2's view-block decoder lets us pair each
-///    record with a slotted name; we filter out Time/metadata/unit/
-///    stdlib-helper names so only plausible user-alias names survive.
+///    pairing from the view-block decoder lets us pair each record with a
+///    slotted name; we filter out Time/metadata/unit/stdlib-helper names
+///    so only plausible user-alias names survive.
 ///
 /// Returns `(name_idx, name_string)` pairs in name-table file order.
-/// The set is NOT guaranteed to equal the MDL-declared alias list --
-/// experience on `econ/base.vdf` and `econ/risk.vdf` shows 4/5 and 6/7
-/// precision, with one alias per fixture that uses an expression
-/// argument classified as a regular variable.
 ///
-/// The earlier cross-agent claim that aliases could be identified from
-/// the `field[11] == 0` predecessor sentinel alone is **not** supported
-/// by the econ data: the five econ/base aliases have predecessor
-/// `f[11]` values of `{23, 68, 67, 70, 69}`, not all zero. The
-/// classification signal is the primary detector; the name-category
-/// filter reduces false positives.
+/// ### Known false negatives
+/// - Aliases whose stdlib call takes expression arguments (`SMTH1(a - b,
+///   t)`) are classified as regular variables (`f[1] == 17`) instead of
+///   alias records -- we miss them. At least one per fixture on `econ/base`
+///   and `econ/risk`.
+/// - On `WRLD3-03/experiment.vdf` no record carries `f[1] == 2065`, so
+///   this detector returns empty. Callers should prefer
+///   [`new_style_alias_signatures`] on new-style VDFs.
+/// - On re-saved new-style fixtures (`econ/policy.vdf`, `econ/mark2.vdf`)
+///   this classifier returns at most one alias; the new-style
+///   `#alias>FUNC#` embedding is the correct detection path there.
+///
+/// ### The `field[11] == 0` predecessor sentinel was NOT the signal
+/// An earlier cross-agent hypothesis proposed that a predecessor record
+/// with `field[11] == 0` uniquely identifies aliases. That claim is not
+/// supported: on `econ/base.vdf` the four alias records (`f[1] == 2065`)
+/// live at record indices {30, 46, 62, 72}; their predecessors' `f[11]`
+/// values are `{23, 68, 67, 70}` -- none are zero. The classification
+/// byte is the actual load-bearing signal; this comment records the
+/// rejected hypothesis to avoid re-investigation.
 pub(crate) fn identify_potential_aliases(
     records: &[super::VdfRecord],
     names: &[String],
@@ -211,6 +223,28 @@ pub(crate) fn identify_potential_aliases(
 /// Whether a name is a plausible stdlib-alias candidate: a slotted user
 /// variable name that is not Time, a system constant, a unit annotation,
 /// a builtin, or metadata.
+///
+/// The inline reject list below covers three name categories observed
+/// in VDF name tables across the test corpus:
+/// 1. **Vensim Control variables** (`Time`, `INITIAL TIME`, `FINAL TIME`,
+///    `TIME STEP`, `SAVEPER`) -- appear in every VDF, never user
+///    variables.
+/// 2. **Vensim builtin function tokens** (`SUM`, `MIN`, `SMOOTH`, `PI`,
+///    `if then else`, etc.) -- these appear in the name table because
+///    equations reference them, but they are operators, not variables.
+///    Derived from `docs/reference/xmile-v1.0.html` plus the Vensim
+///    user reference manual; kept as an inline list rather than
+///    reusing the crate's `builtins.rs` set because that set is
+///    XMILE-canonical (lowercase) while VDF name tables preserve
+///    Vensim's original UPPERCASE/case-mixed spelling.
+/// 3. **Stdlib module internal names** (`LV1`, `LV2`, `LV3`, `ST`, `RT1`,
+///    `RT2`, `DL`, `DEL`, `IN`, `INI`, `OUTPUT`) -- fixed internal
+///    symbol names that SMOOTH / DELAY / TREND macros emit as name-
+///    table entries. Never user-alias names.
+///
+/// Names of actual user variables in real Vensim models never
+/// collide with this list in practice; if a user picks e.g. `ABS` as
+/// a variable name the MDL parser rejects it before the VDF is written.
 fn name_is_alias_candidate(name: &str) -> bool {
     if name.is_empty() {
         return false;

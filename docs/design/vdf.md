@@ -1394,10 +1394,14 @@ These patterns were validated across the full test corpus:
   "no OT entry" sentinel. Arrayed records (`f[6] != 5`) expand to
   `flat_size` consecutive OT slots via the section-3 shape
   directory, matching the pattern in `to_results_via_records`.
-  Validated on WRLD3 SCEN01 / experiment (time-series equality with
-  `build_section6_guided_ot_map` on tens of overlapping names) and
-  on every smaller single-view scalar fixture. The sentinel
-  over-filters a handful of real variables on WRLD3 SCEN01
+  On WRLD3 SCEN01 / experiment the two paths produce the same
+  time series for roughly 40-50 of ~260-270 shared names (~16-18%
+  per-series agreement via exact time-series equality against
+  `build_section6_guided_ot_map`); they diverge on the rest because
+  the guided path and the file-order path have different failure
+  modes. Every smaller single-view scalar fixture agrees in full.
+  The sentinel over-filters a handful of real variables on WRLD3
+  SCEN01
   (quantified by `test_field11_zero_sentinel_loss_on_wrld3_is_pinned`
   and the `FileOrderPairDiagnostics` return from
   `build_file_order_pairs`). On arrayed fixtures (subscripts.vdf)
@@ -1491,14 +1495,22 @@ These patterns were validated across the full test corpus:
   classification signal with name-category filtering to drop
   time/metadata/unit/stdlib-helper names; on `econ/base.vdf` it
   recovers 4 of 5 MDL-declared aliases and on `econ/risk.vdf` 6 of 7,
-  with no false positives.
+  with no false positives. On `WRLD3-03/SCEN01.VDF` it recovers 6 of
+  12 declared aliases; on `WRLD3-03/experiment.vdf` and new-style
+  fixtures (re-saved `econ/policy.vdf`, `econ/mark2.vdf`) the
+  classifier returns an empty or near-empty set because the alias
+  encoding shifts to `#alias>FUNC#` and uses a different
+  classification byte. Treat the result as "necessary but not
+  sufficient".
 
   The cross-agent `field[11] == 0` sentinel from structural signal #12
-  does NOT independently identify aliases on old-style fixtures. The
-  5 econ/base aliases have their predecessor records' `f[11]` values
-  spread across {0, 23, 48, 67, 70}, so the sentinel rule alone cannot
-  separate aliases from regular variables. The combined classifier is
-  the best-available old-style alias detector at this time.
+  does NOT independently identify aliases on old-style fixtures. In
+  `econ/base.vdf` exactly 4 records carry `f[1] == 2065` (not 5 as an
+  earlier draft stated); their predecessor records' `f[11]` values are
+  `{23, 67, 68, 70}` -- none are zero -- so the sentinel rule alone
+  cannot separate aliases from regular variables. The combined
+  classifier is the best-available old-style alias detector at this
+  time.
 
   **What this does NOT yet close**: exact-match alias identification
   from VDF alone on old-style fixtures with expression-argument

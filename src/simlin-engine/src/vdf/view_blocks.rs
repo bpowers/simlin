@@ -155,10 +155,12 @@ impl VdfFile {
     ///    entries.
     /// 3. Variable records pair with variable names, view headers pair with
     ///    view entries, one-to-one in file order. This produces a stream
-    ///    of `(record_idx, name_idx)` pairs. [`Self::build_file_order_pairs`]
-    ///    returns the pairing plus a diagnostics record that reports any
-    ///    unmatched headers or dot-prefix names so callers can detect a
-    ///    divergent fixture.
+    ///    of `(record_idx, name_idx)` pairs. The internal pairing routine
+    ///    also returns a diagnostics record that enumerates any unmatched
+    ///    headers, unmatched dot-prefix names, skipped records, or skipped
+    ///    names so the implementation can detect a divergent fixture. That
+    ///    diagnostics surface is crate-internal; external callers detect
+    ///    divergence via [`VdfFile::record_view_groups_with_diagnostics`].
     /// 4. For each adjacent pair `(pair[i], pair[i+1])`, the record
     ///    referenced by `pair[i]` has `field[11]` pointing at the OT index
     ///    of the name referenced by `pair[i+1]`. (The "shift-by-one link"
@@ -193,7 +195,7 @@ impl VdfFile {
     /// (`risk2.vdf`) the mapping is approximate because the file-order
     /// pair stream itself drifts on unmatched dot names / orphan headers
     /// (see diagnostics returned by
-    /// [`Self::record_view_groups_with_diagnostics`]).
+    /// [`VdfFile::record_view_groups_with_diagnostics`]).
     pub fn to_results_via_file_order_records(&self) -> StdResult<Results, Box<dyn Error>> {
         let vdf_data = self.extract_data()?;
 
@@ -233,7 +235,7 @@ impl VdfFile {
             // shape's flat_size. This mirrors the logic in
             // `to_results_via_records`.
             let self_rec = &self.records[rec_idx];
-            let span = ot_span_for_record(self_rec, &section3_directory, self.offset_table_count);
+            let span = ot_span_for_record(self_rec, &section3_directory);
             let span = match span {
                 OtSpan::Scalar => 1usize,
                 OtSpan::Arrayed(n) => n,
@@ -337,27 +339,33 @@ struct HeaderDotPairing {
 /// Accounting returned alongside a file-order pairing so callers can
 /// quantify how much of the file was successfully paired and which
 /// records / names fell outside the 1:1 structure.
+///
+/// Crate-internal: `build_file_order_pairs` is `pub(crate)` so this
+/// struct is only reachable from inside the engine. External callers
+/// detect pair-stream divergence through the coarser
+/// [`ViewBlockDiagnostics`] returned by
+/// [`VdfFile::record_view_groups_with_diagnostics`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FileOrderPairDiagnostics {
+pub(crate) struct FileOrderPairDiagnostics {
     /// Dot-prefix names that were skipped during pairing because the
     /// record cursor was on a non-header record when they appeared in
     /// name-table order.
-    pub skipped_dot_names: Vec<usize>,
+    pub(crate) skipped_dot_names: Vec<usize>,
     /// Non-dot names that were skipped during pairing because the record
     /// cursor was on a header record.
-    pub skipped_non_dot_names: Vec<usize>,
+    pub(crate) skipped_non_dot_names: Vec<usize>,
     /// Header records left over after the name stream was exhausted.
     /// Observed on `risk2.vdf` where the `.Control` name was trimmed but
     /// its header record was retained.
-    pub unpaired_headers: Vec<usize>,
+    pub(crate) unpaired_headers: Vec<usize>,
     /// Non-header records left over after the name stream was exhausted.
     /// Observed on re-saved files (`risk2.vdf`) and on `Ref.vdf` where
     /// tail records exist past every named variable.
-    pub unpaired_records: Vec<usize>,
+    pub(crate) unpaired_records: Vec<usize>,
     /// Dot-prefix names left over after the record stream was exhausted.
-    pub unpaired_dot_names: Vec<usize>,
+    pub(crate) unpaired_dot_names: Vec<usize>,
     /// Non-dot names left over after the record stream was exhausted.
-    pub unpaired_non_dot_names: Vec<usize>,
+    pub(crate) unpaired_non_dot_names: Vec<usize>,
 }
 
 /// The OT-span decision for a single variable record.
@@ -378,7 +386,6 @@ enum OtSpan {
 fn ot_span_for_record(
     rec: &super::VdfRecord,
     section3: &Option<super::VdfSection3Directory>,
-    _ot_count: usize,
 ) -> OtSpan {
     let shape_code = rec.fields[6];
     if shape_code == 5 {
@@ -703,34 +710,88 @@ mod tests {
     /// mapping only.
     ///
     /// This test pins the observed behavior after the arrayed-expansion
-    /// fix: the column count must be strictly greater than the pre-fix
-    /// baseline (8 columns, one per scalar name) so future silent
-    /// regressions surface immediately.
+    /// fix: (a) the column count must be strictly greater than the pre-
+    /// fix baseline (8 columns, one per scalar name); (b) for every name
+    /// appearing in BOTH this path and `to_results_via_records` (the
+    /// authoritative path for subscripts.vdf), the time series must
+    /// match bit-for-bit -- i.e. whatever file-order-path column we emit
+    /// must carry the correct data, not a coincidentally-same scalar
+    /// value.
     #[test]
     fn test_to_results_via_file_order_records_expands_arrayed_on_subscripts() {
         let vdf = vdf_file("../../test/bobby/vdf/subscripts/subscripts.vdf");
-        let results = vdf
+        let file_order = vdf
             .to_results_via_file_order_records()
             .expect("subscripts mapping should succeed");
+        let authoritative = vdf
+            .to_results_via_records()
+            .expect("authoritative via_records path should succeed");
         // Pre-fix baseline was 8 columns (all arrayed variables collapsed
         // to a single slot). With arrayed expansion we see 9+ columns.
         // We do NOT reach the full 15 because the dim-element names shift
         // the pairing; see `to_results_via_records` for the deterministic
         // f[2]-sort alternative that recovers all 15.
-        let col_count = results.offsets.len();
+        let col_count = file_order.offsets.len();
         assert!(
             col_count >= 9,
             "subscripts: arrayed records must be expanded; got {col_count} \
              columns, expected >= 9 (pre-fix baseline was 8 scalar-only columns)"
         );
+        // Per-time-point correctness on the SCALAR subset shared with
+        // the authoritative path: for every overlapping scalar name,
+        // the data in the file-order column must match the authoritative
+        // column exactly.
+        //
+        // Arrayed element labels (`net_flow[0]`, etc.) are known to
+        // diverge between the two paths on this fixture -- the file-
+        // order path shifts arrayed-block pairings when dimension-
+        // element names (`a`, `b`, `c`) interleave with variable
+        // records. The module docstring calls out
+        // `to_results_via_records` as authoritative for subscripts.
+        // Excluding arrayed labels from the overlap check makes the
+        // assertion honest about that documented limitation while
+        // catching any regression in the SCALAR half of the file-order
+        // pairing.
+        let mut compared = 0usize;
+        let mut mismatched_names: Vec<&str> = Vec::new();
+        for (name, &fo_col) in &file_order.offsets {
+            if name.as_str().contains('[') {
+                continue;
+            }
+            let Some(&auth_col) = authoritative.offsets.get(name) else {
+                continue;
+            };
+            compared += 1;
+            for step in 0..file_order.step_count {
+                let fo_val = file_order.data[step * file_order.step_size + fo_col];
+                let auth_val = authoritative.data[step * authoritative.step_size + auth_col];
+                if (fo_val - auth_val).abs() > 1e-6 {
+                    mismatched_names.push(name.as_str());
+                    break;
+                }
+            }
+        }
+        assert!(
+            mismatched_names.is_empty(),
+            "subscripts: {} scalar column(s) disagree with \
+             `to_results_via_records` on time-series data: {mismatched_names:?} \
+             (out of {compared} overlapping scalar names)",
+            mismatched_names.len()
+        );
+        assert!(
+            compared >= 5,
+            "subscripts: expected >=5 scalar names shared with the authoritative \
+             path, got {compared} -- the file-order path may have lost scalar \
+             columns"
+        );
         // Confirm at least one arrayed element label appears (proving
         // the expansion happened rather than simply filling more
         // scalar names).
-        let has_arrayed_label = results.offsets.keys().any(|k| k.as_str().contains('['));
+        let has_arrayed_label = file_order.offsets.keys().any(|k| k.as_str().contains('['));
         assert!(
             has_arrayed_label,
             "subscripts: expected at least one `name[i]` element label; got {:?}",
-            results
+            file_order
                 .offsets
                 .keys()
                 .map(|k| k.as_str())
@@ -765,18 +826,20 @@ mod tests {
                 "../../test/metasd/WRLD3-03/SCEN01.VDF",
                 "../../test/metasd/WRLD3-03/wrld3-03.mdl",
                 // Observed: 42/266 names agree on exact time series.
-                // Floor of 30 pins the invariant that SOME real
-                // agreement exists (regression guard); higher is
-                // fine and would indicate the paths have converged
-                // further.
-                30usize,
+                // Floor of 38 gives ~10% headroom so the test fails if
+                // the mapping loses more than 4 agreed names, while
+                // staying tolerant of incidental rounding from
+                // float-equality under compilation changes.
+                38usize,
                 200usize,
             ),
             (
                 "WRLD3 experiment",
                 "../../test/metasd/WRLD3-03/experiment.vdf",
                 "../../test/metasd/WRLD3-03/wrld3-03.mdl",
-                30usize,
+                // Observed: 38/242 names agree. Floor of 34 leaves
+                // similar ~10% headroom.
+                34usize,
                 200usize,
             ),
         ] {

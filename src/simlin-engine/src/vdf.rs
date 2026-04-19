@@ -2583,21 +2583,36 @@ impl VdfFile {
     }
 
     /// Return new-style stdlib-call signature triples in name-table file
-    /// order. See [`signatures::new_style_alias_signatures`].
+    /// order. New-style signatures have the form `#alias>FUNC#` where
+    /// the alias is embedded in the signature prefix before `>`,
+    /// allowing pure string-split decoding with no model file. Returns
+    /// `(name_idx, alias, function_family)` tuples.
     pub fn new_style_alias_signatures(&self) -> Vec<(usize, String, String)> {
         signatures::new_style_alias_signatures(&self.names)
     }
 
     /// Return all output-type `#` signature names in name-table file
-    /// order. See [`signatures::output_signatures`].
+    /// order. An output sig is a canonical `#...#` signature representing
+    /// a stdlib call's output (not internal helper stocks like
+    /// `#LV1<DELAY1(...)#`). The classifier requires either `(` for
+    /// old-style `#FUNC(args)#` or exactly one top-level `>` for new-style
+    /// `#alias>FUNC#`, and rejects sub-part names (`>linear#`, `>rate#`)
+    /// and display names lacking both markers.
     pub fn output_signatures(&self) -> Vec<(usize, String)> {
         signatures::output_signatures(&self.names)
     }
 
     /// Identify the slotted user names that are stdlib-call aliases on
-    /// old-style VDF fixtures. See
-    /// [`signatures::identify_potential_aliases`] for the classifier
-    /// and its known limitations.
+    /// old-style VDF fixtures. Uses `f[1] == 2065` (alias classification
+    /// word) plus a name-category filter.
+    ///
+    /// Known false negatives: aliases with expression arguments
+    /// (`SMTH1(a - b, t)`) classify as regular variables; new-style
+    /// `#alias>FUNC#` fixtures use a different byte (callers should use
+    /// [`Self::new_style_alias_signatures`] there); on
+    /// `WRLD3-03/experiment.vdf` this returns empty and on
+    /// `WRLD3-03/SCEN01.VDF` it recovers ~half of the MDL aliases.
+    /// Treat the result as "necessary but not sufficient".
     pub fn identify_potential_aliases(&self) -> Vec<(usize, String)> {
         let (pairs, _diag) = self.build_file_order_pairs();
         signatures::identify_potential_aliases(&self.records, &self.names, &pairs)
