@@ -12,29 +12,149 @@ use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 
-/// Safety cap on the number of elementary circuits the causal-graph DFS
-/// will enumerate before bailing out.
+/// Cap on the number of feedback loops `build_element_level_loops`
+/// will materialize before [`crate::db::model_ltm_variables`]
+/// auto-flips to discovery mode.
 ///
-/// After the reduce-ltm-mem branch brought wrld3's uncapped enumeration
-/// memory from ~8.5 GiB down to ~490 MiB and cut wall time to ~1.2 s
-/// (Johnson's), the cap is no longer needed to keep enumeration itself
-/// inside WASM's 4 GiB linear memory.  It still serves a second
-/// purpose: preventing the *downstream* LTM variable-generation pipeline
-/// (~2 synthetic variables per loop) from blowing up when the circuit
-/// count is in the millions.  wrld3 has ~1.86M elementary circuits;
-/// generating ~3.7M synthetic variables OOMs the compiler even though
-/// enumeration itself is fast and small.
+/// This is the only auto-flip gate that survives: a previously-added
+/// pre-enumeration largest-SCC gate (`MAX_LTM_SCC_NODES`) was removed
+/// in an iter-13 review cycle because it over-flipped sparse
+/// single-cycle SCCs -- a stock -> aux_1 -> ... -> aux_N -> flow ->
+/// stock ring has one elementary loop but N+2 nodes in its SCC, and
+/// the old heuristic mistook length for density.  The post-collapse
+/// emit-count gate implemented here measures actual `Loop`-struct
+/// materialization cost and accepts such shapes correctly.  Truly
+/// dense feedback (WRLD3's 166-node SCC with 1.86M circuits) trips
+/// this gate via the [`MAX_LTM_ENUMERATION_CAP`] streaming cap --
+/// `model_element_loop_circuits` returns `LoopCircuitsResult.truncated
+/// = true` and `model_ltm_variables` routes that into the same
+/// auto-flip handler as an over-budget emit count.
 ///
-/// Removing this cap cleanly would require first capping the synthetic
-/// variable count inside `model_ltm_variables`, or auto-falling back
-/// to discovery mode for very large models -- neither of which is on
-/// this branch's scope.
-pub(crate) const MAX_LTM_CIRCUITS: usize = 100_000;
+/// ## Why 10_000
+///
+/// The 2026-04-18 LTM cap-lift diagnosis
+/// (`docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`) measured
+/// two structural cliffs on WRLD3's 166-node SCC:
+///
+/// - Cliff A: `build_element_level_loops` allocates ~17 GB of
+///   `Loop`/`Link` structs for 1.86M enumerated circuits.
+/// - Cliff B: each `rel_loop_score` equation is 75,303,840 bytes
+///   (~75.3 MB); full emission projects to ~140 TB of equation text
+///   (mitigated separately by the move to post-sim
+///   [`crate::ltm_post::compute_rel_loop_scores`]).
+///
+/// Cliff A remains the live constraint this gate addresses.  At ~9 KB
+/// per materialized `Loop` struct (diagnosis measurement on WRLD3:
+/// ~17 GB / ~1.86M loops) plus ~4 KB per `loop_score` equation,
+/// 10_000 loops cost ~130 MB of intermediate state -- comfortable
+/// inside WASM's 4 GiB budget with room for the rest of the compile
+/// pipeline.  Every in-tree LTM test model is well under this; only
+/// synthetic array-expansion pathology or models at the scale of
+/// WRLD3 trip it.
+pub const MAX_LTM_TOTAL_CIRCUITS: usize = 10_000;
+
+/// Streaming cap on Johnson's-level distinct-circuit enumeration inside
+/// `model_element_loop_circuits` itself, in contrast to
+/// [`MAX_LTM_TOTAL_CIRCUITS`] which gates the post-enumeration emit
+/// count.
+///
+/// The two gates cover different failure modes.
+/// `MAX_LTM_TOTAL_CIRCUITS` (10_000) bounds how many `Loop` structs
+/// `build_element_level_loops` will materialize -- a *post-collapse*
+/// figure, so a pure-A2A model with 10_000+ identical circuits across
+/// a large dimension still stays under the cap because the whole group
+/// collapses to one Loop.  But that post-hoc check requires having
+/// every circuit in hand, which means enumeration has already
+/// allocated `O(circuits × mean_length) × 4 bytes` of indexed paths.
+/// On a model with 10M disjoint small cycles that is ~900 MB of peak
+/// state, well over WASM's 4 GiB budget.
+///
+/// `MAX_LTM_ENUMERATION_CAP` is the streaming backstop that prevents
+/// that: Johnson's DFS inside `model_element_loop_circuits` bails when
+/// the total distinct-circuit count across all SCCs would exceed the
+/// cap, and `LoopCircuitsResult.truncated = true` is the signal to
+/// `model_ltm_variables` that exhaustive mode cannot safely proceed
+/// (the partial list is unsafe to pass to `build_element_level_loops`
+/// because per-group A2A collapse depends on seeing every member).
+///
+/// ## Why 1_000_000
+///
+/// `MAX_LTM_ENUMERATION_CAP` has to be large enough to admit the
+/// largest real SD model whose post-collapse emit count is under
+/// `MAX_LTM_TOTAL_CIRCUITS` -- otherwise we cut off pure-A2A models
+/// that would have stayed exhaustive.  For pure A2A the circuit
+/// count is bounded by the cartesian product of the shared
+/// dimension(s), so any model with |dim| < 1M stays uncapped.  At
+/// 1M indexed paths peak memory is ~100-200 MB (u32-per-node, mean
+/// length ~50), comfortable inside WASM's 4 GiB.  Anything above
+/// that is adversarial or a use-case not in Simlin's authoring
+/// contract.
+pub const MAX_LTM_ENUMERATION_CAP: usize = 1_000_000;
+
+/// Companion cap to [`MAX_LTM_ENUMERATION_CAP`] that bounds the
+/// **total indexed-path node count** emitted across all distinct
+/// circuits of the element-level graph.  Streaming cutoff, enforced
+/// in the same Johnson's DFS check.
+///
+/// The distinct-circuit cap alone does not bound memory on graphs
+/// with many long circuits.  The indexed enumeration stores each
+/// circuit as `Vec<u32>`, so peak state is `O(sum(len(circuit_i)))`,
+/// not `O(circuit_count)`.  A pathological shape -- say a valid
+/// pure-A2A model with a single 1,000-node feedback loop repeated
+/// over 900k elements -- stays under `MAX_LTM_ENUMERATION_CAP` but
+/// accumulates ~900M `u32` indices (~3.5 GiB before Vec overhead),
+/// which blows WASM's 4 GiB budget long before the circuit-count
+/// cutoff triggers.
+///
+/// ## Why 100_000_000
+///
+/// 100M `u32`s = ~400 MiB of indexed-path storage (plus
+/// `Vec`/`IndexedGraph` overhead).  Sized so the distinct-circuit
+/// cap is the primary trigger for WRLD3-shape models (WRLD3: 1.86M
+/// circuits × mean length 47 = 87M nodes; distinct cap fires first
+/// at 1M circuits which corresponds to ~47M nodes, well under the
+/// 100M node cap).  The node cap remains the active constraint for
+/// pathological long-loop shapes (e.g., a 1,000-node loop repeated
+/// across 200k+ elements trips this cap at ~200M nodes even though
+/// the distinct count is under 1M).  Inside WASM's 4 GiB linear
+/// memory 400 MiB leaves room for the rest of the compile pipeline.
+///
+/// The *smaller* of the two caps fires first on any given model, and
+/// the combination bounds peak indexed-path state at whichever is
+/// more restrictive: 1M circuits OR 100M nodes.
+pub const MAX_LTM_ENUMERATION_NODES: usize = 100_000_000;
+
+/// Cap on the number of structural feedback loops
+/// `model_detected_loops` will materialize before returning empty +
+/// `truncated = true`.
+///
+/// Distinct from [`MAX_LTM_TOTAL_CIRCUITS`], which gates *LTM
+/// variable synthesis* (loop_score aux equations, per-link score
+/// equations).  Structural-only consumers -- layout feedback-loop
+/// metadata, `simlin_analyze_get_loops`, `simlin-cli --ltm`, and any
+/// UI that lists feedback loops for display -- don't pay the
+/// equation-text cost, so they can tolerate a higher cap than LTM
+/// synthesis.  Without the split, a model with 20k disjoint 3-node
+/// cycles (a realistic shape for large arrayed models) would
+/// correctly auto-flip LTM to discovery but would also lose all its
+/// structural topology to layout and FFI callers, even though the
+/// Loop-struct materialization cost (~9 KB × 20k = 180 MB) is well
+/// within WASM's budget.
+///
+/// ## Why 100_000
+///
+/// 10x higher than `MAX_LTM_TOTAL_CIRCUITS = 10_000`.  At ~9 KB per
+/// materialized `Loop` struct (links, polarity, stocks with module
+/// enrichment) 100k distinct loops cost ~900 MB of transient state.
+/// Comfortable inside WASM's 4 GiB ceiling but still rules out
+/// WRLD3-scale (1.86M loops) from the structural-detection path.
+pub const MAX_LTM_DETECTED_LOOPS: usize = 100_000;
 
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
-/// out because it would have exceeded the [`MAX_LTM_CIRCUITS`] budget.
-/// The caller should treat this as "LTM analysis skipped for this
-/// model" and emit a user-visible diagnostic.
+/// out because it would have exceeded the caller-supplied `max_circuits`
+/// budget.  Production callers pass `usize::MAX` (no truncation) so they
+/// never see this value; stress tests and diagnostic harnesses use
+/// smaller budgets and check for it explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TruncatedByBudget;
 
@@ -456,6 +576,20 @@ struct JohnsonState {
     seen: HashSet<u64>,
     /// Scratch buffer for hashing: reused rather than allocated per-call.
     hash_scratch: Vec<u32>,
+    /// Upper bound on the number of distinct circuits this enumeration
+    /// may emit before bailing with `TruncatedByBudgetInternal`.
+    /// `usize::MAX` disables the cutoff (the raw-budget call path).
+    distinct_limit: usize,
+    /// Upper bound on the cumulative `u32` indices copied into
+    /// `circuits` across all surviving (distinct) emissions.  Streaming
+    /// companion to `distinct_limit` that bounds peak indexed-path
+    /// memory on graphs with many long circuits (where circuit count
+    /// alone would under-estimate the work).  `usize::MAX` disables.
+    node_limit: usize,
+    /// Running total of `u32` indices stored in `circuits`.
+    /// Incremented alongside every successful `circuits.push` so the
+    /// `node_limit` check is O(1) per emission.
+    total_nodes_emitted: usize,
 }
 
 /// Fixed seed for the LTM circuit fingerprint hash.
@@ -692,6 +826,8 @@ impl IndexedGraph {
         &self,
         scc: &[u32],
         budget: &mut usize,
+        distinct_limit: usize,
+        node_limit: usize,
     ) -> std::result::Result<Vec<Vec<u32>>, TruncatedByBudgetInternal> {
         if scc.is_empty() {
             return Ok(Vec::new());
@@ -714,6 +850,9 @@ impl IndexedGraph {
             circuits: Vec::new(),
             seen: HashSet::new(),
             hash_scratch: Vec::with_capacity(scc.len()),
+            distinct_limit,
+            node_limit,
+            total_nodes_emitted: 0,
         };
         for &v in scc {
             state.in_scc[v as usize] = true;
@@ -817,6 +956,29 @@ impl IndexedGraph {
                 let fp = hash_u32_slice(&state.hash_scratch);
                 if state.seen.insert(fp) {
                     state.circuits.push(state.path.clone());
+                    state.total_nodes_emitted =
+                        state.total_nodes_emitted.saturating_add(state.path.len());
+                    // Streaming distinct-count cutoff: bail the moment
+                    // the unique-circuit count exceeds the caller's
+                    // limit.  Used by `find_loops_if_under_limit` to
+                    // cap Loop-struct materialization memory without
+                    // waiting for full enumeration on dense graphs like
+                    // WRLD3 (which would otherwise allocate ~350 MB of
+                    // indexed paths before the post-hoc length check
+                    // fires).  `distinct_limit = usize::MAX` disables
+                    // this cutoff for the raw-budget call site.
+                    if state.circuits.len() > state.distinct_limit {
+                        return Err(TruncatedByBudgetInternal);
+                    }
+                    // Streaming node-count cutoff: guards against
+                    // shapes that stay under the distinct-count cap
+                    // but still accumulate gigabytes of indexed-path
+                    // storage (e.g., a pure-A2A loop of length 1000
+                    // across a 900k-element dimension emits ~900k
+                    // distinct circuits but ~900M u32 indices).
+                    if state.total_nodes_emitted > state.node_limit {
+                        return Err(TruncatedByBudgetInternal);
+                    }
                 }
                 found_cycle = true;
             } else if w == start {
@@ -1029,6 +1191,27 @@ impl CausalGraph {
         &self.stocks
     }
 
+    /// Return the number of nodes in the largest strongly-connected
+    /// component, or 0 when the graph has no edges.  Singletons without
+    /// self-loops count as size-1 SCCs, so an acyclic graph's return
+    /// value is at most 1.
+    ///
+    /// Kept as a public structural-analysis helper even though the LTM
+    /// auto-flip gate no longer keys on SCC size -- diagnostic
+    /// harnesses (`examples/ltm_mem_bench.rs`) still use it to
+    /// characterize graph shape, and removing it would break that
+    /// tooling.  Runs in O(V + E) via the iterative Tarjan
+    /// implementation that backs Johnson's enumerator.
+    pub fn largest_scc_size(&self) -> usize {
+        let indexed = IndexedGraph::from_edges(&self.edges);
+        indexed
+            .tarjan_scc()
+            .into_iter()
+            .map(|scc| scc.len())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Build a causal graph from a model with project context for modules
     pub fn from_model(model: &ModelStage1, project: &Project) -> Result<Self> {
         let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
@@ -1105,24 +1288,19 @@ impl CausalGraph {
 
     /// Find all elementary circuits (feedback loops).
     ///
-    /// Bounded by [`MAX_LTM_CIRCUITS`] because the downstream LTM
-    /// variable-generation pipeline synthesizes ~2 variables per loop;
-    /// at wrld3's ~1.86M circuits that's too many variables for the
-    /// compiler to handle even though the enumeration itself now
-    /// finishes in ~1.2 s and uses under 500 MiB.  On budget exhaustion
-    /// the public API returns an empty vec -- LTM compilation short-
-    /// circuits to "no loops detected" and simulation proceeds normally.
+    /// The caller supplies the enumeration budget as `max_circuits`.
+    /// Production paths pass `usize::MAX` (no truncation); stress tests
+    /// and diagnostic harnesses pass smaller budgets and check for the
+    /// [`TruncatedByBudget`] signal.  The downstream LTM pipeline is
+    /// gated separately by [`MAX_LTM_TOTAL_CIRCUITS`] at
+    /// [`crate::db::model_ltm_variables`].
     ///
-    /// Callers that need an explicit truncation signal should use
-    /// [`Self::find_loops_with_limit`].
-    pub fn find_loops(&self) -> Vec<Loop> {
-        self.find_loops_with_limit(MAX_LTM_CIRCUITS)
-            .unwrap_or_default()
-    }
-
-    /// Bounded variant of [`Self::find_loops`].  Returns
-    /// `Err(TruncatedByBudget)` when the DFS would enumerate more than
-    /// `max_circuits` elementary circuits; otherwise `Ok(loops)`.
+    /// The budget is charged on **raw** Johnson emissions, not on
+    /// post-dedup distinct circuits; on dense multidigraphs the DFS can
+    /// visit the same circuit many times before dedup collapses it.
+    /// Callers that want a post-dedup bound on the returned Vec size
+    /// (e.g., to cap `Loop` struct materialization memory) should use
+    /// [`Self::find_loops_if_under_limit`] instead.
     pub fn find_loops_with_limit(
         &self,
         max_circuits: usize,
@@ -1133,6 +1311,61 @@ impl CausalGraph {
         // the hot DFS loop allocating only `Vec<u32>` and lets circuits
         // that dedup away shed their string storage before we pay for it.
         let indexed = self.enumerate_indexed_circuits(max_circuits)?;
+        Ok(self.materialize_loops_from_indexed(indexed))
+    }
+
+    /// Find all elementary circuits if and only if the deduped count is
+    /// at most `max_loops`.  Unlike [`Self::find_loops_with_limit`],
+    /// this is a post-dedup gate: the distinct-circuit count is what
+    /// the caller cares about (Loop struct materialization ~9 KB each,
+    /// see the cap-lift diagnosis), not how many duplicate paths
+    /// Johnson's DFS visited before collapsing them.
+    ///
+    /// Enumeration streams the dedup-count cutoff into Johnson's DFS
+    /// itself (see `JohnsonState::distinct_limit`), so dense graphs
+    /// bail the moment the (N+1)th distinct circuit is discovered
+    /// rather than materializing the whole `Vec<Vec<u32>>` first.
+    /// WRLD3-scale inputs therefore exit this helper at ~9 MB of
+    /// indexed-path state (10_001 × ~900-byte paths) rather than the
+    /// ~350 MB an uncapped enumeration would hold.
+    ///
+    /// The raw-emission budget is left at `usize::MAX`: dense
+    /// multidigraphs where raw:dedup is large (e.g. K10 has 1,013
+    /// distinct circuits but millions of raw emissions) still succeed
+    /// when under the distinct cap.  Returns `Err(TruncatedByBudget)`
+    /// only when the distinct-circuit count would exceed `max_loops`.
+    pub fn find_loops_if_under_limit(
+        &self,
+        max_loops: usize,
+    ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
+        self.find_loops_if_under_limit_ex(max_loops, usize::MAX)
+    }
+
+    /// Extended variant of [`Self::find_loops_if_under_limit`] that
+    /// additionally caps the cumulative node count across all emitted
+    /// circuits.  Use `usize::MAX` to disable the node cap and get the
+    /// same behaviour as `find_loops_if_under_limit`.
+    ///
+    /// Both caps share the same `TruncatedByBudget` signal; the caller
+    /// cannot tell which one fired.  That is intentional: consumers
+    /// use the truncation as a "results are incomplete, fall back"
+    /// signal rather than treating the caps as semantic categories.
+    pub fn find_loops_if_under_limit_ex(
+        &self,
+        max_loops: usize,
+        max_nodes: usize,
+    ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
+        let indexed = self.enumerate_indexed_circuits_ex(usize::MAX, max_loops, max_nodes)?;
+        Ok(self.materialize_loops_from_indexed(indexed))
+    }
+
+    /// Shared materialization step from indexed circuits to annotated
+    /// `Loop` structs (links, polarity, stocks with module enrichment,
+    /// deterministic IDs).  Factored out so
+    /// [`Self::find_loops_with_limit`] and
+    /// [`Self::find_loops_if_under_limit`] share the expensive bit and
+    /// only differ in how they bound the indexed enumeration.
+    fn materialize_loops_from_indexed(&self, indexed: IndexedCircuits) -> Vec<Loop> {
         let mut loops = Vec::with_capacity(indexed.circuits.len());
         for circuit_idx in indexed.circuits {
             // Circuit length is always > 1 by construction in
@@ -1164,13 +1397,13 @@ impl CausalGraph {
         // verify the invariant so a future regression trips a test.
         debug_assert!(
             loops_have_unique_node_sets(&loops),
-            "circuit enumerator must emit unique node-sets; duplicate loops reached find_loops_with_limit"
+            "circuit enumerator must emit unique node-sets; duplicate loops reached materialize_loops_from_indexed"
         );
 
         // Assign deterministic IDs based on sorted loop content
         self.assign_deterministic_loop_ids(&mut loops);
 
-        Ok(loops)
+        loops
     }
 
     /// Shared enumeration core used by both `find_loops_with_limit` and
@@ -1187,10 +1420,30 @@ impl CausalGraph {
         &self,
         max_circuits: usize,
     ) -> std::result::Result<IndexedCircuits, TruncatedByBudget> {
+        self.enumerate_indexed_circuits_ex(max_circuits, usize::MAX, usize::MAX)
+    }
+
+    /// Extended version of [`Self::enumerate_indexed_circuits`] that
+    /// also accepts a streaming distinct-circuit cutoff and a streaming
+    /// node-count cutoff.  Set both to `usize::MAX` to disable (the
+    /// raw-budget call path).  A non-`MAX` distinct limit bails the
+    /// moment the total distinct-circuit count across all SCCs would
+    /// exceed it; a non-`MAX` node limit bails the moment the
+    /// cumulative `u32` indices stored across surviving circuits would
+    /// exceed it.  The node cutoff guards against shapes the
+    /// distinct-count cutoff misses (many long circuits rather than
+    /// many short circuits).
+    fn enumerate_indexed_circuits_ex(
+        &self,
+        max_circuits: usize,
+        distinct_limit: usize,
+        node_limit: usize,
+    ) -> std::result::Result<IndexedCircuits, TruncatedByBudget> {
         let graph = IndexedGraph::from_edges(&self.edges);
         let sccs = graph.tarjan_scc();
         let mut all_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget = max_circuits;
+        let mut total_nodes: usize = 0;
 
         // SCC iteration order is whatever Tarjan emitted.  Each SCC's
         // contribution to `all_circuits` is independent, and per-cycle
@@ -1206,8 +1459,24 @@ impl CausalGraph {
             if scc.len() == 1 && !graph.succ[scc[0] as usize].contains(&scc[0]) {
                 continue;
             }
-            match graph.enumerate_circuits_in_scc(scc, &mut budget) {
-                Ok(mut circuits) => all_circuits.append(&mut circuits),
+            // Per-SCC limits are scaled by already-emitted totals: a
+            // 5k-loop SCC 1 followed by a 6k-loop SCC 2 should trip at
+            // 10k, not 11k, and the same accounting applies to the
+            // node-count cutoff.  `saturating_sub` prevents wrap when
+            // the running totals briefly exceed the limit.
+            let remaining_distinct = distinct_limit.saturating_sub(all_circuits.len());
+            let remaining_nodes = node_limit.saturating_sub(total_nodes);
+            match graph.enumerate_circuits_in_scc(
+                scc,
+                &mut budget,
+                remaining_distinct,
+                remaining_nodes,
+            ) {
+                Ok(mut circuits) => {
+                    total_nodes =
+                        total_nodes.saturating_add(circuits.iter().map(|c| c.len()).sum::<usize>());
+                    all_circuits.append(&mut circuits);
+                }
                 Err(TruncatedByBudgetInternal) => return Err(TruncatedByBudget),
             }
         }
@@ -1229,17 +1498,13 @@ impl CausalGraph {
     /// Find all elementary circuits as deduplicated node lists.
     /// Only needs edges -- does not compute polarity or assign IDs.
     ///
-    /// Bounded by [`MAX_LTM_CIRCUITS`]; empty result on budget
-    /// exhaustion.  Use [`Self::find_circuit_node_lists_with_limit`]
-    /// when the caller needs to distinguish "no loops" from "too many
-    /// loops to enumerate".
-    pub fn find_circuit_node_lists(&self) -> Vec<Vec<Ident<Canonical>>> {
-        self.find_circuit_node_lists_with_limit(MAX_LTM_CIRCUITS)
-            .unwrap_or_default()
-    }
-
-    /// Bounded variant of [`Self::find_circuit_node_lists`] exposing the
-    /// budget-exhaustion signal explicitly.
+    /// Budget semantics match [`Self::find_loops_with_limit`]: the
+    /// caller supplies `max_circuits` and receives
+    /// `Err(TruncatedByBudget)` when the DFS would enumerate more than
+    /// that many elementary circuits.  Production paths pass
+    /// `usize::MAX`; callers that need the bounded variant pass a
+    /// smaller budget and interpret the error as "too many loops to
+    /// enumerate".
     pub fn find_circuit_node_lists_with_limit(
         &self,
         max_circuits: usize,
@@ -1276,10 +1541,51 @@ impl CausalGraph {
         max_circuits: usize,
     ) -> std::result::Result<(Vec<String>, Vec<Vec<u32>>), TruncatedByBudget> {
         let indexed = self.enumerate_indexed_circuits(max_circuits)?;
-        let mut circuits = indexed.circuits;
+        Ok(self.trim_indexed_name_table(indexed))
+    }
 
+    /// Streaming variant of [`Self::find_indexed_circuits_with_limit`]
+    /// that caps the *post-dedup* distinct-circuit count via
+    /// [`JohnsonState::distinct_limit`] and returns a truncation flag
+    /// alongside the indexed circuits.
+    ///
+    /// Used by the salsa-tracked `model_element_loop_circuits` so the
+    /// downstream LTM pipeline can flip to discovery mode without
+    /// having first materialized every circuit of a pathologically
+    /// dense graph.  The raw-emission budget is left at `usize::MAX`
+    /// because any real cap there would re-introduce the iter-3
+    /// failure mode (raw-count gates over-truncating distinct counts).
+    ///
+    /// When truncation fires the circuits returned are empty: the
+    /// internal enumeration state bail does not currently expose the
+    /// partial accumulated circuits, and downstream callers treat the
+    /// truncated flag as an auto-flip signal where the partial list
+    /// would not be used anyway.  Non-truncated calls return the full
+    /// trimmed-table shape that
+    /// [`Self::find_indexed_circuits_with_limit`] produces.
+    pub fn find_indexed_circuits_streaming_distinct(
+        &self,
+        distinct_limit: usize,
+        node_limit: usize,
+    ) -> (Vec<String>, Vec<Vec<u32>>, bool) {
+        match self.enumerate_indexed_circuits_ex(usize::MAX, distinct_limit, node_limit) {
+            Ok(indexed) => {
+                let (names, circuits) = self.trim_indexed_name_table(indexed);
+                (names, circuits, false)
+            }
+            Err(TruncatedByBudget) => (Vec::new(), Vec::new(), true),
+        }
+    }
+
+    /// Trim an `IndexedCircuits`' name table to just the node names that
+    /// appear in a surviving circuit, remapping every circuit index to
+    /// the compact table.  Shared by
+    /// [`Self::find_indexed_circuits_with_limit`] and
+    /// [`Self::find_indexed_circuits_streaming_distinct`].
+    fn trim_indexed_name_table(&self, indexed: IndexedCircuits) -> (Vec<String>, Vec<Vec<u32>>) {
+        let mut circuits = indexed.circuits;
         if circuits.is_empty() {
-            return Ok((Vec::new(), circuits));
+            return (Vec::new(), circuits);
         }
 
         // Compact the name table to only the indices that appear in a
@@ -1327,15 +1633,7 @@ impl CausalGraph {
             "every compact index in trimmed circuits must address a valid name-table entry"
         );
 
-        Ok((names, circuits))
-    }
-
-    /// Default-budget variant of [`Self::find_indexed_circuits_with_limit`];
-    /// bounded by [`MAX_LTM_CIRCUITS`].  Returns `(names, [])` when the
-    /// DFS budget is exhausted so callers have a uniform empty response.
-    pub fn find_indexed_circuits(&self) -> (Vec<String>, Vec<Vec<u32>>) {
-        self.find_indexed_circuits_with_limit(MAX_LTM_CIRCUITS)
-            .unwrap_or_else(|_| (Vec::new(), Vec::new()))
+        (names, circuits)
     }
 
     /// Enrich a loop's stock list with stocks from inside any DynamicModule
@@ -1857,10 +2155,18 @@ pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
     }
 }
 
-/// Detect all feedback loops in a single model
+/// Detect all feedback loops in a single model.
+///
+/// Runs Johnson's enumeration with no per-call circuit budget; the
+/// upstream [`crate::db::model_ltm_variables`] pipeline is responsible
+/// for skipping LTM on models whose emitted-Loop count exceeds
+/// [`MAX_LTM_TOTAL_CIRCUITS`].  Since `usize::MAX` is passed as the
+/// budget, the `TruncatedByBudget` branch is unreachable.
 pub fn detect_loops(model: &ModelStage1, project: &Project) -> Result<Vec<Loop>> {
     let graph = CausalGraph::from_model(model, project)?;
-    Ok(graph.find_loops())
+    Ok(graph
+        .find_loops_with_limit(usize::MAX)
+        .expect("usize::MAX budget cannot be exhausted by Johnson's enumeration"))
 }
 
 /// Analyze the polarity of how a variable appears in an equation
@@ -4711,10 +5017,10 @@ mod tests {
     #[test]
     fn find_loops_bails_out_past_budget() {
         let graph = tiny_cycle_graph();
-        // Public `find_loops` hides the bail-out and returns an empty vec
-        // so that callers get a "no LTM loops" signal and simulation can
-        // still proceed.  Use the `_with_limit` variant to observe the
-        // TruncatedByBudget marker directly.
+        // A budget of 0 is the smallest value that must trigger bail-out:
+        // the first circuit push fails the budget check.  Production code
+        // passes usize::MAX (no truncation), but callers that want to
+        // observe the signal still use `find_loops_with_limit` directly.
         let err = graph
             .find_loops_with_limit(0)
             .expect_err("budget of 0 must bail");
@@ -5007,7 +5313,9 @@ mod tests {
         let mut johnson_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget_j = usize::MAX;
         for scc in &sccs {
-            let mut part = graph.enumerate_circuits_in_scc(scc, &mut budget_j).unwrap();
+            let mut part = graph
+                .enumerate_circuits_in_scc(scc, &mut budget_j, usize::MAX, usize::MAX)
+                .unwrap();
             johnson_circuits.append(&mut part);
         }
 
@@ -5155,6 +5463,43 @@ mod tests {
     }
 
     #[test]
+    fn streaming_node_limit_trips_on_long_loops() {
+        // Build a graph with two disjoint 3-node rings.  Each ring
+        // emits one distinct circuit of length 3 (a->b->c->a style),
+        // so the full enumeration produces 2 circuits and 6 total
+        // indexed-path nodes.  Setting node_limit = 4 forces the
+        // second ring's emission to trip (running total 3 before the
+        // emit, 6 after, which exceeds 4).  This exercises the
+        // node-count cutoff independently of the distinct-count cutoff
+        // (distinct_limit is usize::MAX here).
+        let cg = build_causal_graph(&[
+            ("a", &["b"]),
+            ("b", &["c"]),
+            ("c", &["a"]),
+            ("x", &["y"]),
+            ("y", &["z"]),
+            ("z", &["x"]),
+        ]);
+
+        let (_, circuits, truncated) = cg.find_indexed_circuits_streaming_distinct(usize::MAX, 4);
+        assert!(
+            truncated,
+            "node_limit = 4 must trip on two 3-node rings (cumulative 6 > 4)"
+        );
+        // Truncated path returns empty per the documented contract.
+        assert!(circuits.is_empty());
+
+        // With node_limit = 6 the full enumeration fits exactly.
+        let (_, circuits_full, truncated_full) =
+            cg.find_indexed_circuits_streaming_distinct(usize::MAX, 6);
+        assert!(
+            !truncated_full,
+            "node_limit = 6 must admit both 3-node rings (cumulative 6 = 6)"
+        );
+        assert_eq!(circuits_full.len(), 2);
+    }
+
+    #[test]
     fn johnson_respects_shared_budget_across_sccs() {
         // Two disjoint 2-cycles and a generous-but-finite budget.  Both
         // cycles fit; budget remains positive at the end.
@@ -5238,6 +5583,80 @@ mod tests {
             .find_circuit_node_lists_with_limit(11)
             .expect_err("budget of 11 must trip because raw cycle discovery exceeds 11");
         assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn find_loops_if_under_limit_ex_gates_on_node_cap() {
+        // The two-cap API must independently honor the node cap even
+        // when the circuit cap is generous.  Use K4 (11 distinct
+        // circuits, cumulative node count 3+3+3+3+4+4+4+4+4+4+4 = 40,
+        // since K4 has 4 3-cycles and 7 4-cycles) and request a
+        // node-cap of 10 -- well below the cumulative 40.  `max_loops`
+        // is deliberately left at `usize::MAX` so only the node cap
+        // can trip.  Without a working node-cap branch the DFS would
+        // continue enumerating and either OOM on pathological inputs
+        // or silently exceed the caller's memory budget.
+        let cg = build_causal_graph(&[
+            ("a", &["b", "c", "d"]),
+            ("b", &["a", "c", "d"]),
+            ("c", &["a", "b", "d"]),
+            ("d", &["a", "b", "c"]),
+        ]);
+
+        let err = cg
+            .find_loops_if_under_limit_ex(usize::MAX, 10)
+            .expect_err("max_nodes=10 must trip on K4's 40 cumulative circuit nodes");
+        assert_eq!(err, TruncatedByBudget);
+
+        // Sanity: with both caps generous, the same graph enumerates cleanly.
+        let loops = cg
+            .find_loops_if_under_limit_ex(usize::MAX, usize::MAX)
+            .expect("generous caps must admit all distinct circuits");
+        assert_eq!(loops.len(), 11, "K4 dedups to 11 distinct circuits");
+
+        // With a small circuit cap and a generous node cap, the
+        // circuit cap still trips -- demonstrating both arms route
+        // through the same signal.
+        let err = cg
+            .find_loops_if_under_limit_ex(10, usize::MAX)
+            .expect_err("max_loops=10 must trip on distinct-count check");
+        assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn find_loops_if_under_limit_gates_on_post_dedup_count() {
+        // K4 has 11 distinct node-set circuits but raw Johnson emits
+        // many more.  `find_loops_if_under_limit` must succeed when
+        // asked for >=11 (it runs enumeration to completion and
+        // measures deduped count) and truncate when asked for <11 --
+        // the opposite asymmetry from
+        // `johnson_budget_charges_duplicate_raw_cycles`.  This is what
+        // `model_detected_loops` relies on to gate dense multidigraphs
+        // without false positives.
+        let cg = build_causal_graph(&[
+            ("a", &["b", "c", "d"]),
+            ("b", &["a", "c", "d"]),
+            ("c", &["a", "b", "d"]),
+            ("d", &["a", "b", "c"]),
+        ]);
+
+        let loops = cg
+            .find_loops_if_under_limit(11)
+            .expect("budget=11 must admit all 11 distinct circuits");
+        assert_eq!(loops.len(), 11, "K4 dedups to 11 distinct circuits");
+
+        let err = cg
+            .find_loops_if_under_limit(10)
+            .expect_err("budget=10 must trip on distinct-count check");
+        assert_eq!(err, TruncatedByBudget);
+
+        // Proof the two APIs diverge on this input: the raw-budget
+        // variant trips at 11 (pre-dedup) even though 11 distinct loops
+        // exist.
+        let raw_err = cg
+            .find_loops_with_limit(11)
+            .expect_err("raw-budget variant trips because raw emissions exceed 11");
+        assert_eq!(raw_err, TruncatedByBudget);
     }
 
     #[test]
@@ -5346,8 +5765,8 @@ mod tests {
 
         // The indexed form must also be byte-identical, including the
         // trimmed name table and compact indices.
-        let i1 = cg.find_indexed_circuits();
-        let i2 = cg.find_indexed_circuits();
+        let i1 = cg.find_indexed_circuits_with_limit(usize::MAX).unwrap();
+        let i2 = cg.find_indexed_circuits_with_limit(usize::MAX).unwrap();
         assert_eq!(
             i1, i2,
             "repeated indexed enumeration must be byte-identical"
@@ -5367,7 +5786,7 @@ mod tests {
             ("loop_a", &["loop_b"]),
             ("loop_b", &["entry"]),
         ]);
-        let (names, circuits) = cg.find_indexed_circuits();
+        let (names, circuits) = cg.find_indexed_circuits_with_limit(usize::MAX).unwrap();
         assert_eq!(circuits.len(), 1, "exactly one elementary cycle");
         assert!(
             !names.iter().any(|n| n == "feeder"),
@@ -5403,7 +5822,7 @@ mod tests {
         // be empty so salsa sees a stable "no LTM" result across any
         // rename/reshape of the DAG.
         let cg = build_causal_graph(&[("a", &["b"]), ("b", &["c"])]);
-        let (names, circuits) = cg.find_indexed_circuits();
+        let (names, circuits) = cg.find_indexed_circuits_with_limit(usize::MAX).unwrap();
         assert!(circuits.is_empty(), "DAG has no circuits");
         assert!(
             names.is_empty(),
@@ -5429,7 +5848,7 @@ mod tests {
         assert_eq!(
             loops.len(),
             circuits.len(),
-            "find_loops and find_circuit_node_lists must produce the same count"
+            "find_loops_with_limit and find_circuit_node_lists_with_limit must produce the same count"
         );
     }
 
