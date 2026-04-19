@@ -605,6 +605,14 @@ pub struct LoopCircuitsResult {
     /// Each circuit is a deduplicated sequence of indices into `names`.
     /// Circuits are emitted in the enumerator's deterministic order.
     pub circuits: Vec<Vec<u32>>,
+    /// True when enumeration stopped early because the graph has more
+    /// distinct circuits than the caller's streaming cap.  `circuits`
+    /// then holds the first-K circuits emitted by Johnson's DFS (K =
+    /// cap) and `model_ltm_variables` treats this as a hard auto-flip
+    /// signal (the exhaustive path cannot safely reason about a
+    /// truncated circuit list because per-group A2A collapse depends
+    /// on seeing every member of the group).
+    pub truncated: bool,
 }
 
 impl LoopCircuitsResult {
@@ -1076,7 +1084,11 @@ pub fn model_loop_circuits(
     let (names, circuits) = graph
         .find_indexed_circuits_with_limit(usize::MAX)
         .expect("usize::MAX cannot exhaust the enumeration budget");
-    LoopCircuitsResult { names, circuits }
+    LoopCircuitsResult {
+        names,
+        circuits,
+        truncated: false,
+    }
 }
 
 /// Detect feedback loops with polarity analysis and deterministic IDs.
@@ -1102,10 +1114,10 @@ pub fn model_detected_loops(
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
-    // Mirror `model_ltm_variables`'s element-level SCC gate so the two
-    // paths agree on which models are too dense for per-loop scoring.
-    // Without this, `simlin_analyze_get_loops` could return structural
-    // loop IDs for a 51-node single-ring model while
+    // Mirror both of `model_ltm_variables`'s element-level gates so
+    // the two paths agree on which models are too dense for per-loop
+    // scoring.  Without alignment, `simlin_analyze_get_loops` could
+    // return structural loop IDs while
     // `simlin_analyze_get_relative_loop_score` returns `DoesNotExist`
     // for every one of them (LTM auto-flipped), leaving paired
     // consumers like pysimlin's `_populate_loop_behavior` silently
@@ -1113,9 +1125,37 @@ pub fn model_detected_loops(
     // consumers through the same fallback (persisted `loop_metadata`
     // for layout; empty-with-truncated-flag for FFI) whether the user
     // asked for structure or scores.
+    //
+    // Gate 1: element-level largest SCC > MAX_LTM_SCC_NODES.  Cheap
+    // (Tarjan on a few hundred nodes) and catches WRLD3-shape models
+    // before we pay enumeration cost.
     let element_edges = model_element_causal_edges(db, model, project);
     if causal_graph_from_element_edges(element_edges).largest_scc_size()
         > crate::ltm::MAX_LTM_SCC_NODES
+    {
+        return DetectedLoopsResult {
+            loops: Vec::new(),
+            truncated: true,
+        };
+    }
+
+    // Gate 2: element-level truncation or emitted-Loop-count over cap.
+    // `model_element_loop_circuits` already enumerates with a
+    // streaming distinct-circuit bail, so this query either returns
+    // every element-level circuit (`truncated = false`) or a
+    // truncation signal.  The truncation signal is what catches
+    // arrayed cross-element models whose variable-level graph is
+    // sparse but whose element graph has thousands of Loops --
+    // without this, `model_ltm_variables` would auto-flip while
+    // `model_detected_loops` returned the handful of variable-level
+    // signatures, creating exactly the mismatch the iter-6 review
+    // flagged.  On non-truncated results we count emitted Loops via
+    // `super::db_ltm::estimate_emitted_loop_count` (same criteria as
+    // `build_element_level_loops`' per-group collapse).
+    let element_circuits = model_element_loop_circuits(db, model, project);
+    if element_circuits.truncated
+        || super::db_ltm::estimate_emitted_loop_count(element_circuits)
+            > crate::ltm::MAX_LTM_TOTAL_CIRCUITS
     {
         return DetectedLoopsResult {
             loops: Vec::new(),
@@ -1269,10 +1309,23 @@ pub fn model_element_loop_circuits(
 ) -> LoopCircuitsResult {
     let element_edges = model_element_causal_edges(db, model, project);
     let graph = causal_graph_from_element_edges(element_edges);
-    let (names, circuits) = graph
-        .find_indexed_circuits_with_limit(usize::MAX)
-        .expect("usize::MAX cannot exhaust the enumeration budget");
-    LoopCircuitsResult { names, circuits }
+    // Stream a generous distinct-circuit cap
+    // (`MAX_LTM_ENUMERATION_CAP` = 1_000_000) into Johnson's DFS so
+    // we never materialize more than ~100-200 MB of indexed paths
+    // inside enumeration, bounded regardless of graph density.  The
+    // tighter `MAX_LTM_TOTAL_CIRCUITS` gate is applied *after*
+    // enumeration against the post-collapse emitted-Loop count --
+    // keeping the enumeration cap larger lets pure-A2A models that
+    // collapse down to ~1 Loop stay on the exhaustive path even when
+    // their underlying element-level circuit count is up to 1M (a
+    // 500k-element arrayed stock-flow loop, for example).
+    let (names, circuits, truncated) =
+        graph.find_indexed_circuits_streaming_distinct(crate::ltm::MAX_LTM_ENUMERATION_CAP);
+    LoopCircuitsResult {
+        names,
+        circuits,
+        truncated,
+    }
 }
 
 /// Compute stock-to-stock cycle partitions at element granularity.

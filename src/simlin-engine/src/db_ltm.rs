@@ -1766,7 +1766,7 @@ fn strip_subscript(name: &str) -> &str {
 /// function mirrors the exact collapse criteria of
 /// `build_element_level_loops` so the gate bounds the actual emitted
 /// Loop count rather than one of its looser proxies.
-fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuitsResult) -> usize {
+pub(crate) fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuitsResult) -> usize {
     use std::collections::{HashMap, HashSet};
 
     // Group element circuits by variable-level signature (same key as
@@ -2259,7 +2259,7 @@ pub fn model_ltm_variables(
     // the element-level graph has no variable data populated.
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let circuits_result = model_element_loop_circuits(db, model, project);
-        if circuits_result.is_empty() {
+        if circuits_result.is_empty() && !circuits_result.truncated {
             if !has_input_ports {
                 return LtmVariablesResult {
                     vars: vec![],
@@ -2271,43 +2271,63 @@ pub fn model_ltm_variables(
             // Total-circuit backstop.  The largest-SCC gate misses
             // pathological shapes like many disjoint small cycles: each
             // such distinct variable-level loop still costs ~9 KB of
-            // `Loop`/`Link` state in `build_element_level_loops`.  We
-            // key on the *distinct-signature* count rather than the raw
-            // `circuits_result.len()` so that pure A2A models don't get
-            // spuriously flipped: a `population[Region] ->
-            // births[Region] -> population[Region]` cycle with
-            // |Region| = 200_000 produces 200_000 element-level
-            // circuits but collapses to one A2A `Loop` inside
-            // `build_element_level_loops`, so its materialization cost
-            // is ~9 KB, not ~1.8 GB.  Distinct-signature counting
-            // anticipates that collapse.
+            // `Loop`/`Link` state in `build_element_level_loops`.
+            // `model_element_loop_circuits` enumerates with a
+            // streaming distinct-circuit cap of `MAX_LTM_TOTAL_CIRCUITS`
+            // and sets `truncated = true` when that cap trips, which
+            // we treat as a hard auto-flip here: the partial circuit
+            // list is not safe to hand to `build_element_level_loops`
+            // because per-group A2A collapse depends on seeing every
+            // circuit in each group.
             //
-            // Note that `model_detected_loops` uses a different gate
-            // (`MAX_LTM_TOTAL_CIRCUITS` on the *variable-level* graph
-            // via `find_loops_if_under_limit`) and may still return
-            // non-empty when this gate fires on an arrayed model whose
-            // element-level graph is much denser than its variable-
-            // level graph.  The layout path reconciles this asymmetry
-            // by checking whether `loop_partitions` is empty after
-            // compile (see `try_detect_ltm_loops_incremental`).
-            let distinct_loops = estimate_emitted_loop_count(circuits_result);
+            // For non-truncated results we count *emitted* Loops via
+            // `estimate_emitted_loop_count`, which mirrors
+            // `build_element_level_loops`'s per-group collapse
+            // (pure-A2A groups contribute 1, scalar/mixed contribute
+            // group.len()).  That lets a pure-A2A model with
+            // |Region| = 5_000 stay exhaustive (1 Loop) while a model
+            // with 5_000 independent scalar cycles still flips
+            // (5_000 Loops).
+            let truncated_by_enumeration = circuits_result.truncated;
+            let distinct_loops = if truncated_by_enumeration {
+                // Signal-only when truncation fires: the real
+                // emit-count is >= MAX_LTM_TOTAL_CIRCUITS and bail
+                // semantics are the same as the overflow branch.
+                crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1
+            } else {
+                estimate_emitted_loop_count(circuits_result)
+            };
             if distinct_loops > crate::ltm::MAX_LTM_TOTAL_CIRCUITS {
-                let msg = format!(
-                    "LTM analysis auto-switched from exhaustive to discovery mode: \
-                     the element-level graph has {} distinct variable-level \
-                     feedback loops, exceeding MAX_LTM_TOTAL_CIRCUITS = {}.  \
-                     Materializing a Loop struct per distinct loop would allocate \
-                     ~{} MiB of intermediate state (see \
-                     docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
-                     Per-loop scores are ranked post-simulation via the \
-                     strongest-path search; see \
-                     docs/design/ltm--loops-that-matter.md for the two-tier \
-                     strategy.",
-                    distinct_loops,
-                    crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
-                    // 9 KB/loop from the diagnosis allocation profile, in MiB.
-                    (distinct_loops as u64 * 9) / 1024,
-                );
+                let msg = if truncated_by_enumeration {
+                    format!(
+                        "LTM analysis auto-switched from exhaustive to discovery mode: \
+                         element-level feedback-loop enumeration truncated at \
+                         MAX_LTM_ENUMERATION_CAP = {} distinct circuits (see \
+                         docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+                         Per-loop scores are ranked post-simulation via the \
+                         strongest-path search; see \
+                         docs/design/ltm--loops-that-matter.md for the two-tier \
+                         strategy.",
+                        crate::ltm::MAX_LTM_ENUMERATION_CAP,
+                    )
+                } else {
+                    format!(
+                        "LTM analysis auto-switched from exhaustive to discovery mode: \
+                         the element-level graph yields {} feedback loops after \
+                         per-group A2A collapse, exceeding MAX_LTM_TOTAL_CIRCUITS \
+                         = {}.  Materializing one Loop struct per feedback loop \
+                         would allocate ~{} MiB of intermediate state (see \
+                         docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+                         Per-loop scores are ranked post-simulation via the \
+                         strongest-path search; see \
+                         docs/design/ltm--loops-that-matter.md for the two-tier \
+                         strategy.",
+                        distinct_loops,
+                        crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
+                        // 9 KB/loop from the diagnosis allocation profile, in MiB.
+                        (distinct_loops as u64 * 9) / 1024,
+                    )
+                };
                 CompilationDiagnostic(Diagnostic {
                     model: model.name(db).clone(),
                     variable: None,

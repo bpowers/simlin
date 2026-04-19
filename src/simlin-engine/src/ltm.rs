@@ -71,6 +71,44 @@ pub const MAX_LTM_SCC_NODES: usize = 50;
 /// array-expansion pathology or models at the scale of WRLD3 trip it.
 pub const MAX_LTM_TOTAL_CIRCUITS: usize = 10_000;
 
+/// Streaming cap on Johnson's-level distinct-circuit enumeration inside
+/// `model_element_loop_circuits` itself, in contrast to
+/// [`MAX_LTM_TOTAL_CIRCUITS`] which gates the post-enumeration emit
+/// count.
+///
+/// The two gates cover different failure modes.
+/// `MAX_LTM_TOTAL_CIRCUITS` (10_000) bounds how many `Loop` structs
+/// `build_element_level_loops` will materialize -- a *post-collapse*
+/// figure, so a pure-A2A model with 10_000+ identical circuits across
+/// a large dimension still stays under the cap because the whole group
+/// collapses to one Loop.  But that post-hoc check requires having
+/// every circuit in hand, which means enumeration has already
+/// allocated `O(circuits × mean_length) × 4 bytes` of indexed paths.
+/// On a model with 10M disjoint small cycles that is ~900 MB of peak
+/// state, well over WASM's 4 GiB budget.
+///
+/// `MAX_LTM_ENUMERATION_CAP` is the streaming backstop that prevents
+/// that: Johnson's DFS inside `model_element_loop_circuits` bails when
+/// the total distinct-circuit count across all SCCs would exceed the
+/// cap, and `LoopCircuitsResult.truncated = true` is the signal to
+/// `model_ltm_variables` that exhaustive mode cannot safely proceed
+/// (the partial list is unsafe to pass to `build_element_level_loops`
+/// because per-group A2A collapse depends on seeing every member).
+///
+/// ## Why 1_000_000
+///
+/// `MAX_LTM_ENUMERATION_CAP` has to be large enough to admit the
+/// largest real SD model whose post-collapse emit count is under
+/// `MAX_LTM_TOTAL_CIRCUITS` -- otherwise we cut off pure-A2A models
+/// that would have stayed exhaustive.  For pure A2A the circuit
+/// count is bounded by the cartesian product of the shared
+/// dimension(s), so any model with |dim| < 1M stays uncapped.  At
+/// 1M indexed paths peak memory is ~100-200 MB (u32-per-node, mean
+/// length ~50), comfortable inside WASM's 4 GiB.  Anything above
+/// that is adversarial or a use-case not in Simlin's authoring
+/// contract.
+pub const MAX_LTM_ENUMERATION_CAP: usize = 1_000_000;
+
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`
 /// budget.  Production callers pass `usize::MAX` (no truncation) so they
@@ -1405,16 +1443,52 @@ impl CausalGraph {
         max_circuits: usize,
     ) -> std::result::Result<(Vec<String>, Vec<Vec<u32>>), TruncatedByBudget> {
         let indexed = self.enumerate_indexed_circuits(max_circuits)?;
-        let mut circuits = indexed.circuits;
+        Ok(self.trim_indexed_name_table(indexed))
+    }
 
+    /// Streaming variant of [`Self::find_indexed_circuits_with_limit`]
+    /// that caps the *post-dedup* distinct-circuit count via
+    /// [`JohnsonState::distinct_limit`] and returns a truncation flag
+    /// alongside the indexed circuits.
+    ///
+    /// Used by the salsa-tracked `model_element_loop_circuits` so the
+    /// downstream LTM pipeline can flip to discovery mode without
+    /// having first materialized every circuit of a pathologically
+    /// dense graph.  The raw-emission budget is left at `usize::MAX`
+    /// because any real cap there would re-introduce the iter-3
+    /// failure mode (raw-count gates over-truncating distinct counts).
+    ///
+    /// When truncation fires the circuits returned are empty: the
+    /// internal enumeration state bail does not currently expose the
+    /// partial accumulated circuits, and downstream callers treat the
+    /// truncated flag as an auto-flip signal where the partial list
+    /// would not be used anyway.  Non-truncated calls return the full
+    /// trimmed-table shape that
+    /// [`Self::find_indexed_circuits_with_limit`] produces.
+    pub fn find_indexed_circuits_streaming_distinct(
+        &self,
+        distinct_limit: usize,
+    ) -> (Vec<String>, Vec<Vec<u32>>, bool) {
+        match self.enumerate_indexed_circuits_ex(usize::MAX, distinct_limit) {
+            Ok(indexed) => {
+                let (names, circuits) = self.trim_indexed_name_table(indexed);
+                (names, circuits, false)
+            }
+            Err(TruncatedByBudget) => (Vec::new(), Vec::new(), true),
+        }
+    }
+
+    /// Trim an `IndexedCircuits`' name table to just the node names that
+    /// appear in a surviving circuit, remapping every circuit index to
+    /// the compact table.  Shared by
+    /// [`Self::find_indexed_circuits_with_limit`] and
+    /// [`Self::find_indexed_circuits_streaming_distinct`].
+    fn trim_indexed_name_table(&self, indexed: IndexedCircuits) -> (Vec<String>, Vec<Vec<u32>>) {
+        let mut circuits = indexed.circuits;
         if circuits.is_empty() {
-            return Ok((Vec::new(), circuits));
+            return (Vec::new(), circuits);
         }
 
-        // Compact the name table to only the indices that appear in a
-        // circuit.  Using BTreeSet preserves ascending order so the
-        // trimmed `names` stays lex-sorted (the enumerator's canonical
-        // ordering, which downstream tests rely on).
         let mut used: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for c in &circuits {
             for &n in c {
@@ -1423,10 +1497,6 @@ impl CausalGraph {
         }
         let used_vec: Vec<u32> = used.into_iter().collect();
 
-        // Sparse mapping old_idx -> new_idx.  used_vec.len() is bounded
-        // by the (non-trivial) SCC size -- at most a few hundred even
-        // on dense SD models -- so a Vec<i32> keyed by old index is
-        // both faster and denser than a HashMap.
         let mut old_to_new: Vec<i32> = vec![-1; indexed.graph.nodes.len()];
         for (new_i, &old_i) in used_vec.iter().enumerate() {
             old_to_new[old_i as usize] = new_i as i32;
@@ -1442,13 +1512,6 @@ impl CausalGraph {
             .map(|&old| indexed.graph.nodes[old as usize].as_str().to_string())
             .collect();
 
-        // Belt-and-braces: after remap, every circuit index must address
-        // a real entry in the trimmed `names` table.  A future refactor
-        // that accidentally drops a remapped index, mixes global and
-        // compact indices, or emits a circuit whose node is missing
-        // from `used_vec` would silently corrupt downstream lookups
-        // like `LoopCircuitsResult::circuit_names`.  Release builds
-        // compile this check out.
         debug_assert!(
             circuits
                 .iter()
@@ -1456,7 +1519,7 @@ impl CausalGraph {
             "every compact index in trimmed circuits must address a valid name-table entry"
         );
 
-        Ok((names, circuits))
+        (names, circuits)
     }
 
     /// Enrich a loop's stock list with stocks from inside any DynamicModule

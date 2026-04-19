@@ -1988,10 +1988,10 @@ fn test_compute_metadata_falls_back_on_truncated_loop_detection() {
     use simlin_engine::test_common::TestProject;
 
     // Build N disjoint 3-node feedback cycles where N exceeds the
-    // distinct-signature backstop.  Each cycle has a unique variable-
-    // level signature (different aux/flow/stock names), so
-    // `count_distinct_variable_level_signatures` reports N and the
-    // total-circuit backstop fires.
+    // distinct-signature backstop.  Each cycle has a unique
+    // variable-level signature (different aux/flow/stock names), so
+    // `estimate_emitted_loop_count` reports N (scalar groups, no
+    // pure-A2A collapse) and the total-circuit backstop fires.
     let n = MAX_LTM_TOTAL_CIRCUITS + 1;
     let mut builder = TestProject::new("layout_fallback_on_truncation");
     for k in 0..n {
