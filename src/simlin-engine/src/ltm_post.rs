@@ -208,18 +208,35 @@ pub fn compute_rel_loop_scores_per_element(
         for (part_key, indices) in &partition_groups {
             let max_slots = group_max_slots.get(part_key).copied().unwrap_or(1);
             for k in 0..max_slots {
+                // Resolve per-loop element index once.  A loop with
+                // slot_count == 1 broadcasts its single value to every
+                // element; a loop with slot_count > 1 uses `k`
+                // directly, but only when `k < slot_count` -- partition
+                // membership keys on stock SCCs, so a single partition
+                // can legitimately contain loops of mixed arity (e.g.,
+                // a Region loop and a Region x Age loop).  The
+                // mixed-arity loop has no value at elements beyond its
+                // own length, so it drops out of both the denominator
+                // sum and the numerator write for those k.
+                let elem_index = |i: usize| -> Option<usize> {
+                    let slots = slot_counts[i];
+                    if slots > 1 {
+                        if k < slots { Some(k) } else { None }
+                    } else {
+                        Some(0)
+                    }
+                };
+
                 let denom: f64 = indices
                     .iter()
                     .filter_map(|&i| {
-                        offsets[i].map(|off| {
-                            let elem = if slot_counts[i] > 1 { k } else { 0 };
-                            row[off + elem].abs()
-                        })
+                        let elem = elem_index(i)?;
+                        offsets[i].map(|off| row[off + elem].abs())
                     })
                     .sum();
                 for &i in indices {
                     let Some(off) = offsets[i] else { continue };
-                    let elem = if slot_counts[i] > 1 { k } else { 0 };
+                    let Some(elem) = elem_index(i) else { continue };
                     let num = row[off + elem];
                     let val = if denom == 0.0 { 0.0 } else { num / denom };
                     series[i][step * max_slots + k] = val;
@@ -583,6 +600,85 @@ mod tests {
         assert!((rel_b[3] - (8.0 / 10.0)).abs() < 1e-12, "B[s=1, k=0]");
         assert!((rel_b[4] - (8.0 / 12.0)).abs() < 1e-12, "B[s=1, k=1]");
         assert!((rel_b[5] - (8.0 / 14.0)).abs() < 1e-12, "B[s=1, k=2]");
+    }
+
+    #[test]
+    fn per_element_mixed_arity_drops_short_loop_beyond_its_length() {
+        // A partition can contain arrayed loops with different slot
+        // counts (e.g., a Region loop of size 2 sharing a partition
+        // with a Region x Age loop of size 2*3 = 6 because they touch
+        // the same stock SCC).  For elements `k >= slot_count_i`, the
+        // shorter loop must drop out of both the denominator and the
+        // numerator rather than reading past its own buffer into
+        // adjacent columns.
+        //
+        // Test shape:
+        //   loop A (2 slots): step 0 -> [1, 2]
+        //   loop B (4 slots): step 0 -> [10, 20, 30, 40]
+        //
+        // max_slots = 4.  Expected denominators:
+        //   k = 0: |1| + |10| = 11
+        //   k = 1: |2| + |20| = 22
+        //   k = 2:        |30| = 30   (A dropped)
+        //   k = 3:        |40| = 40   (A dropped)
+        //
+        // A's output at k in {2, 3} must be the default 0.0 (loop has
+        // no slot at that element, not a misaligned read from B's
+        // buffer).
+        let step_count = 1;
+        let step_size = 1 + 2 + 4; // time + A + B
+        let mut data = vec![0.0_f64; step_count * step_size];
+        data[0] = 0.0;
+        data[1] = 1.0; // A[0]
+        data[2] = 2.0; // A[1]
+        data[3] = 10.0; // B[0]
+        data[4] = 20.0; // B[1]
+        data[5] = 30.0; // B[2]
+        data[6] = 40.0; // B[3]
+
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        offsets.insert(loop_score_ident("A"), 1);
+        offsets.insert(loop_score_ident("B"), 3);
+
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 0.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs::from(&sim_specs),
+            is_vensim: false,
+        };
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let slots: HashMap<String, usize> = [("A".to_string(), 2), ("B".to_string(), 4)]
+            .into_iter()
+            .collect();
+
+        let per_elem = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let rel_a = per_elem.get("A").expect("loop A has a series");
+        let rel_b = per_elem.get("B").expect("loop B has a series");
+        // Each Vec has length step_count * max_slots = 1 * 4 = 4.
+        assert_eq!(rel_a.len(), 4);
+        assert_eq!(rel_b.len(), 4);
+
+        assert!((rel_a[0] - (1.0 / 11.0)).abs() < 1e-12, "A[k=0]");
+        assert!((rel_a[1] - (2.0 / 22.0)).abs() < 1e-12, "A[k=1]");
+        assert_eq!(rel_a[2], 0.0, "A[k=2] beyond A's length -> default 0.0");
+        assert_eq!(rel_a[3], 0.0, "A[k=3] beyond A's length -> default 0.0");
+
+        assert!((rel_b[0] - (10.0 / 11.0)).abs() < 1e-12, "B[k=0]");
+        assert!((rel_b[1] - (20.0 / 22.0)).abs() < 1e-12, "B[k=1]");
+        assert!((rel_b[2] - (30.0 / 30.0)).abs() < 1e-12, "B[k=2]");
+        assert!((rel_b[3] - (40.0 / 40.0)).abs() < 1e-12, "B[k=3]");
     }
 
     proptest! {

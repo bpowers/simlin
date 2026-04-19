@@ -44,17 +44,13 @@ use crate::variable::{Variable, identifier_set};
 ///   [`crate::ltm_post::compute_rel_loop_scores`]).
 ///
 /// Cliff A remains the live constraint this gate addresses.  At ~9 KB
-/// per `Loop` struct, 10_000 distinct Loops cost ~90 MB of
-/// intermediate state -- comfortable inside WASM's 4 GiB budget with
-/// room for the rest of the compile pipeline.
-/// ## Why 10_000
-///
-/// At ~9 KB per materialized `Loop` struct (diagnosis measurement on
-/// WRLD3: ~17 GB / ~1.86M loops) plus ~4 KB per `loop_score` equation,
-/// 10_000 loops cost ~130 MB of intermediate state.  That fits WASM
-/// with comfortable headroom for the rest of the compile pipeline.
-/// Every in-tree LTM test model is well under this; only synthetic
-/// array-expansion pathology or models at the scale of WRLD3 trip it.
+/// per materialized `Loop` struct (diagnosis measurement on WRLD3:
+/// ~17 GB / ~1.86M loops) plus ~4 KB per `loop_score` equation,
+/// 10_000 loops cost ~130 MB of intermediate state -- comfortable
+/// inside WASM's 4 GiB budget with room for the rest of the compile
+/// pipeline.  Every in-tree LTM test model is well under this; only
+/// synthetic array-expansion pathology or models at the scale of
+/// WRLD3 trip it.
 pub const MAX_LTM_TOTAL_CIRCUITS: usize = 10_000;
 
 /// Streaming cap on Johnson's-level distinct-circuit enumeration inside
