@@ -2087,7 +2087,10 @@ pub fn model_ltm_variables(
         let element_edges = model_element_causal_edges(db, model, project);
         causal_graph_from_element_edges(element_edges).largest_scc_size()
     };
-    let scc_auto_flip = !is_discovery_user && max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
+    // `max_scc_size` is 0 on the user-requested-discovery branch
+    // (computed lazily above), so a bare `>` comparison here is
+    // correct regardless of the discovery-mode source.
+    let scc_auto_flip = max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
     // `is_discovery` may be upgraded to true below by the total-circuit
     // backstop (a second gate for pathological shapes the largest-SCC
     // heuristic misses, e.g. thousands of disjoint small cycles).

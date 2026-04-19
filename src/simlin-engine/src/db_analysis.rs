@@ -1077,15 +1077,17 @@ pub fn model_loop_circuits(
 /// polarity analysis. Loop IDs (r1, b1, u1, ...) match those used
 /// by LTM augmentation.
 ///
-/// Gated by [`crate::ltm::MAX_LTM_SCC_NODES`]: if the variable-level
-/// causal graph has any SCC larger than the threshold, this function
-/// returns an empty result.  The same gate fires on
-/// `model_ltm_variables`, so dense-graph models (WRLD3, etc.) fall back
-/// to discovery-mode analysis consistently across the callers of this
-/// function (layout feedback-loop metadata, `simlin_analyze_get_loops`,
-/// `simlin-cli --ltm`).  Listing 1.86M structural loops would not be
-/// useful to any of those consumers anyway, and enumerating them would
-/// allocate ~17 GB of `Loop`/`Link` state on WRLD3-scale inputs.
+/// Bounded by [`crate::ltm::MAX_LTM_TOTAL_CIRCUITS`]: if the variable-
+/// level causal graph has more elementary circuits than the threshold
+/// (measured directly, not estimated from SCC size), this function
+/// returns an empty result rather than materialize the full Loop list.
+/// The same threshold is the backstop inside `model_ltm_variables`, so
+/// FFI / layout / `simlin-cli --ltm` consumers stay in the "loops are
+/// available" regime exactly when LTM would stay on the exhaustive
+/// branch.  Sparse graphs with one or a few long cycles (e.g., a
+/// 51-node ring, or small multi-module models) enumerate their loops
+/// successfully; dense graphs like WRLD3 truncate and return empty so
+/// callers fall back to `analyze_model`'s discovery-mode output.
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
@@ -1093,18 +1095,15 @@ pub fn model_detected_loops(
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
 
-    // Match the auto-flip gate in `model_ltm_variables`: on graphs with
-    // a dense SCC the enumeration itself is survivable but the
-    // downstream materialization is not, and returning an empty list is
-    // the honest answer — the downstream discovery path (via
-    // `analyze_model`) is what callers should use for such models.
-    if graph.largest_scc_size() > crate::ltm::MAX_LTM_SCC_NODES {
-        return DetectedLoopsResult { loops: Vec::new() };
-    }
-
-    let loops = graph
-        .find_loops_with_limit(usize::MAX)
-        .expect("usize::MAX cannot exhaust the enumeration budget");
+    // Budget-based gate: measure actual circuit count, not an SCC-size
+    // heuristic.  Keeps this query cheap on dense graphs (Johnson's
+    // bails as soon as the `MAX_LTM_TOTAL_CIRCUITS`th circuit would be
+    // recorded) without penalising sparse graphs whose largest SCC
+    // happens to be big but whose circuit count is tiny.
+    let loops = match graph.find_loops_with_limit(crate::ltm::MAX_LTM_TOTAL_CIRCUITS) {
+        Ok(loops) => loops,
+        Err(crate::ltm::TruncatedByBudget) => return DetectedLoopsResult { loops: Vec::new() },
+    };
     DetectedLoopsResult {
         loops: loops
             .into_iter()
@@ -1692,37 +1691,16 @@ mod detected_loops_gate_tests {
         builder.build_datamodel()
     }
 
-    /// `model_detected_loops` must return empty when the variable-level
-    /// causal graph has any SCC larger than `MAX_LTM_SCC_NODES`.  This
-    /// matches the auto-flip gate in `model_ltm_variables`: FFI / layout
-    /// / CLI consumers of `model_detected_loops` (which also runs with
-    /// `usize::MAX` after the cap removal) would otherwise still pay
-    /// `build_element_level_loops`'s ~17 GB allocation profile on
-    /// WRLD3-scale inputs.  Returning empty makes those callers
-    /// consistent with `analyze_model`'s discovery-mode output at the
-    /// same threshold.
+    /// A sparse ring with >50 nodes but exactly one elementary loop
+    /// must enumerate successfully.  The iteration-1 SCC-size gate here
+    /// was too aggressive: it suppressed the loop even though
+    /// enumeration was trivial (one Johnson's walk returning a single
+    /// circuit).  The circuit-budget gate (`MAX_LTM_TOTAL_CIRCUITS`)
+    /// correctly lets this through while still catching dense graphs
+    /// that actually produce many circuits.
     #[test]
-    fn test_model_detected_loops_gated_above_scc_threshold() {
-        let project = build_chain_scc_project("detected_loops_gate_above", 51);
-        let db = SimlinDb::default();
-        let sync = sync_from_datamodel(&db, &project);
-        let model = sync.models["main"].source;
-
-        let detected = model_detected_loops(&db, model, sync.project);
-
-        assert!(
-            detected.loops.is_empty(),
-            "SCC=51 must gate model_detected_loops to empty; got {} loops",
-            detected.loops.len()
-        );
-    }
-
-    /// Below the threshold, `model_detected_loops` must still enumerate
-    /// the expected loops.  A 49-node SCC is one below the gate, so the
-    /// small-model behaviour is unchanged.
-    #[test]
-    fn test_model_detected_loops_returns_loops_below_threshold() {
-        let project = build_chain_scc_project("detected_loops_gate_below", 49);
+    fn test_model_detected_loops_sparse_large_ring_enumerates() {
+        let project = build_chain_scc_project("detected_loops_sparse_ring", 75);
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
         let model = sync.models["main"].source;
@@ -1732,8 +1710,55 @@ mod detected_loops_gate_tests {
         assert_eq!(
             detected.loops.len(),
             1,
-            "49-node single-SCC chain has exactly one elementary loop; got {:?}",
+            "75-node single ring has exactly one elementary loop; \
+             budget-based gate must not suppress it; got {:?}",
             detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
         );
+    }
+
+    /// Small models (well under the budget) keep their loops.  Regression
+    /// test for the bottom end of the gate: nothing should change for
+    /// typical SD models.
+    #[test]
+    fn test_model_detected_loops_small_model_unchanged() {
+        let project = build_chain_scc_project("detected_loops_small", 5);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        let detected = model_detected_loops(&db, model, sync.project);
+
+        assert_eq!(
+            detected.loops.len(),
+            1,
+            "5-node chain has one elementary loop; budget gate inactive \
+             far below threshold; got {:?}",
+            detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// `CausalGraph::find_loops_with_limit` must return
+    /// `Err(TruncatedByBudget)` when the enumeration would exceed the
+    /// caller's budget — the signal that `model_detected_loops` uses to
+    /// gate dense-graph results to empty.  A tight budget on an
+    /// already-known-loopy graph exercises the contract directly
+    /// without requiring a synthetic model with >10K circuits (which
+    /// is hard to express in `TestProject` — WRLD3-scale
+    /// dense-graph coverage lives in `tests/wrld3_ltm_panic.rs`).
+    #[test]
+    fn test_find_loops_with_limit_truncates_dense_graph() {
+        let project = build_chain_scc_project("find_loops_budget_truncate", 5);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        // Variable-level graph has one elementary circuit (the 5-node
+        // ring).  Budget=0 forces TruncatedByBudget on the first
+        // record attempt, proving the bail-out path is live.
+        let graph = causal_graph_with_modules(&db, model, sync.project);
+        let err = graph
+            .find_loops_with_limit(0)
+            .expect_err("budget=0 must truncate as soon as a circuit would be recorded");
+        assert_eq!(err, crate::ltm::TruncatedByBudget);
     }
 }

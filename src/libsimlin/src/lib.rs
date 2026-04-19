@@ -297,6 +297,16 @@ pub(crate) struct SimState {
     /// Constant value overrides survive VM consumption (run_to_end consumes the VM).
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
+    /// Snapshot of the loop-id -> cycle-partition mapping at the time
+    /// this simulation was compiled (when `enable_ltm` was true; empty
+    /// for non-LTM sims and for auto-flipped discovery runs).  Bound to
+    /// the VM snapshot so a `simlin_project_apply_patch` that happens
+    /// between `simlin_sim_new` and `simlin_analyze_get_relative_loop_score`
+    /// cannot silently mismatch partition keys against the results
+    /// buffer.  Post-sim `rel_loop_score` computation in
+    /// `simlin_analyze_get_relative_loop_score` reads from here rather
+    /// than re-querying the (possibly mutated) salsa db.
+    pub(crate) loop_partitions: HashMap<String, Option<usize>>,
 }
 
 /// Opaque simulation structure

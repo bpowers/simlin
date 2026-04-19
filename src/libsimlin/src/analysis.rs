@@ -408,38 +408,13 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     // `rel_loop_score` is no longer materialized as a VM-computed variable
     // (it caused O(P²) compile-time text blowup on dense models; see
     // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md). We derive it
-    // post-hoc from the `loop_score` series the VM does write, using the
-    // cycle-partition mapping cached by salsa on `model_ltm_variables`.
-    let model_ref = &*sim_ref.model;
-    let project_ref = &*model_ref.project;
-    let db_locked = project_ref.db.lock().unwrap();
-    let sync_state = project_ref.sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
-        None => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
-            );
-            return;
-        }
-    };
-
-    let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
-        None => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::BadModelName)
-                    .with_message(format!("model '{}' not found", model_ref.model_name)),
-            );
-            return;
-        }
-    };
-
-    let ltm = engine::db::model_ltm_variables(&*db_locked, synced_model.source, sync.project);
-
+    // post-hoc from the `loop_score` series the VM did write, using the
+    // cycle-partition mapping captured on `SimState` at `simlin_sim_new`
+    // time.  Reading from the snapshot rather than re-querying the
+    // salsa db keeps this FFI isolated from concurrent patches — the
+    // scores stay consistent with the results buffer even if the
+    // project was mutated after the sim was created — and avoids the
+    // db-then-state lock inversion the prior implementation had.
     let state = sim_ref.state.lock().unwrap();
     let Some(ref results) = state.results else {
         store_error(
@@ -450,13 +425,31 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     };
 
-    let scored = engine::ltm_post::compute_rel_loop_scores(results, &ltm.loop_partitions);
+    let scored = engine::ltm_post::compute_rel_loop_scores(results, &state.loop_partitions);
     let Some(series) = scored.get(loop_id) else {
+        // Distinguish two disjoint cases so FFI callers can react
+        // appropriately: (a) `loop_partitions` is empty because LTM
+        // was not enabled or auto-flipped to discovery (structural
+        // loops still exist but no per-loop score was ever written
+        // to results); (b) the loop_id is unknown within an LTM
+        // exhaustive run.  Both still surface as `DoesNotExist`,
+        // matching the pre-PR error code, but with a message that
+        // lets the caller tell which path they hit.
+        let message = if state.loop_partitions.is_empty() {
+            format!(
+                "loop '{loop_id}' has no relative score data: LTM analysis \
+                 was either disabled or auto-switched to discovery mode for \
+                 this model (see engine warnings)"
+            )
+        } else {
+            format!(
+                "loop '{loop_id}' is not in the LTM partition map for this \
+                 simulation; verify the id returned by simlin_analyze_get_loops"
+            )
+        };
         store_error(
             out_error,
-            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                "loop '{loop_id}' does not have relative score data"
-            )),
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(message),
         );
         return;
     };

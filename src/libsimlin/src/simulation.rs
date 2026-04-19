@@ -56,27 +56,57 @@ pub unsafe extern "C" fn simlin_sim_new(
     // on the SourceProject input. The DB is kept in sync by apply_patch
     // and project constructors, so this is typically a cache hit when
     // nothing changed since the last patch.
-    let incremental_result: std::result::Result<engine::CompiledSimulation, engine::Error> = {
+    let (incremental_result, loop_partitions): (
+        std::result::Result<engine::CompiledSimulation, engine::Error>,
+        HashMap<String, Option<usize>>,
+    ) = {
         let mut db = project_ref.db.lock().unwrap();
         let sync_state = project_ref.sync_state.lock().unwrap();
         if let Some(ref state) = *sync_state {
-            let source_project = state.to_sync_result().project;
+            let sync = state.to_sync_result();
+            let source_project = sync.project;
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
-            let result =
+            let compile =
                 engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
+
+            // Snapshot the loop-id -> partition mapping while LTM is
+            // still enabled and before we drop the db lock.  This binds
+            // `rel_loop_score` normalization to the compiled VM's era:
+            // if the project is patched between `sim_new` and
+            // `simlin_analyze_get_relative_loop_score`, the post-sim
+            // computation keeps using this snapshot rather than the
+            // (possibly-reorganised) partitions on the live db.
+            // Non-LTM sims and failed compiles get an empty map.
+            let partitions = if enable_ltm && compile.is_ok() {
+                let canonical = engine::canonicalize(&model_ref.model_name);
+                match sync.models.get(canonical.as_ref()) {
+                    Some(synced) => {
+                        engine::db::model_ltm_variables(&*db, synced.source, source_project)
+                            .loop_partitions
+                            .clone()
+                    }
+                    None => HashMap::new(),
+                }
+            } else {
+                HashMap::new()
+            };
+
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
             // the same SourceProject.
             if enable_ltm {
                 engine::db::set_project_ltm_enabled(&mut db, source_project, false);
             }
-            result
+            (compile, partitions)
         } else {
-            Err(engine::Error {
-                kind: engine::ErrorKind::Simulation,
-                code: engine::ErrorCode::NotSimulatable,
-                details: Some("incremental compilation: no sync state available".to_string()),
-            })
+            (
+                Err(engine::Error {
+                    kind: engine::ErrorKind::Simulation,
+                    code: engine::ErrorCode::NotSimulatable,
+                    details: Some("incremental compilation: no sync state available".to_string()),
+                }),
+                HashMap::new(),
+            )
         }
     };
 
@@ -98,6 +128,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             vm_error,
             results: None,
             overrides: HashMap::new(),
+            loop_partitions,
         }),
         ref_count: AtomicUsize::new(1),
     });

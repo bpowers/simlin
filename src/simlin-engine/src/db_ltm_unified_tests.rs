@@ -802,3 +802,50 @@ fn test_auto_flip_on_total_circuits_emits_warning() {
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
 }
+
+/// Symmetric to `test_auto_flip_warning_surfaces_via_collect_model_diagnostics`
+/// for the SCC gate: the total-circuit backstop's warning must also
+/// reach `collect_model_diagnostics`, which is the API FFI callers
+/// (libsimlin, simlin-mcp) use to surface compile-time issues to end
+/// users.  A regression where `model_all_diagnostics` stopped driving
+/// LTM synthesis would silence this path and leave users wondering why
+/// `rel_loop_score` queries returned empty.
+#[test]
+fn test_total_circuits_warning_surfaces_via_collect_model_diagnostics() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use salsa::Setter;
+
+    let dim_size = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
+    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+
+    let project = crate::test_common::TestProject::new("arrayed_total_circuits_surface")
+        .named_dimension("Region", &elem_refs)
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let has_total_circuits_warning = diags.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg)
+                    if msg.contains("MAX_LTM_TOTAL_CIRCUITS")
+                        && msg.contains("elementary circuits")
+            )
+    });
+    assert!(
+        has_total_circuits_warning,
+        "total-circuit backstop warning must reach collect_model_diagnostics; got: {:?}",
+        diags
+    );
+}
