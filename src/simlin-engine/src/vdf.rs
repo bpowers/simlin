@@ -2374,11 +2374,27 @@ impl VdfFile {
     /// template (5 = scalar; other = section-3 directory entry). This path
     /// is intentionally direct: no scoring, no offset scan, no external
     /// stock classifier -- the mapping is whatever the records deterministically
-    /// produce. Callers that need richer resolution (stocks-first-alphabetical,
-    /// model-guided aliases) should still use `to_results_with_stock_classifier`
-    /// or `build_section6_guided_ot_map`.
+    /// produce.
     ///
-    /// Filtering rules (structural only):
+    /// ### Limitations
+    ///
+    /// This pairing is only **correct** when Vensim emits records in
+    /// name-table order, which holds for small/medium scalar fixtures
+    /// (`water`, `pop`, `bact`, `lookup_ex`, `level_vs_aux/*`, most
+    /// `model_editing/run_*`). On re-saved or large compilation-order
+    /// files (`econ/*.vdf`, `WRLD3-03/*.VDF`, `Ref.vdf`/C-LEARN) the
+    /// record order is Vensim's internal compilation order, not name-table
+    /// order, so the sort-by-`f[2]` + `(slot_count - record_count)` offset
+    /// pairs many records with the wrong name. The column count may look
+    /// healthy, but individual labels will be misassigned. Callers that
+    /// need correct labels on compilation-order fixtures should use
+    /// `build_section6_guided_ot_map` or `to_results_with_model` -- both
+    /// require a parsed model. The deterministic direct-link for records
+    /// in compilation order is still open; see notes in
+    /// `docs/design/vdf.md` section "Name-to-OT mapping".
+    ///
+    /// ### Filtering rules (structural only)
+    ///
     /// - Records with `field[11] == 0` or `field[11] >= offset_table_count`
     ///   are skipped -- OT[0] is the Time series, not a record slot.
     /// - Records whose `field[6] == 0` are treated as non-shape/padding
@@ -5644,62 +5660,138 @@ mod tests {
         );
     }
 
+    /// Check whether `Results` produced by `to_results_via_records` assigns
+    /// correct labels to its data columns, using `build_section6_guided_ot_map`
+    /// as the authoritative ground truth.
+    ///
+    /// Why this is not a simple HashMap equality check:
+    /// - `Results::offsets` maps `Ident -> column_index` (arbitrary layout),
+    ///   NOT `Ident -> OT_index`.
+    /// - `build_section6_guided_ot_map` returns `Ident -> OT_index`.
+    /// - Comparing column_index vs OT_index directly is meaningless.
+    ///
+    /// Correct comparison: for each name present in both maps, the time
+    /// series under that name in `Results` must equal the time series at
+    /// the OT index guided claims for that name. Equality is checked to
+    /// 1e-6 tolerance (per-point) across all saved time steps.
+    ///
+    /// Returns (agreed, compared_total): compared_total is the number of
+    /// names present in both maps; agreed is the subset whose time series
+    /// match.
+    fn via_records_label_agreement(
+        results: &crate::Results,
+        guided: &HashMap<Ident<Canonical>, usize>,
+        vdf_data: &VdfData,
+    ) -> (usize, usize) {
+        let mut agreed = 0;
+        let mut compared = 0;
+        for (name, &col) in &results.offsets {
+            let Some(&guided_ot) = guided.get(name) else {
+                continue;
+            };
+            let Some(guided_series) = vdf_data.entries.get(guided_ot) else {
+                continue;
+            };
+            compared += 1;
+            let step_size = results.step_size;
+            let step_count = results.step_count;
+            let all_match =
+                guided_series
+                    .iter()
+                    .take(step_count)
+                    .enumerate()
+                    .all(|(step, &guided_val)| {
+                        let via_val = results.data[step * step_size + col];
+                        (via_val - guided_val).abs() <= 1e-6
+                    });
+            if all_match {
+                agreed += 1;
+            }
+        }
+        (agreed, compared)
+    }
+
     #[test]
-    fn test_to_results_via_records_covers_econ_base() {
-        // econ/base.vdf used to top out at ~64 non-Time OT slots because
-        // the old filter discarded records paired with stdlib-helper names
-        // (DEL, LV1, ST), Vensim builtin tokens (MIN, SMOOTH, DELAY1),
-        // unit/view markers (-months, .mark2), and single-char placeholders.
-        // Those records all have real `field[6] != 0` shapes and valid
-        // `field[11]` OT indices, so Vensim wrote them deliberately and
-        // the data belongs to whatever name the paired slot carries.
+    fn test_to_results_via_records_matches_guided_on_econ_base_is_known_low() {
+        // On econ/base.vdf, Vensim emits records in compilation order, not
+        // name-table order. The `(slot_count - record_count)` nominal offset
+        // pairing therefore misassigns the majority of labels -- the column
+        // count looks healthy post-filter-removal but individual labels are
+        // wrong. `build_section6_guided_ot_map` is the authoritative ground
+        // truth (model-guided, section-6 class codes + alphabetical sort).
         //
-        // With the lexical filter gone, every structurally valid record
-        // claims an OT. We expect full coverage on econ/base (77/77).
-        //
-        // This test pins the coverage floor so any regression in the
-        // record finder or a re-introduction of a name-category filter
-        // would trip the bound.
+        // This test PINS the current low label-agreement rate so a future
+        // improvement to `to_results_via_records` -- e.g. resolving the
+        // compilation-order record->name link in follow-up task #9 -- would
+        // raise the ratio and fail the assertion, signalling that this test
+        // and the function's docstring should be updated.
         let vdf = vdf_file("../../test/bobby/vdf/econ/base.vdf");
+        let contents = std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").unwrap();
+        let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+        let model = datamodel_project.models.first().unwrap();
+        let guided = vdf
+            .build_section6_guided_ot_map(model)
+            .expect("guided map should succeed on econ/base");
         let results = vdf
             .to_results_via_records()
             .expect("econ/base: record-based mapping should succeed");
-        let non_time_named = results.offsets.len().saturating_sub(1);
-        let non_time_ots = vdf.offset_table_count.saturating_sub(1);
-        assert_eq!(non_time_ots, 77);
+        let vdf_data = vdf.extract_data().unwrap();
+
+        let (agreed, compared) = via_records_label_agreement(&results, &guided, &vdf_data);
+        let ratio = agreed as f64 / compared.max(1) as f64;
         assert!(
-            non_time_named >= 73,
-            "econ/base: expected >=73 non-Time OT mappings, \
-             got {non_time_named}/{non_time_ots}"
+            ratio < 0.60,
+            "econ/base: label-correctness (time-series match against guided) \
+             is {ratio:.2} ({agreed}/{compared} names compared). \
+             If this exceeds 60% the compilation-order record->name link has \
+             likely been fixed -- update the docstring of `to_results_via_records` \
+             and this assertion accordingly."
+        );
+        // Some agreement is expected (Time, and any records that happen to
+        // land at their correct nominal position).
+        assert!(
+            agreed >= 1,
+            "econ/base: expected at least one name's time-series to agree \
+             with guided (Time or an incidentally-correct pairing); got {agreed}"
         );
     }
 
     #[test]
-    fn test_to_results_via_records_covers_econ_siblings() {
-        // The sibling econ fixtures share the same model structure (with
-        // policy/risk tweaks) as econ/base; they all top out below 85%
-        // with the old filter. Verify each clears the 95% coverage floor
-        // after the filter relaxation.
-        for (label, vdf_path, expected_ots) in [
-            ("econ/mark2", "../../test/bobby/vdf/econ/mark2.vdf", 83usize),
-            ("econ/policy", "../../test/bobby/vdf/econ/policy.vdf", 83),
-            ("econ/risk", "../../test/bobby/vdf/econ/risk.vdf", 86),
+    fn test_to_results_via_records_produces_columns_on_econ_siblings() {
+        // Regression guard: the record-based mapping must still produce a
+        // non-empty Results on each econ sibling and must not panic when
+        // `to_results_via_records` is invoked. Label correctness on these
+        // fixtures is NOT asserted here -- they share the compilation-order
+        // limitation with econ/base (see the matches_guided test for
+        // econ/base) and the sort-by-f[2]/offset pairing mislabels the
+        // majority of columns. A Rust-side correctness fix is tracked as
+        // task #9.
+        for (label, vdf_path) in [
+            ("econ/mark2", "../../test/bobby/vdf/econ/mark2.vdf"),
+            ("econ/policy", "../../test/bobby/vdf/econ/policy.vdf"),
+            ("econ/risk", "../../test/bobby/vdf/econ/risk.vdf"),
         ] {
             let vdf = vdf_file(vdf_path);
             let results = vdf
                 .to_results_via_records()
                 .unwrap_or_else(|e| panic!("{label}: record-based mapping should succeed: {e}"));
-            let non_time_named = results.offsets.len().saturating_sub(1);
-            let non_time_ots = vdf.offset_table_count.saturating_sub(1);
             assert_eq!(
-                non_time_ots, expected_ots,
-                "{label}: expected {expected_ots} non-Time OT slots"
+                results.step_count, vdf.time_point_count,
+                "{label}: step_count"
             );
-            let floor = ((expected_ots as f64) * 0.95).ceil() as usize;
             assert!(
-                non_time_named >= floor,
-                "{label}: expected >={floor} non-Time OT mappings (>=95%), \
-                 got {non_time_named}/{non_time_ots}"
+                results
+                    .offsets
+                    .contains_key(&Ident::<Canonical>::new("time")),
+                "{label}: Time must always be present"
+            );
+            // At least produce >1 column (Time + something). Lower bound
+            // kept deliberately loose: the point is to catch a regression
+            // that empties the Results entirely, not to encode a count
+            // floor that pretends labels are correct.
+            assert!(
+                results.offsets.len() > 1,
+                "{label}: expected more than just Time"
             );
         }
     }
@@ -5743,25 +5835,91 @@ mod tests {
     }
 
     #[test]
-    fn test_to_results_via_records_wrld3_scen01_above_floor() {
-        // WRLD3 SCEN01 is a compilation-order fixture (records > slots)
-        // where the sort-by-f[2]/offset pairing is known to misalign --
-        // see follow-up task #9. Despite that, removing the lexical
-        // filter lifts observable coverage from ~82% to ~96% because
-        // the records at the expected pairings all have real f[6]/f[11]
-        // values. Lock in the new floor with a little headroom.
+    fn test_to_results_via_records_matches_guided_on_wrld3_scen01_is_known_low() {
+        // WRLD3 SCEN01 is the canonical compilation-order fixture: records
+        // outnumber slots (419 vs 404 after the record-region fix) and
+        // Vensim emits them in its internal declaration/view-sector order,
+        // not name-table order. Probing in prior investigation showed the
+        // sort-by-f[2]/offset pairing mislabels essentially every column
+        // on this fixture -- 0/335 agreement with the model-guided map in
+        // one dataset.
+        //
+        // This test pins the known-low label-agreement ratio so a future
+        // fix to `to_results_via_records` on compilation-order files (the
+        // task #9 direct record->name link) will make the assertion fail,
+        // forcing whoever lands the fix to also update this test and the
+        // function's docstring.
         let vdf = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
+        let contents = std::fs::read_to_string("../../test/metasd/WRLD3-03/wrld3-03.mdl").unwrap();
+        let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+        let model = datamodel_project.models.first().unwrap();
+        let guided = vdf
+            .build_section6_guided_ot_map(model)
+            .expect("guided map should succeed on WRLD3 SCEN01");
         let results = vdf
             .to_results_via_records()
             .expect("WRLD3 SCEN01: record-based mapping should succeed");
-        let non_time_named = results.offsets.len().saturating_sub(1);
-        let non_time_ots = vdf.offset_table_count.saturating_sub(1);
-        // Ratio around 0.90 gives ~5% headroom below the observed ~0.966.
-        let floor = ((non_time_ots as f64) * 0.90).ceil() as usize;
+        let vdf_data = vdf.extract_data().unwrap();
+
+        let (agreed, compared) = via_records_label_agreement(&results, &guided, &vdf_data);
+        let ratio = agreed as f64 / compared.max(1) as f64;
         assert!(
-            non_time_named >= floor,
-            "WRLD3 SCEN01: expected >={floor} non-Time OT mappings (>=90%), \
-             got {non_time_named}/{non_time_ots}"
+            ratio < 0.20,
+            "WRLD3 SCEN01: label-correctness (time-series match against guided) \
+             is {ratio:.2} ({agreed}/{compared} names compared). \
+             If this exceeds 20% the compilation-order record->name link has \
+             likely been fixed -- update the docstring of `to_results_via_records` \
+             and this assertion accordingly."
         );
+    }
+
+    #[test]
+    fn test_to_results_via_records_agrees_with_guided_on_small_models() {
+        // Positive correctness test: on fixtures where Vensim emits records
+        // in name-table order (small/medium non-arrayed scalar models),
+        // `to_results_via_records` should agree with `build_section6_guided_ot_map`
+        // on the vast majority of labels. The two paths take different
+        // routes to the same answer -- via_records uses f[2]-sort +
+        // (slot_count - record_count) offset; guided uses section-6 class
+        // codes + model-driven alphabetical sort -- and their agreement
+        // confirms both paths are sound on name-ordered fixtures.
+        //
+        // This complements the WRLD3/econ compilation-order tests: when
+        // they trip, this test must still pass (the name-order path must
+        // not regress).
+        // `consts` is excluded here because build_section6_guided_ot_map
+        // returns a candidate-count mismatch on it; the via_records path
+        // succeeds but we have no usable ground truth for comparison.
+        for (label, vdf_path, mdl_path) in [
+            (
+                "water",
+                "../../test/bobby/vdf/water/water.vdf",
+                "../../test/bobby/vdf/water/water.mdl",
+            ),
+            (
+                "pop",
+                "../../test/bobby/vdf/pop/pop.vdf",
+                "../../test/bobby/vdf/pop/pop.mdl",
+            ),
+        ] {
+            let vdf = vdf_file(vdf_path);
+            let contents = std::fs::read_to_string(mdl_path).unwrap();
+            let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
+            let model = datamodel_project.models.first().unwrap();
+            let guided = vdf
+                .build_section6_guided_ot_map(model)
+                .unwrap_or_else(|e| panic!("{label}: guided map should succeed: {e}"));
+            let results = vdf
+                .to_results_via_records()
+                .unwrap_or_else(|e| panic!("{label}: via_records should succeed: {e}"));
+            let vdf_data = vdf.extract_data().unwrap();
+            let (agreed, compared) = via_records_label_agreement(&results, &guided, &vdf_data);
+            let ratio = agreed as f64 / compared.max(1) as f64;
+            assert!(
+                ratio >= 0.90,
+                "{label}: expected >=90% label-correctness against guided, \
+                 got {ratio:.2} ({agreed}/{compared} names compared)"
+            );
+        }
     }
 }
