@@ -606,12 +606,13 @@ pub struct LoopCircuitsResult {
     /// Circuits are emitted in the enumerator's deterministic order.
     pub circuits: Vec<Vec<u32>>,
     /// True when enumeration stopped early because the graph has more
-    /// distinct circuits than the caller's streaming cap.  `circuits`
-    /// then holds the first-K circuits emitted by Johnson's DFS (K =
-    /// cap) and `model_ltm_variables` treats this as a hard auto-flip
-    /// signal (the exhaustive path cannot safely reason about a
-    /// truncated circuit list because per-group A2A collapse depends
-    /// on seeing every member of the group).
+    /// distinct circuits than the caller's streaming cap.  When this
+    /// flag is set, `circuits` and `names` are both empty (Johnson's
+    /// partial enumeration state is not currently surfaced on the
+    /// bail path), and `model_ltm_variables` treats the flag as a
+    /// hard auto-flip signal -- the exhaustive path cannot safely
+    /// reason about a truncated circuit list because per-group A2A
+    /// collapse depends on seeing every member of the group.
     pub truncated: bool,
 }
 
@@ -1165,13 +1166,14 @@ pub fn model_detected_loops(
 
     let graph = causal_graph_with_modules(db, model, project);
 
-    // Second gate: post-dedup distinct-circuit count (streams the
+    // Gate 3: variable-level distinct-circuit count (streams the
     // cutoff into Johnson's DFS so dense multidigraphs bail the
     // moment the (max+1)th distinct circuit is discovered, never
-    // materializing the whole Vec<Vec<u32>>).  This catches models
-    // that slip past the SCC gate but would still allocate
-    // Loop-struct memory beyond the cap (e.g., many disjoint small
-    // cycles, each trivial in isolation).
+    // materializing the whole Vec<Vec<u32>>).  In practice this is
+    // rarely reached for arrayed models -- gates 1 and 2 on the
+    // denser element-level graph fire first -- but it's the
+    // authoritative gate for non-arrayed models where variable-
+    // and element-level graphs coincide.
     //
     // On truncation we return `truncated: true` with an empty `loops`
     // list so consumers can tell "acyclic model" (truncated = false,

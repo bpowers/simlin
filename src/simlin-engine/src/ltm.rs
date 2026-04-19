@@ -1489,6 +1489,10 @@ impl CausalGraph {
             return (Vec::new(), circuits);
         }
 
+        // Compact the name table to only the indices that appear in a
+        // circuit.  Using BTreeSet preserves ascending order so the
+        // trimmed `names` stays lex-sorted (the enumerator's canonical
+        // ordering, which downstream tests rely on).
         let mut used: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for c in &circuits {
             for &n in c {
@@ -1497,6 +1501,10 @@ impl CausalGraph {
         }
         let used_vec: Vec<u32> = used.into_iter().collect();
 
+        // Sparse mapping old_idx -> new_idx.  used_vec.len() is bounded
+        // by the (non-trivial) SCC size -- at most a few hundred even
+        // on dense SD models -- so a Vec<i32> keyed by old index is
+        // both faster and denser than a HashMap.
         let mut old_to_new: Vec<i32> = vec![-1; indexed.graph.nodes.len()];
         for (new_i, &old_i) in used_vec.iter().enumerate() {
             old_to_new[old_i as usize] = new_i as i32;
@@ -1512,6 +1520,13 @@ impl CausalGraph {
             .map(|&old| indexed.graph.nodes[old as usize].as_str().to_string())
             .collect();
 
+        // Belt-and-braces: after remap, every circuit index must address
+        // a real entry in the trimmed `names` table.  A future refactor
+        // that accidentally drops a remapped index, mixes global and
+        // compact indices, or emits a circuit whose node is missing
+        // from `used_vec` would silently corrupt downstream lookups
+        // like `LoopCircuitsResult::circuit_names`.  Release builds
+        // compile this check out.
         debug_assert!(
             circuits
                 .iter()

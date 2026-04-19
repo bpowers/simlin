@@ -851,28 +851,24 @@ fn test_auto_flip_on_total_circuits_emits_warning() {
     );
 }
 
-/// Adversarial test for codex iter-7 P2 finding 1 (the "streaming
-/// enumeration cap" concern).  A model with many disjoint small
-/// cycles (each a separate SCC, each one Loop) must auto-flip to
-/// discovery *during* Johnson's DFS rather than after materializing
-/// every indexed path, otherwise a WASM caller can still OOM on
-/// enumeration before the post-hoc distinct-loop gate fires.  Pure
-/// A2A models that would otherwise stay exhaustive are covered by
-/// the separate `test_pure_a2a_over_large_dimension_stays_exhaustive`
-/// test; this one specifically exercises the
-/// `MAX_LTM_ENUMERATION_CAP` bail.
+/// Pin that `model_element_loop_circuits` completes enumeration (does
+/// NOT set `truncated`) for a disjoint-cycle model between the two
+/// caps: well above `MAX_LTM_TOTAL_CIRCUITS` (so the downstream
+/// emit-count gate will flip `model_ltm_variables` to discovery) but
+/// well below `MAX_LTM_ENUMERATION_CAP` (so Johnson's DFS doesn't
+/// stream-bail).  This confirms the two caps cover the two distinct
+/// purposes the iter-7 commit message calls out -- the ~1M streaming
+/// cap protects enumeration memory, the 10K emit-count cap protects
+/// Loop-struct materialization memory -- and a regression that
+/// collapsed them back into one cap would fail this test.
 ///
-/// We don't synthesize a >1M-cycle model in-test (too slow); instead
-/// we pick N just above `MAX_LTM_TOTAL_CIRCUITS` (10_001) so the
-/// streaming bail inside `model_element_loop_circuits` stays well
-/// below its `MAX_LTM_ENUMERATION_CAP` (1_000_000) but the post-hoc
-/// emit-count gate in `model_ltm_variables` still fires on the
-/// distinct-Loop count.  A regression where
-/// `model_element_loop_circuits` silently enumerated unbounded would
-/// not be caught by this test, but one where the post-hoc gate
-/// stopped firing on N disjoint cycles would.
+/// Note: this test does NOT exercise the `MAX_LTM_ENUMERATION_CAP`
+/// streaming bail itself (synthesizing a >1M-cycle model would be too
+/// slow); real coverage of the streaming cap comes from the WRLD3
+/// integration path, where the 166-node SCC's ~1.86M circuits exceed
+/// the cap.
 #[test]
-fn test_element_loop_circuits_streaming_cap_keeps_wasm_bounded() {
+fn test_disjoint_cycles_below_streaming_cap_completes_enumeration() {
     use super::model_element_loop_circuits;
 
     let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
@@ -883,12 +879,10 @@ fn test_element_loop_circuits_streaming_cap_keeps_wasm_bounded() {
     let model = sync.models["main"].source;
 
     let element = model_element_loop_circuits(&db, model, sync.project);
-    // With n = 10_001, enumeration completes (well under the 1_000_000
-    // streaming cap).  The circuits list has exactly n circuits, one
-    // per disjoint cycle.
     assert!(
         !element.truncated,
-        "{n} disjoint cycles is below MAX_LTM_ENUMERATION_CAP; enumeration must not truncate"
+        "{n} disjoint cycles is below MAX_LTM_ENUMERATION_CAP; \
+         enumeration must not truncate"
     );
     assert_eq!(element.circuits.len(), n);
 }

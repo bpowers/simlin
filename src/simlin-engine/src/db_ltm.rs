@@ -1811,11 +1811,20 @@ pub(crate) fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuits
         //     pop[boston] -> share[nyc].
         // (b) circuits in the group have differing leading subscript
         //     elements — genuine cross-element feedback.
+        //
+        // In either cross-element case, `build_element_level_loops`'s
+        // `is_cross_element` branch emits a single scalar approximation
+        // Loop per group (the first unique stripped cycle), NOT one
+        // Loop per element-level circuit (that's the scalar/mixed
+        // branch, which only fires when `!all_subscripted`).  So both
+        // cross-element shapes contribute 1 to the emit count -- same
+        // as pure A2A.
         let stripped: Vec<&str> = representative.iter().map(|s| strip_subscript(s)).collect();
         let mut seen_vars: HashSet<&str> = HashSet::new();
         let has_repeated = stripped.iter().any(|v| !seen_vars.insert(*v));
         if has_repeated {
-            total = total.saturating_add(group_indices.len());
+            // Cross-element via repeated variable names -> 1 Loop.
+            total = total.saturating_add(1);
             continue;
         }
 
@@ -1832,12 +1841,12 @@ pub(crate) fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuits
             leading_elements.windows(2).any(|w| w[0] != w[1])
         });
 
-        if is_cross_element {
-            total = total.saturating_add(group_indices.len());
-        } else {
-            // Pure-dimension: collapses to one Loop.
-            total = total.saturating_add(1);
-        }
+        // Pure-A2A and cross-element (by leading subscripts) both
+        // collapse to 1 Loop per group in `build_element_level_loops`.
+        // The only branch that expands 1:N is the `!all_subscripted`
+        // scalar/mixed branch, handled earlier.
+        let _ = is_cross_element;
+        total = total.saturating_add(1);
     }
     total
 }
@@ -2273,32 +2282,31 @@ pub fn model_ltm_variables(
             // such distinct variable-level loop still costs ~9 KB of
             // `Loop`/`Link` state in `build_element_level_loops`.
             // `model_element_loop_circuits` enumerates with a
-            // streaming distinct-circuit cap of `MAX_LTM_TOTAL_CIRCUITS`
-            // and sets `truncated = true` when that cap trips, which
-            // we treat as a hard auto-flip here: the partial circuit
-            // list is not safe to hand to `build_element_level_loops`
-            // because per-group A2A collapse depends on seeing every
-            // circuit in each group.
+            // streaming distinct-circuit cap of `MAX_LTM_ENUMERATION_CAP`
+            // (1_000_000) and sets `truncated = true` when that cap
+            // trips, which we treat as a hard auto-flip here.  The
+            // safety reason is *not* that emit count exceeds the
+            // tighter `MAX_LTM_TOTAL_CIRCUITS` budget (that's
+            // knowable only on a complete circuit list): it's that
+            // the partial circuit list truncation yielded is not safe
+            // to hand to `build_element_level_loops` -- per-group A2A
+            // collapse depends on seeing every circuit in each group
+            // before classifying it as pure-dimension, cross-element,
+            // or mixed.
             //
             // For non-truncated results we count *emitted* Loops via
             // `estimate_emitted_loop_count`, which mirrors
             // `build_element_level_loops`'s per-group collapse
-            // (pure-A2A groups contribute 1, scalar/mixed contribute
-            // group.len()).  That lets a pure-A2A model with
-            // |Region| = 5_000 stay exhaustive (1 Loop) while a model
-            // with 5_000 independent scalar cycles still flips
-            // (5_000 Loops).
-            let truncated_by_enumeration = circuits_result.truncated;
-            let distinct_loops = if truncated_by_enumeration {
-                // Signal-only when truncation fires: the real
-                // emit-count is >= MAX_LTM_TOTAL_CIRCUITS and bail
-                // semantics are the same as the overflow branch.
-                crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1
-            } else {
-                estimate_emitted_loop_count(circuits_result)
-            };
-            if distinct_loops > crate::ltm::MAX_LTM_TOTAL_CIRCUITS {
-                let msg = if truncated_by_enumeration {
+            // (pure-A2A groups contribute 1, cross-element groups
+            // contribute 1, scalar/mixed contribute group.len()).
+            // That lets a pure-A2A model with |Region| = 5_000 stay
+            // exhaustive (1 Loop) while a model with 5_000 independent
+            // scalar cycles still flips (5_000 Loops).
+            let overflow = circuits_result.truncated
+                || estimate_emitted_loop_count(circuits_result)
+                    > crate::ltm::MAX_LTM_TOTAL_CIRCUITS;
+            if overflow {
+                let msg = if circuits_result.truncated {
                     format!(
                         "LTM analysis auto-switched from exhaustive to discovery mode: \
                          element-level feedback-loop enumeration truncated at \
@@ -2311,6 +2319,7 @@ pub fn model_ltm_variables(
                         crate::ltm::MAX_LTM_ENUMERATION_CAP,
                     )
                 } else {
+                    let distinct_loops = estimate_emitted_loop_count(circuits_result);
                     format!(
                         "LTM analysis auto-switched from exhaustive to discovery mode: \
                          the element-level graph yields {} feedback loops after \

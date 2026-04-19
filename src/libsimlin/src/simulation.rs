@@ -547,6 +547,13 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
         let idx = (results.step_count - 1) * results.step_size + offset;
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
+            // In-place edit of the saved results buffer invalidates
+            // any memoized relative-score series that was computed
+            // from the pre-edit values.  Without this, a caller that
+            // reads a loop score then calls set_value_by_offset to
+            // amend the saved step would read a stale series on the
+            // next simlin_analyze_get_relative_loop_score.
+            state.cached_rel_scores = None;
             return;
         }
     }
