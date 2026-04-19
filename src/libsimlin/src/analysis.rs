@@ -425,34 +425,34 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     }
 
-    // Resolve the requested loop's partition up front -- a missing
-    // entry in `loop_partitions` falls into the same `None`-group the
-    // full-pass computation uses (see `compute_rel_loop_scores`).  A
-    // loop_id that isn't in the map at all distinguishes between
-    // "never compiled under LTM" and "known loop with no partition
-    // key"; we fall through to the partition-denominator path in both
-    // cases because the denominator pass naturally produces zeros for
-    // an unknown partition (no loops contribute).  That gives the
-    // missing-series branch below something coherent to report.
-    let partition_key = state.loop_partitions.get(loop_id).copied().flatten();
-
-    // Populate the per-partition denominator cache on first access
-    // for this partition, then reuse it across subsequent queries for
-    // any loop in the same partition.  Callers iterating every loop
-    // id (pysimlin `_populate_loop_behavior`, diagram UI stepping
-    // through loops, LoopDominanceAnalyzer) would otherwise pay
-    // O(partition_size * S) per call across P calls -- quadratic in
-    // partition size.  Partition-granularity caching also bounds peak
-    // memory at O(num_partitions * S) instead of the prior
-    // O(loop_count * S); see SimState::cached_partition_denominators.
-    // The cache is invalidated in `simlin_sim_run_to_end`,
-    // `simlin_sim_reset`, and `set_value_by_offset` whenever the
-    // underlying results buffer changes.
+    // Resolve the requested loop's partition, then populate the
+    // per-partition denominator cache on first access and reuse it on
+    // subsequent queries for any loop in the same partition.
+    //
+    // Missing `loop_partitions` entry: a loop_id that isn't in the
+    // map at all follows the same `None`-group path the full-pass
+    // helper uses (see `compute_rel_loop_scores`).  We do not
+    // short-circuit here because the denominator pass produces zeros
+    // for an unknown partition (no loops contribute), letting the
+    // "missing series" branch below report coherent context to the
+    // caller.
+    //
+    // Cache lifecycle: callers iterating every loop id (pysimlin
+    // `_populate_loop_behavior`, diagram UI stepping through loops,
+    // LoopDominanceAnalyzer) would otherwise pay O(partition_size *
+    // S) per call across P calls -- quadratic in partition size.
+    // Partition-granularity caching also bounds peak memory at
+    // O(num_partitions * S) instead of the prior O(loop_count * S);
+    // see `SimState::cached_partition_denominators`.  The cache is
+    // invalidated in `simlin_sim_run_to_end`, `simlin_sim_reset`,
+    // and `set_value_by_offset` whenever the underlying results
+    // buffer changes.
     //
     // The explicit `&mut *state` reborrow splits the MutexGuard into
     // disjoint field borrows so the `or_insert_with` closure can
     // immutably capture `&state.results` and `&state.loop_partitions`
     // while the cache is borrowed mutably.
+    let partition_key = state.loop_partitions.get(loop_id).copied().flatten();
     let state = &mut *state;
     let results = state
         .results

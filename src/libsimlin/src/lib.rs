@@ -280,9 +280,18 @@ pub struct SimlinProject {
     /// through `simlin_project_get_errors` after the `ltm_enabled`
     /// input flag is reset on the salsa db (which otherwise
     /// invalidates `model_all_diagnostics` and drops the
-    /// accumulator's LTM warnings).  Cleared by
+    /// accumulator's LTM warnings).  Overwritten unconditionally on
+    /// every `enable_ltm = true` `sim_new` (even when empty), so the
+    /// slot reflects the most-recent LTM-enabled compile; cleared by
     /// `simlin_project_apply_patch` since the patched model may no
     /// longer trip the auto-flip threshold.
+    ///
+    /// **Lock ordering:** acquire this mutex *after* `db`,
+    /// `sync_state`, and `datamodel` and release it before re-entering
+    /// any of them.  All current call sites hold it for a single
+    /// `*pending = ...`, `pending.clear()`, or read-then-drop, so
+    /// there is no deadlock risk today; documenting the order keeps
+    /// future additions from inverting it.
     pub(crate) pending_ltm_diagnostics: Mutex<Vec<engine::db::Diagnostic>>,
     pub ref_count: AtomicUsize,
 }

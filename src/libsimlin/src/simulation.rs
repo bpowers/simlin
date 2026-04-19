@@ -117,16 +117,23 @@ pub unsafe extern "C" fn simlin_sim_new(
             // `ltm_enabled`; once we reset the flag, salsa re-runs the
             // accumulator without LTM and the warning is lost.  We
             // capture here while the flag is still true.
+            //
+            // Always overwrite the pending slot -- including with an
+            // empty vector when the current sim's model has no LTM
+            // warnings -- so the slot reflects the most-recent
+            // LTM-enabled `sim_new`.  Without the unconditional reset
+            // an earlier warning from a different model could linger
+            // after the caller switched to a clean model on the same
+            // project; the `apply_patch` clear alone does not cover
+            // the "different model, same datamodel" path.
             if enable_ltm {
                 let ltm_diags: Vec<engine::db::Diagnostic> =
                     engine::db::collect_all_diagnostics(&db, &sync)
                         .into_iter()
                         .filter(is_ltm_diagnostic)
                         .collect();
-                if !ltm_diags.is_empty() {
-                    if let Ok(mut pending) = project_ref.pending_ltm_diagnostics.lock() {
-                        *pending = ltm_diags;
-                    }
+                if let Ok(mut pending) = project_ref.pending_ltm_diagnostics.lock() {
+                    *pending = ltm_diags;
                 }
             }
 

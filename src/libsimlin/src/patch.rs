@@ -352,10 +352,20 @@ pub(crate) fn gather_error_details_with_db(
 
 /// Append captured diagnostics (typically LTM auto-flip warnings
 /// persisted on `SimlinProject::pending_ltm_diagnostics`) to an
-/// existing `ErrorDetailData` list, skipping any whose formatted
-/// message is already present.  Used by `simlin_project_get_errors`
-/// to replay LTM-specific warnings that salsa's accumulator drops
-/// when `ltm_enabled` is reset by `simlin_sim_new`.
+/// existing `ErrorDetailData` list, skipping any whose `(model,
+/// message)` pair is already present.  Used by
+/// `simlin_project_get_errors` to replay LTM-specific warnings that
+/// salsa's accumulator drops when `ltm_enabled` is reset by
+/// `simlin_sim_new`.
+///
+/// The dedup key intentionally uses `(model_name, message)` rather
+/// than the formatted `message` alone.  In a multi-model project two
+/// models can legitimately emit identical Assembly warnings; even
+/// though `format_diagnostic_with_datamodel` does include the model
+/// name in its rendered text today, a future rendering change could
+/// collapse that prefix and silently drop the second model's warning.
+/// Keying on the diagnostic's structural `model` field keeps the
+/// multi-model dedup correct regardless of formatter changes.
 pub(crate) fn append_captured_diagnostics(
     all_errors: &mut Vec<ErrorDetailData>,
     captured: &[engine::db::Diagnostic],
@@ -363,12 +373,15 @@ pub(crate) fn append_captured_diagnostics(
 ) {
     for diag in captured {
         let formatted = errors::format_diagnostic_with_datamodel(diag, datamodel);
-        let already_present = all_errors
-            .iter()
-            .any(|e| match (&e.message, &formatted.message) {
-                (Some(existing), Some(new)) => existing.as_str() == new.as_str(),
-                _ => false,
-            });
+        let already_present =
+            all_errors
+                .iter()
+                .any(|e| match (&e.model_name, &e.message, &formatted.message) {
+                    (Some(m), Some(existing), Some(new)) => {
+                        m.as_str() == diag.model && existing.as_str() == new.as_str()
+                    }
+                    _ => false,
+                });
         if !already_present {
             all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
         }

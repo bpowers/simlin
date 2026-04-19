@@ -277,15 +277,25 @@ pub fn compute_partition_denominator(
     // `LtmVariablesResult` that drove emission, but
     // `compute_rel_loop_scores` treats the mismatch as "skip", so do
     // the same here for parity).
-    let offsets: Vec<usize> = loop_partitions
+    //
+    // Sort the loop IDs before collecting offsets so the per-timestep
+    // float summation walks indices in a stable order.  IEEE-754 sums
+    // are non-associative, and the full-pass helper
+    // `compute_rel_loop_scores` already sorts its loop IDs to pin the
+    // denominator bit-for-bit across runs; without the same sort here
+    // the `libsimlin` FFI single-loop path could return a
+    // slightly different series than the full-pass path for the same
+    // inputs.  The sort is O(partition_size * log partition_size) per
+    // distinct partition and happens once (the result is cached at
+    // the FFI layer), so the cost is negligible.
+    let mut ids_in_partition: Vec<&String> = loop_partitions
         .iter()
-        .filter_map(|(id, p)| {
-            if *p == partition {
-                results.offsets.get(&loop_score_ident(id)).copied()
-            } else {
-                None
-            }
-        })
+        .filter_map(|(id, p)| if *p == partition { Some(id) } else { None })
+        .collect();
+    ids_in_partition.sort();
+    let offsets: Vec<usize> = ids_in_partition
+        .iter()
+        .filter_map(|id| results.offsets.get(&loop_score_ident(id)).copied())
         .collect();
 
     let mut denom = Vec::with_capacity(results.step_count);
@@ -601,6 +611,50 @@ mod tests {
             assert_eq!(
                 &streamed, cached,
                 "streamed rel_loop_score for '{id}' diverged from full-pass result"
+            );
+        }
+    }
+
+    #[test]
+    fn per_id_rel_loop_score_bit_parity_with_mixed_magnitudes() {
+        // Reviewer iter-18 P3: the streamed denominator must sum loops
+        // in the same deterministic order the full-pass helper does.
+        // `compute_rel_loop_scores` sorts loop IDs by name before
+        // summing; `compute_partition_denominator` must do the same.
+        // IEEE-754 non-associativity makes this visible as a bit-level
+        // drift when per-loop magnitudes span many orders of magnitude
+        // AND the natural `HashMap` iteration order differs from
+        // lex-sorted order.  Build the partition with loop IDs whose
+        // hash order is typically NOT lex order on the stable-hasher
+        // used by `HashMap<String, ...>`, and include
+        // cancellation-sensitive magnitudes.
+        let series_big = &[1e16, 1e16, 1e16][..];
+        let series_mid = &[-1e16, -1e16, -1e16][..];
+        let series_small = &[1.0, 2.0, 3.0][..];
+        // Names chosen to stress hash-order independence; the actual
+        // order the `HashMap` emits them in is not pinned.  What
+        // matters is the streamed path sorts them before summing.
+        let results = make_results_for_loops(&[
+            ("zzz_small", series_small),
+            ("aaa_big", series_big),
+            ("mmm_mid", series_mid),
+        ]);
+        let partitions = mapping(&[
+            ("zzz_small", Some(0)),
+            ("aaa_big", Some(0)),
+            ("mmm_mid", Some(0)),
+        ]);
+
+        let full = compute_rel_loop_scores(&results, &partitions);
+
+        for id in ["zzz_small", "aaa_big", "mmm_mid"] {
+            let denom = compute_partition_denominator(&results, &partitions, Some(0));
+            let streamed = compute_rel_loop_score_for_id(&results, id, &denom)
+                .unwrap_or_else(|| panic!("loop '{id}' must have a computed series"));
+            let cached = full.get(id).unwrap();
+            assert_eq!(
+                &streamed, cached,
+                "streamed rel_loop_score for '{id}' must match full-pass bit-for-bit"
             );
         }
     }
