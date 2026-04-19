@@ -14,7 +14,7 @@
 //! against the O(P × save_steps) `loop_score` timeseries that the VM
 //! already writes to `Results`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::common::{Canonical, Ident};
 use crate::results::Results;
@@ -71,7 +71,15 @@ pub fn compute_rel_loop_scores(
         .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
         .collect();
 
-    let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    // BTreeMap rather than HashMap so partition-group iteration is
+    // deterministic across runs.  Per-group summation is not
+    // associative in IEEE-754 float arithmetic, so HashMap's
+    // hash-randomized iteration would otherwise allow bit-for-bit
+    // drift in the computed denominator between runs on the same
+    // input — invisible to the existing tests (tolerances 1e-10 in the
+    // proptest, 0.05 in the integration suite) but observable to
+    // diffing consumers and undesirable in a salsa-cached pipeline.
+    let mut partition_groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
     for (i, id) in loop_ids.iter().enumerate() {
         let key = loop_partitions.get(*id).copied().unwrap_or(None);
         partition_groups.entry(key).or_default().push(i);
@@ -190,7 +198,11 @@ mod tests {
         series: &[Vec<f64>],
     ) -> Vec<Vec<f64>> {
         let step_count = series.first().map(|s| s.len()).unwrap_or(0);
-        let mut groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+        // Mirror production's BTreeMap so the proptest's float-sum
+        // order matches exactly — otherwise the random-input test could
+        // drift past the 1e-10 tolerance even though both sides compute
+        // "the same" math.
+        let mut groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
         for (i, id) in loop_ids.iter().enumerate() {
             let key = loop_partitions.get(id).copied().unwrap_or(None);
             groups.entry(key).or_default().push(i);

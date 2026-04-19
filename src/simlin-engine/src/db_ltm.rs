@@ -2087,10 +2087,13 @@ pub fn model_ltm_variables(
         let element_edges = model_element_causal_edges(db, model, project);
         causal_graph_from_element_edges(element_edges).largest_scc_size()
     };
-    let auto_flipped = !is_discovery_user && max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
-    let is_discovery = is_discovery_user || auto_flipped;
+    let scc_auto_flip = !is_discovery_user && max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
+    // `is_discovery` may be upgraded to true below by the total-circuit
+    // backstop (a second gate for pathological shapes the largest-SCC
+    // heuristic misses, e.g. thousands of disjoint small cycles).
+    let mut is_discovery = is_discovery_user || scc_auto_flip;
 
-    if auto_flipped {
+    if scc_auto_flip {
         let msg = format!(
             "LTM analysis auto-switched from exhaustive to discovery mode: \
              the element-level causal graph's largest SCC has {} nodes, \
@@ -2161,6 +2164,42 @@ pub fn model_ltm_variables(
                     loop_partitions: HashMap::new(),
                 };
             }
+            None
+        } else if circuits_result.len() > crate::ltm::MAX_LTM_TOTAL_CIRCUITS {
+            // Total-circuit backstop.  The largest-SCC gate misses
+            // pathological shapes like many disjoint small cycles or a
+            // single variable-level 2-cycle exploded across a very
+            // large dimension: each such circuit still costs ~9 KB of
+            // `Loop`/`Link` state in `build_element_level_loops`, so a
+            // model with `max_scc_size == 2` but 200_000 element-level
+            // circuits would allocate ~1.8 GB before a single LTM
+            // equation is emitted.  Flip to discovery and emit the
+            // same Warning we surface for the SCC-based gate.
+            let total_circuits = circuits_result.len();
+            let msg = format!(
+                "LTM analysis auto-switched from exhaustive to discovery mode: \
+                 the element-level graph has {} elementary circuits, \
+                 exceeding MAX_LTM_TOTAL_CIRCUITS = {}.  Materializing \
+                 a Loop struct per circuit would allocate ~{} MiB of \
+                 intermediate state (see \
+                 docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+                 Per-loop scores are ranked post-simulation via the \
+                 strongest-path search; see \
+                 docs/design/ltm--loops-that-matter.md for the two-tier \
+                 strategy.",
+                total_circuits,
+                crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
+                // 9 KB/loop from the diagnosis allocation profile, in MiB.
+                (total_circuits as u64 * 9) / 1024,
+            );
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
+            is_discovery = true;
             None
         } else {
             // Build the variable-level graph with populated variables for

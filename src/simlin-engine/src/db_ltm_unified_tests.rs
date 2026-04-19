@@ -714,3 +714,91 @@ fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
         ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 }
+
+/// The largest-SCC gate misses models whose element-level graph expands
+/// a small variable-level SCC across a very large dimension: each
+/// per-element circuit still becomes a `Loop` struct in
+/// `build_element_level_loops` (~9 KB each on WRLD3's allocation
+/// profile).  A pure A2A stock-flow loop over a
+/// `MAX_LTM_TOTAL_CIRCUITS + 1`-element dimension has
+/// `max_scc_size == 2` (same-element) but produces one circuit per
+/// element, enough to blow WASM on its own.  The total-circuit backstop
+/// in `model_ltm_variables` catches this shape and auto-flips to
+/// discovery.
+#[test]
+fn test_auto_flip_on_total_circuits_above_threshold() {
+    let dim_size = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
+    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+
+    let project = crate::test_common::TestProject::new("arrayed_a2a_circuit_count_flip")
+        .named_dimension("Region", &elem_refs)
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let has_loop_score = ltm
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
+    assert!(
+        !has_loop_score,
+        "total-circuit backstop must fire for {} > MAX_LTM_TOTAL_CIRCUITS \
+         ({}): expected discovery-shape output (no loop_score vars), \
+         got vars: {:?}",
+        dim_size,
+        crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
+        ltm.vars
+            .iter()
+            .map(|v| &v.name)
+            .take(20)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The total-circuit backstop must emit its own Assembly Warning when it
+/// fires so FFI / CLI callers see why exhaustive mode was skipped
+/// (parallel to the largest-SCC gate's warning).
+#[test]
+fn test_auto_flip_on_total_circuits_emits_warning() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let dim_size = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
+    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+
+    let project = crate::test_common::TestProject::new("arrayed_a2a_circuit_count_warning")
+        .named_dimension("Region", &elem_refs)
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let _ = model_ltm_variables(&db, model, sync.project);
+
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+
+    let has_total_circuits_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg)
+                    if msg.contains("MAX_LTM_TOTAL_CIRCUITS")
+                        && msg.contains("elementary circuits")
+            )
+    });
+    assert!(
+        has_total_circuits_warning,
+        "total-circuit backstop must emit an Assembly Warning; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}

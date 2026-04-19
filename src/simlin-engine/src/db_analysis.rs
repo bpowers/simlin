@@ -1076,12 +1076,31 @@ pub fn model_loop_circuits(
 /// reconstructed variable ASTs, then runs Johnson's algorithm with
 /// polarity analysis. Loop IDs (r1, b1, u1, ...) match those used
 /// by LTM augmentation.
+///
+/// Gated by [`crate::ltm::MAX_LTM_SCC_NODES`]: if the variable-level
+/// causal graph has any SCC larger than the threshold, this function
+/// returns an empty result.  The same gate fires on
+/// `model_ltm_variables`, so dense-graph models (WRLD3, etc.) fall back
+/// to discovery-mode analysis consistently across the callers of this
+/// function (layout feedback-loop metadata, `simlin_analyze_get_loops`,
+/// `simlin-cli --ltm`).  Listing 1.86M structural loops would not be
+/// useful to any of those consumers anyway, and enumerating them would
+/// allocate ~17 GB of `Loop`/`Link` state on WRLD3-scale inputs.
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
+
+    // Match the auto-flip gate in `model_ltm_variables`: on graphs with
+    // a dense SCC the enumeration itself is survivable but the
+    // downstream materialization is not, and returning an empty list is
+    // the honest answer — the downstream discovery path (via
+    // `analyze_model`) is what callers should use for such models.
+    if graph.largest_scc_size() > crate::ltm::MAX_LTM_SCC_NODES {
+        return DetectedLoopsResult { loops: Vec::new() };
+    }
 
     let loops = graph
         .find_loops_with_limit(usize::MAX)
@@ -1640,3 +1659,81 @@ mod loop_circuits_result_tests {
 #[cfg(test)]
 #[path = "db_element_graph_tests.rs"]
 mod db_element_graph_tests;
+
+#[cfg(test)]
+mod detected_loops_gate_tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    /// Build a scalar chain-shaped project whose variable-level causal
+    /// graph is a single SCC of `total_nodes` nodes (stock + flow +
+    /// `total_nodes - 2` auxes), matching the shape used by the LTM
+    /// auto-flip tests in `db_ltm_unified_tests.rs`.
+    fn build_chain_scc_project(project_name: &str, total_nodes: usize) -> datamodel::Project {
+        assert!(
+            total_nodes >= 3,
+            "chain SCC needs >= 3 nodes (stock + flow + >=1 aux), got {total_nodes}"
+        );
+
+        let aux_count = total_nodes - 2;
+        let mut builder = TestProject::new(project_name);
+        for i in 0..aux_count {
+            let name = format!("aux_{i}");
+            let equation = if i + 1 == aux_count {
+                "cap_stock".to_string()
+            } else {
+                format!("aux_{}", i + 1)
+            };
+            builder = builder.scalar_aux(&name, &equation);
+        }
+        builder = builder.flow("cap_flow", "aux_0", None);
+        builder = builder.stock("cap_stock", "0", &["cap_flow"], &[], None);
+        builder.build_datamodel()
+    }
+
+    /// `model_detected_loops` must return empty when the variable-level
+    /// causal graph has any SCC larger than `MAX_LTM_SCC_NODES`.  This
+    /// matches the auto-flip gate in `model_ltm_variables`: FFI / layout
+    /// / CLI consumers of `model_detected_loops` (which also runs with
+    /// `usize::MAX` after the cap removal) would otherwise still pay
+    /// `build_element_level_loops`'s ~17 GB allocation profile on
+    /// WRLD3-scale inputs.  Returning empty makes those callers
+    /// consistent with `analyze_model`'s discovery-mode output at the
+    /// same threshold.
+    #[test]
+    fn test_model_detected_loops_gated_above_scc_threshold() {
+        let project = build_chain_scc_project("detected_loops_gate_above", 51);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        let detected = model_detected_loops(&db, model, sync.project);
+
+        assert!(
+            detected.loops.is_empty(),
+            "SCC=51 must gate model_detected_loops to empty; got {} loops",
+            detected.loops.len()
+        );
+    }
+
+    /// Below the threshold, `model_detected_loops` must still enumerate
+    /// the expected loops.  A 49-node SCC is one below the gate, so the
+    /// small-model behaviour is unchanged.
+    #[test]
+    fn test_model_detected_loops_returns_loops_below_threshold() {
+        let project = build_chain_scc_project("detected_loops_gate_below", 49);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        let detected = model_detected_loops(&db, model, sync.project);
+
+        assert_eq!(
+            detected.loops.len(),
+            1,
+            "49-node single-SCC chain has exactly one elementary loop; got {:?}",
+            detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
+        );
+    }
+}

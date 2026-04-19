@@ -45,6 +45,32 @@ use crate::variable::{Variable, identifier_set};
 /// well before they reach the cliffs.
 pub const MAX_LTM_SCC_NODES: usize = 50;
 
+/// Fallback cap on the total number of elementary circuits in the
+/// element-level graph before
+/// [`crate::db::model_ltm_variables`] auto-flips to discovery mode.
+///
+/// The [`MAX_LTM_SCC_NODES`] gate catches dense feedback partitions, but
+/// it cannot see models whose element-level graph expands a single
+/// variable-level 2-cycle across a very large dimension (or many
+/// disjoint small SCCs whose sum is pathological).  An arrayed model of
+/// the shape `population[Region] -> births[Region] -> population[Region]`
+/// with `|Region| = 200_000` has `max_scc_size == 2` on the element
+/// graph but 200_000 independent 2-node circuits, each of which becomes
+/// a `Loop` struct in `build_element_level_loops` (~9 KB each on WRLD3's
+/// measured allocation profile).  Without this backstop the exhaustive
+/// branch would still allocate 1.8 GB of `Loop`/`Link` state and blow
+/// WASM's 4 GiB ceiling.
+///
+/// ## Why 10_000
+///
+/// At ~9 KB per materialized `Loop` struct (diagnosis measurement on
+/// WRLD3: ~17 GB / ~1.86M loops) plus ~4 KB per `loop_score` equation,
+/// 10_000 loops cost ~130 MB of intermediate state.  That fits WASM
+/// with comfortable headroom for the rest of the compile pipeline.
+/// Every in-tree LTM test model is well under this; only synthetic
+/// array-expansion pathology or models at the scale of WRLD3 trip it.
+pub const MAX_LTM_TOTAL_CIRCUITS: usize = 10_000;
+
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`
 /// budget.  Production callers pass `usize::MAX` (no truncation) so they
