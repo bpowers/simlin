@@ -1102,18 +1102,36 @@ pub fn model_detected_loops(
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
+    // Mirror `model_ltm_variables`'s element-level SCC gate so the two
+    // paths agree on which models are too dense for per-loop scoring.
+    // Without this, `simlin_analyze_get_loops` could return structural
+    // loop IDs for a 51-node single-ring model while
+    // `simlin_analyze_get_relative_loop_score` returns `DoesNotExist`
+    // for every one of them (LTM auto-flipped), leaving paired
+    // consumers like pysimlin's `_populate_loop_behavior` silently
+    // unable to score their own loops.  Truncating here routes those
+    // consumers through the same fallback (persisted `loop_metadata`
+    // for layout; empty-with-truncated-flag for FFI) whether the user
+    // asked for structure or scores.
+    let element_edges = model_element_causal_edges(db, model, project);
+    if causal_graph_from_element_edges(element_edges).largest_scc_size()
+        > crate::ltm::MAX_LTM_SCC_NODES
+    {
+        return DetectedLoopsResult {
+            loops: Vec::new(),
+            truncated: true,
+        };
+    }
+
     let graph = causal_graph_with_modules(db, model, project);
 
-    // Gate on post-dedup distinct-circuit count so dense multidigraphs
-    // where Johnson's DFS revisits the same cycle many times don't get
-    // spuriously truncated: the raw-emission budget of
-    // `find_loops_with_limit` can fire even for graphs whose actual
-    // distinct loop count is well under MAX_LTM_TOTAL_CIRCUITS
-    // (`ltm::tests::johnson_budget_charges_duplicate_raw_cycles` codifies
-    // the raw-count semantic).  `find_loops_if_under_limit` runs
-    // enumeration to completion (cheap `Vec<u32>` paths) and only
-    // materializes `Loop` structs when the distinct count is under the
-    // memory-cliff threshold.
+    // Second gate: post-dedup distinct-circuit count (streams the
+    // cutoff into Johnson's DFS so dense multidigraphs bail the
+    // moment the (max+1)th distinct circuit is discovered, never
+    // materializing the whole Vec<Vec<u32>>).  This catches models
+    // that slip past the SCC gate but would still allocate
+    // Loop-struct memory beyond the cap (e.g., many disjoint small
+    // cycles, each trivial in isolation).
     //
     // On truncation we return `truncated: true` with an empty `loops`
     // list so consumers can tell "acyclic model" (truncated = false,
@@ -1718,28 +1736,34 @@ mod detected_loops_gate_tests {
         builder.build_datamodel()
     }
 
-    /// A sparse ring with >50 nodes but exactly one elementary loop
-    /// must enumerate successfully.  The iteration-1 SCC-size gate here
-    /// was too aggressive: it suppressed the loop even though
-    /// enumeration was trivial (one Johnson's walk returning a single
-    /// circuit).  The circuit-budget gate (`MAX_LTM_TOTAL_CIRCUITS`)
-    /// correctly lets this through while still catching dense graphs
-    /// that actually produce many circuits.
+    /// A sparse ring with >50 nodes has exactly one elementary loop,
+    /// but `model_ltm_variables`'s SCC gate auto-flips such models to
+    /// discovery mode because `MAX_LTM_SCC_NODES = 50`.
+    /// `model_detected_loops` mirrors that gate so the two paths agree:
+    /// consumers that pair get_loops + get_relative_loop_score cannot
+    /// get a loop ID they can never score.  A 75-node single ring
+    /// therefore surfaces as `truncated = true` with an empty `loops`
+    /// list, routing callers through the same fallback (layout to
+    /// persisted `loop_metadata`) as any other dense-graph path.
     #[test]
-    fn test_model_detected_loops_sparse_large_ring_enumerates() {
-        let project = build_chain_scc_project("detected_loops_sparse_ring", 75);
+    fn test_model_detected_loops_large_scc_truncates_to_match_ltm_gate() {
+        let project = build_chain_scc_project("detected_loops_large_scc", 75);
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
         let model = sync.models["main"].source;
 
         let detected = model_detected_loops(&db, model, sync.project);
 
-        assert_eq!(
-            detected.loops.len(),
-            1,
-            "75-node single ring has exactly one elementary loop; \
-             budget-based gate must not suppress it; got {:?}",
+        assert!(
+            detected.truncated,
+            "75-node SCC must trip the MAX_LTM_SCC_NODES gate; got \
+             truncated=false with loops={:?}",
             detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
+        );
+        assert!(
+            detected.loops.is_empty(),
+            "truncated DetectedLoopsResult must have an empty loop \
+             list so consumers distinguish the truncation case"
         );
     }
 

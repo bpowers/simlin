@@ -1743,45 +1743,103 @@ fn strip_subscript(name: &str) -> &str {
     }
 }
 
-/// Count the number of distinct *variable-level* loop signatures in an
-/// element-level circuit list.
+/// Estimate the number of `Loop` structs `build_element_level_loops`
+/// will emit from an element-level circuit list.
 ///
 /// `build_element_level_loops` groups element circuits by their
-/// stripped (subscript-removed) node sequence and, for pure-dimension
-/// A2A groups, emits a single collapsed `Loop` per group regardless of
-/// how many elements share that structure.  The
-/// `MAX_LTM_TOTAL_CIRCUITS` backstop bounds `Loop` struct
-/// materialization memory, so it needs to key on the post-collapse
-/// count -- otherwise an arrayed `population[Region] -> births[Region]
-/// -> population[Region]` model with a large `|Region|` would trip the
-/// gate despite emitting only a single Loop.
+/// stripped (subscript-removed) node sequence.  Each group then emits:
 ///
-/// Returns an upper bound on the pure-dimension collapse: each
-/// distinct stripped sequence contributes 1 here, even when the group
-/// turns out to be cross-element inside `build_element_level_loops`
-/// (which would emit one Loop per circuit in the group).  The bound is
-/// tight for pure A2A and loose for cross-element -- in the loose
-/// direction it under-counts, so cross-element models with many small
-/// loops could slip past the gate.  That is intentional: cross-element
-/// loops are rare, and the subsequent Loop materialization is still
-/// bounded by the per-circuit 9 KB figure, which leaves WASM-safe
-/// headroom for ~100k cross-element loops before the actual memory
-/// cliff.
-fn count_distinct_variable_level_signatures(element_circuits: &super::LoopCircuitsResult) -> usize {
-    use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::new();
+/// - **one** collapsed A2A `Loop` when the group is pure-dimension
+///   (every node has a subscript, no repeated variable names in the
+///   stripped sequence, and all circuits in the group share a single
+///   leading subscript element), regardless of how many elements share
+///   that structure; or
+/// - **one `Loop` per circuit** in the group when the group is
+///   scalar-only or cross-element.
+///
+/// The `MAX_LTM_TOTAL_CIRCUITS` backstop bounds `Loop`-struct
+/// materialization memory, so it needs to key on the post-collapse
+/// count.  Counting distinct stripped signatures alone under-counts
+/// cross-element groups (many circuits collapse to one signature but
+/// don't collapse to one Loop), while using the raw
+/// `element_circuits.len()` over-counts pure-A2A groups.  This
+/// function mirrors the exact collapse criteria of
+/// `build_element_level_loops` so the gate bounds the actual emitted
+/// Loop count rather than one of its looser proxies.
+fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuitsResult) -> usize {
+    use std::collections::{HashMap, HashSet};
+
+    // Group element circuits by variable-level signature (same key as
+    // `build_element_level_loops`).
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for i in 0..element_circuits.len() {
-        // Same keying as `build_element_level_loops`: strip subscripts
-        // and join with NUL so two nodes with colliding stripped names
-        // cannot produce the same key by accident.
         let key: String = element_circuits
             .circuit_names(i)
             .map(strip_subscript)
             .collect::<Vec<_>>()
             .join("\x00");
-        seen.insert(key);
+        groups.entry(key).or_default().push(i);
     }
-    seen.len()
+
+    let mut total: usize = 0;
+    for group_indices in groups.values() {
+        // Representative: first circuit in the group.  Used to probe
+        // all-subscripted-ness and repeated-variable-names.
+        let representative: Vec<String> = element_circuits
+            .circuit_names(group_indices[0])
+            .map(str::to_owned)
+            .collect();
+        if representative.is_empty() {
+            // Defensive: a zero-length circuit should never reach
+            // here (enumerate_circuits_in_scc filters self-loops), but
+            // if it does, count as one Loop rather than silently
+            // dropping.
+            total = total.saturating_add(group_indices.len());
+            continue;
+        }
+
+        let all_subscripted = representative.iter().all(|n| n.contains('['));
+        if !all_subscripted {
+            // Scalar or mixed: one Loop per circuit, no collapse.
+            total = total.saturating_add(group_indices.len());
+            continue;
+        }
+
+        // Pure-A2A candidate.  Two disqualifiers:
+        // (a) stripped sequence has a repeated variable name — indicates
+        //     a cross-element circuit like pop[nyc] -> share[boston] ->
+        //     pop[boston] -> share[nyc].
+        // (b) circuits in the group have differing leading subscript
+        //     elements — genuine cross-element feedback.
+        let stripped: Vec<&str> = representative.iter().map(|s| strip_subscript(s)).collect();
+        let mut seen_vars: HashSet<&str> = HashSet::new();
+        let has_repeated = stripped.iter().any(|v| !seen_vars.insert(*v));
+        if has_repeated {
+            total = total.saturating_add(group_indices.len());
+            continue;
+        }
+
+        let is_cross_element = group_indices.iter().any(|&ci| {
+            let leading_elements: Vec<&str> = element_circuits
+                .circuit_names(ci)
+                .filter_map(|n| {
+                    let start = n.find('[')?;
+                    let end = n.rfind(']')?;
+                    let subscript = &n[start + 1..end];
+                    Some(subscript.split(',').next().unwrap_or(subscript))
+                })
+                .collect();
+            leading_elements.windows(2).any(|w| w[0] != w[1])
+        });
+
+        if is_cross_element {
+            total = total.saturating_add(group_indices.len());
+        } else {
+            // Pure-dimension: collapses to one Loop.
+            total = total.saturating_add(1);
+        }
+    }
+    total
 }
 
 /// Compute the cartesian product of element name lists as comma-joined
@@ -2232,7 +2290,7 @@ pub fn model_ltm_variables(
             // level graph.  The layout path reconciles this asymmetry
             // by checking whether `loop_partitions` is empty after
             // compile (see `try_detect_ltm_loops_incremental`).
-            let distinct_loops = count_distinct_variable_level_signatures(circuits_result);
+            let distinct_loops = estimate_emitted_loop_count(circuits_result);
             if distinct_loops > crate::ltm::MAX_LTM_TOTAL_CIRCUITS {
                 let msg = format!(
                     "LTM analysis auto-switched from exhaustive to discovery mode: \

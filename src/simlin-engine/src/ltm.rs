@@ -497,6 +497,10 @@ struct JohnsonState {
     seen: HashSet<u64>,
     /// Scratch buffer for hashing: reused rather than allocated per-call.
     hash_scratch: Vec<u32>,
+    /// Upper bound on the number of distinct circuits this enumeration
+    /// may emit before bailing with `TruncatedByBudgetInternal`.
+    /// `usize::MAX` disables the cutoff (the raw-budget call path).
+    distinct_limit: usize,
 }
 
 /// Fixed seed for the LTM circuit fingerprint hash.
@@ -733,6 +737,7 @@ impl IndexedGraph {
         &self,
         scc: &[u32],
         budget: &mut usize,
+        distinct_limit: usize,
     ) -> std::result::Result<Vec<Vec<u32>>, TruncatedByBudgetInternal> {
         if scc.is_empty() {
             return Ok(Vec::new());
@@ -755,6 +760,7 @@ impl IndexedGraph {
             circuits: Vec::new(),
             seen: HashSet::new(),
             hash_scratch: Vec::with_capacity(scc.len()),
+            distinct_limit,
         };
         for &v in scc {
             state.in_scc[v as usize] = true;
@@ -858,6 +864,18 @@ impl IndexedGraph {
                 let fp = hash_u32_slice(&state.hash_scratch);
                 if state.seen.insert(fp) {
                     state.circuits.push(state.path.clone());
+                    // Streaming distinct-count cutoff: bail the moment
+                    // the unique-circuit count exceeds the caller's
+                    // limit.  Used by `find_loops_if_under_limit` to
+                    // cap Loop-struct materialization memory without
+                    // waiting for full enumeration on dense graphs like
+                    // WRLD3 (which would otherwise allocate ~350 MB of
+                    // indexed paths before the post-hoc length check
+                    // fires).  `distinct_limit = usize::MAX` disables
+                    // this cutoff for the raw-budget call site.
+                    if state.circuits.len() > state.distinct_limit {
+                        return Err(TruncatedByBudgetInternal);
+                    }
                 }
                 found_cycle = true;
             } else if w == start {
@@ -1200,26 +1218,24 @@ impl CausalGraph {
     /// see the cap-lift diagnosis), not how many duplicate paths
     /// Johnson's DFS visited before collapsing them.
     ///
-    /// Enumeration runs under `usize::MAX` (no raw-emission cap).  Real
-    /// SD models have a raw:dedup ratio close to 1 so this completes
-    /// quickly; the pathological complete-digraph case (e.g., K10 has
-    /// 1,013 distinct circuits but millions of raw emissions) still
-    /// succeeds because raw-count is not the bound.  For extreme
-    /// adversarial inputs (K20+) the enumeration could be expensive,
-    /// but those are not in the Simlin model-authoring contract.
-    /// Returns `Err(TruncatedByBudget)` only when the distinct-circuit
-    /// count exceeds `max_loops`; in that case no `Loop` structs are
-    /// materialized (the indexed paths go out of scope and are freed).
+    /// Enumeration streams the dedup-count cutoff into Johnson's DFS
+    /// itself (see `JohnsonState::distinct_limit`), so dense graphs
+    /// bail the moment the (N+1)th distinct circuit is discovered
+    /// rather than materializing the whole `Vec<Vec<u32>>` first.
+    /// WRLD3-scale inputs therefore exit this helper at ~9 MB of
+    /// indexed-path state (10_001 × ~900-byte paths) rather than the
+    /// ~350 MB an uncapped enumeration would hold.
+    ///
+    /// The raw-emission budget is left at `usize::MAX`: dense
+    /// multidigraphs where raw:dedup is large (e.g. K10 has 1,013
+    /// distinct circuits but millions of raw emissions) still succeed
+    /// when under the distinct cap.  Returns `Err(TruncatedByBudget)`
+    /// only when the distinct-circuit count would exceed `max_loops`.
     pub fn find_loops_if_under_limit(
         &self,
         max_loops: usize,
     ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
-        let indexed = self
-            .enumerate_indexed_circuits(usize::MAX)
-            .expect("usize::MAX cannot exhaust the enumeration budget");
-        if indexed.circuits.len() > max_loops {
-            return Err(TruncatedByBudget);
-        }
+        let indexed = self.enumerate_indexed_circuits_ex(usize::MAX, max_loops)?;
         Ok(self.materialize_loops_from_indexed(indexed))
     }
 
@@ -1284,6 +1300,21 @@ impl CausalGraph {
         &self,
         max_circuits: usize,
     ) -> std::result::Result<IndexedCircuits, TruncatedByBudget> {
+        self.enumerate_indexed_circuits_ex(max_circuits, usize::MAX)
+    }
+
+    /// Extended version of [`Self::enumerate_indexed_circuits`] that
+    /// also accepts a streaming distinct-circuit cutoff.  Set
+    /// `distinct_limit = usize::MAX` to disable (the raw-budget call
+    /// path).  A non-`MAX` value bails the moment the total distinct-
+    /// circuit count across all SCCs would exceed it, so dense graphs
+    /// never materialize more than `distinct_limit + 1` indexed
+    /// circuits.
+    fn enumerate_indexed_circuits_ex(
+        &self,
+        max_circuits: usize,
+        distinct_limit: usize,
+    ) -> std::result::Result<IndexedCircuits, TruncatedByBudget> {
         let graph = IndexedGraph::from_edges(&self.edges);
         let sccs = graph.tarjan_scc();
         let mut all_circuits: Vec<Vec<u32>> = Vec::new();
@@ -1303,7 +1334,12 @@ impl CausalGraph {
             if scc.len() == 1 && !graph.succ[scc[0] as usize].contains(&scc[0]) {
                 continue;
             }
-            match graph.enumerate_circuits_in_scc(scc, &mut budget) {
+            // Per-SCC distinct-limit is scaled by already-emitted
+            // circuits: a 5k-loop SCC 1 followed by a 6k-loop SCC 2
+            // should trip at 10k, not 11k.  (`saturating_sub` prevents
+            // wrap when all_circuits.len() briefly exceeds the limit.)
+            let remaining_distinct = distinct_limit.saturating_sub(all_circuits.len());
+            match graph.enumerate_circuits_in_scc(scc, &mut budget, remaining_distinct) {
                 Ok(mut circuits) => all_circuits.append(&mut circuits),
                 Err(TruncatedByBudgetInternal) => return Err(TruncatedByBudget),
             }
@@ -5100,7 +5136,9 @@ mod tests {
         let mut johnson_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget_j = usize::MAX;
         for scc in &sccs {
-            let mut part = graph.enumerate_circuits_in_scc(scc, &mut budget_j).unwrap();
+            let mut part = graph
+                .enumerate_circuits_in_scc(scc, &mut budget_j, usize::MAX)
+                .unwrap();
             johnson_circuits.append(&mut part);
         }
 

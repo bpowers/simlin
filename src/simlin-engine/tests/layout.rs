@@ -2043,7 +2043,7 @@ fn test_compute_metadata_falls_back_on_truncated_loop_detection() {
         .any(|fl| fl.name == marker_name);
     assert!(
         has_marker,
-        "compute_metadata must fall back to loop_metadata when LTM loop \\
+        "compute_metadata must fall back to loop_metadata when LTM loop \
          detection truncates; got feedback_loops: {:?}",
         metadata
             .feedback_loops
