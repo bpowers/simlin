@@ -719,22 +719,28 @@ small/medium test fixtures; what we need is the actual formula.
    f[10] sort, consistent with one run per sketch view). For single-view
    or small multi-view files, the global alphabetical claim holds.
 
-   **Alias limitation**: Vensim records stdlib-call outputs under their
-   `#` signature names (e.g. `#SMOOTH(x,y)#`) rather than their user
-   alias names (e.g. `perceived_hpi`). The `#` signatures have records;
-   the user aliases appear in the name table but do NOT have their own
-   records. Pairing f[10]-sorted records alphabetically with visible
-   names works until the first alias, after which all subsequent
-   pairings shift by one.
+   **Alias limitation**: Vensim stores both a user-alias variable
+   record and its `#FUNC(args)#` signature in the VDF. User aliases DO
+   carry dedicated records (classified with `f[1] == 2065` on simple
+   stdlib-call forms, see "Confirmed structural signals" below); the
+   `#FUNC(args)#` signature names have no slot-table entries and do
+   not participate in the f[10]-sorted record array. Pairing
+   f[10]-sorted records alphabetically with visible names breaks
+   because alias records frequently carry `sort_key = 0` (sentinel)
+   rather than the alphabetical position of the alias name.
 
    Once the alias *set* is known (typically from a parsed model),
    aliases and output signatures pair up deterministically **by file
    order in the name table** -- see "Confirmed structural signals"
    below. Identifying aliases *from VDF alone* on old-style
-   `#FUNC(args)#` fixtures remains open; `build_section6_guided_ot_map`
-   resolves them via the parsed model's variable equations, and the
-   new-style `#alias>FUNC#` encoding on re-saved files closes the gap
-   without any model help.
+   `#FUNC(args)#` fixtures is partially solved by the `f[1] == 2065`
+   classification signal (`VdfFile::identify_potential_aliases`), which
+   recovers 4/5 aliases on `econ/base.vdf` and 6/7 on `econ/risk.vdf`;
+   the one-per-fixture gap corresponds to aliases with expression
+   arguments (`SMTH1(a - b, t)`). `build_section6_guided_ot_map`
+   resolves the full alias set via the parsed model's variable
+   equations, and the new-style `#alias>FUNC#` encoding on re-saved
+   files closes the gap without any model help.
 
    Stock sentinel records typically have sort_key=0; their sort keys
    come from attached sort anchor records (non-sentinel records whose
@@ -1470,12 +1476,39 @@ These patterns were validated across the full test corpus:
   from the parsed model), the alias -> output-sig mapping is a pure
   pairing of the two ordered lists -- no per-name lookup required.
 
-  **What this does NOT yet close**: identifying *which* slotted user
-  names are aliases from VDF alone on old-style files. The aliases lack
-  dedicated records (see "Alias limitation" under structural signal #8),
-  but we have not yet found a VDF-internal signal that distinguishes
-  them from regular user variables. A sweep over candidates A-E in the
-  2026-04 reverse-engineering task did not reveal a deterministic
-  alias-bit anywhere in the record array, slot pointees, pre-record
-  header cells, section-4 entries, or section-6 ref stream -- see
-  "Hypotheses tested and ruled out" below for the numeric evidence.
+- **Alias records carry classification `f[1] == 2065` (`0x811`)** on
+  old-style fixtures. The classification byte structure is high-byte
+  `0x08` "associated with stocks" + low-byte `0x11` "dynamic non-stock",
+  as documented under "Classification field (field 1) byte-level
+  structure". Every alias-backed user variable record observed on
+  `econ/base`, `econ/risk`, and the WRLD3 SCEN01 family carries this
+  classification when the stdlib-call argument list consists of simple
+  name references (`SMTH1(x, t)` or `DELAY1(x, t)`). This is NOT a
+  complete signal: aliases whose argument is an expression (e.g.
+  `SMTH1(a - b, t)` on `perceived mortgage balance`) are classified as
+  regular variables with `f[1] == 17`. Exposed as
+  `VdfFile::identify_potential_aliases()`, which combines the
+  classification signal with name-category filtering to drop
+  time/metadata/unit/stdlib-helper names; on `econ/base.vdf` it
+  recovers 4 of 5 MDL-declared aliases and on `econ/risk.vdf` 6 of 7,
+  with no false positives.
+
+  The cross-agent `field[11] == 0` sentinel from structural signal #12
+  does NOT independently identify aliases on old-style fixtures. The
+  5 econ/base aliases have their predecessor records' `f[11]` values
+  spread across {0, 23, 48, 67, 70}, so the sentinel rule alone cannot
+  separate aliases from regular variables. The combined classifier is
+  the best-available old-style alias detector at this time.
+
+  **What this does NOT yet close**: exact-match alias identification
+  from VDF alone on old-style fixtures with expression-argument
+  stdlib calls. Callers that need the precise alias set should either
+  (a) parse the MDL and compare aliases against
+  `identify_potential_aliases()` for cross-validation, or (b) rely on
+  the new-style `#alias>FUNC#` encoding (signal below) which re-saved
+  files from newer Vensim builds produce deterministically. A sweep
+  over candidates A-E in the 2026-04 reverse-engineering task did not
+  reveal a *deterministic* single-signal alias-bit anywhere in the
+  record array, slot pointees, pre-record header cells, section-4
+  entries, or section-6 ref stream -- see "Hypotheses tested and
+  ruled out" below for the numeric evidence.

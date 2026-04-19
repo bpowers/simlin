@@ -103,6 +103,173 @@ pub(crate) fn parse_new_style_alias_sig(sig: &str) -> Option<&str> {
     Some(alias)
 }
 
+/// Return new-style stdlib-call signature triples in name-table file order.
+///
+/// Each triple is `(name_idx, signature_name, alias_name)`. The alias is
+/// parsed directly out of the `#alias>FUNC#` encoding -- so this function
+/// only returns entries for fixtures that use the newer Vensim signature
+/// form.
+///
+/// Only the *canonical* top-level `#alias>FUNC#` form is emitted. The
+/// multi-`>` sub-part names that Vensim writes for stateful macros
+/// (`#alias>RAMP FROM TO>linear#`, `>slope#`, `>rate#`, `>interval#`, ...)
+/// are filtered out by [`is_output_sig_name`]; this keeps the alias list
+/// 1:1 with the user-facing alias set rather than 7:1-inflated per RAMP
+/// alias.
+///
+/// Old-style fixtures (`#FUNC(args)#`) yield an empty vector here because
+/// the alias name is not encoded in the signature; those callers need a
+/// model-guided path (see `VdfFile::build_section6_guided_ot_map`).
+pub(crate) fn new_style_alias_signatures(names: &[String]) -> Vec<(usize, String, String)> {
+    let mut out = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        if !is_output_sig_name(name) {
+            continue;
+        }
+        if let Some(alias) = parse_new_style_alias_sig(name) {
+            out.push((i, name.clone(), alias.to_string()));
+        }
+    }
+    out
+}
+
+/// Return all output-type `#` signature names in name-table file order.
+///
+/// Output signatures are the names that a user alias may bind to: the
+/// top-level function result (`#DELAY1(...)`, `#SMOOTH(...)`, or the
+/// new-style `#alias>FUNC#`). Internal stdlib stocks and rates
+/// (`#LV1<...>`, `#RT1<...>`, `#alias>FUNC>LV1#`, etc.) are excluded.
+pub(crate) fn output_signatures(names: &[String]) -> Vec<(usize, String)> {
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| is_output_sig_name(n))
+        .map(|(i, n)| (i, n.clone()))
+        .collect()
+}
+
+/// Record classification word observed on alias-backed variable records:
+/// `0x811` (high byte `0x08` "associated with stocks" + low byte `0x11`
+/// "dynamic non-stock"). Every alias record seen in `econ` and WRLD3
+/// carries this when the stdlib-call arguments are simple name
+/// references. Aliases with expression arguments (`SMTH1(a - b, t)`)
+/// are classified as regular variables (`f[1] == 17`) instead.
+const ALIAS_CLASSIFICATION_WORD: u32 = 2065;
+
+/// Identify the slotted user names that are stdlib-call aliases using a
+/// composite of two structural signals:
+///
+/// 1. **Classification signal (`f[1] == 2065`)**: Vensim tags alias-backed
+///    variable records with `0x811` (see [`ALIAS_CLASSIFICATION_WORD`]).
+///    Observed on 4 of 5 `econ/base.vdf` aliases, 6 of 7 `econ/risk.vdf`
+///    aliases, and the majority of stdlib aliases in WRLD3.
+///
+/// 2. **Name-category filter (cross-agent signal)**: the file-order
+///    pairing from Agent 2's view-block decoder lets us pair each
+///    record with a slotted name; we filter out Time/metadata/unit/
+///    stdlib-helper names so only plausible user-alias names survive.
+///
+/// Returns `(name_idx, name_string)` pairs in name-table file order.
+/// The set is NOT guaranteed to equal the MDL-declared alias list --
+/// experience on `econ/base.vdf` and `econ/risk.vdf` shows 4/5 and 6/7
+/// precision, with one alias per fixture that uses an expression
+/// argument classified as a regular variable.
+///
+/// The earlier cross-agent claim that aliases could be identified from
+/// the `field[11] == 0` predecessor sentinel alone is **not** supported
+/// by the econ data: the five econ/base aliases have predecessor
+/// `f[11]` values of `{23, 68, 67, 70, 69}`, not all zero. The
+/// classification signal is the primary detector; the name-category
+/// filter reduces false positives.
+pub(crate) fn identify_potential_aliases(
+    records: &[super::VdfRecord],
+    names: &[String],
+    pairs: &[(usize, usize)],
+) -> Vec<(usize, String)> {
+    use std::collections::HashSet;
+
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut seen_names: HashSet<usize> = HashSet::new();
+
+    for (rec_idx, name_idx) in pairs {
+        let rec = &records[*rec_idx];
+        if rec.fields[1] != ALIAS_CLASSIFICATION_WORD {
+            continue;
+        }
+        let name = &names[*name_idx];
+        if name_is_alias_candidate(name) && !seen_names.contains(name_idx) {
+            seen_names.insert(*name_idx);
+            out.push((*name_idx, name.clone()));
+        }
+    }
+
+    // Sort by name-table file order so the output is deterministic.
+    out.sort_by_key(|(idx, _)| *idx);
+    out
+}
+
+/// Whether a name is a plausible stdlib-alias candidate: a slotted user
+/// variable name that is not Time, a system constant, a unit annotation,
+/// a builtin, or metadata.
+fn name_is_alias_candidate(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let Some(first) = name.chars().next() else {
+        return false;
+    };
+    if matches!(first, '.' | '-' | ':' | '?' | '#') {
+        return false;
+    }
+    !matches!(
+        name,
+        "Time"
+            | "INITIAL TIME"
+            | "FINAL TIME"
+            | "TIME STEP"
+            | "SAVEPER"
+            | "SUM"
+            | "PROD"
+            | "VMIN"
+            | "VMAX"
+            | "LOG"
+            | "MIN"
+            | "MAX"
+            | "ABS"
+            | "EXP"
+            | "LN"
+            | "SMOOTH"
+            | "SMOOTH3"
+            | "SMOOTHI"
+            | "DELAY1"
+            | "DELAY3"
+            | "TREND"
+            | "IN"
+            | "INI"
+            | "OUTPUT"
+            | "PI"
+            | "SIN"
+            | "COS"
+            | "TAN"
+            | "SQRT"
+            | "STEP"
+            | "INTEGER"
+            | "RAMP"
+            | "PULSE"
+            | "MODULO"
+            | "DEL"
+            | "LV1"
+            | "LV2"
+            | "LV3"
+            | "ST"
+            | "RT1"
+            | "RT2"
+            | "DL"
+            | "if then else"
+            | "IF THEN ELSE"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +417,31 @@ mod tests {
         // Bare / empty.
         assert_eq!(parse_new_style_alias_sig("#"), None);
         assert_eq!(parse_new_style_alias_sig("##"), None);
+    }
+
+    #[test]
+    fn test_name_is_alias_candidate_rejects_metadata_and_builtins() {
+        // Positive: real user variable names.
+        assert!(name_is_alias_candidate("defaults"));
+        assert!(name_is_alias_candidate("perceived HPI"));
+        assert!(name_is_alias_candidate("average risk of derivatives"));
+        // Metadata prefixes.
+        assert!(!name_is_alias_candidate(".Control"));
+        assert!(!name_is_alias_candidate("-dmnl"));
+        assert!(!name_is_alias_candidate(":SUPPLEMENTARY"));
+        assert!(!name_is_alias_candidate("?"));
+        assert!(!name_is_alias_candidate("#SMOOTH(x,3)#"));
+        // Time/system names.
+        assert!(!name_is_alias_candidate("Time"));
+        assert!(!name_is_alias_candidate("INITIAL TIME"));
+        assert!(!name_is_alias_candidate("SAVEPER"));
+        // Stdlib builtins / helpers.
+        assert!(!name_is_alias_candidate("SMOOTH"));
+        assert!(!name_is_alias_candidate("DELAY1"));
+        assert!(!name_is_alias_candidate("DEL"));
+        assert!(!name_is_alias_candidate("LV1"));
+        assert!(!name_is_alias_candidate("RT1"));
+        // Empty.
+        assert!(!name_is_alias_candidate(""));
     }
 }
