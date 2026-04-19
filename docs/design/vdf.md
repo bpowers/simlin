@@ -999,6 +999,100 @@ the most recent findings come first.
   (`(entry_file_offset - section_base) / 4`). Section 4 carries
   view/sketch connector metadata, not variable-owner records.
 
+- **Section 4 as an `(axis_slot_ref, dim_name_slot_ref)` binding**: refuted.
+  Of the 18 declared dimensions in C-LEARN (`Ref.vdf`), only `COP` is ever
+  referenced from section 4 under direct slot->name mapping, and only in
+  8 of 94 entries. Each of those entries pairs `COP` with an unrelated
+  variable slot (`FF change target year`, `UN population HIGH`, etc.),
+  consistent with sketch-connector metadata, not a clean dim-axis binding.
+  The other 17 dimensions (`Target`, `HFC type`, `Semi Agg`, `layers`,
+  `lower`, `upper`, `bottom`, `scenario`, `Aggregated Regions`, `Developing A`,
+  `Developing B`, `COP Developed`, `COP Developing A`,
+  `COP Remaining Developing`, `set targets`, `tNext`, `tPrev`) do not
+  appear as refs in any section-4 entry.
+
+#### Claims about multi-dim element naming (sec3 <-> sec5 binding)
+
+These investigations target: for an arrayed variable with 2-D shape like
+`[COP, Target]`, Vensim's VDF shows element names (`OECD US, t1`, `OECD EU,
+t1`, ...) even without the MDL. The element names must be in the file.
+None of the following signals, however, encodes a deterministic
+`axis_slot_ref -> dim_name -> element_list` binding.
+
+- **Candidate A: sec4 as `(axis_slot_ref, dim_name_slot_ref)` binding**:
+  refuted (see above).
+
+- **Candidate B: sec5 `n` as dim cardinality, 1:1 pairing to dims**: in
+  `subscripts.vdf` (1D), the single sec5 entry's payload contains `sub1`
+  (the dim name) and `n=3` matches the cardinality. In `Ref.vdf`
+  (C-LEARN, 18 dims), sec5 has exactly 18 entries with `n` values that
+  sort-match the 18 declared cardinalities, which is suggestive -- but
+  0 of 59 sec5 payload refs resolve to any dim name under direct slot
+  mapping. Every sec5 payload ref resolves to a VARIABLE name instead.
+  The entry ordering within sec5 does not correspond to MDL declaration
+  order, alphabetical dim-name order, or name-table appearance order of
+  dim names, so there is no deterministic way to pair a given sec5 entry
+  with a specific dim. This is consistent with sec5 being a variable-group
+  (by view/axis) catalog rather than a dim descriptor table.
+
+- **Candidate C: element names follow the dim name contiguously in the
+  name table**: refuted on `Ref.vdf`. Of 8 tested dims, only `COP`
+  (elements at name-table indices 71..77, immediately after the dim name
+  at 62) has contiguous elements. `HFC type`'s 9 elements are scattered
+  across name-table indices 163, 859, 861, 863, 865, 867, 868, 870, 872
+  (span 709). `scenario`'s 3 elements span indices 90, 1114, 1115. Most
+  dims have their elements NOT adjacent to the dim name in the name table.
+
+- **Candidate D: sec3 word 10 / word 11 / unused words as secondary
+  dim-identity key**: refuted. Word 10 is a packing hint equal to the
+  trailing axis size (or 1 for 1-D). Word 11 is a small axis counter (0
+  or 1). Unused words 4..9, 12..17, 20..25 are zero on every validated
+  sec3 entry across all fixtures.
+
+- **Candidate E: section 0 as a dim directory tail**: refuted. Section 0
+  is 132-140 bytes across all observed fixtures (small, medium, and
+  array-heavy), containing only the simulation command string and zero
+  padding. No trailing array-dim directory.
+
+- **sec3 axis_slot_refs as direct pointers to dim names**: refuted. In
+  `Ref.vdf`, the size-7 axis slot `636` resolves under direct slot_table
+  mapping to the scalar `watt per J s`. The size-9 slot `1852` resolves
+  to `Sea Level Rise` (a 3-element scenario-dim variable, not a 9-dim
+  variable). No axis slot's direct-mapped name corresponds to the dim
+  itself or to any variable of matching cardinality.
+
+- **sec3 axis-anchor record's f[2] as the first-element name-table index**:
+  refuted. For the size-7 axis in `Ref.vdf`, the anchor record (rec[9]
+  at byte offset 636) has `f[2]=72` and `names[72..78] = ['OECD EU',
+  'G77 China', ..., 'UN population LOW LOOKUP']`. The actual 7 COP
+  elements start at `names[71]='OECD US'`, so f[2] is off-by-one, and
+  the resulting slice still includes a non-element `UN population LOW
+  LOOKUP` at the tail. Other anchor records' f[2] values (`237=layers`,
+  `189=CH4 per C`, `323=Developing B stop growth year`) produce
+  mismatched or unrelated name slices. The f[2]-pointer hypothesis does
+  not generalize.
+
+- **sec3 anchor record's 16-byte substructure as a dim descriptor**:
+  refuted. Dumping the 16 bytes at each `axis_slot_ref` in `Ref.vdf`
+  yields diverse u32 tuples: `(0, 0, 0, 1)` for slot 636, `(8460, 0,
+  1008981770, 0)` for slot 1852, `(17, 0, 0, 5)` for slot 3436, etc.
+  Some values look like float constants (`0.01`, `0.1`), others are
+  small ints, none encode a cardinality or a name-table pointer. Two
+  "dim-flavored" anchor records (rec[9] with `f[1]=143, f[5]=8028,
+  f[6]=0, f[11]=0` and rec[28] with `f[1]=135, f[5]=508, f[6]=0,
+  f[11]=0`) have a distinctive shape, but the pattern does not hold for
+  other axis anchors (rec[8], rec[37], rec[53], rec[70], rec[109]
+  are ordinary variable records).
+
+The practical consequence: the existing conservative
+`_recover_dimension_sets` path in `tools/vdf_xray.py` (and
+`VdfFile::inferred_dimension_sets` in `src/simlin-engine/src/vdf.rs`),
+which requires a single-sec5-entry layout with exactly one non-metadata
+payload ref naming the dim, remains the only decoded dim-binding
+mechanism. Multi-dim / multi-sec5 fixtures still surface their element
+slots with numeric subscripts like `var[1], var[2], ...` rather than
+named element labels.
+
 #### Claims about section 6
 
 - **Section-6 leading refs as a save list**: Resolved refs include model
