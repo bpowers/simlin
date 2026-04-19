@@ -307,6 +307,14 @@ pub(crate) struct SimState {
     /// `simlin_analyze_get_relative_loop_score` reads from here rather
     /// than re-querying the (possibly mutated) salsa db.
     pub(crate) loop_partitions: HashMap<String, Option<usize>>,
+    /// Memoized result of `ltm_post::compute_rel_loop_scores(results,
+    /// loop_partitions)`.  Populated lazily on the first
+    /// `simlin_analyze_get_relative_loop_score` call, cleared whenever
+    /// `results` is replaced (run-to-end, reset).  Per-loop FFI callers
+    /// (pysimlin `_populate_loop_behavior`, diagram UI, MCP) iterate
+    /// every loop id and would otherwise pay O(P * S) normalization
+    /// work P times per sim; the cache collapses that to one traversal.
+    pub(crate) cached_rel_scores: Option<HashMap<String, Vec<f64>>>,
 }
 
 /// Opaque simulation structure

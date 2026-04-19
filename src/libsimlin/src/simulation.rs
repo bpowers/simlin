@@ -129,6 +129,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             results: None,
             overrides: HashMap::new(),
             loop_partitions,
+            cached_rel_scores: None,
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -199,6 +200,9 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
+                // Fresh results invalidate the memoized rel_loop_score
+                // map; next FFI read will recompute from the new buffer.
+                state.cached_rel_scores = None;
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -263,6 +267,10 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
+    // Results just went away; any memoized rel_loop_score map is now
+    // referring to a dead buffer and must be evicted before the next
+    // run_to_end populates fresh results.
+    state.cached_rel_scores = None;
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation

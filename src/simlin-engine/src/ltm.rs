@@ -1173,6 +1173,13 @@ impl CausalGraph {
     /// [`TruncatedByBudget`] signal.  The downstream LTM pipeline is
     /// gated separately by [`MAX_LTM_SCC_NODES`] at
     /// [`crate::db::model_ltm_variables`].
+    ///
+    /// The budget is charged on **raw** Johnson emissions, not on
+    /// post-dedup distinct circuits; on dense multidigraphs the DFS can
+    /// visit the same circuit many times before dedup collapses it.
+    /// Callers that want a post-dedup bound on the returned Vec size
+    /// (e.g., to cap `Loop` struct materialization memory) should use
+    /// [`Self::find_loops_if_under_limit`] instead.
     pub fn find_loops_with_limit(
         &self,
         max_circuits: usize,
@@ -1183,6 +1190,42 @@ impl CausalGraph {
         // the hot DFS loop allocating only `Vec<u32>` and lets circuits
         // that dedup away shed their string storage before we pay for it.
         let indexed = self.enumerate_indexed_circuits(max_circuits)?;
+        Ok(self.materialize_loops_from_indexed(indexed))
+    }
+
+    /// Find all elementary circuits if and only if the deduped count is
+    /// at most `max_loops`.  Unlike [`Self::find_loops_with_limit`],
+    /// this does not charge the budget on raw Johnson emissions: it
+    /// runs enumeration to completion (cheap — `Vec<u32>` per circuit)
+    /// and then checks the distinct-circuit count.  Callers using this
+    /// method as a memory gate for `Loop` materialization (~9 KB per
+    /// loop, see the cap-lift diagnosis) see a faithful post-dedup
+    /// decision regardless of how multidigraph-dense the source graph
+    /// is.
+    ///
+    /// Returns `Err(TruncatedByBudget)` when the graph has more than
+    /// `max_loops` distinct elementary circuits; no `Loop` struct is
+    /// materialized on the truncation path.
+    pub fn find_loops_if_under_limit(
+        &self,
+        max_loops: usize,
+    ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
+        let indexed = self
+            .enumerate_indexed_circuits(usize::MAX)
+            .expect("usize::MAX cannot exhaust the enumeration budget");
+        if indexed.circuits.len() > max_loops {
+            return Err(TruncatedByBudget);
+        }
+        Ok(self.materialize_loops_from_indexed(indexed))
+    }
+
+    /// Shared materialization step from indexed circuits to annotated
+    /// `Loop` structs (links, polarity, stocks with module enrichment,
+    /// deterministic IDs).  Factored out so
+    /// [`Self::find_loops_with_limit`] and
+    /// [`Self::find_loops_if_under_limit`] share the expensive bit and
+    /// only differ in how they bound the indexed enumeration.
+    fn materialize_loops_from_indexed(&self, indexed: IndexedCircuits) -> Vec<Loop> {
         let mut loops = Vec::with_capacity(indexed.circuits.len());
         for circuit_idx in indexed.circuits {
             // Circuit length is always > 1 by construction in
@@ -1214,13 +1257,13 @@ impl CausalGraph {
         // verify the invariant so a future regression trips a test.
         debug_assert!(
             loops_have_unique_node_sets(&loops),
-            "circuit enumerator must emit unique node-sets; duplicate loops reached find_loops_with_limit"
+            "circuit enumerator must emit unique node-sets; duplicate loops reached materialize_loops_from_indexed"
         );
 
         // Assign deterministic IDs based on sorted loop content
         self.assign_deterministic_loop_ids(&mut loops);
 
-        Ok(loops)
+        loops
     }
 
     /// Shared enumeration core used by both `find_loops_with_limit` and
@@ -5284,6 +5327,42 @@ mod tests {
             .find_circuit_node_lists_with_limit(11)
             .expect_err("budget of 11 must trip because raw cycle discovery exceeds 11");
         assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn find_loops_if_under_limit_gates_on_post_dedup_count() {
+        // K4 has 11 distinct node-set circuits but raw Johnson emits
+        // many more.  `find_loops_if_under_limit` must succeed when
+        // asked for >=11 (it runs enumeration to completion and
+        // measures deduped count) and truncate when asked for <11 --
+        // the opposite asymmetry from
+        // `johnson_budget_charges_duplicate_raw_cycles`.  This is what
+        // `model_detected_loops` relies on to gate dense multidigraphs
+        // without false positives.
+        let cg = build_causal_graph(&[
+            ("a", &["b", "c", "d"]),
+            ("b", &["a", "c", "d"]),
+            ("c", &["a", "b", "d"]),
+            ("d", &["a", "b", "c"]),
+        ]);
+
+        let loops = cg
+            .find_loops_if_under_limit(11)
+            .expect("budget=11 must admit all 11 distinct circuits");
+        assert_eq!(loops.len(), 11, "K4 dedups to 11 distinct circuits");
+
+        let err = cg
+            .find_loops_if_under_limit(10)
+            .expect_err("budget=10 must trip on distinct-count check");
+        assert_eq!(err, TruncatedByBudget);
+
+        // Proof the two APIs diverge on this input: the raw-budget
+        // variant trips at 11 (pre-dedup) even though 11 distinct loops
+        // exist.
+        let raw_err = cg
+            .find_loops_with_limit(11)
+            .expect_err("raw-budget variant trips because raw emissions exceed 11");
+        assert_eq!(raw_err, TruncatedByBudget);
     }
 
     #[test]

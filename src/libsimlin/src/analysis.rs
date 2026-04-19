@@ -415,17 +415,38 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     // scores stay consistent with the results buffer even if the
     // project was mutated after the sim was created — and avoids the
     // db-then-state lock inversion the prior implementation had.
-    let state = sim_ref.state.lock().unwrap();
-    let Some(ref results) = state.results else {
+    let mut state = sim_ref.state.lock().unwrap();
+    if state.results.is_none() {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
                 .with_message("simulation has no results; run the simulation first"),
         );
         return;
-    };
+    }
 
-    let scored = engine::ltm_post::compute_rel_loop_scores(results, &state.loop_partitions);
+    // Populate the per-sim rel_loop_score cache on first access and
+    // reuse it thereafter.  Callers iterating every loop id (pysimlin
+    // `_populate_loop_behavior`, diagram UI stepping through loops,
+    // LoopDominanceAnalyzer) would otherwise pay O(P * S) per call
+    // across P calls -- quadratic in loop count.  The cache is
+    // invalidated in `simlin_sim_run_to_end` and `simlin_sim_reset`
+    // whenever `results` is replaced or cleared.
+    if state.cached_rel_scores.is_none() {
+        let scored = {
+            let results = state
+                .results
+                .as_ref()
+                .expect("state.results is Some: checked above");
+            engine::ltm_post::compute_rel_loop_scores(results, &state.loop_partitions)
+        };
+        state.cached_rel_scores = Some(scored);
+    }
+    let scored = state
+        .cached_rel_scores
+        .as_ref()
+        .expect("cache was just populated");
+
     let Some(series) = scored.get(loop_id) else {
         // Distinguish two disjoint cases so FFI callers can react
         // appropriately: (a) `loop_partitions` is empty because LTM

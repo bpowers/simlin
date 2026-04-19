@@ -1095,12 +1095,17 @@ pub fn model_detected_loops(
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
 
-    // Budget-based gate: measure actual circuit count, not an SCC-size
-    // heuristic.  Keeps this query cheap on dense graphs (Johnson's
-    // bails as soon as the `MAX_LTM_TOTAL_CIRCUITS`th circuit would be
-    // recorded) without penalising sparse graphs whose largest SCC
-    // happens to be big but whose circuit count is tiny.
-    let loops = match graph.find_loops_with_limit(crate::ltm::MAX_LTM_TOTAL_CIRCUITS) {
+    // Gate on post-dedup distinct-circuit count so dense multidigraphs
+    // where Johnson's DFS revisits the same cycle many times don't get
+    // spuriously truncated: the raw-emission budget of
+    // `find_loops_with_limit` can fire even for graphs whose actual
+    // distinct loop count is well under MAX_LTM_TOTAL_CIRCUITS
+    // (`ltm::tests::johnson_budget_charges_duplicate_raw_cycles` codifies
+    // the raw-count semantic).  `find_loops_if_under_limit` runs
+    // enumeration to completion (cheap `Vec<u32>` paths) and only
+    // materializes `Loop` structs when the distinct count is under the
+    // memory-cliff threshold.
+    let loops = match graph.find_loops_if_under_limit(crate::ltm::MAX_LTM_TOTAL_CIRCUITS) {
         Ok(loops) => loops,
         Err(crate::ltm::TruncatedByBudget) => return DetectedLoopsResult { loops: Vec::new() },
     };
@@ -1737,28 +1742,36 @@ mod detected_loops_gate_tests {
         );
     }
 
-    /// `CausalGraph::find_loops_with_limit` must return
-    /// `Err(TruncatedByBudget)` when the enumeration would exceed the
-    /// caller's budget — the signal that `model_detected_loops` uses to
-    /// gate dense-graph results to empty.  A tight budget on an
-    /// already-known-loopy graph exercises the contract directly
-    /// without requiring a synthetic model with >10K circuits (which
-    /// is hard to express in `TestProject` — WRLD3-scale
-    /// dense-graph coverage lives in `tests/wrld3_ltm_panic.rs`).
+    /// `CausalGraph::find_loops_if_under_limit` must return
+    /// `Err(TruncatedByBudget)` when the post-dedup distinct-circuit
+    /// count exceeds the caller's budget.  A 3-node ring has exactly
+    /// one distinct loop so the assertion uses a 0-loop budget to
+    /// exercise the gate.  This exercises the contract
+    /// `model_detected_loops` depends on: the gate is keyed on the
+    /// number of *distinct* loops (the Loop-struct materialization
+    /// cost) rather than on how many times Johnson's DFS revisited a
+    /// given node-set before dedup.
     #[test]
-    fn test_find_loops_with_limit_truncates_dense_graph() {
-        let project = build_chain_scc_project("find_loops_budget_truncate", 5);
+    fn test_find_loops_if_under_limit_truncates_on_post_dedup_count() {
+        let project = build_chain_scc_project("find_loops_if_under_limit_truncate", 5);
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
         let model = sync.models["main"].source;
 
         // Variable-level graph has one elementary circuit (the 5-node
-        // ring).  Budget=0 forces TruncatedByBudget on the first
-        // record attempt, proving the bail-out path is live.
+        // ring).  Budget=0 forces TruncatedByBudget because 1 > 0.
         let graph = causal_graph_with_modules(&db, model, sync.project);
         let err = graph
-            .find_loops_with_limit(0)
-            .expect_err("budget=0 must truncate as soon as a circuit would be recorded");
+            .find_loops_if_under_limit(0)
+            .expect_err("budget=0 must truncate since the graph has 1 distinct loop");
         assert_eq!(err, crate::ltm::TruncatedByBudget);
+
+        // Budget=1 is exactly the distinct-loop count, so it must
+        // succeed.  This pairs with the previous assertion: the gate
+        // is strict `>`, not `>=`.
+        let loops = graph
+            .find_loops_if_under_limit(1)
+            .expect("budget=1 must admit the single distinct loop");
+        assert_eq!(loops.len(), 1);
     }
 }
