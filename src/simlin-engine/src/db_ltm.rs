@@ -2175,9 +2175,8 @@ pub fn model_ltm_variables(
 
     use super::{
         CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
-        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_element_edges,
-        causal_graph_with_modules, generate_max_abs_chain_str, model_causal_edges,
-        model_element_causal_edges, model_element_cycle_partitions, model_element_loop_circuits,
+        LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules, generate_max_abs_chain_str,
+        model_causal_edges, model_element_cycle_partitions, model_element_loop_circuits,
         module_input_pathways_from_edges,
     };
 
@@ -2190,50 +2189,27 @@ pub fn model_ltm_variables(
     }
 
     // When the user explicitly requested discovery mode, honor it directly.
-    // Otherwise gate on the element-level graph's largest SCC so we avoid
-    // Cliff A (~17 GB in `build_element_level_loops`) and Cliff B (~140 TB
-    // of `rel_loop_score` equation text at WRLD3 scale) *before* paying
-    // for Johnson's circuit enumeration.  See
+    // Otherwise we let circuit enumeration run (bounded by
+    // `MAX_LTM_ENUMERATION_CAP`'s streaming cutoff) and gate the exhaustive
+    // path on the post-collapse emit count further below.  Previous
+    // iterations had a pre-enumeration gate keyed on the largest
+    // element-level SCC size, but that proved too blunt: a sparse
+    // stock -> aux_1 -> ... -> aux_N -> flow -> stock model has a
+    // single loop that exhaustive mode would happily score, yet an
+    // SCC-size heuristic misclassified the whole SCC as "dense" and
+    // forced the model into discovery.  The downstream
+    // `MAX_LTM_TOTAL_CIRCUITS` gate measures actual Loop-struct emit
+    // count (via `build_element_level_loops`'s per-group collapse
+    // rules) and so accepts sparse large SCCs while still catching
+    // WRLD3-style dense feedback (where enumeration trips the
+    // `MAX_LTM_ENUMERATION_CAP` streaming cap and sets
+    // `LoopCircuitsResult.truncated = true`).  See
     // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
     let is_discovery_user = project.ltm_discovery_mode(db);
-    let max_scc_size = if is_discovery_user {
-        0
-    } else {
-        let element_edges = model_element_causal_edges(db, model, project);
-        causal_graph_from_element_edges(element_edges).largest_scc_size()
-    };
-    // `max_scc_size` is 0 on the user-requested-discovery branch
-    // (computed lazily above), so a bare `>` comparison here is
-    // correct regardless of the discovery-mode source.
-    let scc_auto_flip = max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
     // `is_discovery` may be upgraded to true below by the total-circuit
-    // backstop (a second gate for pathological shapes the largest-SCC
-    // heuristic misses, e.g. thousands of disjoint small cycles).
-    let mut is_discovery = is_discovery_user || scc_auto_flip;
-
-    if scc_auto_flip {
-        let msg = format!(
-            "LTM analysis auto-switched from exhaustive to discovery mode: \
-             the element-level causal graph's largest SCC has {} nodes, \
-             exceeding MAX_LTM_SCC_NODES = {}.  Exhaustive compilation at \
-             this scale would allocate gigabytes of synthetic-variable \
-             equation text (see \
-             docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
-             Per-loop scores are ranked post-simulation via the \
-             strongest-path search; see \
-             docs/design/ltm--loops-that-matter.md for the two-tier \
-             strategy.",
-            max_scc_size,
-            crate::ltm::MAX_LTM_SCC_NODES,
-        );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
-    }
+    // backstop (either the streaming `truncated` signal or the
+    // post-collapse emit-count exceeds `MAX_LTM_TOTAL_CIRCUITS`).
+    let mut is_discovery = is_discovery_user;
 
     // Determine output ports for this model. Stdlib models always use
     // the "output" convention. For user-defined models, output ports are

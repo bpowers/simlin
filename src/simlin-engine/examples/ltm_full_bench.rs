@@ -18,7 +18,8 @@
 //! `docs/design-plans/2026-04-18-ltm-cap-lift-validation.md`); this
 //! bench measures the post-cap pipeline with the real production
 //! parameters -- enumeration runs uncapped and the downstream
-//! synthetic-variable pipeline is gated by [`MAX_LTM_SCC_NODES`].
+//! synthetic-variable pipeline is gated by
+//! `simlin_engine::ltm::MAX_LTM_TOTAL_CIRCUITS`.
 //!
 //! The stages are measured in order, with cumulative VmPeak / VmHWM /
 //! VmRSS (all from /proc/self/status) plus wall-clock time recorded at
@@ -261,9 +262,10 @@ fn main() {
     );
 
     // Stage 6: element-level circuit enumeration (Johnson's w/ SCC).
-    // Enumeration runs with max_circuits = usize::MAX; the downstream
-    // synthetic-variable pipeline is gated by MAX_LTM_SCC_NODES in
-    // `model_ltm_variables`, not by a circuit-count cap.
+    // Enumeration is bounded by the streaming MAX_LTM_ENUMERATION_CAP
+    // inside `model_element_loop_circuits`; the downstream
+    // synthetic-variable pipeline is gated by MAX_LTM_TOTAL_CIRCUITS
+    // in `model_ltm_variables`.
     let t0 = Instant::now();
     let circuits_result = model_element_loop_circuits(&db, root_source_model, sync.project);
     let n_circuits = circuits_result.len();

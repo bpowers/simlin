@@ -417,17 +417,22 @@ fn build_two_disjoint_sccs_project(project_name: &str, scc_size: usize) -> datam
     builder.build_datamodel()
 }
 
-/// Auto-flip: a model whose element-level causal graph has an SCC of
-/// 51 nodes (one node over the 50-node threshold) must flip to
+/// Auto-flip: a model whose element-level graph will emit more than
+/// `MAX_LTM_TOTAL_CIRCUITS` distinct feedback loops must flip to
 /// discovery-mode shape: link scores for causal edges, no per-loop
-/// `loop_score` synthetic variables.  (`rel_loop_score` is never
-/// materialized now that Option B moved it to post-sim.)
+/// `loop_score` synthetic variables.  We exercise the gate with N+1
+/// disjoint 3-node cycles (each cycle is its own variable-level
+/// signature so `estimate_emitted_loop_count` returns N+1).
+/// `rel_loop_score` is never materialized now that Option B moved it
+/// to post-sim, so its absence on this path is also asserted.
 ///
-/// See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` for the
-/// compile-time equation-text blow-up that motivates this threshold.
+/// See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` for
+/// the compile-time equation-text blow-up that motivates the
+/// threshold.
 #[test]
-fn test_model_ltm_variables_auto_flip_above_scc_threshold() {
-    let project = build_chain_scc_project("auto_flip_above", 51);
+fn test_model_ltm_variables_auto_flip_above_total_circuits_threshold() {
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("auto_flip_above", n);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
@@ -469,13 +474,16 @@ fn test_model_ltm_variables_auto_flip_above_scc_threshold() {
     );
 }
 
-/// Counterpart: at 49 nodes (under the 50-node threshold) the
-/// exhaustive path still runs and emits per-loop `loop_score` vars.
-/// Guards against the threshold drifting too low and breaking LTM on
-/// realistically sized models.
+/// Counterpart: a sparse stock -> aux_0 -> ... -> aux_48 -> flow ->
+/// stock ring has a large (51-node) SCC but only one elementary
+/// feedback loop, which `estimate_emitted_loop_count` reports as 1 --
+/// well under `MAX_LTM_TOTAL_CIRCUITS`.  Exhaustive mode must run and
+/// emit per-loop `loop_score`, reflecting the iter-13 decision to key
+/// auto-flip on emitted-Loop count rather than SCC node count (which
+/// misclassifies sparse single-cycle SCCs).
 #[test]
-fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
-    let project = build_chain_scc_project("auto_flip_below", 49);
+fn test_model_ltm_variables_stays_exhaustive_on_sparse_large_scc() {
+    let project = build_chain_scc_project("sparse_large_scc", 51);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
@@ -488,8 +496,8 @@ fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
         .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
     assert!(
         has_loop_score,
-        "below-threshold model should stay on the exhaustive path and emit \
-         loop_score vars; got: {:?}",
+        "51-node sparse ring has one elementary loop; exhaustive mode \
+         must run and emit loop_score; got: {:?}",
         ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 }
@@ -503,7 +511,8 @@ fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
 fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
     use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
 
-    let project = build_chain_scc_project("auto_flip_diag", 51);
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("auto_flip_diag", n);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
@@ -542,7 +551,8 @@ fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
-    let project = build_chain_scc_project("auto_flip_surface", 51);
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("auto_flip_surface", n);
     let mut db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
@@ -574,7 +584,8 @@ fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
 fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
 
-    let project = build_chain_scc_project("auto_flip_disabled", 51);
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("auto_flip_disabled", n);
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;

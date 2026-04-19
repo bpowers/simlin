@@ -460,11 +460,11 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
             format!(
                 "loop '{loop_id}' has no relative score data: either LTM \
                  was not enabled when this simulation was created, or the \
-                 model's element-level causal graph tripped the auto-flip \
-                 threshold (largest SCC > MAX_LTM_SCC_NODES or total \
-                 feedback-loop count > MAX_LTM_TOTAL_CIRCUITS), so LTM \
-                 ran in discovery mode and did not materialize per-loop \
-                 score timeseries"
+                 model's element-level graph tripped the auto-flip \
+                 threshold (total feedback-loop count exceeded \
+                 MAX_LTM_TOTAL_CIRCUITS or enumeration truncated at \
+                 MAX_LTM_ENUMERATION_CAP), so LTM ran in discovery mode \
+                 and did not materialize per-loop score timeseries"
             )
         } else {
             format!(

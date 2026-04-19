@@ -86,10 +86,12 @@ fn wrld3_ltm_compilation_finishes_in_time() {
 /// element-level causal graph rather than a `TruncatedByBudget` signal or
 /// a silently truncated result.
 ///
-/// `MAX_LTM_SCC_NODES` remains the real backstop: it gates the downstream
-/// synthetic-variable pipeline at `model_ltm_variables`.  Pure
-/// enumeration stays uncapped so diagnostic tools and future stress tests
-/// can measure the raw graph structure.
+/// `MAX_LTM_TOTAL_CIRCUITS` is the real backstop: it gates the downstream
+/// synthetic-variable pipeline at `model_ltm_variables` (either via the
+/// post-collapse emit-count check or via the streaming
+/// `MAX_LTM_ENUMERATION_CAP`).  Pure enumeration stays uncapped here
+/// so diagnostic tools and future stress tests can measure the raw
+/// graph structure.
 #[test]
 fn wrld3_element_level_enumeration_is_uncapped() {
     let project = load_wrld3();

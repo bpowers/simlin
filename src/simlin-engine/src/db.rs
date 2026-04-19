@@ -1911,9 +1911,10 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// 2. `check_model_units` -- accumulates unit inference/checking warnings
 /// 3. When LTM is enabled, `model_ltm_variables` -- accumulates LTM
 ///    assembly diagnostics (notably the auto-flip warning that surfaces
-///    when the element-level largest SCC exceeds `MAX_LTM_SCC_NODES`).
-///    Gated on `ltm_enabled` so we don't run LTM synthesis on projects
-///    that never requested it.
+///    when the post-collapse emitted-Loop count exceeds
+///    `MAX_LTM_TOTAL_CIRCUITS` or element-level enumeration truncates
+///    at `MAX_LTM_ENUMERATION_CAP`).  Gated on `ltm_enabled` so we
+///    don't run LTM synthesis on projects that never requested it.
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
     let source_vars = model.variables(db);

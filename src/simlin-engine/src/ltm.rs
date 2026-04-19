@@ -12,20 +12,25 @@ use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 
-/// Maximum number of nodes in any single strongly-connected component
-/// of a model's element-level causal graph before
-/// [`crate::db::model_ltm_variables`] auto-flips from exhaustive to
-/// discovery mode.
+/// Cap on the number of feedback loops `build_element_level_loops`
+/// will materialize before [`crate::db::model_ltm_variables`]
+/// auto-flips to discovery mode.
 ///
-/// The gate is applied **before** Johnson's circuit enumeration so that
-/// the downstream `build_element_level_loops` /
-/// `generate_loop_score_variables` pipeline is never entered on inputs
-/// whose per-partition materialization would exceed WASM's 4 GiB linear
-/// memory budget.  With the largest-SCC gate in place there is no
-/// separate cap on total circuit count; enumeration itself is bounded
-/// only by the per-call `max_circuits` argument supplied by the caller.
+/// This is the only auto-flip gate that survives: a previously-added
+/// pre-enumeration largest-SCC gate (`MAX_LTM_SCC_NODES`) was removed
+/// in an iter-13 review cycle because it over-flipped sparse
+/// single-cycle SCCs -- a stock -> aux_1 -> ... -> aux_N -> flow ->
+/// stock ring has one elementary loop but N+2 nodes in its SCC, and
+/// the old heuristic mistook length for density.  The post-collapse
+/// emit-count gate implemented here measures actual `Loop`-struct
+/// materialization cost and accepts such shapes correctly.  Truly
+/// dense feedback (WRLD3's 166-node SCC with 1.86M circuits) trips
+/// this gate via the [`MAX_LTM_ENUMERATION_CAP`] streaming cap --
+/// `model_element_loop_circuits` returns `LoopCircuitsResult.truncated
+/// = true` and `model_ltm_variables` routes that into the same
+/// auto-flip handler as an over-budget emit count.
 ///
-/// ## Why 50
+/// ## Why 10_000
 ///
 /// The 2026-04-18 LTM cap-lift diagnosis
 /// (`docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`) measured
@@ -34,33 +39,14 @@ use crate::variable::{Variable, identifier_set};
 /// - Cliff A: `build_element_level_loops` allocates ~17 GB of
 ///   `Loop`/`Link` structs for 1.86M enumerated circuits.
 /// - Cliff B: each `rel_loop_score` equation is 75,303,840 bytes
-///   (~75.3 MB); full emission projects to ~140 TB of equation text.
+///   (~75.3 MB); full emission projects to ~140 TB of equation text
+///   (mitigated separately by the move to post-sim
+///   [`crate::ltm_post::compute_rel_loop_scores`]).
 ///
-/// The diagnosis recommends gating on largest-SCC size rather than
-/// total circuit count because the O(P²) rel_loop_score term binds on
-/// partition size (each partition maps to one SCC), and the size of
-/// the largest SCC upper-bounds the worst-case partition size.
-/// Threshold 50 keeps every existing LTM test model on the exhaustive
-/// path while catching dense feedback graphs like WRLD3 (166-node SCC)
-/// well before they reach the cliffs.
-pub const MAX_LTM_SCC_NODES: usize = 50;
-
-/// Fallback cap on the total number of elementary circuits in the
-/// element-level graph before
-/// [`crate::db::model_ltm_variables`] auto-flips to discovery mode.
-///
-/// The [`MAX_LTM_SCC_NODES`] gate catches dense feedback partitions, but
-/// it cannot see models whose element-level graph expands a single
-/// variable-level 2-cycle across a very large dimension (or many
-/// disjoint small SCCs whose sum is pathological).  An arrayed model of
-/// the shape `population[Region] -> births[Region] -> population[Region]`
-/// with `|Region| = 200_000` has `max_scc_size == 2` on the element
-/// graph but 200_000 independent 2-node circuits, each of which becomes
-/// a `Loop` struct in `build_element_level_loops` (~9 KB each on WRLD3's
-/// measured allocation profile).  Without this backstop the exhaustive
-/// branch would still allocate 1.8 GB of `Loop`/`Link` state and blow
-/// WASM's 4 GiB ceiling.
-///
+/// Cliff A remains the live constraint this gate addresses.  At ~9 KB
+/// per `Loop` struct, 10_000 distinct Loops cost ~90 MB of
+/// intermediate state -- comfortable inside WASM's 4 GiB budget with
+/// room for the rest of the compile pipeline.
 /// ## Why 10_000
 ///
 /// At ~9 KB per materialized `Loop` struct (diagnosis measurement on
@@ -1129,14 +1115,14 @@ impl CausalGraph {
     /// Return the number of nodes in the largest strongly-connected
     /// component, or 0 when the graph has no edges.  Singletons without
     /// self-loops count as size-1 SCCs, so an acyclic graph's return
-    /// value is at most 1 and never triggers [`MAX_LTM_SCC_NODES`].
+    /// value is at most 1.
     ///
-    /// Used as the auto-flip gate in
-    /// [`crate::db::model_ltm_variables`]: if any SCC exceeds
-    /// [`MAX_LTM_SCC_NODES`], LTM compilation switches to discovery
-    /// mode before paying for full circuit enumeration.  Runs in
-    /// O(V + E) via the iterative Tarjan implementation that backs
-    /// Johnson's enumerator.
+    /// Kept as a public structural-analysis helper even though the LTM
+    /// auto-flip gate no longer keys on SCC size -- diagnostic
+    /// harnesses (`examples/ltm_mem_bench.rs`) still use it to
+    /// characterize graph shape, and removing it would break that
+    /// tooling.  Runs in O(V + E) via the iterative Tarjan
+    /// implementation that backs Johnson's enumerator.
     pub fn largest_scc_size(&self) -> usize {
         let indexed = IndexedGraph::from_edges(&self.edges);
         indexed
@@ -1227,7 +1213,7 @@ impl CausalGraph {
     /// Production paths pass `usize::MAX` (no truncation); stress tests
     /// and diagnostic harnesses pass smaller budgets and check for the
     /// [`TruncatedByBudget`] signal.  The downstream LTM pipeline is
-    /// gated separately by [`MAX_LTM_SCC_NODES`] at
+    /// gated separately by [`MAX_LTM_TOTAL_CIRCUITS`] at
     /// [`crate::db::model_ltm_variables`].
     ///
     /// The budget is charged on **raw** Johnson emissions, not on
@@ -2060,9 +2046,9 @@ pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
 ///
 /// Runs Johnson's enumeration with no per-call circuit budget; the
 /// upstream [`crate::db::model_ltm_variables`] pipeline is responsible
-/// for skipping LTM on models whose element-level SCC exceeds
-/// [`MAX_LTM_SCC_NODES`].  Since `usize::MAX` is passed as the budget,
-/// the `TruncatedByBudget` branch is unreachable.
+/// for skipping LTM on models whose emitted-Loop count exceeds
+/// [`MAX_LTM_TOTAL_CIRCUITS`].  Since `usize::MAX` is passed as the
+/// budget, the `TruncatedByBudget` branch is unreachable.
 pub fn detect_loops(model: &ModelStage1, project: &Project) -> Result<Vec<Loop>> {
     let graph = CausalGraph::from_model(model, project)?;
     Ok(graph

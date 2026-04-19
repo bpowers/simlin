@@ -459,6 +459,132 @@ mod tests {
         assert!((rel_b[0] - 0.25).abs() < 1e-12);
     }
 
+    #[test]
+    fn per_element_with_all_scalar_matches_scalar_variant() {
+        // When every loop has slot count 1 (or absent from the map),
+        // `compute_rel_loop_scores_per_element` must produce output
+        // bit-identical to `compute_rel_loop_scores`.  Pins the
+        // docstring claim that "scalar-only groups trivially stride 1".
+        let series_a = &[1.0, 2.0, -4.0][..];
+        let series_b = &[3.0, -4.0, 0.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+
+        let scalar = compute_rel_loop_scores(&results, &partitions);
+
+        // Empty slot map -> everything defaults to 1.
+        let empty_slots: HashMap<String, usize> = HashMap::new();
+        let per_elem_empty =
+            compute_rel_loop_scores_per_element(&results, &partitions, &empty_slots);
+        for (id, scalar_series) in &scalar {
+            let per_elem_series = per_elem_empty
+                .get(id)
+                .unwrap_or_else(|| panic!("loop '{id}' missing from per-element output"));
+            assert_eq!(per_elem_series, scalar_series);
+        }
+
+        // Explicit slot=1 -> identical result.
+        let explicit_slots: HashMap<String, usize> = [("A".to_string(), 1), ("B".to_string(), 1)]
+            .into_iter()
+            .collect();
+        let per_elem_explicit =
+            compute_rel_loop_scores_per_element(&results, &partitions, &explicit_slots);
+        assert_eq!(per_elem_explicit, scalar);
+    }
+
+    #[test]
+    fn per_element_broadcasts_scalar_loops_in_mixed_partition() {
+        // Partition containing one arrayed loop (3 slots) and one
+        // scalar loop (1 slot): at element k, the arrayed loop
+        // contributes slot k and the scalar loop broadcasts slot 0 to
+        // every element's denominator.  This matches pre-PR compile-
+        // time broadcast semantics and the test helper in
+        // simulate_ltm.rs.
+        //
+        // Two steps, one partition:
+        //   loop A (arrayed, 3 slots): step 0 -> [1, 2, 3], step 1 -> [2, 4, 6]
+        //   loop B (scalar):           step 0 -> 4,         step 1 -> 8
+        //
+        // Denominators at each step should be:
+        //   step 0, elem 0: |1| + |4| = 5
+        //   step 0, elem 1: |2| + |4| = 6
+        //   step 0, elem 2: |3| + |4| = 7
+        //   step 1, elem 0: |2| + |8| = 10
+        //   step 1, elem 1: |4| + |8| = 12
+        //   step 1, elem 2: |6| + |8| = 14
+        //
+        // Results are stored row-major so we need 3 slots of A + 1
+        // slot of B + the `time` column.  Build the Results manually
+        // since `make_results_for_loops` assumes scalar loops.
+        let step_count = 2;
+        let step_size = 1 + 3 + 1; // time + 3 slots of A + 1 slot of B
+        let mut data = vec![0.0_f64; step_count * step_size];
+        // step 0
+        data[0] = 0.0;
+        data[1] = 1.0; // A[0]
+        data[2] = 2.0; // A[1]
+        data[3] = 3.0; // A[2]
+        data[4] = 4.0; // B
+        // step 1
+        data[step_size] = 1.0;
+        data[step_size + 1] = 2.0;
+        data[step_size + 2] = 4.0;
+        data[step_size + 3] = 6.0;
+        data[step_size + 4] = 8.0;
+
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        offsets.insert(loop_score_ident("A"), 1);
+        offsets.insert(loop_score_ident("B"), 4);
+
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs::from(&sim_specs),
+            is_vensim: false,
+        };
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let slots: HashMap<String, usize> = [("A".to_string(), 3), ("B".to_string(), 1)]
+            .into_iter()
+            .collect();
+
+        let per_elem = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+
+        // Each loop's output Vec has length step_count * max_slots = 2 * 3 = 6,
+        // with element k of step s at index s * 3 + k.
+        let rel_a = per_elem.get("A").expect("loop A has a series");
+        let rel_b = per_elem.get("B").expect("loop B has a series");
+        assert_eq!(rel_a.len(), 6);
+        assert_eq!(rel_b.len(), 6);
+
+        // step 0
+        assert!((rel_a[0] - (1.0 / 5.0)).abs() < 1e-12, "A[s=0, k=0]");
+        assert!((rel_a[1] - (2.0 / 6.0)).abs() < 1e-12, "A[s=0, k=1]");
+        assert!((rel_a[2] - (3.0 / 7.0)).abs() < 1e-12, "A[s=0, k=2]");
+        assert!((rel_b[0] - (4.0 / 5.0)).abs() < 1e-12, "B[s=0, k=0]");
+        assert!((rel_b[1] - (4.0 / 6.0)).abs() < 1e-12, "B[s=0, k=1]");
+        assert!((rel_b[2] - (4.0 / 7.0)).abs() < 1e-12, "B[s=0, k=2]");
+
+        // step 1
+        assert!((rel_a[3] - (2.0 / 10.0)).abs() < 1e-12, "A[s=1, k=0]");
+        assert!((rel_a[4] - (4.0 / 12.0)).abs() < 1e-12, "A[s=1, k=1]");
+        assert!((rel_a[5] - (6.0 / 14.0)).abs() < 1e-12, "A[s=1, k=2]");
+        assert!((rel_b[3] - (8.0 / 10.0)).abs() < 1e-12, "B[s=1, k=0]");
+        assert!((rel_b[4] - (8.0 / 12.0)).abs() < 1e-12, "B[s=1, k=1]");
+        assert!((rel_b[5] - (8.0 / 14.0)).abs() < 1e-12, "B[s=1, k=2]");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
