@@ -4,16 +4,21 @@
 
 //! Full-path LTM compile benchmark.
 //!
-//! Usage: `cargo run --release --example ltm_full_bench -- [mdl] [cap]`
+//! Usage: `cargo run --release --example ltm_full_bench -- [mdl]`
 //!
 //! Example:
 //!   cargo run --release --example ltm_full_bench -- \
-//!       test/metasd/WRLD3-03/wrld3-03.mdl 250000
+//!       test/metasd/WRLD3-03/wrld3-03.mdl
 //!
 //! Unlike `ltm_mem_bench` (which stops after circuit enumeration), this
 //! harness drives the full salsa-backed LTM pipeline end-to-end so we
-//! can diagnose which downstream stage starts to blow up as the circuit
-//! budget is lifted above the production cap of 100_000.
+//! can profile each stage's wall time and memory footprint.  The
+//! [`MAX_LTM_CIRCUITS`]-based circuit cap has been retired in favour of
+//! the auto-flip gate (see
+//! `docs/design-plans/2026-04-18-ltm-cap-lift-validation.md`); this
+//! bench measures the post-cap pipeline with the real production
+//! parameters -- enumeration runs uncapped and the downstream
+//! synthetic-variable pipeline is gated by [`MAX_LTM_SCC_NODES`].
 //!
 //! The stages are measured in order, with cumulative VmPeak / VmHWM /
 //! VmRSS (all from /proc/self/status) plus wall-clock time recorded at
@@ -27,11 +32,6 @@
 //!   6. loop_circuits       -- model_element_loop_circuits (Johnson's)
 //!   7. ltm_variables       -- model_ltm_variables (synth var gen)
 //!   8. compile             -- compile_project_incremental (full assembly)
-//!
-//! The circuit budget is applied by calling `simlin_engine::ltm::set_max_ltm_circuits(cap)`
-//! before any pipeline stage runs.  The production `MAX_LTM_CIRCUITS`
-//! constant is unchanged; the override exists purely so this bench can
-//! vary the cap across runs without rebuilding or touching the constant.
 
 use std::fs;
 use std::time::Instant;
@@ -41,7 +41,7 @@ use simlin_engine::db::{
     model_element_loop_circuits, model_ltm_variables, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::open_vensim;
+use simlin_engine::{open_vensim, open_xmile};
 
 fn read_proc_status_kb(key: &str) -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;
@@ -157,10 +157,6 @@ fn main() {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "test/metasd/WRLD3-03/wrld3-03.mdl".to_string());
-    let cap: usize = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(simlin_engine::ltm::default_max_ltm_circuits);
 
     // Abort ceiling: 15 GiB by default; override with LTM_BENCH_ABORT_MIB.
     let abort_peak_mib: f64 = std::env::var("LTM_BENCH_ABORT_MIB")
@@ -170,14 +166,8 @@ fn main() {
 
     eprintln!("=== LTM full-pipeline benchmark ===");
     eprintln!("model:       {mdl_path}");
-    eprintln!("cap:         {cap}");
     eprintln!("abort @:     {:.0} MiB VmPeak", abort_peak_mib);
     eprintln!();
-
-    // Install the cap BEFORE any pipeline call so salsa caches the
-    // element-level circuits computed under this budget.  The default
-    // `MAX_LTM_CIRCUITS` constant is unchanged.
-    simlin_engine::ltm::set_max_ltm_circuits(cap);
 
     let initial = snapshot();
     eprintln!(
@@ -192,10 +182,17 @@ fn main() {
     let mut tracker = Tracker::new(initial, abort_peak_mib);
     let run_start = Instant::now();
 
-    // Stage 1: parse model file.
+    // Stage 1: parse model file.  MDL and XMILE (.stmx/.xmile) are both
+    // supported so the bench can profile non-Vensim test models without
+    // needing per-format driver scripts.
     let t0 = Instant::now();
-    let mdl = fs::read_to_string(&mdl_path).expect("read model file");
-    let datamodel = open_vensim(&mdl).expect("parse MDL");
+    let contents = fs::read_to_string(&mdl_path).expect("read model file");
+    let datamodel = if mdl_path.ends_with(".mdl") {
+        open_vensim(&contents).expect("parse MDL")
+    } else {
+        let mut reader = contents.as_bytes();
+        open_xmile(&mut reader).expect("parse XMILE")
+    };
     let n_models = datamodel.models.len();
     let n_root_vars = datamodel
         .models
@@ -264,8 +261,9 @@ fn main() {
     );
 
     // Stage 6: element-level circuit enumeration (Johnson's w/ SCC).
-    // This is the stage bounded by the cap; the cap is applied at
-    // find_indexed_circuits() via the runtime-configurable budget.
+    // Enumeration runs with max_circuits = usize::MAX; the downstream
+    // synthetic-variable pipeline is gated by MAX_LTM_SCC_NODES in
+    // `model_ltm_variables`, not by a circuit-count cap.
     let t0 = Instant::now();
     let circuits_result = model_element_loop_circuits(&db, root_source_model, sync.project);
     let n_circuits = circuits_result.len();
@@ -343,11 +341,10 @@ fn main() {
     // Emit a machine-readable summary line as the last line of stderr
     // so the driver shell script can scrape it without regexing the
     // whole table.  Format:
-    //   SUMMARY cap=N circuits=N vars=N peak_mib=F hwm_mib=F rss_mib=F wall_ms=F compile_ok=BOOL
+    //   SUMMARY circuits=N vars=N peak_mib=F hwm_mib=F rss_mib=F wall_ms=F compile_ok=BOOL
     eprintln!(
-        "SUMMARY cap={} circuits={} vars={} peak_mib={:.2} hwm_mib={:.2} rss_mib={:.2} \
+        "SUMMARY circuits={} vars={} peak_mib={:.2} hwm_mib={:.2} rss_mib={:.2} \
          wall_ms={:.1} compile_ok={}",
-        cap,
         n_circuits,
         n_ltm,
         tracker.records.last().map(|r| r.peak_mib).unwrap_or(0.0),

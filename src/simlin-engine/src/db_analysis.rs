@@ -1064,7 +1064,9 @@ pub fn model_loop_circuits(
 ) -> LoopCircuitsResult {
     let edges_result = model_causal_edges(db, model, project);
     let graph = causal_graph_from_edges(edges_result);
-    let (names, circuits) = graph.find_indexed_circuits();
+    let (names, circuits) = graph
+        .find_indexed_circuits_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
     LoopCircuitsResult { names, circuits }
 }
 
@@ -1081,7 +1083,9 @@ pub fn model_detected_loops(
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
 
-    let loops = graph.find_loops();
+    let loops = graph
+        .find_loops_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
     DetectedLoopsResult {
         loops: loops
             .into_iter()
@@ -1202,7 +1206,9 @@ pub fn model_element_loop_circuits(
 ) -> LoopCircuitsResult {
     let element_edges = model_element_causal_edges(db, model, project);
     let graph = causal_graph_from_element_edges(element_edges);
-    let (names, circuits) = graph.find_indexed_circuits();
+    let (names, circuits) = graph
+        .find_indexed_circuits_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
     LoopCircuitsResult { names, circuits }
 }
 
