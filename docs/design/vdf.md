@@ -700,14 +700,44 @@ small/medium test fixtures; what we need is the actual formula.
 7. **Section-3 extension in array models** provides dimension cardinality
    at words 26-27 of the section data (e.g., 3 for a 3-element dimension).
 
-8. **Record sort_key (field 10) as global alphabetical ordering signal**.
-   When sorted ascending across all visible owner blocks, sort keys
-   correspond 1:1 to the alphabetically sorted (case-insensitive) variable
-   names. Validated across the full `model_editing/` test corpus and the
-   `water`, `pop`, `consts`, `lookups` models. Stock sentinel records
-   typically have sort_key=0; their sort keys come from attached sort
-   anchor records (non-sentinel records whose ot_index falls within the
-   stock's OT range).
+8. **Record sort_key (field 10) as alphabetical ordering signal**. f[10]
+   is a monotonic unique key across all non-padding records, and sorting
+   records by f[10] produces them in alphabetical name order. `#`-prefixed
+   signature names sort first (ASCII `#` = 35 < letters), then case-
+   insensitive alphabetical among user, stdlib-helper, and system names.
+
+   Validated on water, pop, bact, lookup_ex, model_editing runs, and the
+   first alphabetical prefix of econ/base (16 names before the first
+   alias breaks alignment). `f[10] = 0` is a sentinel on specific system
+   records (observed on FINAL TIME and SAVEPER records for water; varies
+   across fixtures). System records are identified by `f[2] in {9, 13,
+   17, 21}` and mapped to their fixed system names directly.
+
+   **Scope limitation**: the alphabetical ordering is global across a
+   single Vensim "view block" but restarts at view boundaries on large
+   multi-view files (WRLD3 SCEN01 exhibits ~54 alphabetical runs after
+   f[10] sort, consistent with one run per sketch view). For single-view
+   or small multi-view files, the global alphabetical claim holds.
+
+   **Alias limitation**: Vensim records stdlib-call outputs under their
+   `#` signature names (e.g. `#SMOOTH(x,y)#`) rather than their user
+   alias names (e.g. `perceived_hpi`). The `#` signatures have records;
+   the user aliases appear in the name table but do NOT have their own
+   records. Pairing f[10]-sorted records alphabetically with visible
+   names works until the first alias, after which all subsequent
+   pairings shift by one. Identifying aliases from VDF alone is still
+   open; `build_section6_guided_ot_map` resolves them via the parsed
+   model's variable equations.
+
+   Stock sentinel records typically have sort_key=0; their sort keys
+   come from attached sort anchor records (non-sentinel records whose
+   ot_index falls within the stock's OT range).
+
+   **Structural invariant**: `#` signature names lack slot-table entries
+   (they appear at the tail of the name table, beyond `slot_count`).
+   In econ/base, the 6 names at positions 94..99 are exactly the 6 `#`
+   signatures; positions 0..93 cover `Time`, system variables, metadata,
+   and slotted user/stdlib names.
 
 9. **OT-position validation for stock classification**. Given a proposed
    name-to-block assignment, the stocks-first-alphabetical ordering
