@@ -124,6 +124,119 @@ pub fn compute_rel_loop_scores(
     out
 }
 
+/// Compute per-timestep, per-element relative loop scores for A2A
+/// arrayed loops.
+///
+/// [`compute_rel_loop_scores`] collapses every loop's `loop_score` to
+/// slot 0 — correct and matches pre-PR FFI semantics (which also
+/// returned a scalar series) for consumers that only needed the
+/// first-element view.  But pre-PR's *compile-time* `rel_loop_score`
+/// synthetic variables were genuinely per-element for A2A loops, and
+/// callers that want per-element normalization (e.g., pysimlin users
+/// reading dimension-aware importance series, or a future FFI that
+/// exposes arrayed loop analysis) need a production path that
+/// reproduces the same math.
+///
+/// Returns a flat `Vec<f64>` per loop id of length
+/// `step_count * max_slots`, where `max_slots` is the largest slot
+/// count among the loops sharing that partition group.  The value at
+/// step `s`, element `k` is at index `s * max_slots + k`.  Scalar
+/// loops in a mixed partition broadcast their single value across
+/// every element slot, matching the behaviour of the pre-PR compile-
+/// time emitter.
+///
+/// `n_slots_by_loop` maps each loop id to its element count.  Missing
+/// entries or a count of 1 are treated as scalar.  The denominator at
+/// element `k` is `sum_j |loop_score_j[k_j]|` where `k_j = k` for
+/// arrayed loops and `k_j = 0` for scalar ones (broadcast semantics).
+pub fn compute_rel_loop_scores_per_element(
+    results: &Results,
+    loop_partitions: &HashMap<String, Option<usize>>,
+    n_slots_by_loop: &HashMap<String, usize>,
+) -> HashMap<String, Vec<f64>> {
+    // Sort ids so partition groups are deterministic (matches the
+    // scalar variant's rationale).
+    let mut loop_ids: Vec<&String> = loop_partitions.keys().collect();
+    loop_ids.sort();
+
+    let offsets: Vec<Option<usize>> = loop_ids
+        .iter()
+        .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
+        .collect();
+    let slot_counts: Vec<usize> = loop_ids
+        .iter()
+        .map(|id| n_slots_by_loop.get(*id).copied().unwrap_or(1).max(1))
+        .collect();
+
+    let mut partition_groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
+    for (i, id) in loop_ids.iter().enumerate() {
+        let key = loop_partitions.get(*id).copied().unwrap_or(None);
+        partition_groups.entry(key).or_default().push(i);
+    }
+
+    // Per-group max_slots -- the stride used for both the numerator
+    // and denominator walks.  Scalar-only groups trivially stride 1
+    // and produce output identical to `compute_rel_loop_scores`.
+    let group_max_slots: BTreeMap<Option<usize>, usize> = partition_groups
+        .iter()
+        .map(|(part, indices)| {
+            let max = indices
+                .iter()
+                .map(|&i| slot_counts[i])
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            (*part, max)
+        })
+        .collect();
+
+    let mut series: Vec<Vec<f64>> = offsets
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            if o.is_some() {
+                let key = loop_partitions.get(loop_ids[i]).copied().unwrap_or(None);
+                let max_slots = group_max_slots.get(&key).copied().unwrap_or(1);
+                vec![0.0_f64; results.step_count * max_slots]
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+
+    for (step, row) in results.iter().enumerate() {
+        for (part_key, indices) in &partition_groups {
+            let max_slots = group_max_slots.get(part_key).copied().unwrap_or(1);
+            for k in 0..max_slots {
+                let denom: f64 = indices
+                    .iter()
+                    .filter_map(|&i| {
+                        offsets[i].map(|off| {
+                            let elem = if slot_counts[i] > 1 { k } else { 0 };
+                            row[off + elem].abs()
+                        })
+                    })
+                    .sum();
+                for &i in indices {
+                    let Some(off) = offsets[i] else { continue };
+                    let elem = if slot_counts[i] > 1 { k } else { 0 };
+                    let num = row[off + elem];
+                    let val = if denom == 0.0 { 0.0 } else { num / denom };
+                    series[i][step * max_slots + k] = val;
+                }
+            }
+        }
+    }
+
+    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loop_ids.len());
+    for (i, id) in loop_ids.iter().enumerate() {
+        if offsets[i].is_some() {
+            out.insert((*id).clone(), std::mem::take(&mut series[i]));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

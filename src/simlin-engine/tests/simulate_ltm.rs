@@ -3009,70 +3009,21 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
     entries
 }
 
-/// Test helper: compute per-step per-element rel_loop_scores for A2A
-/// scenarios.
-///
-/// Mirrors `ltm_post::compute_rel_loop_scores` but exposes the per-slot
-/// dimension that the scalar production path collapses to element 0.  A
-/// partition's denominator at element k is `sum_j |loop_score_j[k]|`,
-/// with scalar loops broadcasting slot 0.
-///
-/// Returns: loop_id -> flat series of length `step_count * max_slots`
-/// where the value at step `s`, slot `k` is at index `s * max_slots + k`.
-/// `max_slots` is the largest slot count among loops sharing the
-/// partition group containing `loop_id`.
+/// Thin test-side alias for the production per-element normalizer in
+/// [`simlin_engine::ltm_post::compute_rel_loop_scores_per_element`].
+/// Existed as a local-only helper when per-element computation was not
+/// yet in production; kept as an alias now so the many integration-
+/// test call sites read fluently without a fully-qualified path.
 fn compute_rel_loop_scores_per_element(
     results: &Results,
     loop_partitions: &HashMap<String, Option<usize>>,
     n_slots_by_loop: &HashMap<String, usize>,
 ) -> HashMap<String, Vec<f64>> {
-    let mut groups: HashMap<Option<usize>, Vec<String>> = HashMap::new();
-    for (id, p) in loop_partitions {
-        groups.entry(*p).or_default().push(id.clone());
-    }
-    let mut out: HashMap<String, Vec<f64>> = HashMap::new();
-    for ids in groups.values() {
-        let max_slots = ids
-            .iter()
-            .map(|id| *n_slots_by_loop.get(id).unwrap_or(&1))
-            .max()
-            .unwrap_or(1);
-        let offsets: HashMap<String, usize> = ids
-            .iter()
-            .filter_map(|id| {
-                let key: Ident<Canonical> =
-                    Ident::new(&format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{id}"));
-                results.offsets.get(&key).map(|&off| (id.clone(), off))
-            })
-            .collect();
-        for step in 0..results.step_count {
-            for k in 0..max_slots {
-                let denom: f64 = ids
-                    .iter()
-                    .filter_map(|id| {
-                        offsets.get(id).map(|&off| {
-                            let slots = *n_slots_by_loop.get(id).unwrap_or(&1);
-                            let elem = if slots > 1 { k } else { 0 };
-                            results.data[step * results.step_size + off + elem].abs()
-                        })
-                    })
-                    .sum();
-                for id in ids {
-                    let Some(&off) = offsets.get(id) else {
-                        continue;
-                    };
-                    let slots = *n_slots_by_loop.get(id).unwrap_or(&1);
-                    let elem = if slots > 1 { k } else { 0 };
-                    let num = results.data[step * results.step_size + off + elem];
-                    let val = if denom == 0.0 { 0.0 } else { num / denom };
-                    out.entry(id.clone())
-                        .or_insert_with(|| vec![0.0; results.step_count * max_slots])
-                        [step * max_slots + k] = val;
-                }
-            }
-        }
-    }
-    out
+    simlin_engine::ltm_post::compute_rel_loop_scores_per_element(
+        results,
+        loop_partitions,
+        n_slots_by_loop,
+    )
 }
 
 /// AC6.1 + AC6.4 + AC6.5: Pure A2A loop scores for an arrayed feedback model.
