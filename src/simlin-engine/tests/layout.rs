@@ -1972,3 +1972,83 @@ fn test_incremental_add_chain_rebuilds_existing_cloud_flow() {
         "chain_flow and waste_flow should not overlap after incremental add (dist={dist})"
     );
 }
+
+/// Regression test for the iteration-5 layout fallback on truncated
+/// dense graphs.  When `model_detected_loops` reports `truncated = true`
+/// (more distinct loops than `MAX_LTM_TOTAL_CIRCUITS`), `compute_metadata`
+/// must skip structural-only loop detection and fall back to the
+/// model's persisted `loop_metadata` list.  Without this branch dense
+/// models would either show empty feedback_loops or feedback loops
+/// with uniformly-zero importance_series.
+#[test]
+fn test_compute_metadata_falls_back_on_truncated_loop_detection() {
+    use simlin_engine::datamodel::LoopMetadata;
+    use simlin_engine::layout::compute_metadata;
+    use simlin_engine::ltm::MAX_LTM_TOTAL_CIRCUITS;
+    use simlin_engine::test_common::TestProject;
+
+    // Build N disjoint 3-node feedback cycles where N exceeds the
+    // distinct-signature backstop.  Each cycle has a unique variable-
+    // level signature (different aux/flow/stock names), so
+    // `count_distinct_variable_level_signatures` reports N and the
+    // total-circuit backstop fires.
+    let n = MAX_LTM_TOTAL_CIRCUITS + 1;
+    let mut builder = TestProject::new("layout_fallback_on_truncation");
+    for k in 0..n {
+        let aux_name = format!("aux_{k}");
+        let flow_name = format!("flow_{k}");
+        let stock_name = format!("stock_{k}");
+        builder = builder.scalar_aux(&aux_name, &stock_name);
+        builder = builder.flow(&flow_name, &aux_name, None);
+        builder = builder.stock(&stock_name, "0", &[flow_name.as_str()], &[], None);
+    }
+    let mut project = builder.build_datamodel();
+
+    // `build_feedback_loops_from_metadata` maps `loop_metadata.uids`
+    // back to idents via the `uid_to_ident` map built in
+    // `compute_metadata`, which needs at least two resolvable UIDs to
+    // emit a feedback loop.  Assign UIDs to the first cycle's
+    // variables and cite them in a persisted `LoopMetadata` entry.
+    let aux_uid = 101;
+    let flow_uid = 102;
+    let stock_uid = 103;
+    for var in &mut project.models[0].variables {
+        match var {
+            simlin_engine::datamodel::Variable::Aux(a) if a.ident == "aux_0" => {
+                a.uid = Some(aux_uid);
+            }
+            simlin_engine::datamodel::Variable::Flow(f) if f.ident == "flow_0" => {
+                f.uid = Some(flow_uid);
+            }
+            simlin_engine::datamodel::Variable::Stock(s) if s.ident == "stock_0" => {
+                s.uid = Some(stock_uid);
+            }
+            _ => {}
+        }
+    }
+    let marker_name = "hand_annotated_loop".to_string();
+    project.models[0].loop_metadata.push(LoopMetadata {
+        uids: vec![stock_uid, flow_uid, aux_uid],
+        deleted: false,
+        name: marker_name.clone(),
+        description: "persisted loop for fallback validation".to_string(),
+    });
+
+    let metadata = compute_metadata(&project, MAIN_MODEL, None)
+        .expect("compute_metadata should succeed on the truncated-dense project");
+
+    let has_marker = metadata
+        .feedback_loops
+        .iter()
+        .any(|fl| fl.name == marker_name);
+    assert!(
+        has_marker,
+        "compute_metadata must fall back to loop_metadata when LTM loop \\
+         detection truncates; got feedback_loops: {:?}",
+        metadata
+            .feedback_loops
+            .iter()
+            .map(|fl| &fl.name)
+            .collect::<Vec<_>>()
+    );
+}

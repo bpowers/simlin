@@ -3828,6 +3828,16 @@ fn try_detect_ltm_loops_incremental(
         (source_model, detected)
     };
 
+    // Truncated dense graphs look structurally acyclic here (empty
+    // `loops`) but are semantically cyclic with too many loops to
+    // materialize.  Returning `Some(vec![])` in that case would
+    // suppress the documented fallback to persisted loop_metadata
+    // (see `compute_metadata`'s `unwrap_or_else(build_feedback_loops_from_metadata)`
+    // at the caller).  Return `None` instead so the caller chooses
+    // that fallback.
+    if detected.truncated {
+        return None;
+    }
     if detected.loops.is_empty() {
         return Some(Vec::new());
     }

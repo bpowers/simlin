@@ -1195,33 +1195,28 @@ impl CausalGraph {
 
     /// Find all elementary circuits if and only if the deduped count is
     /// at most `max_loops`.  Unlike [`Self::find_loops_with_limit`],
-    /// this is primarily a post-dedup gate: the distinct-circuit count
-    /// is what the caller cares about (Loop struct materialization
-    /// ~9 KB each, see the cap-lift diagnosis), not how many duplicate
-    /// paths Johnson's DFS visited before collapsing them.
+    /// this is a post-dedup gate: the distinct-circuit count is what
+    /// the caller cares about (Loop struct materialization ~9 KB each,
+    /// see the cap-lift diagnosis), not how many duplicate paths
+    /// Johnson's DFS visited before collapsing them.
     ///
-    /// The enumeration still runs under a raw-emission safety cap of
-    /// `max_loops * RAW_EMISSION_HEADROOM_FACTOR` so that adversarial
-    /// multidigraphs (where raw emissions can be much larger than the
-    /// deduped count) still bail out quickly instead of enumerating
-    /// unboundedly.  Real SD models have a raw:dedup ratio close to 1
-    /// so the safety cap is effectively transparent for them; only
-    /// truly pathological inputs hit it.  Either trigger returns
-    /// `Err(TruncatedByBudget)`; the caller treats both identically.
+    /// Enumeration runs under `usize::MAX` (no raw-emission cap).  Real
+    /// SD models have a raw:dedup ratio close to 1 so this completes
+    /// quickly; the pathological complete-digraph case (e.g., K10 has
+    /// 1,013 distinct circuits but millions of raw emissions) still
+    /// succeeds because raw-count is not the bound.  For extreme
+    /// adversarial inputs (K20+) the enumeration could be expensive,
+    /// but those are not in the Simlin model-authoring contract.
+    /// Returns `Err(TruncatedByBudget)` only when the distinct-circuit
+    /// count exceeds `max_loops`; in that case no `Loop` structs are
+    /// materialized (the indexed paths go out of scope and are freed).
     pub fn find_loops_if_under_limit(
         &self,
         max_loops: usize,
     ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
-        // 64x headroom is generous for any plausible SD model (which
-        // typically have raw:dedup ≈ 1) and well in excess of the K4-
-        // style worst case that our in-tree tests cover.  Keeps the
-        // enumeration cost on WRLD3-scale dense graphs bounded: at
-        // `max_loops = MAX_LTM_TOTAL_CIRCUITS (10_000)` this is a
-        // 640_000-circuit raw budget, which trips inside ~0.5 s on
-        // the measured 1.86M-circuit WRLD3 graph.
-        const RAW_EMISSION_HEADROOM_FACTOR: usize = 64;
-        let raw_budget = max_loops.saturating_mul(RAW_EMISSION_HEADROOM_FACTOR);
-        let indexed = self.enumerate_indexed_circuits(raw_budget)?;
+        let indexed = self
+            .enumerate_indexed_circuits(usize::MAX)
+            .expect("usize::MAX cannot exhaust the enumeration budget");
         if indexed.circuits.len() > max_loops {
             return Err(TruncatedByBudget);
         }

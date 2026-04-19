@@ -663,9 +663,18 @@ pub enum DetectedLoopPolarity {
 }
 
 /// Result of full loop detection with polarity and IDs.
+///
+/// `truncated = true` signals that the causal graph has more distinct
+/// elementary circuits than `MAX_LTM_TOTAL_CIRCUITS`, so `loops` is
+/// intentionally empty rather than derived from enumeration.
+/// Consumers that need to distinguish "acyclic model" from "over-budget
+/// dense model" should check this flag: layout metadata falls back to
+/// persisted `loop_metadata` on truncation, while the structural-only
+/// `simlin_analyze_get_loops` FFI surfaces empty loops either way.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct DetectedLoopsResult {
     pub loops: Vec<DetectedLoop>,
+    pub truncated: bool,
 }
 
 /// Stock-to-stock cycle partitions.
@@ -1105,9 +1114,21 @@ pub fn model_detected_loops(
     // enumeration to completion (cheap `Vec<u32>` paths) and only
     // materializes `Loop` structs when the distinct count is under the
     // memory-cliff threshold.
+    //
+    // On truncation we return `truncated: true` with an empty `loops`
+    // list so consumers can tell "acyclic model" (truncated = false,
+    // loops = []) from "dense cyclic model" (truncated = true) --
+    // important for layout metadata which falls back to persisted
+    // loop_metadata on the latter rather than reporting no feedback
+    // loops.
     let loops = match graph.find_loops_if_under_limit(crate::ltm::MAX_LTM_TOTAL_CIRCUITS) {
         Ok(loops) => loops,
-        Err(crate::ltm::TruncatedByBudget) => return DetectedLoopsResult { loops: Vec::new() },
+        Err(crate::ltm::TruncatedByBudget) => {
+            return DetectedLoopsResult {
+                loops: Vec::new(),
+                truncated: true,
+            };
+        }
     };
     DetectedLoopsResult {
         loops: loops
@@ -1141,6 +1162,7 @@ pub fn model_detected_loops(
                 }
             })
             .collect(),
+        truncated: false,
     }
 }
 
@@ -1773,5 +1795,105 @@ mod detected_loops_gate_tests {
             .find_loops_if_under_limit(1)
             .expect("budget=1 must admit the single distinct loop");
         assert_eq!(loops.len(), 1);
+    }
+
+    /// Build a complete-digraph (K_n) project: n nodes where each node
+    /// references every other node.  Dense multidigraphs like this have
+    /// many raw Johnson emissions per distinct circuit, so they
+    /// exercise the post-dedup semantic of `find_loops_if_under_limit`
+    /// -- raw count can be orders of magnitude larger than distinct
+    /// count, but the gate keys on distinct.
+    ///
+    /// Uses stocks as all nodes so every pair can form a valid
+    /// stock->flow->stock chain through an intermediate flow; this
+    /// keeps the SD model valid while producing a dense SCC.  To keep
+    /// test runtime reasonable, n should stay small (5 is already
+    /// ~100 distinct circuits; 10 is ~1000).
+    fn build_complete_digraph_project(project_name: &str, n: usize) -> datamodel::Project {
+        assert!(n >= 3, "need >= 3 nodes for a non-trivial K_n");
+        let mut builder = TestProject::new(project_name);
+        // Auxiliaries a_0..a_{n-1}, each referencing every other aux
+        // through the stock (for solvability).
+        for i in 0..n {
+            let name = format!("a_{i}");
+            // Depend on every *other* a_k, joined as a sum so each
+            // reference shows up in the causal graph.
+            let mut parts: Vec<String> = Vec::new();
+            for j in 0..n {
+                if j != i {
+                    parts.push(format!("s_{j}"));
+                }
+            }
+            builder = builder.scalar_aux(&name, &parts.join(" + "));
+        }
+        // Flows and stocks: s_i := stock fed by f_i which reads a_i.
+        for i in 0..n {
+            let flow_name = format!("f_{i}");
+            let stock_name = format!("s_{i}");
+            builder = builder.flow(&flow_name, &format!("a_{i}"), None);
+            builder = builder.stock(&stock_name, "0", &[flow_name.as_str()], &[], None);
+        }
+        builder.build_datamodel()
+    }
+
+    /// Dense SCCs whose distinct-circuit count is well under
+    /// `MAX_LTM_TOTAL_CIRCUITS` must enumerate successfully, even when
+    /// raw Johnson emissions exceed the distinct count by orders of
+    /// magnitude.  Regression test for the iteration-5 review finding:
+    /// a K5-like multidigraph has hundreds of distinct circuits and
+    /// many more raw emissions, but all of them should be materialized
+    /// because 200 << 10_000.
+    #[test]
+    fn test_model_detected_loops_dense_subgraph_under_budget_succeeds() {
+        let project = build_complete_digraph_project("detected_loops_k5_dense", 5);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        let detected = model_detected_loops(&db, model, sync.project);
+
+        assert!(
+            !detected.truncated,
+            "K5 model has far fewer than MAX_LTM_TOTAL_CIRCUITS distinct \
+             loops; must not report truncation; got truncated=true, loops={}",
+            detected.loops.len()
+        );
+        assert!(
+            detected.loops.len() > 5,
+            "K5 model has many elementary circuits (>5); got {}",
+            detected.loops.len()
+        );
+    }
+
+    /// Truncation on `model_detected_loops` must surface as
+    /// `truncated = true` with an empty `loops` list, so consumers
+    /// (layout metadata, FFI) can distinguish dense-cyclic from
+    /// acyclic.
+    #[test]
+    fn test_model_detected_loops_signals_truncation_flag() {
+        let project = build_chain_scc_project("detected_loops_trunc_flag_acyclic", 5);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+
+        // Baseline: a cyclic 5-node ring produces a single loop with
+        // truncated = false.
+        let detected = model_detected_loops(&db, model, sync.project);
+        assert!(!detected.truncated);
+        assert_eq!(detected.loops.len(), 1);
+
+        // Acyclic model: empty loops list, truncated = false.  This is
+        // the "no loops" case callers must be able to tell apart from
+        // the truncated case.
+        let acyclic = TestProject::new("detected_loops_acyclic")
+            .scalar_const("a", 1.0)
+            .scalar_aux("b", "a + 1")
+            .build_datamodel();
+        let db2 = SimlinDb::default();
+        let sync2 = sync_from_datamodel(&db2, &acyclic);
+        let acyclic_model = sync2.models["main"].source;
+        let acyclic_detected = model_detected_loops(&db2, acyclic_model, sync2.project);
+        assert!(!acyclic_detected.truncated);
+        assert!(acyclic_detected.loops.is_empty());
     }
 }

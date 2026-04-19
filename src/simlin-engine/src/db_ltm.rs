@@ -2209,9 +2209,7 @@ pub fn model_ltm_variables(
                 };
             }
             None
-        } else if count_distinct_variable_level_signatures(circuits_result)
-            > crate::ltm::MAX_LTM_TOTAL_CIRCUITS
-        {
+        } else {
             // Total-circuit backstop.  The largest-SCC gate misses
             // pathological shapes like many disjoint small cycles: each
             // such distinct variable-level loop still costs ~9 KB of
@@ -2225,46 +2223,57 @@ pub fn model_ltm_variables(
             // `build_element_level_loops`, so its materialization cost
             // is ~9 KB, not ~1.8 GB.  Distinct-signature counting
             // anticipates that collapse.
+            //
+            // Note that `model_detected_loops` uses a different gate
+            // (`MAX_LTM_TOTAL_CIRCUITS` on the *variable-level* graph
+            // via `find_loops_if_under_limit`) and may still return
+            // non-empty when this gate fires on an arrayed model whose
+            // element-level graph is much denser than its variable-
+            // level graph.  The layout path reconciles this asymmetry
+            // by checking whether `loop_partitions` is empty after
+            // compile (see `try_detect_ltm_loops_incremental`).
             let distinct_loops = count_distinct_variable_level_signatures(circuits_result);
-            let msg = format!(
-                "LTM analysis auto-switched from exhaustive to discovery mode: \
-                 the element-level graph has {} distinct variable-level \
-                 feedback loops, exceeding MAX_LTM_TOTAL_CIRCUITS = {}.  \
-                 Materializing a Loop struct per distinct loop would allocate \
-                 ~{} MiB of intermediate state (see \
-                 docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
-                 Per-loop scores are ranked post-simulation via the \
-                 strongest-path search; see \
-                 docs/design/ltm--loops-that-matter.md for the two-tier \
-                 strategy.",
-                distinct_loops,
-                crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
-                // 9 KB/loop from the diagnosis allocation profile, in MiB.
-                (distinct_loops as u64 * 9) / 1024,
-            );
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
-            is_discovery = true;
-            None
-        } else {
-            // Build the variable-level graph with populated variables for
-            // polarity analysis. Element-level graphs have empty variables.
-            let var_graph = causal_graph_with_modules(db, model, project);
+            if distinct_loops > crate::ltm::MAX_LTM_TOTAL_CIRCUITS {
+                let msg = format!(
+                    "LTM analysis auto-switched from exhaustive to discovery mode: \
+                     the element-level graph has {} distinct variable-level \
+                     feedback loops, exceeding MAX_LTM_TOTAL_CIRCUITS = {}.  \
+                     Materializing a Loop struct per distinct loop would allocate \
+                     ~{} MiB of intermediate state (see \
+                     docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+                     Per-loop scores are ranked post-simulation via the \
+                     strongest-path search; see \
+                     docs/design/ltm--loops-that-matter.md for the two-tier \
+                     strategy.",
+                    distinct_loops,
+                    crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
+                    // 9 KB/loop from the diagnosis allocation profile, in MiB.
+                    (distinct_loops as u64 * 9) / 1024,
+                );
+                CompilationDiagnostic(Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg),
+                    severity: DiagnosticSeverity::Warning,
+                })
+                .accumulate(db);
+                is_discovery = true;
+                None
+            } else {
+                // Build the variable-level graph with populated variables for
+                // polarity analysis. Element-level graphs have empty variables.
+                let var_graph = causal_graph_with_modules(db, model, project);
 
-            let detected = build_element_level_loops(
-                circuits_result,
-                &var_graph,
-                source_vars,
-                db,
-                project,
-                dm_dims,
-            );
-            Some(detected)
+                let detected = build_element_level_loops(
+                    circuits_result,
+                    &var_graph,
+                    source_vars,
+                    db,
+                    project,
+                    dm_dims,
+                );
+                Some(detected)
+            }
         }
     } else {
         None
