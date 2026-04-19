@@ -262,3 +262,29 @@ term on the exhaustive branch for models that stay below the threshold.
 - `/tmp/ltm-diag/cap-02000000-trace.log` — 2M run with
   `LTM_BENCH_TRACE=1`; the numbers in this document are drawn from this
   file.
+
+## Resolution
+
+Resolved 2026-04-18 on branch `ltm-perf-enable-always`:
+
+- **Option A (auto-flip):** `MAX_LTM_SCC_NODES = 50` in
+  `src/simlin-engine/src/ltm.rs` now gates `model_ltm_variables`; any
+  element-level SCC above the threshold flips to discovery mode with a
+  user-visible diagnostic.
+- **Option B (post-sim rel_loop_score):** `rel_loop_score` moved to
+  post-simulation computation in `src/simlin-engine/src/ltm_post.rs`;
+  no more compile-time O(P²) equation text.
+- **Cap removed:** With both gates in place, the vestigial
+  `MAX_LTM_CIRCUITS = 100_000` cap on pure enumeration was deleted
+  along with its runtime override and default-budget wrappers. Callers
+  now pass `usize::MAX` to the `_with_limit` enumeration APIs; the
+  `TruncatedByBudget` signal stays available for stress tests.
+- **Adversarial validation:** `wrld3-03.mdl` compiles end-to-end with
+  LTM enabled in 1.6 s / 467 MiB peak / 1,863,803 circuits;
+  `arrayed_population.stmx` and `cross_element.stmx` are unchanged.
+  Details in `2026-04-18-ltm-cap-lift-validation.md`.
+
+No follow-up work outstanding against Cliff A or Cliff B on this
+branch. Tech-debt item #25 tracks the longer-term refactor that would
+enumerate pure-A2A loops at variable granularity to reduce cost below
+the auto-flip threshold on dense arrayed models.

@@ -281,3 +281,17 @@ I recommend task #7 additionally:
    circuit cap.
 
 -- adversary, 2026-04-18
+
+## Resolution
+
+Task #7 completed 2026-04-18: `MAX_LTM_CIRCUITS` plus its runtime
+override (`set_max_ltm_circuits`, `default_max_ltm_circuits`) and the
+three default-budget enumeration wrappers (`find_loops`,
+`find_circuit_node_lists`, `find_indexed_circuits`) were removed from
+`src/simlin-engine/src/ltm.rs`.  The three salsa call sites in
+`db_analysis.rs` plus `detect_loops` and `ltm_full_bench.rs` now pass
+`usize::MAX` to the `_with_limit` APIs.  `MAX_LTM_SCC_NODES = 50`
+remains as-is per recommendation #3.  The recommendation-#2 re-run on
+`wrld3-03.mdl`, `arrayed_population.stmx`, and `cross_element.stmx`
+matches this table: 467 MiB / 1.6 s for WRLD3 (1,863,803 circuits),
+10.5 MiB for each arrayed model, with auto-flip behaviour unchanged.
