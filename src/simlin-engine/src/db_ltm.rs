@@ -2302,9 +2302,19 @@ pub fn model_ltm_variables(
             // That lets a pure-A2A model with |Region| = 5_000 stay
             // exhaustive (1 Loop) while a model with 5_000 independent
             // scalar cycles still flips (5_000 Loops).
-            let overflow = circuits_result.truncated
-                || estimate_emitted_loop_count(circuits_result)
-                    > crate::ltm::MAX_LTM_TOTAL_CIRCUITS;
+            // Compute the estimate once up front.  Only consulted when
+            // the result has not been truncated by enumeration (the
+            // truncation path has its own tailored diagnostic that
+            // doesn't reference the emit count), but it's still the
+            // input to the `overflow` decision, so computing it here
+            // avoids a double-walk of `circuits_result`.
+            let estimated_loops = if circuits_result.truncated {
+                0
+            } else {
+                estimate_emitted_loop_count(circuits_result)
+            };
+            let overflow =
+                circuits_result.truncated || estimated_loops > crate::ltm::MAX_LTM_TOTAL_CIRCUITS;
             if overflow {
                 let msg = if circuits_result.truncated {
                     format!(
@@ -2319,7 +2329,7 @@ pub fn model_ltm_variables(
                         crate::ltm::MAX_LTM_ENUMERATION_CAP,
                     )
                 } else {
-                    let distinct_loops = estimate_emitted_loop_count(circuits_result);
+                    let distinct_loops = estimated_loops;
                     format!(
                         "LTM analysis auto-switched from exhaustive to discovery mode: \
                          the element-level graph yields {} feedback loops after \

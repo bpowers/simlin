@@ -458,9 +458,13 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         // lets the caller tell which path they hit.
         let message = if state.loop_partitions.is_empty() {
             format!(
-                "loop '{loop_id}' has no relative score data: LTM analysis \
-                 was either disabled or auto-switched to discovery mode for \
-                 this model (see engine warnings)"
+                "loop '{loop_id}' has no relative score data: either LTM \
+                 was not enabled when this simulation was created, or the \
+                 model's element-level causal graph tripped the auto-flip \
+                 threshold (largest SCC > MAX_LTM_SCC_NODES or total \
+                 feedback-loop count > MAX_LTM_TOTAL_CIRCUITS), so LTM \
+                 ran in discovery mode and did not materialize per-loop \
+                 score timeseries"
             )
         } else {
             format!(

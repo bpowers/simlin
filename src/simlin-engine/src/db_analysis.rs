@@ -1115,66 +1115,29 @@ pub fn model_detected_loops(
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
-    // Mirror both of `model_ltm_variables`'s element-level gates so
-    // the two paths agree on which models are too dense for per-loop
-    // scoring.  Without alignment, `simlin_analyze_get_loops` could
-    // return structural loop IDs while
-    // `simlin_analyze_get_relative_loop_score` returns `DoesNotExist`
-    // for every one of them (LTM auto-flipped), leaving paired
-    // consumers like pysimlin's `_populate_loop_behavior` silently
-    // unable to score their own loops.  Truncating here routes those
-    // consumers through the same fallback (persisted `loop_metadata`
-    // for layout; empty-with-truncated-flag for FFI) whether the user
-    // asked for structure or scores.
+    // `model_detected_loops` answers the structural question "what
+    // feedback loops does this model have?", independent of whether
+    // LTM can score them.  The consumer alignment the iter-6/7 reviews
+    // asked for (get_loops and get_relative_loop_score agreeing on
+    // which loops exist) broke large-sparse-model topology reporting:
+    // a 51-node single ring has one elementary loop that Johnson's can
+    // enumerate in microseconds, yet an LTM-shaped SCC gate here would
+    // return "no loops" because `model_ltm_variables` would auto-flip
+    // the same model.  Structural-loop consumers (layout feedback-
+    // metadata, `simlin_analyze_get_loops`, `simlin-cli --ltm`) care
+    // about topology; LTM-specific scoring failures are best signalled
+    // through the `simlin_analyze_get_relative_loop_score` error
+    // message, not by suppressing structure.
     //
-    // Gate 1: element-level largest SCC > MAX_LTM_SCC_NODES.  Cheap
-    // (Tarjan on a few hundred nodes) and catches WRLD3-shape models
-    // before we pay enumeration cost.
-    let element_edges = model_element_causal_edges(db, model, project);
-    if causal_graph_from_element_edges(element_edges).largest_scc_size()
-        > crate::ltm::MAX_LTM_SCC_NODES
-    {
-        return DetectedLoopsResult {
-            loops: Vec::new(),
-            truncated: true,
-        };
-    }
-
-    // Gate 2: element-level truncation or emitted-Loop-count over cap.
-    // `model_element_loop_circuits` already enumerates with a
-    // streaming distinct-circuit bail, so this query either returns
-    // every element-level circuit (`truncated = false`) or a
-    // truncation signal.  The truncation signal is what catches
-    // arrayed cross-element models whose variable-level graph is
-    // sparse but whose element graph has thousands of Loops --
-    // without this, `model_ltm_variables` would auto-flip while
-    // `model_detected_loops` returned the handful of variable-level
-    // signatures, creating exactly the mismatch the iter-6 review
-    // flagged.  On non-truncated results we count emitted Loops via
-    // `super::db_ltm::estimate_emitted_loop_count` (same criteria as
-    // `build_element_level_loops`' per-group collapse).
-    let element_circuits = model_element_loop_circuits(db, model, project);
-    if element_circuits.truncated
-        || super::db_ltm::estimate_emitted_loop_count(element_circuits)
-            > crate::ltm::MAX_LTM_TOTAL_CIRCUITS
-    {
-        return DetectedLoopsResult {
-            loops: Vec::new(),
-            truncated: true,
-        };
-    }
-
+    // This function retains exactly one gate: the variable-level
+    // post-dedup distinct-circuit budget (via
+    // `find_loops_if_under_limit`).  That gate streams the cutoff
+    // into Johnson's DFS so dense multidigraphs bail the moment the
+    // (max+1)th distinct circuit is discovered (WRLD3's 1.86M
+    // circuits trip at ~9 MB of state, not 467 MiB), while sparse
+    // large rings enumerate their single loop cheaply.
     let graph = causal_graph_with_modules(db, model, project);
 
-    // Gate 3: variable-level distinct-circuit count (streams the
-    // cutoff into Johnson's DFS so dense multidigraphs bail the
-    // moment the (max+1)th distinct circuit is discovered, never
-    // materializing the whole Vec<Vec<u32>>).  In practice this is
-    // rarely reached for arrayed models -- gates 1 and 2 on the
-    // denser element-level graph fire first -- but it's the
-    // authoritative gate for non-arrayed models where variable-
-    // and element-level graphs coincide.
-    //
     // On truncation we return `truncated: true` with an empty `loops`
     // list so consumers can tell "acyclic model" (truncated = false,
     // loops = []) from "dense cyclic model" (truncated = true) --
@@ -1791,18 +1754,19 @@ mod detected_loops_gate_tests {
         builder.build_datamodel()
     }
 
-    /// A sparse ring with >50 nodes has exactly one elementary loop,
-    /// but `model_ltm_variables`'s SCC gate auto-flips such models to
-    /// discovery mode because `MAX_LTM_SCC_NODES = 50`.
-    /// `model_detected_loops` mirrors that gate so the two paths agree:
-    /// consumers that pair get_loops + get_relative_loop_score cannot
-    /// get a loop ID they can never score.  A 75-node single ring
-    /// therefore surfaces as `truncated = true` with an empty `loops`
-    /// list, routing callers through the same fallback (layout to
-    /// persisted `loop_metadata`) as any other dense-graph path.
+    /// `model_detected_loops` reports structural topology
+    /// independently of whether LTM can score the result.  A 75-node
+    /// sparse ring has exactly one elementary loop that Johnson's DFS
+    /// enumerates in microseconds; returning it (rather than
+    /// suppressing it to match `model_ltm_variables`' SCC gate) lets
+    /// layout feedback-metadata, `simlin_analyze_get_loops`, and
+    /// `simlin-cli --ltm` report the topology they would otherwise
+    /// lose.  LTM-specific scoring failures are surfaced separately
+    /// through the `simlin_analyze_get_relative_loop_score` error
+    /// message.
     #[test]
-    fn test_model_detected_loops_large_scc_truncates_to_match_ltm_gate() {
-        let project = build_chain_scc_project("detected_loops_large_scc", 75);
+    fn test_model_detected_loops_large_sparse_ring_enumerates() {
+        let project = build_chain_scc_project("detected_loops_large_sparse_ring", 75);
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
         let model = sync.models["main"].source;
@@ -1810,15 +1774,15 @@ mod detected_loops_gate_tests {
         let detected = model_detected_loops(&db, model, sync.project);
 
         assert!(
-            detected.truncated,
-            "75-node SCC must trip the MAX_LTM_SCC_NODES gate; got \
-             truncated=false with loops={:?}",
-            detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
+            !detected.truncated,
+            "sparse 75-node ring's single loop fits well under the \
+             MAX_LTM_TOTAL_CIRCUITS budget; must enumerate cleanly"
         );
-        assert!(
-            detected.loops.is_empty(),
-            "truncated DetectedLoopsResult must have an empty loop \
-             list so consumers distinguish the truncation case"
+        assert_eq!(
+            detected.loops.len(),
+            1,
+            "75-node single ring has exactly one elementary loop; got {:?}",
+            detected.loops.iter().map(|l| &l.id).collect::<Vec<_>>()
         );
     }
 
