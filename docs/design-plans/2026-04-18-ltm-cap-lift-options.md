@@ -324,3 +324,23 @@ Orthogonal improvement; pursue separately if needed after the core lift.
   (grep says no — only post-sim reads in libsimlin's analysis FFI and in
   layout metadata). If a future builtin wants it live, materialize on
   demand like LOOPSCORE.
+
+## Resolution
+
+Resolved 2026-04-18 on branch `ltm-perf-enable-always`:
+
+- **Option A (auto-flip):** shipped.  `MAX_LTM_SCC_NODES = 50` in
+  `src/simlin-engine/src/ltm.rs` gates `model_ltm_variables`; SCCs above
+  the threshold flip to discovery mode with a user-visible diagnostic.
+- **Option B (post-sim rel_loop_score):** shipped.  Computation lives
+  in `src/simlin-engine/src/ltm_post.rs`; the compile-time O(P²)
+  equation-text cliff is gone.
+- **Option D (per-SCC budget):** not needed.  Auto-flip already covers
+  multi-SCC starvation for every model in the test corpus.
+- **Cap:** `MAX_LTM_CIRCUITS` removed.  Enumeration now runs uncapped
+  against `usize::MAX`; the `TruncatedByBudget` signal remains on the
+  `_with_limit` APIs for future stress tests.
+
+See `2026-04-18-ltm-cap-lift-diagnosis.md` and
+`2026-04-18-ltm-cap-lift-validation.md` for the resolved versions with
+measurements.
