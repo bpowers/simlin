@@ -725,9 +725,16 @@ small/medium test fixtures; what we need is the actual formula.
    the user aliases appear in the name table but do NOT have their own
    records. Pairing f[10]-sorted records alphabetically with visible
    names works until the first alias, after which all subsequent
-   pairings shift by one. Identifying aliases from VDF alone is still
-   open; `build_section6_guided_ot_map` resolves them via the parsed
-   model's variable equations.
+   pairings shift by one.
+
+   Once the alias *set* is known (typically from a parsed model),
+   aliases and output signatures pair up deterministically **by file
+   order in the name table** -- see "Confirmed structural signals"
+   below. Identifying aliases *from VDF alone* on old-style
+   `#FUNC(args)#` fixtures remains open; `build_section6_guided_ot_map`
+   resolves them via the parsed model's variable equations, and the
+   new-style `#alias>FUNC#` encoding on re-saved files closes the gap
+   without any model help.
 
    Stock sentinel records typically have sort_key=0; their sort keys
    come from attached sort anchor records (non-sentinel records whose
@@ -1244,6 +1251,66 @@ named element labels.
   are complementary; neither is uniformly more correct than the
   other across the full fixture corpus.
 
+#### Alias-identification hypotheses (ruled out April 2026)
+
+The task "decode the alias-to-signature link" swept five candidate
+mechanisms for a VDF-internal signal that marks a slotted user name as an
+alias (as opposed to a regular variable). None of them produced a
+deterministic alias-bit; documented here so a future investigator does
+not re-do the same searches.
+
+- **Candidate A: per-slot 16-byte pointee as alias marker**. Each slot
+  in `slot_table` points to a 16-byte cell in section-1 data; many cells
+  are overlaid on record memory, so the cell content is just a slice of a
+  nearby record's fields. Across `econ/base.vdf`, `econ/policy.vdf`,
+  `econ/risk.vdf`, and WRLD3 SCEN01/experiment, the five alias cells have
+  no common structural content: they land at distinct record offsets
+  (0, 16, 32, 48) and hold whatever record bytes happen to be there. In
+  particular, none of the four words in an alias cell equals that alias's
+  target OT. Hit rate 0/5 on econ/base. Also ruled out: one of the four
+  words being an OT index, a `#` name index, or a section-6 ref-stream
+  index.
+
+- **Candidate B: section-6 leading ref stream as alias directory**.
+  Parsed the 79 entries on `econ/base.vdf` and the 342 on WRLD3 SCEN01
+  with entry widths 1-4 refs. No entry pairs an alias slot ref with a
+  target signature slot ref (the `#` signatures past `slot_count` have no
+  slot-table entries to begin with). The entries resolve to a mix of
+  variable names, view markers, unit annotations, and builtin names, as
+  the pre-existing ref-stream analysis reported.
+
+- **Candidate C: pre-record 16-byte cells as alias table**. Section-1
+  data bytes 12..204 (preamble 12 + three 64-byte "header blocks") hold
+  12 cells of 16 bytes. On `econ/base.vdf` ten of those cells are
+  claimed by slot entries (offsets 44, 60, 76, 92, 108, 124, 140, 156,
+  172, 188); the slotted names at those offsets are a mix of stdlib
+  helpers (`DEL`, `DELAY1`, `SMOOTH`), unit annotations (`-dmnl`,
+  `-months`), and regular user variables (`base housing supply`). No
+  subset of those ten cells coincides with the 5-alias set, and the 16
+  bytes at each cell vary unstructured across re-saved fixtures
+  (RAM descriptor residue on `policy.vdf`/`mark2.vdf`).
+
+- **Candidate D: hidden alias table as a fixed-width (u32, u32) pair
+  array**. Checked every byte range marked "undecoded" or "varies" in
+  the docs -- section-0 tail, section-1 bytes 8..44, section-5 scalar
+  degenerate region, section-6 prefix-word region -- for a sequence of
+  `(u32, u32)` pairs whose first word could be an alias slot ref and
+  whose second word could be a target OT or signature name index. No
+  such pair stream exists on any tested fixture.
+
+- **Candidate E: section-6 lookup mapping records generalized to stdlib
+  aliases**. The 13-u32 fixed-width records at the end of section 6
+  carry lookup-table definitions (1:1 with lookup names; word[10] holds
+  the OT). On `econ/base.vdf` the 4 lookup records account for exactly
+  the 4 lookup-table definitions in the model and do not extend to
+  aliases; no similar record block exists for stdlib outputs.
+
+The **file-order pairing** of aliases with output signatures (see
+"Confirmed structural signals") still works once the alias set is known;
+what remains unsolved is identifying aliases from VDF alone on old-style
+fixtures. The new-style `#alias>FUNC#` encoding closes the gap on
+re-saved files from current Vensim builds.
+
 #### Name-based claims
 
 - **Name-based lookup heuristics**: names containing " table" were initially
@@ -1333,3 +1400,82 @@ These patterns were validated across the full test corpus:
   `to_results_via_records` when the fixture has dim-element names
   interleaved with variables. Exposed as
   `VdfFile::to_results_via_file_order_records()`.
+
+- **Two stdlib signature encodings** (`#` name table entries): Vensim emits
+  stdlib-call signatures in two forms that coexist across our test corpus:
+
+  | Style | Output sig form | Internal stocks |
+  |-------|-----------------|-----------------|
+  | Old   | `#FUNCNAME(args)#`     | `#LV1<FUNCNAME(args)#`, `#DL<...`, `#RT1<...`, ... |
+  | New   | `#alias>FUNC#`         | `#alias>FUNC>LV1#`, `#alias>FUNC>DL#`, ... |
+
+  The new-style form **encodes the user alias name directly** in the
+  signature prefix (e.g. `#defaults>DELAY1#`), so user-alias -> output-OT
+  resolution requires no external model. The old-style form leaves the
+  alias name implicit.
+
+  An "output" signature is one that a user alias binds to. The classifier
+  requires a **positive** structural signal to avoid false positives on
+  non-stdlib `#`-bracketed names (Ref.vdf has many `#BAU atm conc CO2#`-
+  style display names, and `model_editing/run_1.vdf` has a bare `#` from
+  an empty aux):
+  - Old-style output: the name contains `(` somewhere AND does NOT start
+    with one of the seven internal prefixes `#LV1<`, `#LV2<`, `#LV3<`,
+    `#ST<`, `#DL<`, `#RT1<`, `#RT2<`.
+  - New-style output: the name contains exactly ONE `>` at the top
+    level AND does NOT end with one of the matching internal suffixes
+    `>LV1#`, `>LV2#`, `>LV3#`, `>ST#`, `>DL#`, `>RT1#`, `>RT2#`. Names
+    with two or more `>` are sub-parts of multi-output macros
+    (`#alias>RAMP FROM TO>linear#`, `>slope#`, `>rate#`, `>interval#`,
+    `>input#` for SSHAPE, ...) and are NOT treated as user-alias
+    outputs; they are internal helpers per top-level alias.
+
+  Validated on all econ VDFs (base/rk/policy/mark2/risk), WRLD3-03
+  SCEN01 / experiment, `Ref.vdf` (C-LEARN with RAMP FROM TO / SSHAPE
+  macros), and `model_editing/run_1.vdf` (bare `#` fixture).
+
+  Rust helpers: `VdfFile::output_signatures()`, `new_style_alias_signatures()`.
+
+- **User aliases and output signatures appear in the name table in
+  matching file order**: on old-style fixtures (`econ/base`, `econ/rk`,
+  `econ/risk`) the user-facing alias names (slotted user names that
+  declare a stdlib call in the MDL) occur in the name table in the
+  same order as their target `#FUNC(args)#` output signatures occur.
+  The pairing is 1:1 once the internal `#LV1<...>` / `#LV2<...>` / ...
+  signatures are removed.
+
+  **WRLD3 SCEN01 breaks this 1:1 upper bound**: the MDL declares 12+
+  stdlib-call aliases but the VDF emits only 8 old-style output sigs.
+  The gap likely reflects Vensim re-using a single module for multiple
+  aliases (for example, two auxiliaries that both call the same SMOOTH
+  with identical arguments can share one compiled module and thus one
+  output sig). Pinned by `wrld3_scen01_alias_to_sig_pairing_is_not_1to1`:
+  the pairing is an upper bound, not a guarantee.
+
+  Example (`econ/base.vdf`, 5 aliases vs 5 old-style output sigs):
+
+  | file-order idx | alias name                     | output sig (later in name table) |
+  |---------------:|---------------------------------|-----------------------------------|
+  | 30             | `defaults`                      | `#DELAY1(insolvencyrisk,...)` @94 |
+  | 46             | `perceived inflation rate`      | `#SMOOTH(realinflationrate,3)` @96 |
+  | 62             | `perceived HPI`                 | `#SMOOTH(indexedHPI,...)` @97     |
+  | 72             | `perceived risk of insolvency`  | `#SMOOTH(insolvencyrisk,6)` @98   |
+  | 84             | `perceived mortgage balance`    | `#SMOOTH(interest...)` @99        |
+
+  Verified against the MDL parser on `econ/base.vdf` and `econ/risk.vdf`
+  (7 aliases, 7 output sigs), and confirmed deterministic by the
+  `test_old_style_alias_to_output_sig_pair_by_file_order` unit test.
+
+  **What this closes**: once a caller knows the alias list (currently
+  from the parsed model), the alias -> output-sig mapping is a pure
+  pairing of the two ordered lists -- no per-name lookup required.
+
+  **What this does NOT yet close**: identifying *which* slotted user
+  names are aliases from VDF alone on old-style files. The aliases lack
+  dedicated records (see "Alias limitation" under structural signal #8),
+  but we have not yet found a VDF-internal signal that distinguishes
+  them from regular user variables. A sweep over candidates A-E in the
+  2026-04 reverse-engineering task did not reveal a deterministic
+  alias-bit anywhere in the record array, slot pointees, pre-record
+  header cells, section-4 entries, or section-6 ref stream -- see
+  "Hypotheses tested and ruled out" below for the numeric evidence.

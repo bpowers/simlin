@@ -25,9 +25,11 @@ use crate::{
 };
 
 mod section3;
+mod signatures;
 mod view_blocks;
 
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
+use signatures::{is_output_sig_name, parse_new_style_alias_sig};
 
 // ---- Stdlib call analysis and helpers for name-to-OT mapping ----
 //
@@ -2579,6 +2581,51 @@ impl VdfFile {
         }
 
         Ok(vdf_data.build_results(&ordered))
+    }
+
+    /// Return new-style stdlib-call signature triples in name-table file order.
+    ///
+    /// Each triple is `(name_idx, signature_name, alias_name)`. The alias is
+    /// parsed directly out of the `#alias>FUNC#` encoding -- so this method
+    /// only returns entries for fixtures that use the newer Vensim signature
+    /// form.
+    ///
+    /// Only the *canonical* top-level `#alias>FUNC#` form is emitted. The
+    /// multi-`>` sub-part names that Vensim writes for stateful macros
+    /// (`#alias>RAMP FROM TO>linear#`, `>slope#`, `>rate#`, `>interval#`,
+    /// ...) are filtered out by `is_output_sig_name`; this keeps the
+    /// alias list 1:1 with the user-facing alias set rather than
+    /// 7:1-inflated per RAMP alias.
+    ///
+    /// Old-style fixtures (`#FUNC(args)#`) yield an empty vector here because
+    /// the alias name is not encoded in the signature; those callers need a
+    /// model-guided path (see [`VdfFile::build_section6_guided_ot_map`]).
+    pub fn new_style_alias_signatures(&self) -> Vec<(usize, String, String)> {
+        let mut out = Vec::new();
+        for (i, name) in self.names.iter().enumerate() {
+            if !is_output_sig_name(name) {
+                continue;
+            }
+            if let Some(alias) = parse_new_style_alias_sig(name) {
+                out.push((i, name.clone(), alias.to_string()));
+            }
+        }
+        out
+    }
+
+    /// Return all output-type `#` signature names in name-table file order.
+    ///
+    /// Output signatures are the names that a user alias may bind to: the
+    /// top-level function result (`#DELAY1(...)`, `#SMOOTH(...)`, or the
+    /// new-style `#alias>FUNC#`). Internal stdlib stocks and rates
+    /// (`#LV1<...>`, `#RT1<...>`, `#alias>FUNC>LV1#`, etc.) are excluded.
+    pub fn output_signatures(&self) -> Vec<(usize, String)> {
+        self.names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| is_output_sig_name(n))
+            .map(|(i, n)| (i, n.clone()))
+            .collect()
     }
 }
 

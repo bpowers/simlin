@@ -88,6 +88,10 @@ name = "json_roundtrip"
 [[test]]
 name = "compiler_vector"
 
+[[test]]
+name = "vdf_alias_decoder"
+required-features = ["file_io"]
+
 [[bench]]
 name = "array_ops"
 harness = false
