@@ -1823,8 +1823,23 @@ pub(crate) fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuits
         let mut seen_vars: HashSet<&str> = HashSet::new();
         let has_repeated = stripped.iter().any(|v| !seen_vars.insert(*v));
         if has_repeated {
-            // Cross-element via repeated variable names -> 1 Loop.
-            total = total.saturating_add(1);
+            // Cross-element via repeated variable names -> 1 Loop,
+            // but `build_element_level_loops` additionally gates on
+            // `unique_cycle.len() >= 2` (it walks the stripped
+            // sequence to the first repeat to find the unique-
+            // stripped cycle).  A length-1 unique cycle means the
+            // group has a direct self-reference like `pop -> pop`,
+            // which the emitter skips entirely.  Match that
+            // criterion here so the two functions count identically
+            // on degenerate shapes.
+            let mut unique_seen: HashSet<&str> = HashSet::new();
+            let unique_cycle_len = stripped
+                .iter()
+                .take_while(|name| unique_seen.insert(**name))
+                .count();
+            if unique_cycle_len >= 2 {
+                total = total.saturating_add(1);
+            }
             continue;
         }
 
