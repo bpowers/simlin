@@ -91,6 +91,33 @@ pub const MAX_LTM_TOTAL_CIRCUITS: usize = 10_000;
 /// contract.
 pub const MAX_LTM_ENUMERATION_CAP: usize = 1_000_000;
 
+/// Companion cap to [`MAX_LTM_ENUMERATION_CAP`] that bounds the
+/// **total indexed-path node count** emitted across all distinct
+/// circuits of the element-level graph.  Streaming cutoff, enforced
+/// in the same Johnson's DFS check.
+///
+/// The distinct-circuit cap alone does not bound memory on graphs
+/// with many long circuits.  The indexed enumeration stores each
+/// circuit as `Vec<u32>`, so peak state is `O(sum(len(circuit_i)))`,
+/// not `O(circuit_count)`.  A pathological shape -- say a valid
+/// pure-A2A model with a single 1,000-node feedback loop repeated
+/// over 900k elements -- stays under `MAX_LTM_ENUMERATION_CAP` but
+/// accumulates ~900M `u32` indices (~3.5 GiB before Vec overhead),
+/// which blows WASM's 4 GiB budget long before the circuit-count
+/// cutoff triggers.
+///
+/// ## Why 10_000_000
+///
+/// 10M `u32`s = ~40 MiB of indexed-path storage (plus
+/// `Vec`/`IndexedGraph` overhead).  Inside WASM's 4 GiB linear
+/// memory that leaves room for the rest of the compile pipeline,
+/// and it covers WRLD3's 87M-node enumeration with truncation
+/// (WRLD3: 1.86M circuits × mean length 47 = 87M nodes; the
+/// distinct-circuit cap trips first at 1M circuits, but if a future
+/// WRLD3-shape model had longer mean length this cap is the
+/// backstop).
+pub const MAX_LTM_ENUMERATION_NODES: usize = 10_000_000;
+
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`
 /// budget.  Production callers pass `usize::MAX` (no truncation) so they
@@ -521,6 +548,16 @@ struct JohnsonState {
     /// may emit before bailing with `TruncatedByBudgetInternal`.
     /// `usize::MAX` disables the cutoff (the raw-budget call path).
     distinct_limit: usize,
+    /// Upper bound on the cumulative `u32` indices copied into
+    /// `circuits` across all surviving (distinct) emissions.  Streaming
+    /// companion to `distinct_limit` that bounds peak indexed-path
+    /// memory on graphs with many long circuits (where circuit count
+    /// alone would under-estimate the work).  `usize::MAX` disables.
+    node_limit: usize,
+    /// Running total of `u32` indices stored in `circuits`.
+    /// Incremented alongside every successful `circuits.push` so the
+    /// `node_limit` check is O(1) per emission.
+    total_nodes_emitted: usize,
 }
 
 /// Fixed seed for the LTM circuit fingerprint hash.
@@ -758,6 +795,7 @@ impl IndexedGraph {
         scc: &[u32],
         budget: &mut usize,
         distinct_limit: usize,
+        node_limit: usize,
     ) -> std::result::Result<Vec<Vec<u32>>, TruncatedByBudgetInternal> {
         if scc.is_empty() {
             return Ok(Vec::new());
@@ -781,6 +819,8 @@ impl IndexedGraph {
             seen: HashSet::new(),
             hash_scratch: Vec::with_capacity(scc.len()),
             distinct_limit,
+            node_limit,
+            total_nodes_emitted: 0,
         };
         for &v in scc {
             state.in_scc[v as usize] = true;
@@ -884,6 +924,8 @@ impl IndexedGraph {
                 let fp = hash_u32_slice(&state.hash_scratch);
                 if state.seen.insert(fp) {
                     state.circuits.push(state.path.clone());
+                    state.total_nodes_emitted =
+                        state.total_nodes_emitted.saturating_add(state.path.len());
                     // Streaming distinct-count cutoff: bail the moment
                     // the unique-circuit count exceeds the caller's
                     // limit.  Used by `find_loops_if_under_limit` to
@@ -894,6 +936,15 @@ impl IndexedGraph {
                     // fires).  `distinct_limit = usize::MAX` disables
                     // this cutoff for the raw-budget call site.
                     if state.circuits.len() > state.distinct_limit {
+                        return Err(TruncatedByBudgetInternal);
+                    }
+                    // Streaming node-count cutoff: guards against
+                    // shapes that stay under the distinct-count cap
+                    // but still accumulate gigabytes of indexed-path
+                    // storage (e.g., a pure-A2A loop of length 1000
+                    // across a 900k-element dimension emits ~900k
+                    // distinct circuits but ~900M u32 indices).
+                    if state.total_nodes_emitted > state.node_limit {
                         return Err(TruncatedByBudgetInternal);
                     }
                 }
@@ -1255,7 +1306,7 @@ impl CausalGraph {
         &self,
         max_loops: usize,
     ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
-        let indexed = self.enumerate_indexed_circuits_ex(usize::MAX, max_loops)?;
+        let indexed = self.enumerate_indexed_circuits_ex(usize::MAX, max_loops, usize::MAX)?;
         Ok(self.materialize_loops_from_indexed(indexed))
     }
 
@@ -1320,25 +1371,30 @@ impl CausalGraph {
         &self,
         max_circuits: usize,
     ) -> std::result::Result<IndexedCircuits, TruncatedByBudget> {
-        self.enumerate_indexed_circuits_ex(max_circuits, usize::MAX)
+        self.enumerate_indexed_circuits_ex(max_circuits, usize::MAX, usize::MAX)
     }
 
     /// Extended version of [`Self::enumerate_indexed_circuits`] that
-    /// also accepts a streaming distinct-circuit cutoff.  Set
-    /// `distinct_limit = usize::MAX` to disable (the raw-budget call
-    /// path).  A non-`MAX` value bails the moment the total distinct-
-    /// circuit count across all SCCs would exceed it, so dense graphs
-    /// never materialize more than `distinct_limit + 1` indexed
-    /// circuits.
+    /// also accepts a streaming distinct-circuit cutoff and a streaming
+    /// node-count cutoff.  Set both to `usize::MAX` to disable (the
+    /// raw-budget call path).  A non-`MAX` distinct limit bails the
+    /// moment the total distinct-circuit count across all SCCs would
+    /// exceed it; a non-`MAX` node limit bails the moment the
+    /// cumulative `u32` indices stored across surviving circuits would
+    /// exceed it.  The node cutoff guards against shapes the
+    /// distinct-count cutoff misses (many long circuits rather than
+    /// many short circuits).
     fn enumerate_indexed_circuits_ex(
         &self,
         max_circuits: usize,
         distinct_limit: usize,
+        node_limit: usize,
     ) -> std::result::Result<IndexedCircuits, TruncatedByBudget> {
         let graph = IndexedGraph::from_edges(&self.edges);
         let sccs = graph.tarjan_scc();
         let mut all_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget = max_circuits;
+        let mut total_nodes: usize = 0;
 
         // SCC iteration order is whatever Tarjan emitted.  Each SCC's
         // contribution to `all_circuits` is independent, and per-cycle
@@ -1354,13 +1410,24 @@ impl CausalGraph {
             if scc.len() == 1 && !graph.succ[scc[0] as usize].contains(&scc[0]) {
                 continue;
             }
-            // Per-SCC distinct-limit is scaled by already-emitted
-            // circuits: a 5k-loop SCC 1 followed by a 6k-loop SCC 2
-            // should trip at 10k, not 11k.  (`saturating_sub` prevents
-            // wrap when all_circuits.len() briefly exceeds the limit.)
+            // Per-SCC limits are scaled by already-emitted totals: a
+            // 5k-loop SCC 1 followed by a 6k-loop SCC 2 should trip at
+            // 10k, not 11k, and the same accounting applies to the
+            // node-count cutoff.  `saturating_sub` prevents wrap when
+            // the running totals briefly exceed the limit.
             let remaining_distinct = distinct_limit.saturating_sub(all_circuits.len());
-            match graph.enumerate_circuits_in_scc(scc, &mut budget, remaining_distinct) {
-                Ok(mut circuits) => all_circuits.append(&mut circuits),
+            let remaining_nodes = node_limit.saturating_sub(total_nodes);
+            match graph.enumerate_circuits_in_scc(
+                scc,
+                &mut budget,
+                remaining_distinct,
+                remaining_nodes,
+            ) {
+                Ok(mut circuits) => {
+                    total_nodes =
+                        total_nodes.saturating_add(circuits.iter().map(|c| c.len()).sum::<usize>());
+                    all_circuits.append(&mut circuits);
+                }
                 Err(TruncatedByBudgetInternal) => return Err(TruncatedByBudget),
             }
         }
@@ -1450,8 +1517,9 @@ impl CausalGraph {
     pub fn find_indexed_circuits_streaming_distinct(
         &self,
         distinct_limit: usize,
+        node_limit: usize,
     ) -> (Vec<String>, Vec<Vec<u32>>, bool) {
-        match self.enumerate_indexed_circuits_ex(usize::MAX, distinct_limit) {
+        match self.enumerate_indexed_circuits_ex(usize::MAX, distinct_limit, node_limit) {
             Ok(indexed) => {
                 let (names, circuits) = self.trim_indexed_name_table(indexed);
                 (names, circuits, false)
@@ -5197,7 +5265,7 @@ mod tests {
         let mut budget_j = usize::MAX;
         for scc in &sccs {
             let mut part = graph
-                .enumerate_circuits_in_scc(scc, &mut budget_j, usize::MAX)
+                .enumerate_circuits_in_scc(scc, &mut budget_j, usize::MAX, usize::MAX)
                 .unwrap();
             johnson_circuits.append(&mut part);
         }
@@ -5343,6 +5411,43 @@ mod tests {
             .find_circuit_node_lists_with_limit(0)
             .expect_err("zero budget on a cycle must truncate");
         assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
+    fn streaming_node_limit_trips_on_long_loops() {
+        // Build a graph with two disjoint 3-node rings.  Each ring
+        // emits one distinct circuit of length 3 (a->b->c->a style),
+        // so the full enumeration produces 2 circuits and 6 total
+        // indexed-path nodes.  Setting node_limit = 4 forces the
+        // second ring's emission to trip (running total 3 before the
+        // emit, 6 after, which exceeds 4).  This exercises the
+        // node-count cutoff independently of the distinct-count cutoff
+        // (distinct_limit is usize::MAX here).
+        let cg = build_causal_graph(&[
+            ("a", &["b"]),
+            ("b", &["c"]),
+            ("c", &["a"]),
+            ("x", &["y"]),
+            ("y", &["z"]),
+            ("z", &["x"]),
+        ]);
+
+        let (_, circuits, truncated) = cg.find_indexed_circuits_streaming_distinct(usize::MAX, 4);
+        assert!(
+            truncated,
+            "node_limit = 4 must trip on two 3-node rings (cumulative 6 > 4)"
+        );
+        // Truncated path returns empty per the documented contract.
+        assert!(circuits.is_empty());
+
+        // With node_limit = 6 the full enumeration fits exactly.
+        let (_, circuits_full, truncated_full) =
+            cg.find_indexed_circuits_streaming_distinct(usize::MAX, 6);
+        assert!(
+            !truncated_full,
+            "node_limit = 6 must admit both 3-node rings (cumulative 6 = 6)"
+        );
+        assert_eq!(circuits_full.len(), 2);
     }
 
     #[test]

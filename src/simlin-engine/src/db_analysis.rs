@@ -1274,18 +1274,29 @@ pub fn model_element_loop_circuits(
 ) -> LoopCircuitsResult {
     let element_edges = model_element_causal_edges(db, model, project);
     let graph = causal_graph_from_element_edges(element_edges);
-    // Stream a generous distinct-circuit cap
-    // (`MAX_LTM_ENUMERATION_CAP` = 1_000_000) into Johnson's DFS so
-    // we never materialize more than ~100-200 MB of indexed paths
-    // inside enumeration, bounded regardless of graph density.  The
-    // tighter `MAX_LTM_TOTAL_CIRCUITS` gate is applied *after*
+    // Stream two generous caps into Johnson's DFS so we never
+    // materialize more than a WASM-safe indexed-path footprint
+    // regardless of graph shape:
+    //
+    // - `MAX_LTM_ENUMERATION_CAP` bounds the distinct-circuit count
+    //   (~1M circuits).  Catches dense feedback graphs like WRLD3.
+    // - `MAX_LTM_ENUMERATION_NODES` bounds the total indexed-path
+    //   node count (~10M u32 indices, ~40 MB).  Catches shapes the
+    //   distinct-count cap misses -- e.g., a pure-A2A model with a
+    //   1_000-node loop across a 900_000-element dimension passes
+    //   the distinct-count cap but would accumulate ~900M u32
+    //   indices (3.5 GiB) without this cutoff.
+    //
+    // The tighter `MAX_LTM_TOTAL_CIRCUITS` gate is applied *after*
     // enumeration against the post-collapse emitted-Loop count --
-    // keeping the enumeration cap larger lets pure-A2A models that
+    // keeping both enumeration caps larger lets pure-A2A models that
     // collapse down to ~1 Loop stay on the exhaustive path even when
     // their underlying element-level circuit count is up to 1M (a
     // 500k-element arrayed stock-flow loop, for example).
-    let (names, circuits, truncated) =
-        graph.find_indexed_circuits_streaming_distinct(crate::ltm::MAX_LTM_ENUMERATION_CAP);
+    let (names, circuits, truncated) = graph.find_indexed_circuits_streaming_distinct(
+        crate::ltm::MAX_LTM_ENUMERATION_CAP,
+        crate::ltm::MAX_LTM_ENUMERATION_NODES,
+    );
     LoopCircuitsResult {
         names,
         circuits,
