@@ -1129,13 +1129,18 @@ pub fn model_detected_loops(
     // through the `simlin_analyze_get_relative_loop_score` error
     // message, not by suppressing structure.
     //
-    // This function retains exactly one gate: the variable-level
-    // post-dedup distinct-circuit budget (via
-    // `find_loops_if_under_limit`).  That gate streams the cutoff
-    // into Johnson's DFS so dense multidigraphs bail the moment the
-    // (max+1)th distinct circuit is discovered (WRLD3's 1.86M
-    // circuits trip at ~9 MB of state, not 467 MiB), while sparse
-    // large rings enumerate their single loop cheaply.
+    // This function retains two streaming gates: the variable-level
+    // post-dedup distinct-circuit budget (`MAX_LTM_DETECTED_LOOPS`)
+    // and the cumulative node-count cap (`MAX_LTM_ENUMERATION_NODES`),
+    // whichever fires first.  Split from the LTM-synthesis cap
+    // (`MAX_LTM_TOTAL_CIRCUITS`) because structural consumers
+    // (layout, FFI, CLI) don't pay LTM synthesis' equation-text cost
+    // and can tolerate a higher loop count.  Both cutoffs stream
+    // into Johnson's DFS so dense multidigraphs bail the moment
+    // either limit is crossed; WRLD3's 1.86M circuits trip the
+    // distinct-count cutoff at ~9 MB of state, while a pathologically
+    // long-loop model trips the node-count cutoff at ~40 MB.  Sparse
+    // large rings enumerate their single loop cheaply under both.
     let graph = causal_graph_with_modules(db, model, project);
 
     // On truncation we return `truncated: true` with an empty `loops`
@@ -1144,7 +1149,10 @@ pub fn model_detected_loops(
     // important for layout metadata which falls back to persisted
     // loop_metadata on the latter rather than reporting no feedback
     // loops.
-    let loops = match graph.find_loops_if_under_limit(crate::ltm::MAX_LTM_TOTAL_CIRCUITS) {
+    let loops = match graph.find_loops_if_under_limit_ex(
+        crate::ltm::MAX_LTM_DETECTED_LOOPS,
+        crate::ltm::MAX_LTM_ENUMERATION_NODES,
+    ) {
         Ok(loops) => loops,
         Err(crate::ltm::TruncatedByBudget) => {
             return DetectedLoopsResult {

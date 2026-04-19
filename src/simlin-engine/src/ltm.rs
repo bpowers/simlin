@@ -106,17 +106,49 @@ pub const MAX_LTM_ENUMERATION_CAP: usize = 1_000_000;
 /// which blows WASM's 4 GiB budget long before the circuit-count
 /// cutoff triggers.
 ///
-/// ## Why 10_000_000
+/// ## Why 100_000_000
 ///
-/// 10M `u32`s = ~40 MiB of indexed-path storage (plus
-/// `Vec`/`IndexedGraph` overhead).  Inside WASM's 4 GiB linear
-/// memory that leaves room for the rest of the compile pipeline,
-/// and it covers WRLD3's 87M-node enumeration with truncation
-/// (WRLD3: 1.86M circuits × mean length 47 = 87M nodes; the
-/// distinct-circuit cap trips first at 1M circuits, but if a future
-/// WRLD3-shape model had longer mean length this cap is the
-/// backstop).
-pub const MAX_LTM_ENUMERATION_NODES: usize = 10_000_000;
+/// 100M `u32`s = ~400 MiB of indexed-path storage (plus
+/// `Vec`/`IndexedGraph` overhead).  Sized so the distinct-circuit
+/// cap is the primary trigger for WRLD3-shape models (WRLD3: 1.86M
+/// circuits × mean length 47 = 87M nodes; distinct cap fires first
+/// at 1M circuits which corresponds to ~47M nodes, well under the
+/// 100M node cap).  The node cap remains the active constraint for
+/// pathological long-loop shapes (e.g., a 1,000-node loop repeated
+/// across 200k+ elements trips this cap at ~200M nodes even though
+/// the distinct count is under 1M).  Inside WASM's 4 GiB linear
+/// memory 400 MiB leaves room for the rest of the compile pipeline.
+///
+/// The *smaller* of the two caps fires first on any given model, and
+/// the combination bounds peak indexed-path state at whichever is
+/// more restrictive: 1M circuits OR 100M nodes.
+pub const MAX_LTM_ENUMERATION_NODES: usize = 100_000_000;
+
+/// Cap on the number of structural feedback loops
+/// `model_detected_loops` will materialize before returning empty +
+/// `truncated = true`.
+///
+/// Distinct from [`MAX_LTM_TOTAL_CIRCUITS`], which gates *LTM
+/// variable synthesis* (loop_score aux equations, per-link score
+/// equations).  Structural-only consumers -- layout feedback-loop
+/// metadata, `simlin_analyze_get_loops`, `simlin-cli --ltm`, and any
+/// UI that lists feedback loops for display -- don't pay the
+/// equation-text cost, so they can tolerate a higher cap than LTM
+/// synthesis.  Without the split, a model with 20k disjoint 3-node
+/// cycles (a realistic shape for large arrayed models) would
+/// correctly auto-flip LTM to discovery but would also lose all its
+/// structural topology to layout and FFI callers, even though the
+/// Loop-struct materialization cost (~9 KB × 20k = 180 MB) is well
+/// within WASM's budget.
+///
+/// ## Why 100_000
+///
+/// 10x higher than `MAX_LTM_TOTAL_CIRCUITS = 10_000`.  At ~9 KB per
+/// materialized `Loop` struct (links, polarity, stocks with module
+/// enrichment) 100k distinct loops cost ~900 MB of transient state.
+/// Comfortable inside WASM's 4 GiB ceiling but still rules out
+/// WRLD3-scale (1.86M loops) from the structural-detection path.
+pub const MAX_LTM_DETECTED_LOOPS: usize = 100_000;
 
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`
@@ -1306,7 +1338,24 @@ impl CausalGraph {
         &self,
         max_loops: usize,
     ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
-        let indexed = self.enumerate_indexed_circuits_ex(usize::MAX, max_loops, usize::MAX)?;
+        self.find_loops_if_under_limit_ex(max_loops, usize::MAX)
+    }
+
+    /// Extended variant of [`Self::find_loops_if_under_limit`] that
+    /// additionally caps the cumulative node count across all emitted
+    /// circuits.  Use `usize::MAX` to disable the node cap and get the
+    /// same behaviour as `find_loops_if_under_limit`.
+    ///
+    /// Both caps share the same `TruncatedByBudget` signal; the caller
+    /// cannot tell which one fired.  That is intentional: consumers
+    /// use the truncation as a "results are incomplete, fall back"
+    /// signal rather than treating the caps as semantic categories.
+    pub fn find_loops_if_under_limit_ex(
+        &self,
+        max_loops: usize,
+        max_nodes: usize,
+    ) -> std::result::Result<Vec<Loop>, TruncatedByBudget> {
+        let indexed = self.enumerate_indexed_circuits_ex(usize::MAX, max_loops, max_nodes)?;
         Ok(self.materialize_loops_from_indexed(indexed))
     }
 

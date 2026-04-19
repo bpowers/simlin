@@ -2260,22 +2260,18 @@ pub fn model_ltm_variables(
             }
             None
         } else {
-            // Total-circuit backstop.  The largest-SCC gate misses
-            // pathological shapes like many disjoint small cycles: each
-            // such distinct variable-level loop still costs ~9 KB of
-            // `Loop`/`Link` state in `build_element_level_loops`.
-            // `model_element_loop_circuits` enumerates with a
-            // streaming distinct-circuit cap of `MAX_LTM_ENUMERATION_CAP`
-            // (1_000_000) and sets `truncated = true` when that cap
-            // trips, which we treat as a hard auto-flip here.  The
-            // safety reason is *not* that emit count exceeds the
-            // tighter `MAX_LTM_TOTAL_CIRCUITS` budget (that's
-            // knowable only on a complete circuit list): it's that
-            // the partial circuit list truncation yielded is not safe
-            // to hand to `build_element_level_loops` -- per-group A2A
-            // collapse depends on seeing every circuit in each group
-            // before classifying it as pure-dimension, cross-element,
-            // or mixed.
+            // Total-circuit backstop.  `model_element_loop_circuits`
+            // enumerates with two streaming caps --
+            // `MAX_LTM_ENUMERATION_CAP` (distinct circuits) and
+            // `MAX_LTM_ENUMERATION_NODES` (cumulative indexed-path
+            // nodes) -- and sets `truncated = true` when either trips,
+            // which we treat as a hard auto-flip here.  The safety
+            // reason is that the partial circuit list truncation
+            // yielded is not safe to hand to
+            // `build_element_level_loops` -- per-group A2A collapse
+            // depends on seeing every circuit in each group before
+            // classifying it as pure-dimension, cross-element, or
+            // mixed.
             //
             // For non-truncated results we count *emitted* Loops via
             // `estimate_emitted_loop_count`, which mirrors
@@ -2302,14 +2298,18 @@ pub fn model_ltm_variables(
                 let msg = if circuits_result.truncated {
                     format!(
                         "LTM analysis auto-switched from exhaustive to discovery mode: \
-                         element-level feedback-loop enumeration truncated at \
-                         MAX_LTM_ENUMERATION_CAP = {} distinct circuits (see \
+                         element-level feedback-loop enumeration truncated by the \
+                         streaming safety caps (MAX_LTM_ENUMERATION_CAP = {} \
+                         distinct circuits or MAX_LTM_ENUMERATION_NODES = {} \
+                         cumulative indexed-path nodes; whichever fires first \
+                         depends on the model's mean loop length -- see \
                          docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
                          Per-loop scores are ranked post-simulation via the \
                          strongest-path search; see \
                          docs/design/ltm--loops-that-matter.md for the two-tier \
                          strategy.",
                         crate::ltm::MAX_LTM_ENUMERATION_CAP,
+                        crate::ltm::MAX_LTM_ENUMERATION_NODES,
                     )
                 } else {
                     let distinct_loops = estimated_loops;
