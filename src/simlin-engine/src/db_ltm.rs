@@ -1828,24 +1828,16 @@ pub(crate) fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuits
             continue;
         }
 
-        let is_cross_element = group_indices.iter().any(|&ci| {
-            let leading_elements: Vec<&str> = element_circuits
-                .circuit_names(ci)
-                .filter_map(|n| {
-                    let start = n.find('[')?;
-                    let end = n.rfind(']')?;
-                    let subscript = &n[start + 1..end];
-                    Some(subscript.split(',').next().unwrap_or(subscript))
-                })
-                .collect();
-            leading_elements.windows(2).any(|w| w[0] != w[1])
-        });
-
-        // Pure-A2A and cross-element (by leading subscripts) both
-        // collapse to 1 Loop per group in `build_element_level_loops`.
-        // The only branch that expands 1:N is the `!all_subscripted`
-        // scalar/mixed branch, handled earlier.
-        let _ = is_cross_element;
+        // At this point the group is all-subscripted and has no
+        // repeated stripped names.  `build_element_level_loops`
+        // classifies this as either pure-A2A (all leading-subscript
+        // elements match across circuits) or cross-element (they
+        // differ), and emits exactly one Loop either way: pure-A2A
+        // collapses to a dimensioned A2A loop, cross-element collapses
+        // to a scalar approximation over the unique-stripped cycle.
+        // Since both branches contribute 1 to the emitted Loop count,
+        // we don't need to inspect leading subscripts here -- the
+        // classification is a no-op for the purpose of counting.
         total = total.saturating_add(1);
     }
     total

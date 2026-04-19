@@ -2052,3 +2052,57 @@ fn test_compute_metadata_falls_back_on_truncated_loop_detection() {
             .collect::<Vec<_>>()
     );
 }
+
+/// Regression test for codex iter-10 P2: when LTM auto-flips to
+/// discovery but `model_detected_loops` still returns structural
+/// loops (a model whose element-level SCC or total-loop count trips
+/// the LTM gate, but whose variable-level graph is under the
+/// `MAX_LTM_TOTAL_CIRCUITS` cap), `compute_metadata` must keep the
+/// structural loops with empty `importance_series` rather than
+/// dropping them entirely to fall back on persisted loop_metadata.
+/// Newly imported or unsaved models usually have no persisted
+/// loop_metadata, and the pre-iter-10 "return None on auto-flip"
+/// branch silently dropped real feedback-loop data for them.
+///
+/// We build a many-element pure-A2A model: the element-level graph
+/// exceeds `MAX_LTM_TOTAL_CIRCUITS` (all post-collapse Loops are
+/// emitted, but any iteration of the score normalization after
+/// auto-flip produces an empty `rel_scores` map), while the variable-
+/// level graph has one elementary loop that `model_detected_loops`
+/// still reports cleanly.  We do NOT annotate loop_metadata -- the
+/// test asserts the structural loop shows up from the LTM path's
+/// detected_loops, not from a hand-authored fallback.
+#[test]
+fn test_compute_metadata_preserves_structural_loops_when_ltm_auto_flips() {
+    use simlin_engine::layout::compute_metadata;
+    use simlin_engine::test_common::TestProject;
+
+    // Pure-A2A N-element stock-flow loop.  N chosen so the element
+    // graph has exactly one variable-level signature but element-SCC
+    // size keeps the detected_loops path cheap.  We do NOT set
+    // ltm_discovery_mode explicitly; the compile_metadata internals
+    // decide whether auto-flip fires based on graph shape.
+    let dim_size = 60usize;
+    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
+    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+
+    let project = TestProject::new("layout_preserves_structural_under_autoflip")
+        .named_dimension("Region", &elem_refs)
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * 0.1", None)
+        .build_datamodel();
+
+    let metadata = compute_metadata(&project, MAIN_MODEL, None)
+        .expect("compute_metadata should succeed on the arrayed A2A model");
+
+    // The model has one structural variable-level loop (the
+    // population/births cycle).  Even if ltm_variables collapses
+    // to discovery and leaves loop_partitions empty, the loop must
+    // still surface in compute_metadata's output -- the iter-10
+    // fix is specifically to not drop this to an empty vec.
+    assert!(
+        !metadata.feedback_loops.is_empty(),
+        "pure-A2A arrayed model must surface at least one structural \
+         feedback loop; compute_metadata returned empty"
+    );
+}
