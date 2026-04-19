@@ -25,6 +25,7 @@ use crate::{
 };
 
 mod section3;
+mod view_blocks;
 
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
 
@@ -344,6 +345,21 @@ pub const VDF_SECTION6_OT_CODE_TIME: u8 = 0x0f;
 /// the nearby section-1 record classification fields stay unchanged.
 pub const VDF_SECTION6_OT_CODE_STOCK: u8 = 0x08;
 
+/// Record classification value (`field[1]`) that marks a view header record.
+///
+/// Every VDF file observed so far contains exactly one record with
+/// `field[1] == 138` for each dot-prefix view marker in the name table
+/// (`.Agriculture`, `.Population`, etc.). These view header records also
+/// carry `field[0] == 0` (padding marker) and act as boundary sentinels:
+/// records before a view header belong to the previous view; records after
+/// it belong to the view named by its dot-prefix entry.
+///
+/// Validated 1:1 on every scalar fixture (`f138_count == dot_prefix_count`)
+/// across the full test corpus, including WRLD3 SCEN01 (20/20), WRLD3
+/// experiment (20/20), and every small single-view fixture (bact, water,
+/// pop, consts, lookups, model_editing, etc., all 2/2).
+pub const VDF_RECORD_VIEW_HEADER_CLASS: u32 = 138;
+
 /// Size of a VDF section header in bytes (magic + 5 u32 fields).
 pub const SECTION_HEADER_SIZE: usize = 24;
 
@@ -485,6 +501,18 @@ impl VdfRecord {
     /// proper variable metadata record (vs. a padding or alignment block).
     pub fn has_sentinel(&self) -> bool {
         self.fields[8] == VDF_SENTINEL && self.fields[9] == VDF_SENTINEL
+    }
+
+    /// Whether this record is a **view header** marker (`field[1] == 138`).
+    ///
+    /// View header records mark boundaries between Vensim sketch views in
+    /// file order. The run of records between two consecutive view headers
+    /// (or between the file start and the first view header, or between
+    /// the last view header and the end of the record region) corresponds
+    /// to one view's worth of variable records. See
+    /// [`VDF_RECORD_VIEW_HEADER_CLASS`] for the validation evidence.
+    pub fn is_view_header(&self) -> bool {
+        self.fields[1] == VDF_RECORD_VIEW_HEADER_CLASS
     }
 }
 

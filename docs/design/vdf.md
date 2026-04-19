@@ -768,6 +768,85 @@ small/medium test fixtures; what we need is the actual formula.
     relies on this directly; the Python `_try_f2_offset_mapping` uses the
     same nominal formula.
 
+11. **Record `field[1] == 138` marks view headers**. Every VDF file
+    contains a run of records with `field[1] == 138` (also `field[0] ==
+    0`, making them look like "padding" records). On small single-view
+    fixtures and on WRLD3 SCEN01 / experiment the count matches the
+    dot-prefix name count exactly:
+
+    | Fixture              | `f[1]==138` count | dot-prefix count |
+    |----------------------|-------------------|------------------|
+    | water                | 2                 | 2                |
+    | pop                  | 2                 | 2                |
+    | bact, lookup_ex, ... | 2                 | 2                |
+    | econ/base            | 2                 | 2                |
+    | econ/risk            | 2                 | 2                |
+    | WRLD3 SCEN01         | 20                | 20               |
+    | WRLD3 experiment     | 20                | 20               |
+
+    The 1:1 alignment does **not** hold universally. Two divergent cases
+    have been observed and are pinned by tests in
+    `src/simlin-engine/src/vdf/view_blocks.rs`:
+
+    | Fixture        | `f[1]==138` count | dot-prefix count | Divergence cause |
+    |----------------|-------------------|------------------|------------------|
+    | `econ/risk2`   | 2                 | 1                | Edited file dropped the `.Control` dot-name but the header record survived |
+    | `Ref.vdf`      | 17                | 69               | C-LEARN nests modules, so many dot names describe sub-groups (`.Agriculture.Loop1`) that share a parent view's header record |
+
+    Between two consecutive view-header records lies one view's worth of
+    variable records. On 1:1-aligned fixtures, the group sizes match
+    `names[dot[i] + 1 .. dot[i + 1]]` on every non-terminal view block.
+    (The final `.Supplementary`-style view is the one exception because
+    `#` signature names and stdlib tail records sit past the slot
+    boundary.) The public API exposes two helpers:
+    `VdfFile::record_view_groups()` returns the groups, and
+    `VdfFile::record_view_groups_with_diagnostics()` returns the groups
+    plus a `ViewBlockDiagnostics` struct listing unmatched headers and
+    unmatched dot names so callers can detect divergent fixtures
+    without silently dropping them.
+
+12. **Shift-by-one record-to-name OT link**. For file-order record-to-name
+    pairs `(rec[i], name[i])` (where variable records pair with non-dot
+    names and view headers pair with dot-prefix names), the OT index of
+    `name[i+1]` equals `rec[i].field[11]`. Each record's `field[11]`
+    identifies its file-order successor's OT slot, not its own.
+
+    The only special case is `Time`, which always lives at OT[0]; because
+    the first variable record already carries the OT for `name[1]`, the
+    Time binding is implicit in the shift-by-one rule. Records with
+    `field[11] == 0` for a non-Time successor are treated as sentinels
+    meaning "no OT entry for that name". **Known imprecision**: the
+    sentinel over-filters on WRLD3 SCEN01, where 59 successors have
+    f[11]==0. Most are metadata/unit/stdlib-helper names without OT
+    entries, but a handful are real variables (`unit agricultural input`,
+    several `#SMOOTH3(...)#` signatures) that are silently lost through
+    this path. Closing this gap requires an additional structural signal
+    that separates aliases/metadata from real variables; the
+    `FileOrderPairDiagnostics` returned by `build_file_order_pairs` lets
+    callers detect the lost names.
+
+    For arrayed records (paired name's record has `field[6] != 5`),
+    the OT slot from the shift-by-one link is expanded to `N`
+    consecutive slots where `N` is the `flat_size` of the matching
+    section-3 shape entry, matching the pattern in
+    `to_results_via_records`. Element labels use the `name[i]`
+    convention (0-indexed).
+
+    Validated on WRLD3 SCEN01 / experiment (time-series equality
+    against `build_section6_guided_ot_map` agrees on ~40-50 of ~260
+    overlapping names, with disagreements reflecting that the two
+    mapping paths use different heuristics), water, pop, consts, and
+    every small single-view fixture.
+
+    On compilation-order files with interleaved dimension-element
+    records (subscripts.vdf) and on edited/re-saved files (risk2.vdf,
+    Ref.vdf), the file-order pairing drifts on unmatched dot names and
+    orphan headers; the path surfaces a partial mapping in those cases.
+    `to_results_via_records` (f[2]-sort based) remains more robust on
+    those fixtures.
+
+    Exposed as `VdfFile::to_results_via_file_order_records()`.
+
 ### VDF-structural path (stock classifier required)
 
 `VdfFile::to_results_with_stock_classifier(is_stock)` uses only VDF structural
@@ -867,46 +946,64 @@ true format mechanism is simpler and direct; these approaches approximate it.
 
 ### The core unsolved problem
 
-We still do not have a general, deterministic method to extract named
-results from arbitrary large VDF files. The record-based path
-(`to_results_via_records`) is deterministic and correct for every OT
-entry that is backed by a metadata record, but records are **sparse**
-in large models, so the path covers only a subset of variables. Closing
-the gap requires a separate mechanism for OT entries that are owned by
-names which have no variable metadata record.
+The large-model name-to-OT link has two partial decoders with
+complementary failure modes:
+`VdfFile::to_results_via_file_order_records()` uses the `field[1] ==
+138` view-header marker (signal #11) and the shift-by-one `field[11]`
+link (signal #12) to recover most of the mapping on WRLD3 SCEN01 /
+experiment (verified against the model's declared constants and against
+time-series equality with the model-guided path). `VdfFile::
+to_results_via_records()` uses the `field[2]` sort + nominal offset
+(signal #10) and is the more robust path on small fixtures,
+subscripts.vdf, and other compilation-order fixtures where dim-element
+names interleave with variable names. Neither is universally correct.
 
-Specific manifestations of this gap:
+Remaining gaps:
 
-1. **Sparse-record coverage for large models.** For WRLD3, the name
-   table has ~340 candidates for 296 OT slots, but only 23 of those 296
-   OT entries have backing records. The record-based path resolves the
-   23, and the other 273 need another structural signal. A C program
-   would not filter by name heuristics -- it would use an index or flag
-   to identify which names are OT participants. We have confirmed that
-   the section-1 16-byte per-name entries are a direct dump of a C
-   runtime struct (RAM pointers and sequence numbers), NOT a durable
-   participation flag, so that candidate is ruled out. The flag may
-   still live elsewhere (section 4 view metadata, or an unparsed
-   subregion of section 6).
+1. **Trailing `.Supplementary` / `#`-signature region.** The last
+   view block (`.Supplementary` on WRLD3) has extra record/name entries
+   for internal stdlib helpers and `#` signature names past the slot
+   boundary. Record-count and name-count diverge here (e.g. SCEN01: 68
+   records vs 53 names; experiment: 43 records vs 66 names). The
+   shift-by-one link still applies for the first ~8 entries of the
+   block but breaks once the `#`-signature region starts. The
+   remaining variables in this block may need a separate handling.
 
-2. **Multi-dimension array composition.** The structural path from
+2. **Interleaved SCEN01-style extra records.** SCEN01 has 15 extra
+   records compared to slot_count (419 vs 404); these carry unusual
+   `field[1]` values like 144, 255, 2056, 2065, 4625. They insert
+   within view 1 and cause 2 of 15 SCEN01 constants to mismap (GDP pc
+   unit, unit population). Experiment.vdf (394 records, 397 slots)
+   does not have these and maps 16/16 correctly. Decoding the
+   interleaving rule for these records would close the last SCEN01
+   gap.
+
+3. **Multi-dimension array composition.** The structural path from
    records through section-3 shapes to section-5 dimension sets is
    confirmed, but assigning named elements to each axis of a
    multi-dimensional variable is not wired up.
 
-3. **Lookup-record payload structure.** Section-6 lookup records
+4. **Lookup-record payload structure.** Section-6 lookup records
    identify lookup definitions and their OT indices, but the internal
    payload is not fully decoded. On small fixtures, parsed lookup-record
    OT indices overlap already-owned variable slots, so extraction is
    kept conservative.
 
-4. **Large-model visible-variable ordering.** Even when records resolve
-   a block of variables, we rely on stocks-first-alphabetical to place
-   the **remaining** names (those without records) into the remaining
-   OT slots. That property is validated on 7 of 8 test files but breaks
-   on `Ref.vdf` (C-LEARN), where 209 stock entries split across 8
-   non-contiguous ranges. A per-name participation signal would
-   decouple this step from alphabetical fitting.
+5. **C-LEARN (`Ref.vdf`) view-grouping.** `Ref.vdf` has 69 dot-prefix
+   names but only 17 `field[1] == 138` records. The view-header-per-
+   dot-prefix rule that holds on small fixtures and on WRLD3 breaks
+   here, probably because C-LEARN's module nesting surfaces sub-group
+   dot-prefix entries (e.g. `.Agriculture.Loop1`) that share their
+   parent view's header record rather than owning their own. The
+   `ViewBlockDiagnostics` returned by
+   `record_view_groups_with_diagnostics` surfaces these unmatched dot
+   names so callers can avoid silent misalignment.
+
+6. **Re-saved/edited files with orphan view-header records.** Files
+   edited to delete a trailing view (e.g. `econ/risk2.vdf` dropping
+   `.Control` from the name table) keep the view-header record and
+   emit a header count greater than the dot-prefix count. Pinned by
+   `test_record_view_groups_divergent_fixtures`.
 
 
 ## Appendix: reverse-engineering notes
@@ -1124,7 +1221,28 @@ named element labels.
   WRLD3 SCEN01 exhibits 54 alphabetical runs (sizes 8..36) after
   f[10]-sort, consistent with one run per sketch view. Global
   alphabetical sort is not the right shape for the mapping on
-  compilation-order fixtures.
+  compilation-order fixtures. **Superseded**: the actual view-block
+  partitioning comes from `field[1] == 138` marker records (signal
+  #11), and the within-view record-to-name pairing comes from the
+  shift-by-one `field[11]` link (signal #12). The `f[10]` alphabetical
+  runs are a secondary ordering within some but not all views, and
+  are not needed for the name-to-OT mapping.
+
+- **Assumption: the name-to-OT mapping on compilation-order files
+  universally requires a model**: partially refuted. The `field[1]
+  == 138` view-header markers plus the shift-by-one `field[11]`
+  link give a VDF-native mapping path
+  (`to_results_via_file_order_records`) that recovers most of the
+  mapping on WRLD3 SCEN01 / experiment (verified against the
+  model's declared constants and against per-time-point agreement
+  with `build_section6_guided_ot_map`). `build_section6_guided_ot_map`
+  remains the reference mapping on small fixtures (where its
+  alphabetical-within-class assumption matches Vensim's output)
+  and on arrayed fixtures (subscripts.vdf): the file-order path is
+  imperfect on those because the dimension-element names and
+  compilation-order artefacts shift the 1:1 pairing. The two paths
+  are complementary; neither is uniformly more correct than the
+  other across the full fixture corpus.
 
 #### Name-based claims
 
@@ -1181,3 +1299,37 @@ These patterns were validated across the full test corpus:
   are 4-byte-aligned and within section-1 range appear in the slot table.
   The section grows proportionally with model complexity (20 bytes for
   water, 600 bytes for WRLD3).
+
+- **Record field[1] == 138 as view-header marker**: Each VDF contains
+  a run of `field[1] == 138` records that act as view-group boundaries.
+  On small single-view fixtures and on WRLD3 SCEN01 / experiment the
+  header count matches the dot-prefix name count exactly (1:1). On
+  edited files (`econ/risk2.vdf` drops `.Control` but keeps its record)
+  and on multi-level module fixtures (`Ref.vdf`, 17 headers vs 69
+  dot-names with sub-groups) the 1:1 alignment breaks. Between two
+  consecutive view-header records lie that view's variable records;
+  on 1:1 fixtures the count matches the names between the two
+  corresponding dot-prefix entries. Exposed as
+  `VdfFile::record_view_groups()` and
+  `VdfFile::record_view_groups_with_diagnostics()` (returns unmatched
+  headers / dot-names alongside the groups).
+
+- **Shift-by-one record-to-name OT link via `field[11]`**: For file-
+  order record-to-name pairs `(rec[i], name[i])`, the OT index of
+  `name[i+1]` equals `rec[i].field[11]`. `Time` is the sole `OT[0]`
+  owner (implicit); `field[11] == 0` for a non-Time successor is a
+  "no OT entry" sentinel. Arrayed records (`f[6] != 5`) expand to
+  `flat_size` consecutive OT slots via the section-3 shape
+  directory, matching the pattern in `to_results_via_records`.
+  Validated on WRLD3 SCEN01 / experiment (time-series equality with
+  `build_section6_guided_ot_map` on tens of overlapping names) and
+  on every smaller single-view scalar fixture. The sentinel
+  over-filters a handful of real variables on WRLD3 SCEN01
+  (quantified by `test_field11_zero_sentinel_loss_on_wrld3_is_pinned`
+  and the `FileOrderPairDiagnostics` return from
+  `build_file_order_pairs`). On arrayed fixtures (subscripts.vdf)
+  and edited/multi-level-module fixtures (risk2, Ref), the pairing
+  drifts and the path surfaces a partial mapping; use
+  `to_results_via_records` when the fixture has dim-element names
+  interleaved with variables. Exposed as
+  `VdfFile::to_results_via_file_order_records()`.
