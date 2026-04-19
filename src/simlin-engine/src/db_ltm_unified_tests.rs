@@ -715,23 +715,22 @@ fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
     );
 }
 
-/// The largest-SCC gate misses models whose element-level graph expands
-/// a small variable-level SCC across a very large dimension: each
-/// per-element circuit still becomes a `Loop` struct in
-/// `build_element_level_loops` (~9 KB each on WRLD3's allocation
-/// profile).  A pure A2A stock-flow loop over a
-/// `MAX_LTM_TOTAL_CIRCUITS + 1`-element dimension has
-/// `max_scc_size == 2` (same-element) but produces one circuit per
-/// element, enough to blow WASM on its own.  The total-circuit backstop
-/// in `model_ltm_variables` catches this shape and auto-flips to
-/// discovery.
+/// A pure A2A stock-flow loop over a large dimension produces many
+/// element-level circuits but `build_element_level_loops` collapses
+/// them into a single A2A `Loop`.  The total-circuit backstop keys on
+/// the post-collapse distinct-signature count, so these models stay on
+/// the exhaustive path regardless of `|dimension|` -- only ~9 KB of
+/// Loop materialization, well under the 10k-loop cliff the backstop
+/// guards against.  A regression where we keyed on raw element-level
+/// `circuits_result.len()` would force these models into discovery
+/// mode and lose their per-loop scores.
 #[test]
-fn test_auto_flip_on_total_circuits_above_threshold() {
+fn test_pure_a2a_over_large_dimension_stays_exhaustive() {
     let dim_size = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
     let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
     let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
 
-    let project = crate::test_common::TestProject::new("arrayed_a2a_circuit_count_flip")
+    let project = crate::test_common::TestProject::new("arrayed_a2a_stays_exhaustive")
         .named_dimension("Region", &elem_refs)
         .array_stock("population[Region]", "100", &["births"], &[], None)
         .array_flow("births[Region]", "population * 0.1", None)
@@ -748,11 +747,67 @@ fn test_auto_flip_on_total_circuits_above_threshold() {
         .iter()
         .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
     assert!(
+        has_loop_score,
+        "pure-A2A arrayed model with |Region|={} collapses to one \
+         variable-level loop; must stay exhaustive and emit loop_score. \
+         MAX_LTM_TOTAL_CIRCUITS = {}. Got vars: {:?}",
+        dim_size,
+        crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
+        ltm.vars
+            .iter()
+            .map(|v| &v.name)
+            .take(20)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Build a project with N independent disjoint 3-node stock-flow
+/// cycles.  Each cycle contributes one distinct variable-level loop
+/// signature and one element-level circuit (no cross-element), so this
+/// is the shape that actually exercises the total-circuit backstop:
+/// N > MAX_LTM_TOTAL_CIRCUITS forces auto-flip because each cycle is a
+/// separate variable-level signature that would materialize its own
+/// Loop struct.  Contrasted with the pure-A2A test above which also has
+/// N > threshold in element-count but collapses to one signature.
+fn build_n_disjoint_cycles_project(project_name: &str, n: usize) -> crate::datamodel::Project {
+    let mut builder = crate::test_common::TestProject::new(project_name);
+    for k in 0..n {
+        let aux_name = format!("aux_{k}");
+        let flow_name = format!("flow_{k}");
+        let stock_name = format!("stock_{k}");
+        builder = builder.scalar_aux(&aux_name, &stock_name);
+        builder = builder.flow(&flow_name, &aux_name, None);
+        builder = builder.stock(&stock_name, "0", &[flow_name.as_str()], &[], None);
+    }
+    builder.build_datamodel()
+}
+
+/// The total-circuit backstop fires on models whose DISTINCT
+/// variable-level loop count exceeds `MAX_LTM_TOTAL_CIRCUITS`, not on
+/// raw element-level count.  N disjoint 3-node cycles have N distinct
+/// signatures, so N > MAX_LTM_TOTAL_CIRCUITS must flip to discovery.
+#[test]
+fn test_auto_flip_on_distinct_signature_count_above_threshold() {
+    // Each cycle = 1 distinct signature; 1 above threshold forces flip.
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("n_disjoint_cycles_flip", n);
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let has_loop_score = ltm
+        .vars
+        .iter()
+        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}"));
+    assert!(
         !has_loop_score,
         "total-circuit backstop must fire for {} > MAX_LTM_TOTAL_CIRCUITS \
-         ({}): expected discovery-shape output (no loop_score vars), \
-         got vars: {:?}",
-        dim_size,
+         ({}) distinct variable-level signatures: expected discovery-shape \
+         output (no loop_score vars), got vars: {:?}",
+        n,
         crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
         ltm.vars
             .iter()
@@ -769,15 +824,8 @@ fn test_auto_flip_on_total_circuits_above_threshold() {
 fn test_auto_flip_on_total_circuits_emits_warning() {
     use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
 
-    let dim_size = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
-    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
-    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
-
-    let project = crate::test_common::TestProject::new("arrayed_a2a_circuit_count_warning")
-        .named_dimension("Region", &elem_refs)
-        .array_stock("population[Region]", "100", &["births"], &[], None)
-        .array_flow("births[Region]", "population * 0.1", None)
-        .build_datamodel();
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("n_disjoint_cycles_warning", n);
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
@@ -793,7 +841,7 @@ fn test_auto_flip_on_total_circuits_emits_warning() {
                 &d.error,
                 DiagnosticError::Assembly(msg)
                     if msg.contains("MAX_LTM_TOTAL_CIRCUITS")
-                        && msg.contains("elementary circuits")
+                        && msg.contains("feedback loops")
             )
     });
     assert!(
@@ -815,15 +863,8 @@ fn test_total_circuits_warning_surfaces_via_collect_model_diagnostics() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
-    let dim_size = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
-    let elements: Vec<String> = (0..dim_size).map(|i| format!("R{i}")).collect();
-    let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
-
-    let project = crate::test_common::TestProject::new("arrayed_total_circuits_surface")
-        .named_dimension("Region", &elem_refs)
-        .array_stock("population[Region]", "100", &["births"], &[], None)
-        .array_flow("births[Region]", "population * 0.1", None)
-        .build_datamodel();
+    let n = crate::ltm::MAX_LTM_TOTAL_CIRCUITS + 1;
+    let project = build_n_disjoint_cycles_project("n_disjoint_cycles_surface", n);
 
     let mut db = SimlinDb::default();
     let (source_project, source_model) = {
@@ -840,7 +881,7 @@ fn test_total_circuits_warning_surfaces_via_collect_model_diagnostics() {
                 &d.error,
                 DiagnosticError::Assembly(msg)
                     if msg.contains("MAX_LTM_TOTAL_CIRCUITS")
-                        && msg.contains("elementary circuits")
+                        && msg.contains("feedback loops")
             )
     });
     assert!(

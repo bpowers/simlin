@@ -1743,6 +1743,47 @@ fn strip_subscript(name: &str) -> &str {
     }
 }
 
+/// Count the number of distinct *variable-level* loop signatures in an
+/// element-level circuit list.
+///
+/// `build_element_level_loops` groups element circuits by their
+/// stripped (subscript-removed) node sequence and, for pure-dimension
+/// A2A groups, emits a single collapsed `Loop` per group regardless of
+/// how many elements share that structure.  The
+/// `MAX_LTM_TOTAL_CIRCUITS` backstop bounds `Loop` struct
+/// materialization memory, so it needs to key on the post-collapse
+/// count -- otherwise an arrayed `population[Region] -> births[Region]
+/// -> population[Region]` model with a large `|Region|` would trip the
+/// gate despite emitting only a single Loop.
+///
+/// Returns an upper bound on the pure-dimension collapse: each
+/// distinct stripped sequence contributes 1 here, even when the group
+/// turns out to be cross-element inside `build_element_level_loops`
+/// (which would emit one Loop per circuit in the group).  The bound is
+/// tight for pure A2A and loose for cross-element -- in the loose
+/// direction it under-counts, so cross-element models with many small
+/// loops could slip past the gate.  That is intentional: cross-element
+/// loops are rare, and the subsequent Loop materialization is still
+/// bounded by the per-circuit 9 KB figure, which leaves WASM-safe
+/// headroom for ~100k cross-element loops before the actual memory
+/// cliff.
+fn count_distinct_variable_level_signatures(element_circuits: &super::LoopCircuitsResult) -> usize {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    for i in 0..element_circuits.len() {
+        // Same keying as `build_element_level_loops`: strip subscripts
+        // and join with NUL so two nodes with colliding stripped names
+        // cannot produce the same key by accident.
+        let key: String = element_circuits
+            .circuit_names(i)
+            .map(strip_subscript)
+            .collect::<Vec<_>>()
+            .join("\x00");
+        seen.insert(key);
+    }
+    seen.len()
+}
+
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -2168,32 +2209,38 @@ pub fn model_ltm_variables(
                 };
             }
             None
-        } else if circuits_result.len() > crate::ltm::MAX_LTM_TOTAL_CIRCUITS {
+        } else if count_distinct_variable_level_signatures(circuits_result)
+            > crate::ltm::MAX_LTM_TOTAL_CIRCUITS
+        {
             // Total-circuit backstop.  The largest-SCC gate misses
-            // pathological shapes like many disjoint small cycles or a
-            // single variable-level 2-cycle exploded across a very
-            // large dimension: each such circuit still costs ~9 KB of
-            // `Loop`/`Link` state in `build_element_level_loops`, so a
-            // model with `max_scc_size == 2` but 200_000 element-level
-            // circuits would allocate ~1.8 GB before a single LTM
-            // equation is emitted.  Flip to discovery and emit the
-            // same Warning we surface for the SCC-based gate.
-            let total_circuits = circuits_result.len();
+            // pathological shapes like many disjoint small cycles: each
+            // such distinct variable-level loop still costs ~9 KB of
+            // `Loop`/`Link` state in `build_element_level_loops`.  We
+            // key on the *distinct-signature* count rather than the raw
+            // `circuits_result.len()` so that pure A2A models don't get
+            // spuriously flipped: a `population[Region] ->
+            // births[Region] -> population[Region]` cycle with
+            // |Region| = 200_000 produces 200_000 element-level
+            // circuits but collapses to one A2A `Loop` inside
+            // `build_element_level_loops`, so its materialization cost
+            // is ~9 KB, not ~1.8 GB.  Distinct-signature counting
+            // anticipates that collapse.
+            let distinct_loops = count_distinct_variable_level_signatures(circuits_result);
             let msg = format!(
                 "LTM analysis auto-switched from exhaustive to discovery mode: \
-                 the element-level graph has {} elementary circuits, \
-                 exceeding MAX_LTM_TOTAL_CIRCUITS = {}.  Materializing \
-                 a Loop struct per circuit would allocate ~{} MiB of \
-                 intermediate state (see \
+                 the element-level graph has {} distinct variable-level \
+                 feedback loops, exceeding MAX_LTM_TOTAL_CIRCUITS = {}.  \
+                 Materializing a Loop struct per distinct loop would allocate \
+                 ~{} MiB of intermediate state (see \
                  docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
                  Per-loop scores are ranked post-simulation via the \
                  strongest-path search; see \
                  docs/design/ltm--loops-that-matter.md for the two-tier \
                  strategy.",
-                total_circuits,
+                distinct_loops,
                 crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
                 // 9 KB/loop from the diagnosis allocation profile, in MiB.
-                (total_circuits as u64 * 9) / 1024,
+                (distinct_loops as u64 * 9) / 1024,
             );
             CompilationDiagnostic(Diagnostic {
                 model: model.name(db).clone(),

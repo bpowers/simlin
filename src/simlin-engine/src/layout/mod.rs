@@ -3856,6 +3856,19 @@ fn try_detect_ltm_loops_incremental(
 
     source_project.set_ltm_enabled(db).to(false);
 
+    // If LTM auto-flipped to discovery (SCC or distinct-signature
+    // backstop fired), `loop_partitions` is empty and the structural
+    // loops we detected above cannot be scored via post-sim
+    // normalization.  Return None so `compute_metadata` falls back to
+    // persisted `loop_metadata` (the documented fallback in
+    // `try_detect_ltm_loops`'s rustdoc) rather than emitting feedback
+    // loops with uniformly-zero importance series.  Non-LTM users
+    // still reach this path via `try_detect_ltm_loops`, but their
+    // detected loops are always empty and returned before this point.
+    if vm_result.is_some() && !detected.loops.is_empty() && loop_partitions.is_empty() {
+        return None;
+    }
+
     let vm = vm_result?;
     let results = vm.into_results();
 
