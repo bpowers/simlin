@@ -5586,6 +5586,44 @@ mod tests {
     }
 
     #[test]
+    fn find_loops_if_under_limit_ex_gates_on_node_cap() {
+        // The two-cap API must independently honor the node cap even
+        // when the circuit cap is generous.  Use K4 (11 distinct
+        // circuits, cumulative node count 3+3+3+3+4+4+4+4+4+4+4 = 40,
+        // since K4 has 4 3-cycles and 7 4-cycles) and request a
+        // node-cap of 10 -- well below the cumulative 40.  `max_loops`
+        // is deliberately left at `usize::MAX` so only the node cap
+        // can trip.  Without a working node-cap branch the DFS would
+        // continue enumerating and either OOM on pathological inputs
+        // or silently exceed the caller's memory budget.
+        let cg = build_causal_graph(&[
+            ("a", &["b", "c", "d"]),
+            ("b", &["a", "c", "d"]),
+            ("c", &["a", "b", "d"]),
+            ("d", &["a", "b", "c"]),
+        ]);
+
+        let err = cg
+            .find_loops_if_under_limit_ex(usize::MAX, 10)
+            .expect_err("max_nodes=10 must trip on K4's 40 cumulative circuit nodes");
+        assert_eq!(err, TruncatedByBudget);
+
+        // Sanity: with both caps generous, the same graph enumerates cleanly.
+        let loops = cg
+            .find_loops_if_under_limit_ex(usize::MAX, usize::MAX)
+            .expect("generous caps must admit all distinct circuits");
+        assert_eq!(loops.len(), 11, "K4 dedups to 11 distinct circuits");
+
+        // With a small circuit cap and a generous node cap, the
+        // circuit cap still trips -- demonstrating both arms route
+        // through the same signal.
+        let err = cg
+            .find_loops_if_under_limit_ex(10, usize::MAX)
+            .expect_err("max_loops=10 must trip on distinct-count check");
+        assert_eq!(err, TruncatedByBudget);
+    }
+
+    #[test]
     fn find_loops_if_under_limit_gates_on_post_dedup_count() {
         // K4 has 11 distinct node-set circuits but raw Johnson emits
         // many more.  `find_loops_if_under_limit` must succeed when

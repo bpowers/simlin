@@ -263,18 +263,29 @@ fn main() {
 
     // Stage 6: element-level circuit enumeration (Johnson's w/ SCC).
     // Enumeration is bounded by the streaming MAX_LTM_ENUMERATION_CAP
-    // inside `model_element_loop_circuits`; the downstream
-    // synthetic-variable pipeline is gated by MAX_LTM_TOTAL_CIRCUITS
-    // in `model_ltm_variables`.
+    // and MAX_LTM_ENUMERATION_NODES inside `model_element_loop_circuits`;
+    // the downstream synthetic-variable pipeline is gated by
+    // MAX_LTM_TOTAL_CIRCUITS in `model_ltm_variables`.
+    //
+    // On truncation the streaming cap returns `truncated = true` with
+    // empty `circuits` / `names` -- reporting just `len()` would print
+    // "circuits=0" in that case and mislead anyone reading the bench
+    // output for the very shapes this tool is meant to diagnose.
+    // Surface the truncation flag explicitly so the detail line
+    // matches reality.
     let t0 = Instant::now();
     let circuits_result = model_element_loop_circuits(&db, root_source_model, sync.project);
     let n_circuits = circuits_result.len();
     let n_circuit_names = circuits_result.names.len();
-    tracker.record(
-        "loop_circuits",
-        t0.elapsed().as_secs_f64() * 1000.0,
-        format!("circuits={n_circuits} unique_names={n_circuit_names}"),
-    );
+    let detail = if circuits_result.truncated {
+        format!(
+            "circuits={n_circuits} unique_names={n_circuit_names} truncated=true \
+             (streaming cap tripped; circuits list empty by design)"
+        )
+    } else {
+        format!("circuits={n_circuits} unique_names={n_circuit_names}")
+    };
+    tracker.record("loop_circuits", t0.elapsed().as_secs_f64() * 1000.0, detail);
 
     // Stage 7: LTM synthetic variables (link scores, loop scores,
     // pathways, composites).  Relative loop scores are computed

@@ -30,6 +30,24 @@ fn is_internal_var(name: &str) -> bool {
     name.starts_with('$')
 }
 
+/// Match the LTM auto-flip / total-circuits warnings emitted by
+/// `db_ltm::model_ltm_variables` so we can persist just those
+/// diagnostics on the `SimlinProject` when the `ltm_enabled` input
+/// flag is about to flip back off.  Matching by message substring
+/// keeps us decoupled from the engine's internal `DiagnosticError`
+/// classification: the LTM messages all share the "discovery mode"
+/// phrase and name their enforcement thresholds (`MAX_LTM_*`) in the
+/// text.  Other Assembly warnings (unit mismatches, assembly errors)
+/// are left with salsa's accumulator so they stay invalidation-
+/// correct through patch application.
+pub(crate) fn is_ltm_diagnostic(diag: &engine::db::Diagnostic) -> bool {
+    if let engine::db::DiagnosticError::Assembly(msg) = &diag.error {
+        msg.contains("discovery mode") || msg.contains("MAX_LTM_TOTAL_CIRCUITS")
+    } else {
+        false
+    }
+}
+
 /// Creates a new simulation context
 ///
 /// # Safety
@@ -91,6 +109,27 @@ pub unsafe extern "C" fn simlin_sim_new(
                 HashMap::new()
             };
 
+            // Before resetting `ltm_enabled`, capture any LTM-specific
+            // diagnostics accumulated during compilation (auto-flip
+            // warning, total-circuits warning) so they stay visible
+            // through `simlin_project_get_errors` after the flag
+            // reset.  `model_all_diagnostics` gates its LTM call on
+            // `ltm_enabled`; once we reset the flag, salsa re-runs the
+            // accumulator without LTM and the warning is lost.  We
+            // capture here while the flag is still true.
+            if enable_ltm {
+                let ltm_diags: Vec<engine::db::Diagnostic> =
+                    engine::db::collect_all_diagnostics(&db, &sync)
+                        .into_iter()
+                        .filter(is_ltm_diagnostic)
+                        .collect();
+                if !ltm_diags.is_empty() {
+                    if let Ok(mut pending) = project_ref.pending_ltm_diagnostics.lock() {
+                        *pending = ltm_diags;
+                    }
+                }
+            }
+
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
             // the same SourceProject.
@@ -129,7 +168,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             results: None,
             overrides: HashMap::new(),
             loop_partitions,
-            cached_rel_scores: None,
+            cached_partition_denominators: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -200,9 +239,10 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
-                // Fresh results invalidate the memoized rel_loop_score
-                // map; next FFI read will recompute from the new buffer.
-                state.cached_rel_scores = None;
+                // Fresh results invalidate the memoized per-partition
+                // denominator cache; next FFI read will recompute from
+                // the new buffer.
+                state.cached_partition_denominators.clear();
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -267,10 +307,10 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
-    // Results just went away; any memoized rel_loop_score map is now
-    // referring to a dead buffer and must be evicted before the next
-    // run_to_end populates fresh results.
-    state.cached_rel_scores = None;
+    // Results just went away; any memoized per-partition denominators
+    // are now referring to a dead buffer and must be evicted before
+    // the next run_to_end populates fresh results.
+    state.cached_partition_denominators.clear();
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation
@@ -548,12 +588,13 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
             // In-place edit of the saved results buffer invalidates
-            // any memoized relative-score series that was computed
-            // from the pre-edit values.  Without this, a caller that
-            // reads a loop score then calls set_value_by_offset to
-            // amend the saved step would read a stale series on the
-            // next simlin_analyze_get_relative_loop_score.
-            state.cached_rel_scores = None;
+            // any memoized per-partition denominators that were
+            // computed from the pre-edit values.  Without this, a
+            // caller that reads a loop score then calls
+            // set_value_by_offset to amend the saved step would read
+            // a stale series on the next
+            // simlin_analyze_get_relative_loop_score.
+            state.cached_partition_denominators.clear();
             return;
         }
     }

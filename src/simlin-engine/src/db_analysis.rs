@@ -673,12 +673,17 @@ pub enum DetectedLoopPolarity {
 
 /// Result of full loop detection with polarity and IDs.
 ///
-/// `truncated = true` signals that the causal graph has more distinct
-/// elementary circuits than `MAX_LTM_TOTAL_CIRCUITS`, so `loops` is
-/// intentionally empty rather than derived from enumeration.
-/// Consumers that need to distinguish "acyclic model" from "over-budget
-/// dense model" should check this flag: layout metadata falls back to
-/// persisted `loop_metadata` on truncation, while the structural-only
+/// `truncated = true` signals that enumeration tripped one of the
+/// streaming safety caps -- `MAX_LTM_DETECTED_LOOPS` (distinct-circuit
+/// count) or `MAX_LTM_ENUMERATION_NODES` (cumulative indexed-path
+/// nodes), whichever fires first -- so `loops` is intentionally empty
+/// rather than derived from enumeration.  This is distinct from
+/// `MAX_LTM_TOTAL_CIRCUITS`, which only gates the downstream LTM
+/// variable-synthesis pipeline; structural consumers (layout, FFI,
+/// CLI) use the higher caps documented here.  Consumers that need to
+/// distinguish "acyclic model" from "over-budget dense model" should
+/// check this flag: layout metadata falls back to persisted
+/// `loop_metadata` on truncation, while the structural-only
 /// `simlin_analyze_get_loops` FFI surfaces empty loops either way.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct DetectedLoopsResult {
@@ -1099,17 +1104,25 @@ pub fn model_loop_circuits(
 /// polarity analysis. Loop IDs (r1, b1, u1, ...) match those used
 /// by LTM augmentation.
 ///
-/// Bounded by [`crate::ltm::MAX_LTM_TOTAL_CIRCUITS`]: if the variable-
-/// level causal graph has more elementary circuits than the threshold
-/// (measured directly, not estimated from SCC size), this function
-/// returns an empty result rather than materialize the full Loop list.
-/// The same threshold is the backstop inside `model_ltm_variables`, so
-/// FFI / layout / `simlin-cli --ltm` consumers stay in the "loops are
-/// available" regime exactly when LTM would stay on the exhaustive
-/// branch.  Sparse graphs with one or a few long cycles (e.g., a
-/// 51-node ring, or small multi-module models) enumerate their loops
-/// successfully; dense graphs like WRLD3 truncate and return empty so
-/// callers fall back to `analyze_model`'s discovery-mode output.
+/// Bounded by [`crate::ltm::MAX_LTM_DETECTED_LOOPS`] (distinct-circuit
+/// count) and [`crate::ltm::MAX_LTM_ENUMERATION_NODES`] (cumulative
+/// indexed-path node count), whichever fires first.  Distinct from
+/// [`crate::ltm::MAX_LTM_TOTAL_CIRCUITS`], which gates the downstream
+/// LTM synthesis pipeline in `model_ltm_variables`: structural
+/// consumers (layout metadata, `simlin_analyze_get_loops`,
+/// `simlin-cli --ltm`) do not pay the per-Loop equation-text cost and
+/// so tolerate a higher cap than LTM synthesis.  A dense model that
+/// tips `MAX_LTM_TOTAL_CIRCUITS` but stays under
+/// `MAX_LTM_DETECTED_LOOPS` reports structural topology here while
+/// `model_ltm_variables` auto-flips to discovery mode; FFI callers
+/// see the "loops without scores" mismatch through the
+/// `simlin_analyze_get_relative_loop_score` error message rather
+/// than through suppressed structure.  Sparse graphs with one or a
+/// few long cycles (e.g., a 51-node ring, or small multi-module
+/// models) enumerate their loops successfully; graphs with more
+/// than `MAX_LTM_DETECTED_LOOPS` distinct loops truncate and return
+/// empty so callers fall back to `analyze_model`'s discovery-mode
+/// output.
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
@@ -1139,8 +1152,10 @@ pub fn model_detected_loops(
     // into Johnson's DFS so dense multidigraphs bail the moment
     // either limit is crossed; WRLD3's 1.86M circuits trip the
     // distinct-count cutoff at ~9 MB of state, while a pathologically
-    // long-loop model trips the node-count cutoff at ~40 MB.  Sparse
-    // large rings enumerate their single loop cheaply under both.
+    // long-loop model trips the node-count cutoff at ~400 MB (the
+    // 100M-entry `u32` path storage sized to keep distinct count as
+    // the primary trigger on realistic inputs).  Sparse large rings
+    // enumerate their single loop cheaply under both.
     let graph = causal_graph_with_modules(db, model, project);
 
     // On truncation we return `truncated: true` with an empty `loops`
@@ -1289,11 +1304,11 @@ pub fn model_element_loop_circuits(
     // - `MAX_LTM_ENUMERATION_CAP` bounds the distinct-circuit count
     //   (~1M circuits).  Catches dense feedback graphs like WRLD3.
     // - `MAX_LTM_ENUMERATION_NODES` bounds the total indexed-path
-    //   node count (~10M u32 indices, ~40 MB).  Catches shapes the
-    //   distinct-count cap misses -- e.g., a pure-A2A model with a
-    //   1_000-node loop across a 900_000-element dimension passes
-    //   the distinct-count cap but would accumulate ~900M u32
-    //   indices (3.5 GiB) without this cutoff.
+    //   node count (~100M u32 indices, ~400 MB).  Catches shapes
+    //   the distinct-count cap misses -- e.g., a pure-A2A model
+    //   with a 1_000-node loop across a 900_000-element dimension
+    //   passes the distinct-count cap but would accumulate ~900M
+    //   u32 indices (3.5 GiB) without this cutoff.
     //
     // The tighter `MAX_LTM_TOTAL_CIRCUITS` gate is applied *after*
     // enumeration against the post-collapse emitted-Loop count --
@@ -1795,7 +1810,7 @@ mod detected_loops_gate_tests {
         assert!(
             !detected.truncated,
             "sparse 75-node ring's single loop fits well under the \
-             MAX_LTM_TOTAL_CIRCUITS budget; must enumerate cleanly"
+             MAX_LTM_DETECTED_LOOPS budget; must enumerate cleanly"
         );
         assert_eq!(
             detected.loops.len(),
@@ -1899,12 +1914,12 @@ mod detected_loops_gate_tests {
     }
 
     /// Dense SCCs whose distinct-circuit count is well under
-    /// `MAX_LTM_TOTAL_CIRCUITS` must enumerate successfully, even when
+    /// `MAX_LTM_DETECTED_LOOPS` must enumerate successfully, even when
     /// raw Johnson emissions exceed the distinct count by orders of
     /// magnitude.  Regression test for the iteration-5 review finding:
     /// a K5-like multidigraph has hundreds of distinct circuits and
     /// many more raw emissions, but all of them should be materialized
-    /// because 200 << 10_000.
+    /// because 200 << 100_000.
     #[test]
     fn test_model_detected_loops_dense_subgraph_under_budget_succeeds() {
         let project = build_complete_digraph_project("detected_loops_k5_dense", 5);
@@ -1916,7 +1931,7 @@ mod detected_loops_gate_tests {
 
         assert!(
             !detected.truncated,
-            "K5 model has far fewer than MAX_LTM_TOTAL_CIRCUITS distinct \
+            "K5 model has far fewer than MAX_LTM_DETECTED_LOOPS distinct \
              loops; must not report truncation; got truncated=true, loops={}",
             detected.loops.len()
         );

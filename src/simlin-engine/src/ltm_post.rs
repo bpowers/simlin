@@ -254,6 +254,80 @@ pub fn compute_rel_loop_scores_per_element(
     out
 }
 
+/// Compute the per-timestep denominator series
+/// `sum_j(|loop_score_j, t|)` for a single cycle partition.
+///
+/// Companion to [`compute_rel_loop_scores`] for callers that only need
+/// one loop's normalized series at a time (the `libsimlin` single-loop
+/// FFI) or that want to amortize denominator work across many
+/// loop-level queries via partition-scoped caching.  Loops absent from
+/// `results.offsets` contribute 0 to the sum (they are treated as if
+/// LTM never wrote a `loop_score` for them, matching
+/// `compute_rel_loop_scores`' skip behaviour).
+///
+/// Returns a `Vec<f64>` of length `results.step_count`.
+pub fn compute_partition_denominator(
+    results: &Results,
+    loop_partitions: &HashMap<String, Option<usize>>,
+    partition: Option<usize>,
+) -> Vec<f64> {
+    // Walk all loops keyed to this partition; skip ones whose
+    // `loop_score` never made it into `results` (unlikely in practice
+    // because `loop_partitions` is populated from the same
+    // `LtmVariablesResult` that drove emission, but
+    // `compute_rel_loop_scores` treats the mismatch as "skip", so do
+    // the same here for parity).
+    let offsets: Vec<usize> = loop_partitions
+        .iter()
+        .filter_map(|(id, p)| {
+            if *p == partition {
+                results.offsets.get(&loop_score_ident(id)).copied()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut denom = Vec::with_capacity(results.step_count);
+    for row in results.iter() {
+        let sum: f64 = offsets.iter().map(|&off| row[off].abs()).sum();
+        denom.push(sum);
+    }
+    denom
+}
+
+/// Compute the relative-loop-score series for a single loop given a
+/// precomputed partition denominator.
+///
+/// Returns `None` if `loop_id`'s `loop_score` is absent from
+/// `results.offsets` (LTM was not enabled for this loop, or the
+/// simulation auto-flipped to discovery mode).  `denominator` must be a
+/// slice of length `results.step_count` produced by
+/// [`compute_partition_denominator`] for the same partition as `loop_id`.
+///
+/// SAFEDIV-0 semantics match [`compute_rel_loop_scores`]: a zero
+/// denominator at time `t` yields `0.0`, not `NaN`.
+pub fn compute_rel_loop_score_for_id(
+    results: &Results,
+    loop_id: &str,
+    denominator: &[f64],
+) -> Option<Vec<f64>> {
+    let offset = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
+    debug_assert_eq!(
+        denominator.len(),
+        results.step_count,
+        "denominator length must match results step_count"
+    );
+    let mut series = Vec::with_capacity(results.step_count);
+    for (row_idx, row) in results.iter().enumerate() {
+        let num = row[offset];
+        let denom = denominator[row_idx];
+        let val = if denom == 0.0 { 0.0 } else { num / denom };
+        series.push(val);
+    }
+    Some(series)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +548,70 @@ mod tests {
         // Shared denom of 3 + 1 = 4.
         assert!((rel_a[0] - 0.75).abs() < 1e-12);
         assert!((rel_b[0] - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn partition_denominator_matches_full_pass_sum() {
+        // The per-partition primitive must produce the same per-step
+        // sum the full pass uses internally.  If it drifts, the
+        // single-loop FFI would silently compute wrong rel_scores.
+        let series_a = &[1.0, 2.0, -4.0][..];
+        let series_b = &[3.0, -4.0, 0.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+
+        let denom = compute_partition_denominator(&results, &partitions, Some(0));
+        assert_eq!(denom.len(), 3);
+        // t=0: |1| + |3| = 4.
+        assert!((denom[0] - 4.0).abs() < 1e-12);
+        // t=1: |2| + |-4| = 6.
+        assert!((denom[1] - 6.0).abs() < 1e-12);
+        // t=2: |-4| + |0| = 4.
+        assert!((denom[2] - 4.0).abs() < 1e-12);
+
+        // Loops in a different partition contribute nothing.
+        let empty = compute_partition_denominator(&results, &partitions, Some(99));
+        assert_eq!(empty, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn per_id_rel_loop_score_matches_full_pass() {
+        // Bit-for-bit parity with `compute_rel_loop_scores` is the
+        // load-bearing contract that lets the `libsimlin` FFI swap from
+        // the full cache to the denominator-only cache without changing
+        // observed output.  Exercise a mix of positive / negative /
+        // zero values and multiple partitions to cover the SAFEDIV-0
+        // and per-partition scoping branches.
+        let series_a = &[1.0, 2.0, -4.0, 0.0][..];
+        let series_b = &[3.0, -4.0, 0.0, 0.0][..];
+        let series_c = &[7.0, 7.0, 7.0, 7.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b), ("C", series_c)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0)), ("C", Some(1))]);
+
+        let full = compute_rel_loop_scores(&results, &partitions);
+
+        for id in ["A", "B", "C"] {
+            let partition = partitions.get(id).copied().unwrap();
+            let denom = compute_partition_denominator(&results, &partitions, partition);
+            let streamed = compute_rel_loop_score_for_id(&results, id, &denom)
+                .unwrap_or_else(|| panic!("loop '{id}' must have a computed series"));
+            let cached = full
+                .get(id)
+                .unwrap_or_else(|| panic!("loop '{id}' missing from full pass"));
+            assert_eq!(
+                &streamed, cached,
+                "streamed rel_loop_score for '{id}' diverged from full-pass result"
+            );
+        }
+    }
+
+    #[test]
+    fn per_id_rel_loop_score_returns_none_for_unknown_loop() {
+        // Matches `compute_rel_loop_scores` behaviour, which omits
+        // loops whose `loop_score` is absent from `results.offsets`.
+        let results = make_results_for_loops(&[("present", &[1.0, 2.0][..])]);
+        let denom = vec![1.0, 2.0];
+        assert!(compute_rel_loop_score_for_id(&results, "absent", &denom).is_none());
     }
 
     #[test]

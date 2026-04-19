@@ -275,6 +275,15 @@ pub struct SimlinProject {
     pub db: Mutex<engine::db::SimlinDb>,
     /// Salsa input handles from the last sync, enabling incremental updates.
     pub sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
+    /// LTM-specific diagnostics captured during `simlin_sim_new` with
+    /// `enable_ltm = true`, persisted here so they remain visible
+    /// through `simlin_project_get_errors` after the `ltm_enabled`
+    /// input flag is reset on the salsa db (which otherwise
+    /// invalidates `model_all_diagnostics` and drops the
+    /// accumulator's LTM warnings).  Cleared by
+    /// `simlin_project_apply_patch` since the patched model may no
+    /// longer trip the auto-flip threshold.
+    pub(crate) pending_ltm_diagnostics: Mutex<Vec<engine::db::Diagnostic>>,
     pub ref_count: AtomicUsize,
 }
 
@@ -307,14 +316,23 @@ pub(crate) struct SimState {
     /// `simlin_analyze_get_relative_loop_score` reads from here rather
     /// than re-querying the (possibly mutated) salsa db.
     pub(crate) loop_partitions: HashMap<String, Option<usize>>,
-    /// Memoized result of `ltm_post::compute_rel_loop_scores(results,
-    /// loop_partitions)`.  Populated lazily on the first
-    /// `simlin_analyze_get_relative_loop_score` call, cleared whenever
-    /// `results` is replaced (run-to-end, reset).  Per-loop FFI callers
-    /// (pysimlin `_populate_loop_behavior`, diagram UI, MCP) iterate
-    /// every loop id and would otherwise pay O(P * S) normalization
-    /// work P times per sim; the cache collapses that to one traversal.
-    pub(crate) cached_rel_scores: Option<HashMap<String, Vec<f64>>>,
+    /// Per-cycle-partition denominator cache used by
+    /// `simlin_analyze_get_relative_loop_score`.  Populated lazily on
+    /// first access for each distinct partition the caller asks about,
+    /// cleared whenever `results` is replaced (run-to-end, reset).
+    ///
+    /// Caching at partition granularity rather than full rel-score
+    /// granularity bounds peak memory at O(num_partitions × step_count)
+    /// instead of O(loop_count × step_count).  For dense models near
+    /// `MAX_LTM_TOTAL_CIRCUITS` the old full cache could hit ~800 MB
+    /// (10k loops × 10k save steps × 8 B) -- large enough to blow the
+    /// WASM 4 GiB budget when combined with the rest of the pipeline.
+    /// Partition granularity keeps the cache in the single-MB range on
+    /// realistic partition counts (WRLD3 has under 100 partitions) and
+    /// still amortizes denominator work across the common per-loop
+    /// iteration pattern: pysimlin `_populate_loop_behavior`, diagram
+    /// UI loop stepping, MCP loop analysis.
+    pub(crate) cached_partition_denominators: HashMap<Option<usize>, Vec<f64>>,
 }
 
 /// Opaque simulation structure

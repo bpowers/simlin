@@ -1946,6 +1946,16 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // `collect_all_diagnostics`.  Without this call, the warning would
     // be invisible to `simlin-mcp`/`libsimlin` callers even though
     // `model_ltm_variables` had already emitted it.
+    //
+    // Non-LTM users do NOT get LTM diagnostics here by design --
+    // `simlin-mcp` callers that never request LTM should not see LTM-
+    // specific warnings as noise (see
+    // `test_ltm_disabled_does_not_surface_auto_flip_warning`).  The
+    // separate concern of "user requested LTM but the flag was reset
+    // by `simlin_sim_new`" is handled at the libsimlin layer: the
+    // sim captures LTM diagnostics at `sim_new` time and surfaces
+    // them through `simlin_project_get_errors` even after the flag
+    // reset.
     if project.ltm_enabled(db) {
         let _ = model_ltm_variables(db, model, project);
     }

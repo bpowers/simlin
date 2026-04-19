@@ -769,6 +769,115 @@ fn test_analyze_get_links_null_safety() {
     }
 }
 
+/// Regression test for iteration-17 codex P2: `simlin_sim_new` resets
+/// `ltm_enabled` back to false once compilation completes, which
+/// invalidates `model_all_diagnostics`' LTM accumulator branch.  Before
+/// the fix, a later `simlin_project_get_errors` call against a model
+/// that had auto-switched to discovery mode would report nothing, even
+/// though the simulation had already lost its per-loop scoring.
+///
+/// The fix captures LTM diagnostics on `SimlinProject` at sim_new time
+/// and replays them through `simlin_project_get_errors`.
+#[test]
+fn test_auto_flip_warning_surfaces_via_get_errors_after_sim_new() {
+    // Build N disjoint 3-cycles to exceed MAX_LTM_TOTAL_CIRCUITS = 10_000.
+    // Using scalar auxes so each cycle is variable-level distinct; the
+    // emit-count backstop will trip on the post-collapse estimate.
+    let n: usize = 10_001;
+    let mut builder = TestProject::new("auto_flip_ffi").with_sim_time(0.0, 1.0, 1.0);
+    for k in 0..n {
+        let aux_name = format!("aux_{k}");
+        let flow_name = format!("flow_{k}");
+        let stock_name = format!("stock_{k}");
+        builder = builder.aux(&aux_name, &stock_name, None);
+        builder = builder.flow(&flow_name, &aux_name, None);
+        builder = builder.stock(&stock_name, "0", &[flow_name.as_str()], &[], None);
+    }
+    let datamodel_project = builder.build_datamodel();
+    let pb = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    pb.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(!proj.is_null(), "project open failed");
+        assert!(err.is_null(), "project open reported error");
+
+        // Baseline: before sim_new, get_errors must NOT report an LTM
+        // auto-flip warning -- the project was not compiled under LTM.
+        err = ptr::null_mut();
+        let baseline = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "baseline get_errors set out_error");
+        if !baseline.is_null() {
+            let detail_count = simlin_error_get_detail_count(baseline);
+            for i in 0..detail_count {
+                let detail = simlin_error_get_detail(baseline, i);
+                assert!(!detail.is_null());
+                if !(*detail).message.is_null() {
+                    let msg = CStr::from_ptr((*detail).message).to_str().unwrap_or("");
+                    assert!(
+                        !msg.contains("discovery mode"),
+                        "baseline (pre-LTM-sim) get_errors leaked an LTM diagnostic: {msg}"
+                    );
+                }
+            }
+            simlin_error_free(baseline);
+        }
+
+        let mut err_get_model: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(
+            proj,
+            ptr::null(),
+            &mut err_get_model as *mut *mut SimlinError,
+        );
+        assert!(err_get_model.is_null(), "get_model failed");
+        assert!(!model.is_null());
+
+        // Create a sim with LTM enabled.  The large-disjoint-cycles
+        // structure auto-flips to discovery, which emits the diagnostic
+        // we expect to capture.
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "sim_new with enable_ltm=true should succeed");
+        assert!(!sim.is_null());
+
+        // After sim_new (flag has been reset by simlin_sim_new),
+        // get_errors must still surface the auto-flip warning via the
+        // captured-diagnostic path.
+        err = ptr::null_mut();
+        let post_sim = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "post-sim get_errors set out_error");
+        assert!(
+            !post_sim.is_null(),
+            "post-sim get_errors should return the captured LTM warning, got null"
+        );
+
+        let mut found_auto_flip = false;
+        let detail_count = simlin_error_get_detail_count(post_sim);
+        for i in 0..detail_count {
+            let detail = simlin_error_get_detail(post_sim, i);
+            assert!(!detail.is_null());
+            if !(*detail).message.is_null() {
+                let msg = CStr::from_ptr((*detail).message).to_str().unwrap_or("");
+                if msg.contains("discovery mode") {
+                    found_auto_flip = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            found_auto_flip,
+            "post-sim get_errors must surface the LTM auto-flip warning"
+        );
+        simlin_error_free(post_sim);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_analyze_get_relative_loop_score_renamed() {
     // Create a project with a reinforcing loop
