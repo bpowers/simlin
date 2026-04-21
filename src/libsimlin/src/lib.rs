@@ -275,24 +275,6 @@ pub struct SimlinProject {
     pub db: Mutex<engine::db::SimlinDb>,
     /// Salsa input handles from the last sync, enabling incremental updates.
     pub sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
-    /// LTM-specific diagnostics captured during `simlin_sim_new` with
-    /// `enable_ltm = true`, persisted here so they remain visible
-    /// through `simlin_project_get_errors` after the `ltm_enabled`
-    /// input flag is reset on the salsa db (which otherwise
-    /// invalidates `model_all_diagnostics` and drops the
-    /// accumulator's LTM warnings).  Overwritten unconditionally on
-    /// every `enable_ltm = true` `sim_new` (even when empty), so the
-    /// slot reflects the most-recent LTM-enabled compile; cleared by
-    /// `simlin_project_apply_patch` since the patched model may no
-    /// longer trip the auto-flip threshold.
-    ///
-    /// **Lock ordering:** acquire this mutex *after* `db`,
-    /// `sync_state`, and `datamodel` and release it before re-entering
-    /// any of them.  All current call sites hold it for a single
-    /// `*pending = ...`, `pending.clear()`, or read-then-drop, so
-    /// there is no deadlock risk today; documenting the order keeps
-    /// future additions from inverting it.
-    pub(crate) pending_ltm_diagnostics: Mutex<Vec<engine::db::Diagnostic>>,
     pub ref_count: AtomicUsize,
 }
 
@@ -315,33 +297,6 @@ pub(crate) struct SimState {
     /// Constant value overrides survive VM consumption (run_to_end consumes the VM).
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
-    /// Snapshot of the loop-id -> cycle-partition mapping at the time
-    /// this simulation was compiled (when `enable_ltm` was true; empty
-    /// for non-LTM sims and for auto-flipped discovery runs).  Bound to
-    /// the VM snapshot so a `simlin_project_apply_patch` that happens
-    /// between `simlin_sim_new` and `simlin_analyze_get_relative_loop_score`
-    /// cannot silently mismatch partition keys against the results
-    /// buffer.  Post-sim `rel_loop_score` computation in
-    /// `simlin_analyze_get_relative_loop_score` reads from here rather
-    /// than re-querying the (possibly mutated) salsa db.
-    pub(crate) loop_partitions: HashMap<String, Option<usize>>,
-    /// Per-cycle-partition denominator cache used by
-    /// `simlin_analyze_get_relative_loop_score`.  Populated lazily on
-    /// first access for each distinct partition the caller asks about,
-    /// cleared whenever `results` is replaced (run-to-end, reset).
-    ///
-    /// Caching at partition granularity rather than full rel-score
-    /// granularity bounds peak memory at O(num_partitions × step_count)
-    /// instead of O(loop_count × step_count).  For dense models near
-    /// `MAX_LTM_TOTAL_CIRCUITS` the old full cache could hit ~800 MB
-    /// (10k loops × 10k save steps × 8 B) -- large enough to blow the
-    /// WASM 4 GiB budget when combined with the rest of the pipeline.
-    /// Partition granularity keeps the cache in the single-MB range on
-    /// realistic partition counts (WRLD3 has under 100 partitions) and
-    /// still amortizes denominator work across the common per-loop
-    /// iteration pattern: pysimlin `_populate_loop_behavior`, diagram
-    /// UI loop stepping, MCP loop analysis.
-    pub(crate) cached_partition_denominators: HashMap<Option<usize>, Vec<f64>>,
 }
 
 /// Opaque simulation structure

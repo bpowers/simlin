@@ -214,9 +214,9 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine (src/simlin-engine/src/db_analysis.rs `model_element_loop_circuits`)
 - **Severity**: medium
-- **Description**: `model_element_loop_circuits` enumerates circuits on the element graph. For a pure-A2A model with 20 variables over a 100-element dimension, every variable-level circuit produces 100 element-level circuits that `build_element_level_loops` then collapses into one A2A loop. The circuit count is no longer artificially capped (the old `MAX_LTM_CIRCUITS = 100_000` gate was retired on 2026-04-18 once auto-flip made it vestigial), but the `MAX_LTM_SCC_NODES = 50` gate in `model_ltm_variables` still flips dense feedback subgraphs to discovery mode far sooner than variable-level enumeration would. Fix: enumerate at the variable level first, tag each loop's edges by same-element / cross-element / scalar, and only element-level-enumerate the cross-element subgraph. Cost becomes additive in N for pure-A2A loops instead of multiplicative, and SCC width stays below the auto-flip threshold.
+- **Description**: `model_element_loop_circuits` enumerates circuits on the element graph. For a pure-A2A model with 20 variables over a 100-element dimension, every variable-level circuit produces 100 element-level circuits that `build_element_level_loops` then collapses into one A2A loop. The multiplication hits MAX_LTM_CIRCUITS=100_000 far sooner than variable-level enumeration would. Fix: enumerate at the variable level first, tag each loop's edges by same-element / cross-element / scalar, and only element-level-enumerate the cross-element subgraph. Cost becomes additive in N for pure-A2A loops instead of multiplicative.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-18
+- **Last reviewed**: 2026-04-17
 
 ### 26. LTM A2A Partial Equation Is Wrong When Target Mixes Same-Element and Cross-Element References
 

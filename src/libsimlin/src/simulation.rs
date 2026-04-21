@@ -30,24 +30,6 @@ fn is_internal_var(name: &str) -> bool {
     name.starts_with('$')
 }
 
-/// Match the LTM auto-flip / total-circuits warnings emitted by
-/// `db_ltm::model_ltm_variables` so we can persist just those
-/// diagnostics on the `SimlinProject` when the `ltm_enabled` input
-/// flag is about to flip back off.  Matching by message substring
-/// keeps us decoupled from the engine's internal `DiagnosticError`
-/// classification: the LTM messages all share the "discovery mode"
-/// phrase and name their enforcement thresholds (`MAX_LTM_*`) in the
-/// text.  Other Assembly warnings (unit mismatches, assembly errors)
-/// are left with salsa's accumulator so they stay invalidation-
-/// correct through patch application.
-pub(crate) fn is_ltm_diagnostic(diag: &engine::db::Diagnostic) -> bool {
-    if let engine::db::DiagnosticError::Assembly(msg) = &diag.error {
-        msg.contains("discovery mode") || msg.contains("MAX_LTM_TOTAL_CIRCUITS")
-    } else {
-        false
-    }
-}
-
 /// Creates a new simulation context
 ///
 /// # Safety
@@ -74,85 +56,27 @@ pub unsafe extern "C" fn simlin_sim_new(
     // on the SourceProject input. The DB is kept in sync by apply_patch
     // and project constructors, so this is typically a cache hit when
     // nothing changed since the last patch.
-    let (incremental_result, loop_partitions): (
-        std::result::Result<engine::CompiledSimulation, engine::Error>,
-        HashMap<String, Option<usize>>,
-    ) = {
+    let incremental_result: std::result::Result<engine::CompiledSimulation, engine::Error> = {
         let mut db = project_ref.db.lock().unwrap();
         let sync_state = project_ref.sync_state.lock().unwrap();
         if let Some(ref state) = *sync_state {
-            let sync = state.to_sync_result();
-            let source_project = sync.project;
+            let source_project = state.to_sync_result().project;
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
-            let compile =
+            let result =
                 engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
-
-            // Snapshot the loop-id -> partition mapping while LTM is
-            // still enabled and before we drop the db lock.  This binds
-            // `rel_loop_score` normalization to the compiled VM's era:
-            // if the project is patched between `sim_new` and
-            // `simlin_analyze_get_relative_loop_score`, the post-sim
-            // computation keeps using this snapshot rather than the
-            // (possibly-reorganised) partitions on the live db.
-            // Non-LTM sims and failed compiles get an empty map.
-            let partitions = if enable_ltm && compile.is_ok() {
-                let canonical = engine::canonicalize(&model_ref.model_name);
-                match sync.models.get(canonical.as_ref()) {
-                    Some(synced) => {
-                        engine::db::model_ltm_variables(&*db, synced.source, source_project)
-                            .loop_partitions
-                            .clone()
-                    }
-                    None => HashMap::new(),
-                }
-            } else {
-                HashMap::new()
-            };
-
-            // Before resetting `ltm_enabled`, capture any LTM-specific
-            // diagnostics accumulated during compilation (auto-flip
-            // warning, total-circuits warning) so they stay visible
-            // through `simlin_project_get_errors` after the flag
-            // reset.  `model_all_diagnostics` gates its LTM call on
-            // `ltm_enabled`; once we reset the flag, salsa re-runs the
-            // accumulator without LTM and the warning is lost.  We
-            // capture here while the flag is still true.
-            //
-            // Always overwrite the pending slot -- including with an
-            // empty vector when the current sim's model has no LTM
-            // warnings -- so the slot reflects the most-recent
-            // LTM-enabled `sim_new`.  Without the unconditional reset
-            // an earlier warning from a different model could linger
-            // after the caller switched to a clean model on the same
-            // project; the `apply_patch` clear alone does not cover
-            // the "different model, same datamodel" path.
-            if enable_ltm {
-                let ltm_diags: Vec<engine::db::Diagnostic> =
-                    engine::db::collect_all_diagnostics(&db, &sync)
-                        .into_iter()
-                        .filter(is_ltm_diagnostic)
-                        .collect();
-                if let Ok(mut pending) = project_ref.pending_ltm_diagnostics.lock() {
-                    *pending = ltm_diags;
-                }
-            }
-
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
             // the same SourceProject.
             if enable_ltm {
                 engine::db::set_project_ltm_enabled(&mut db, source_project, false);
             }
-            (compile, partitions)
+            result
         } else {
-            (
-                Err(engine::Error {
-                    kind: engine::ErrorKind::Simulation,
-                    code: engine::ErrorCode::NotSimulatable,
-                    details: Some("incremental compilation: no sync state available".to_string()),
-                }),
-                HashMap::new(),
-            )
+            Err(engine::Error {
+                kind: engine::ErrorKind::Simulation,
+                code: engine::ErrorCode::NotSimulatable,
+                details: Some("incremental compilation: no sync state available".to_string()),
+            })
         }
     };
 
@@ -174,8 +98,6 @@ pub unsafe extern "C" fn simlin_sim_new(
             vm_error,
             results: None,
             overrides: HashMap::new(),
-            loop_partitions,
-            cached_partition_denominators: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -246,10 +168,6 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
-                // Fresh results invalidate the memoized per-partition
-                // denominator cache; next FFI read will recompute from
-                // the new buffer.
-                state.cached_partition_denominators.clear();
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -314,10 +232,6 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
-    // Results just went away; any memoized per-partition denominators
-    // are now referring to a dead buffer and must be evicted before
-    // the next run_to_end populates fresh results.
-    state.cached_partition_denominators.clear();
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation
@@ -594,14 +508,6 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
         let idx = (results.step_count - 1) * results.step_size + offset;
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
-            // In-place edit of the saved results buffer invalidates
-            // any memoized per-partition denominators that were
-            // computed from the pre-edit values.  Without this, a
-            // caller that reads a loop score then calls
-            // set_value_by_offset to amend the saved step would read
-            // a stale series on the next
-            // simlin_analyze_get_relative_loop_score.
-            state.cached_partition_denominators.clear();
             return;
         }
     }

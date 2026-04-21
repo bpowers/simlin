@@ -5294,21 +5294,18 @@ fn test_ltm_incremental_simulation_produces_scores() {
     vm.run_to_end()
         .expect("simulation should run to completion");
 
-    // Find a (non-relative) loop score in the offsets.  Relative loop
-    // scores are no longer compile-time synthetic variables -- they are
-    // computed post-simulation via `ltm_post::compute_rel_loop_scores`
-    // from the raw `loop_score` timeseries, which is still emitted.
-    let score_entry = compiled.offsets.iter().find(|(k, _)| {
-        let s = k.as_str();
-        s.contains("\u{205A}loop_score\u{205A}")
-    });
+    // Find a relative loop score variable in the offsets
+    let rel_score_entry = compiled
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str().contains("rel_loop_score"));
 
     assert!(
-        score_entry.is_some(),
-        "should have at least one loop_score variable"
+        rel_score_entry.is_some(),
+        "should have at least one relative loop score variable"
     );
 
-    let (_, &offset) = score_entry.unwrap();
+    let (_, &offset) = rel_score_entry.unwrap();
 
     // Read the score values from the simulation data
     let results = vm.into_results();

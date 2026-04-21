@@ -122,110 +122,53 @@ pub(crate) fn quote_ident(ident: &str) -> String {
     }
 }
 
-/// Generate absolute loop score variables for all loops.
+/// Generate loop score variables for all loops.
 ///
-/// Emits one `$⁚ltm⁚loop_score⁚{id}` synthetic aux per loop (product of
-/// the loop's link scores).  Relative loop scores are no longer emitted
-/// here: the per-partition `rel_loop_score` was O(P²) text per partition
-/// and dominated compile memory on dense models (see
-/// `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`).  The
-/// normalization now happens post-simulation in
-/// [`crate::ltm_post::compute_rel_loop_scores`].  `partitions` is still
-/// accepted so the signature matches the call site's precomputed data
-/// and to keep the option open for future partition-aware emission
-/// (e.g., a bounded per-partition denominator aux if we ever need one).
+/// Absolute loop scores are unchanged (product of link scores).
+/// Relative loop scores use partition-scoped denominators: each loop's
+/// relative score equation only references loops in the same partition.
+/// Loops with no stocks form their own unpartitioned group.
 pub(crate) fn generate_loop_score_variables(
     loops: &[Loop],
     partitions: &CyclePartitions,
 ) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut loop_vars = HashMap::new();
 
-    // Tracing is opt-in via LTM_BENCH_TRACE=1.  When disabled, the only
-    // per-iteration overhead is an integer add for the byte counter and
-    // one branch-predictor-friendly zero-compare, so production cost is
-    // negligible; when enabled the tracer logs every 10_000 loops so we
-    // can slope-fit equation-text growth and correlate it with RSS.
-    let trace_on = std::env::var("LTM_BENCH_TRACE").is_ok();
-    let mut loop_score_bytes: u64 = 0;
-
-    if trace_on {
-        eprintln!(
-            "[ltm-trace] generate_loop_score_variables start loops={} partitions={} \
-             rss_mib={:.1}",
-            loops.len(),
-            partitions.partitions.len(),
-            read_rss_mib().unwrap_or(0.0),
-        );
-    }
-
-    for (i, loop_item) in loops.iter().enumerate() {
+    // First, generate absolute loop scores (unchanged)
+    for loop_item in loops {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
         let equation = generate_loop_score_equation(loop_item);
-        loop_score_bytes += equation.len() as u64;
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
-        if trace_on && should_trace(i + 1) {
-            eprintln!(
-                "[ltm-trace] pass=loop_score i={} cum_loop_bytes={} rss_mib={:.1}",
-                i + 1,
-                loop_score_bytes,
-                read_rss_mib().unwrap_or(0.0),
-            );
-        }
     }
 
-    if trace_on {
-        eprintln!(
-            "[ltm-trace] generate_loop_score_variables done loops={} loop_bytes={} \
-             rss_mib={:.1}",
-            loops.len(),
-            loop_score_bytes,
-            read_rss_mib().unwrap_or(0.0),
-        );
+    // Group loops by partition for relative score computation
+    let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    for (i, loop_item) in loops.iter().enumerate() {
+        let partition = partitions.partition_for_loop(loop_item);
+        partition_groups.entry(partition).or_default().push(i);
+    }
+
+    // Pre-collect IDs per partition group to avoid cloning Loop structs
+    let group_ids: HashMap<Option<usize>, Vec<&str>> = partition_groups
+        .iter()
+        .map(|(&partition, indices)| {
+            let ids: Vec<&str> = indices.iter().map(|&idx| loops[idx].id.as_str()).collect();
+            (partition, ids)
+        })
+        .collect();
+
+    // Generate relative loop scores with partition-scoped denominators
+    for loop_item in loops {
+        let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
+        let partition = partitions.partition_for_loop(loop_item);
+        let same_group_ids = &group_ids[&partition];
+        let equation = generate_relative_loop_score_equation(&loop_item.id, same_group_ids);
+        let ltm_var = create_aux_variable(&var_name, &equation);
+        loop_vars.insert(Ident::new(&var_name), ltm_var);
     }
 
     loop_vars
-}
-
-/// Decide whether iteration `n` (1-based) should emit a trace line.
-///
-/// We want early iterations densely (so we see the scaling curve
-/// even if we OOM before completing the first 10_000 loops on a dense
-/// partition) and later iterations sparsely (so we don't spam the log
-/// for millions of loops).  Rule: log on every power of two up to and
-/// including 8192, then every 10_000 after that.  Powers of two give
-/// ~14 lines of early-curve data; 10_000 cadence gives steady-state
-/// measurements during long runs.
-fn should_trace(n: usize) -> bool {
-    if n == 0 {
-        return false;
-    }
-    if n <= 8192 {
-        n.is_power_of_two()
-    } else {
-        n.is_multiple_of(10_000) || n.is_power_of_two()
-    }
-}
-
-/// Resident-set size in MiB, or `None` if the kernel does not expose
-/// `/proc/self/status` (e.g. non-Linux or wasm builds).  Used only by
-/// the `LTM_BENCH_TRACE` instrumentation above, so an unavailable
-/// reading degrades to a zero in the log rather than failing.
-#[cfg(target_os = "linux")]
-fn read_rss_mib() -> Option<f64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
-            return Some(kb as f64 / 1024.0);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_rss_mib() -> Option<f64> {
-    None
 }
 
 /// Generate the equation for a link score variable.
@@ -472,6 +415,28 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
     } else {
         link_score_names.join(" * ")
     }
+}
+
+/// Generate the equation for a relative loop score variable.
+///
+/// `same_group_ids` contains the IDs of all loops in the same partition group
+/// (including this loop itself). The denominator sums only these loops.
+fn generate_relative_loop_score_equation(loop_id: &str, same_group_ids: &[&str]) -> String {
+    let loop_score_var = format!("\"$⁚ltm⁚loop_score⁚{loop_id}\"");
+
+    let all_loop_scores: Vec<String> = same_group_ids
+        .iter()
+        .map(|id| format!("ABS(\"$⁚ltm⁚loop_score⁚{id}\")"))
+        .collect();
+
+    let sum_expr = if all_loop_scores.is_empty() {
+        "1".to_string() // Avoid division by zero
+    } else {
+        all_loop_scores.join(" + ")
+    };
+
+    // Relative score formula using SAFEDIV for division by zero protection
+    format!("SAFEDIV({loop_score_var}, ({sum_expr}), 0)")
 }
 
 /// Create an auxiliary variable with the given equation

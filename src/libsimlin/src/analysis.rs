@@ -405,106 +405,33 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
-    // `rel_loop_score` is no longer materialized as a VM-computed variable
-    // (it caused O(P²) compile-time text blowup on dense models; see
-    // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md). We derive it
-    // post-hoc from the `loop_score` series the VM did write, using the
-    // cycle-partition mapping captured on `SimState` at `simlin_sim_new`
-    // time.  Reading from the snapshot rather than re-querying the
-    // salsa db keeps this FFI isolated from concurrent patches — the
-    // scores stay consistent with the results buffer even if the
-    // project was mutated after the sim was created — and avoids the
-    // db-then-state lock inversion the prior implementation had.
-    let mut state = sim_ref.state.lock().unwrap();
-    if state.results.is_none() {
+    let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{loop_id}");
+    let var_ident = canonicalize(&var_name);
+
+    let state = sim_ref.state.lock().unwrap();
+    if let Some(ref results) = state.results {
+        if let Some(&offset) = results.offsets.get(&*var_ident) {
+            let count = std::cmp::min(results.step_count, len);
+            for (i, row) in results.iter().take(count).enumerate() {
+                *results_ptr.add(i) = row[offset];
+            }
+            *out_written = count;
+        } else {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "loop '{}' does not have relative score data",
+                    loop_id
+                )),
+            );
+        }
+    } else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
                 .with_message("simulation has no results; run the simulation first"),
         );
-        return;
     }
-
-    // Resolve the requested loop's partition, then populate the
-    // per-partition denominator cache on first access and reuse it on
-    // subsequent queries for any loop in the same partition.
-    //
-    // Missing `loop_partitions` entry: a loop_id that isn't in the
-    // map at all follows the same `None`-group path the full-pass
-    // helper uses (see `compute_rel_loop_scores`).  We do not
-    // short-circuit here because the denominator pass produces zeros
-    // for an unknown partition (no loops contribute), letting the
-    // "missing series" branch below report coherent context to the
-    // caller.
-    //
-    // Cache lifecycle: callers iterating every loop id (pysimlin
-    // `_populate_loop_behavior`, diagram UI stepping through loops,
-    // LoopDominanceAnalyzer) would otherwise pay O(partition_size *
-    // S) per call across P calls -- quadratic in partition size.
-    // Partition-granularity caching also bounds peak memory at
-    // O(num_partitions * S) instead of the prior O(loop_count * S);
-    // see `SimState::cached_partition_denominators`.  The cache is
-    // invalidated in `simlin_sim_run_to_end`, `simlin_sim_reset`,
-    // and `set_value_by_offset` whenever the underlying results
-    // buffer changes.
-    //
-    // The explicit `&mut *state` reborrow splits the MutexGuard into
-    // disjoint field borrows so the `or_insert_with` closure can
-    // immutably capture `&state.results` and `&state.loop_partitions`
-    // while the cache is borrowed mutably.
-    let partition_key = state.loop_partitions.get(loop_id).copied().flatten();
-    let state = &mut *state;
-    let results = state
-        .results
-        .as_ref()
-        .expect("state.results is Some: checked above");
-    let loop_partitions = &state.loop_partitions;
-    let denom = state
-        .cached_partition_denominators
-        .entry(partition_key)
-        .or_insert_with(|| {
-            engine::ltm_post::compute_partition_denominator(results, loop_partitions, partition_key)
-        });
-
-    let Some(series) = engine::ltm_post::compute_rel_loop_score_for_id(results, loop_id, denom)
-    else {
-        // Distinguish two disjoint cases so FFI callers can react
-        // appropriately: (a) `loop_partitions` is empty because LTM
-        // was not enabled or auto-flipped to discovery (structural
-        // loops still exist but no per-loop score was ever written
-        // to results); (b) the loop_id is unknown within an LTM
-        // exhaustive run.  Both still surface as `DoesNotExist`,
-        // matching the pre-PR error code, but with a message that
-        // lets the caller tell which path they hit.
-        let message = if state.loop_partitions.is_empty() {
-            format!(
-                "loop '{loop_id}' has no relative score data: either LTM \
-                 was not enabled when this simulation was created, or the \
-                 model's element-level graph tripped one of the auto-flip \
-                 thresholds (post-collapse Loop count exceeded \
-                 MAX_LTM_TOTAL_CIRCUITS, or streaming circuit/node \
-                 enumeration hit MAX_LTM_ENUMERATION_CAP or \
-                 MAX_LTM_ENUMERATION_NODES), so LTM ran in discovery mode \
-                 and did not materialize per-loop score timeseries"
-            )
-        } else {
-            format!(
-                "loop '{loop_id}' is not in the LTM partition map for this \
-                 simulation; verify the id returned by simlin_analyze_get_loops"
-            )
-        };
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(message),
-        );
-        return;
-    };
-
-    let count = std::cmp::min(series.len(), len);
-    for (i, v) in series.iter().take(count).enumerate() {
-        *results_ptr.add(i) = *v;
-    }
-    *out_written = count;
 }
 
 /// # Safety

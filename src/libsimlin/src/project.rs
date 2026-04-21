@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use crate::ffi;
 use crate::ffi_error::{FfiError, SimlinError};
 use crate::ffi_try;
-use crate::patch::{append_captured_diagnostics, gather_error_details_with_db};
+use crate::patch::gather_error_details_with_db;
 use crate::{
     build_simlin_error, clear_out_error, drop_c_string, new_synced_db, require_project,
     store_anyhow_error, store_error, SimlinErrorCode, SimlinModel, SimlinProject,
@@ -65,7 +65,6 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
             datamodel: Mutex::new(datamodel_project),
             db: Mutex::new(db),
             sync_state: Mutex::new(Some(sync_state)),
-            pending_ltm_diagnostics: Mutex::new(Vec::new()),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -146,7 +145,6 @@ pub unsafe extern "C" fn simlin_project_open_json(
             datamodel: Mutex::new(datamodel_project),
             db: Mutex::new(db),
             sync_state: Mutex::new(Some(sync_state)),
-            pending_ltm_diagnostics: Mutex::new(Vec::new()),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -484,7 +482,6 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
-                pending_ltm_diagnostics: Mutex::new(Vec::new()),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -545,7 +542,6 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
-                pending_ltm_diagnostics: Mutex::new(Vec::new()),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -642,7 +638,6 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
-                pending_ltm_diagnostics: Mutex::new(Vec::new()),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -704,7 +699,6 @@ pub unsafe extern "C" fn simlin_project_open_systems(
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
                 sync_state: Mutex::new(Some(sync_state)),
-                pending_ltm_diagnostics: Mutex::new(Vec::new()),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -808,19 +802,8 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         Err(err) => Some(err),
     };
 
-    let mut all_errors =
+    let all_errors =
         gather_error_details_with_db(&db_locked, &sync, vm_error.as_ref(), &datamodel_locked);
-
-    // Merge in any LTM-specific diagnostics captured during a prior
-    // `simlin_sim_new(enable_ltm = true)` call.  The salsa accumulator
-    // drops these the moment `ltm_enabled` flips back to false (see
-    // `SimlinProject::pending_ltm_diagnostics` for the rationale), so
-    // we persist them on the project and replay them here.
-    if let Ok(pending) = proj.pending_ltm_diagnostics.lock() {
-        if !pending.is_empty() {
-            append_captured_diagnostics(&mut all_errors, &pending, &datamodel_locked);
-        }
-    }
 
     if all_errors.is_empty() {
         return ptr::null_mut();

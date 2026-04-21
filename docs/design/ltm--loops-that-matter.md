@@ -11,9 +11,8 @@ The implementation is split across three modules in `src/simlin-engine/src/`:
 | Module | Responsibility |
 |--------|---------------|
 | `ltm.rs` | Causal graph construction, loop detection (Johnson's algorithm), static polarity analysis, cycle partitions |
-| `ltm_augment.rs` | Synthetic variable generation: link score and loop score equations |
+| `ltm_augment.rs` | Synthetic variable generation: link score, loop score, and relative loop score equations |
 | `ltm_finding.rs` | Strongest-path loop discovery algorithm for models too large for exhaustive enumeration |
-| `ltm_post.rs` | Post-simulation computation: normalizes loop scores into relative loop scores using the cycle-partition mapping produced during LTM compilation |
 
 The production entry point is the `model_ltm_variables` tracked function in
 `db_ltm.rs`, invoked as part of `compile_project_incremental`. LTM compilation
@@ -24,12 +23,8 @@ is controlled by two flags on `SourceProject`:
 
 - **`ltm_discovery_mode`** -- Controls which edges get link scores. When false
   (exhaustive mode), link scores are generated only for edges participating in
-  detected loops, plus one `loop_score` variable per loop. When true (discovery
-  mode), link scores are generated for all causal edges.  Relative loop scores
-  are derived post-simulation in both modes via
-  [`crate::ltm_post::compute_rel_loop_scores`] from the raw `loop_score`
-  timeseries and the cycle-partition mapping cached on
-  `LtmVariablesResult::loop_partitions`.
+  detected loops, plus loop score and relative loop score variables. When true
+  (discovery mode), link scores are generated for all causal edges.
 
 Every model -- root, stdlib, and user-defined -- receives identical LTM treatment
 via `model_ltm_variables`. The function auto-detects sub-model behavior by
@@ -103,10 +98,8 @@ and average absolute score for ranking.
 6. Deterministic IDs are assigned by sorting loops by their content key
    (`assign_loop_ids`)
 7. `model_ltm_variables` generates synthetic variables for all links
-   participating in any loop, plus one `loop_score` variable per loop.
-   Relative loop scores are not materialized as synthetic variables; they are
-   computed post-simulation from the raw loop score timeseries using the
-   cycle-partition mapping cached on `LtmVariablesResult::loop_partitions`
+   participating in any loop, plus loop score and relative loop score
+   variables (with partition-scoped denominators)
 
 ### Discovery Mode (`ltm_discovery_mode = true` + `discover_loops`)
 
@@ -145,10 +138,8 @@ disconnected stock groups, each subcomponent has a separate loop dominance profi
 
 ### How Partitions Are Used
 
-- **Exhaustive mode**: `generate_loop_score_variables()` records each loop's
-  partition on the emitted `loop_score` `LtmSyntheticVar`. Post-simulation,
-  `compute_rel_loop_scores()` (`ltm_post.rs`) groups loops by partition and
-  normalizes each loop score against the sum of absolute scores within its own
+- **Exhaustive mode**: `generate_loop_score_variables()` groups loops by partition.
+  Each loop's relative score equation denominates only against loops in the same
   partition, ensuring structurally independent stock groups don't dilute each
   other's scores.
 - **Discovery mode**: `rank_and_filter()` computes per-partition, per-timestep
@@ -168,13 +159,9 @@ assertion that all parent-level stocks agree.
 ## Synthetic Variable Approach
 
 The central design decision is to implement LTM scores as **synthetic simulation
-variables** rather than as post-processing on raw results. Each link score and
-loop score becomes a regular auxiliary variable in the augmented model. Relative
-loop scores are the single exception: they are computed in Rust post-simulation
-(`ltm_post::compute_rel_loop_scores`) from the raw `loop_score` timeseries to
-avoid quadratic growth in equation text for partitions that contain many loops
-(a single partition with P loops would otherwise synthesize P equations, each
-summing over all P denominators -- O(P^2) text).
+variables** rather than as post-processing on raw results. Each link score, loop
+score, and relative loop score becomes a regular auxiliary variable in the
+augmented model.
 
 ### Why Synthetic Variables
 
@@ -194,9 +181,8 @@ summing over all P denominators -- O(P^2) text).
 ### Trade-offs
 
 - **Model size**: The augmented model has significantly more variables. Each causal
-  link adds one synthetic variable; each loop adds one absolute `loop_score`
-  variable. For a model with L links and N loops, this adds L + N variables.
-  Relative loop scores are not synthesized; they are computed post-simulation.
+  link adds one synthetic variable; each loop adds two (absolute and relative
+  score). For a model with L links and N loops, this adds L + 2N variables.
 - **Simulation cost**: Link score equations re-evaluate the target variable's
   equation with ceteris-paribus substitutions, roughly doubling the per-variable
   evaluation cost. This matches the ~2x overhead described in the papers.
@@ -215,10 +201,7 @@ as a separator:
 | Pathway score | `$⁚ltm⁚path⁚{port}⁚{index}` |
 | Composite score | `$⁚ltm⁚composite⁚{port}` |
 | Loop score | `$⁚ltm⁚loop_score⁚{loop_id}` |
-
-Relative loop scores are not emitted as synthetic variables. They are computed
-post-simulation by `ltm_post::compute_rel_loop_scores` from `loop_score` result
-offsets and the cycle-partition mapping cached on `LtmVariablesResult`.
+| Relative loop score | `$⁚ltm⁚rel_loop_score⁚{loop_id}` |
 
 The `$` prefix prevents collisions with user-defined variables. The Unicode
 separator `⁚` (U+205A) was chosen because it is a valid XID_Continue character
@@ -580,11 +563,9 @@ from mixed loops:
 **A2A loops**: All circuits in a group have the same variable-level structure
 and every node carries a subscript. These are collapsed into a single `Loop`
 with a shared ID (e.g., `r1`) and `dimensions` populated from the underlying
-variables. Loop score equations are generated with those dimensions, producing
-N result slots (one per element) with per-element dominance profiles. Relative
-loop scores are derived post-simulation per-element by `compute_rel_loop_scores`
-consumers (e.g. `libsimlin::analysis`), normalizing each element's loop score
-against the per-element partition sum.
+variables. Loop score and relative loop score equations are generated with those
+dimensions, producing N result slots (one per element) with per-element
+dominance profiles.
 
 **Mixed loops**: Circuits containing scalar nodes or with inconsistent
 variable-level structures. Each circuit becomes its own scalar `Loop` with a
@@ -633,22 +614,11 @@ computational interval" strategy.
    `save_step` in sim specs), which may be coarser. This is an intentional
    simplification that trades completeness for speed.
 
-2. **Auto-flip on large SCCs, no composite-network pre-reduction**: The papers
-   describe a two-tier strategy in which models with fewer than ~1000 loops use
-   exhaustive enumeration on a composite (max-score) network. The implementation
-   does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
-   enumeration and `ltm_discovery_mode` runs `discover_loops()`. However,
-   `model_ltm_variables` in `src/simlin-engine/src/db_ltm.rs` does automatically
-   switch from exhaustive to discovery when the largest SCC of the element-level
-   causal graph exceeds `MAX_LTM_SCC_NODES` (currently 50, defined in
-   `src/simlin-engine/src/ltm.rs`). Above this size, Johnson circuit enumeration
-   blows past reasonable memory and time budgets on its own; see
-   `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` for the
-   measurements. (The legacy per-loop relative-score equation synthesis
-   compounded this with an O(P^2) text blowup; moving the normalization
-   post-simulation -- divergence 5 below -- removed that factor from
-   augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
-   `Warning` severity so callers can surface the fallback to users.
+2. **No composite network fallback**: The papers describe a two-tier strategy
+   where models with fewer than ~1000 loops use exhaustive enumeration on a
+   composite (max-score) network. The implementation keeps the two modes entirely
+   separate: `ltm_enabled` for exhaustive and `ltm_discovery_mode` + `discover_loops()`
+   for discovery. There is no automatic switching based on loop count.
 
 3. **Module handling**: The papers describe composite link scores for macros
    (DELAY, SMOOTH) but do not discuss module boundaries as an implementation
@@ -663,13 +633,10 @@ computational interval" strategy.
    desugared to `PREVIOUS(x, 0)`. LTM first-timestep behavior is handled
    explicitly with `TIME = INITIAL_TIME`.
 
-5. **Relative loop score formula and timing**: The implementation computes
-   `loop_score / sum_of_abs_scores` with explicit division-by-zero protection
-   (yielding 0 rather than NaN), while the papers present the formula without
-   discussing this edge case. It also performs this normalization in a
-   post-simulation pass (`ltm_post::compute_rel_loop_scores`) rather than as
-   synthesized compile-time equations, avoiding O(P^2) equation-text growth on
-   models with very large same-partition loop sets (e.g. WRLD3).
+5. **Relative loop score formula**: The implementation uses
+   `SAFEDIV(loop_score, sum_of_abs_scores, 0)` with explicit division-by-zero
+   protection, while the papers present the formula without discussing this edge
+   case. This means zero-activity periods produce 0 rather than NaN.
 
 6. **Flow-to-stock numerator timing**: The flow-to-stock link score numerator uses
    `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` rather than `flow - PREVIOUS(flow)`.
@@ -702,12 +669,9 @@ computational interval" strategy.
   (auxiliary-to-auxiliary, flow-to-stock, stock-to-flow, module links),
   AST-based partial equation building (`build_partial_equation`) with tests
   for builtin function preservation, simple substitution, no-deps-to-wrap, and
-  IF-THEN-ELSE, loop score equations, generated variable structure
-
-- **`ltm_post.rs`**: Post-simulation relative loop score computation --
-  partition grouping, SAFEDIV-0 semantics on empty-denominator timesteps,
-  property-based equivalence with the reference compile-time formula on
-  synthetic loop-score matrices
+  IF-THEN-ELSE, loop score and relative loop score equations (including
+  single-loop SAFEDIV behavior and single-balancing-loop negative scores),
+  generated variable structure
 
 - **`ltm_finding.rs`**: SearchGraph construction and edge sorting, trivial loop,
   Figure 7 from the paper (demonstrating per-stock reset recovery), per-stock

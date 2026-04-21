@@ -30,7 +30,7 @@ use self::placement::{
 use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
 use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
-use crate::common::canonicalize;
+use crate::common::{Ident, canonicalize};
 use crate::datamodel;
 use crate::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use crate::datamodel::{Rect, ViewElement};
@@ -3821,23 +3821,12 @@ fn try_detect_ltm_loops_incremental(
     let actual_name_owned = actual_name.to_string();
 
     // Phase 1: Model lookup and loop detection.
-    let (source_model, detected) = {
+    let detected = {
         let canonical_name = crate::canonicalize(&actual_name_owned);
         let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
-        let detected = crate::db::model_detected_loops(db, source_model, source_project);
-        (source_model, detected)
+        crate::db::model_detected_loops(db, source_model, source_project)
     };
 
-    // Truncated dense graphs look structurally acyclic here (empty
-    // `loops`) but are semantically cyclic with too many loops to
-    // materialize.  Returning `Some(vec![])` in that case would
-    // suppress the documented fallback to persisted loop_metadata
-    // (see `compute_metadata`'s `unwrap_or_else(build_feedback_loops_from_metadata)`
-    // at the caller).  Return `None` instead so the caller chooses
-    // that fallback.
-    if detected.truncated {
-        return None;
-    }
     if detected.loops.is_empty() {
         return Some(Vec::new());
     }
@@ -3851,56 +3840,12 @@ fn try_detect_ltm_loops_incremental(
             vm.run_to_end().ok()?;
             Some(vm)
         });
-
-    // Capture the loop_partitions mapping while LTM is still enabled so the
-    // cached `model_ltm_variables` query sees the same flag value the VM ran
-    // under.  The rel_loop_score computation below consumes the mapping
-    // directly; it is not re-read from the db after the LTM flag flips back.
-    let loop_partitions = if vm_result.is_some() {
-        crate::db::model_ltm_variables(db, source_model, source_project)
-            .loop_partitions
-            .clone()
-    } else {
-        HashMap::new()
-    };
-
     source_project.set_ltm_enabled(db).to(false);
 
-    // When LTM auto-flips to discovery, `loop_partitions` comes back
-    // empty and the structural loops this function already detected
-    // cannot be scored via post-sim normalization.  Previously we
-    // returned `None` here to force `compute_metadata`'s fallback to
-    // persisted `loop_metadata`, but newly imported or unsaved
-    // models usually have no persisted metadata, so that fallback
-    // dropped the real structural loops entirely.  Instead: leave
-    // `detected.loops` intact and let the per-loop
-    // `importance_series` below come back empty -- the feedback loop
-    // list still carries correct topology and polarity, only the
-    // behavioral importance is unavailable.  Layout and UI consumers
-    // already handle empty importance series gracefully (see
-    // `FeedbackLoop::average_importance`'s NaN guard).
-
     let vm = vm_result?;
-    let results = vm.into_results();
 
-    // `rel_loop_score` is no longer a VM variable; derive it post-sim
-    // from the `loop_score` series the VM does emit, using the
-    // partition mapping cached on `model_ltm_variables`.  See
-    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
-    //
-    // Stream per-partition: iterate detected loops, cache each
-    // partition's denominator series the first time a loop in that
-    // partition is seen, and compute only the requested loop's
-    // rel_loop_score series per iteration.  The full-pass
-    // `compute_rel_loop_scores` would build the entire `loop_count *
-    // step_count` matrix plus a `HashMap` allocation per loop, then
-    // require a `cloned()` into each `FeedbackLoop` -- near 10k-loop
-    // exhaustive models that is hundreds of MB of transient state.
-    // This path holds at most `num_partitions * step_count + 1 *
-    // step_count` at any moment and hands the per-loop `Vec<f64>`
-    // directly into `FeedbackLoop` without cloning.
+    // Phase 3: Build feedback loop structs from VM results.
     let mut feedback_loops = Vec::new();
-    let mut partition_denominators: HashMap<Option<usize>, Vec<f64>> = HashMap::new();
     for dl in &detected.loops {
         let polarity = match dl.polarity {
             crate::db::DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
@@ -3916,27 +3861,15 @@ fn try_detect_ltm_loops_incremental(
             vars
         };
 
-        let partition_key = loop_partitions.get(&dl.id).copied().flatten();
-        let denom = partition_denominators
-            .entry(partition_key)
-            .or_insert_with(|| {
-                crate::ltm_post::compute_partition_denominator(
-                    &results,
-                    &loop_partitions,
-                    partition_key,
-                )
-            });
-        let mut importance_series =
-            crate::ltm_post::compute_rel_loop_score_for_id(&results, &dl.id, denom)
-                .unwrap_or_default();
-        // Replace any non-finite entries with 0 so consumers that
-        // average the series (e.g. `FeedbackLoop::average_importance`)
-        // do not observe NaN / Inf from upstream VM divide-by-zero.
-        for v in &mut importance_series {
-            if !v.is_finite() {
-                *v = 0.0;
-            }
-        }
+        // Extract the relative loop score time series.
+        let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{}", dl.id);
+        let var_ident = Ident::new(&var_name);
+        let importance_series = vm
+            .get_series(&var_ident)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| if v.is_finite() { v } else { 0.0 })
+            .collect();
 
         feedback_loops.push(metadata::FeedbackLoop {
             name: dl.id.clone(),

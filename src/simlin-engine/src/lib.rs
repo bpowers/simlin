@@ -44,7 +44,6 @@ mod lexer;
 pub mod ltm;
 pub mod ltm_augment;
 pub mod ltm_finding;
-pub mod ltm_post;
 pub mod mdl;
 mod model;
 mod parser;

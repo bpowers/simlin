@@ -1743,121 +1743,6 @@ fn strip_subscript(name: &str) -> &str {
     }
 }
 
-/// Estimate the number of `Loop` structs `build_element_level_loops`
-/// will emit from an element-level circuit list.
-///
-/// `build_element_level_loops` groups element circuits by their
-/// stripped (subscript-removed) node sequence.  Each group then emits:
-///
-/// - **one** collapsed A2A `Loop` when the group is pure-dimension
-///   (every node has a subscript, no repeated variable names in the
-///   stripped sequence, and all circuits in the group share a single
-///   leading subscript element), regardless of how many elements share
-///   that structure; or
-/// - **one `Loop` per circuit** in the group when the group is
-///   scalar-only or cross-element.
-///
-/// The `MAX_LTM_TOTAL_CIRCUITS` backstop bounds `Loop`-struct
-/// materialization memory, so it needs to key on the post-collapse
-/// count.  Counting distinct stripped signatures alone under-counts
-/// cross-element groups (many circuits collapse to one signature but
-/// don't collapse to one Loop), while using the raw
-/// `element_circuits.len()` over-counts pure-A2A groups.  This
-/// function mirrors the exact collapse criteria of
-/// `build_element_level_loops` so the gate bounds the actual emitted
-/// Loop count rather than one of its looser proxies.
-pub(crate) fn estimate_emitted_loop_count(element_circuits: &super::LoopCircuitsResult) -> usize {
-    use std::collections::{HashMap, HashSet};
-
-    // Group element circuits by variable-level signature (same key as
-    // `build_element_level_loops`).
-    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-    for i in 0..element_circuits.len() {
-        let key: String = element_circuits
-            .circuit_names(i)
-            .map(strip_subscript)
-            .collect::<Vec<_>>()
-            .join("\x00");
-        groups.entry(key).or_default().push(i);
-    }
-
-    let mut total: usize = 0;
-    for group_indices in groups.values() {
-        // Representative: first circuit in the group.  Used to probe
-        // all-subscripted-ness and repeated-variable-names.
-        let representative: Vec<String> = element_circuits
-            .circuit_names(group_indices[0])
-            .map(str::to_owned)
-            .collect();
-        if representative.is_empty() {
-            // Defensive: a zero-length circuit should never reach
-            // here (enumerate_circuits_in_scc filters self-loops), but
-            // if it does, count as one Loop rather than silently
-            // dropping.
-            total = total.saturating_add(group_indices.len());
-            continue;
-        }
-
-        let all_subscripted = representative.iter().all(|n| n.contains('['));
-        if !all_subscripted {
-            // Scalar or mixed: one Loop per circuit, no collapse.
-            total = total.saturating_add(group_indices.len());
-            continue;
-        }
-
-        // Pure-A2A candidate.  Two disqualifiers:
-        // (a) stripped sequence has a repeated variable name — indicates
-        //     a cross-element circuit like pop[nyc] -> share[boston] ->
-        //     pop[boston] -> share[nyc].
-        // (b) circuits in the group have differing leading subscript
-        //     elements — genuine cross-element feedback.
-        //
-        // In either cross-element case, `build_element_level_loops`'s
-        // `is_cross_element` branch emits a single scalar approximation
-        // Loop per group (the first unique stripped cycle), NOT one
-        // Loop per element-level circuit (that's the scalar/mixed
-        // branch, which only fires when `!all_subscripted`).  So both
-        // cross-element shapes contribute 1 to the emit count -- same
-        // as pure A2A.
-        let stripped: Vec<&str> = representative.iter().map(|s| strip_subscript(s)).collect();
-        let mut seen_vars: HashSet<&str> = HashSet::new();
-        let has_repeated = stripped.iter().any(|v| !seen_vars.insert(*v));
-        if has_repeated {
-            // Cross-element via repeated variable names -> 1 Loop,
-            // but `build_element_level_loops` additionally gates on
-            // `unique_cycle.len() >= 2` (it walks the stripped
-            // sequence to the first repeat to find the unique-
-            // stripped cycle).  A length-1 unique cycle means the
-            // group has a direct self-reference like `pop -> pop`,
-            // which the emitter skips entirely.  Match that
-            // criterion here so the two functions count identically
-            // on degenerate shapes.
-            let mut unique_seen: HashSet<&str> = HashSet::new();
-            let unique_cycle_len = stripped
-                .iter()
-                .take_while(|name| unique_seen.insert(**name))
-                .count();
-            if unique_cycle_len >= 2 {
-                total = total.saturating_add(1);
-            }
-            continue;
-        }
-
-        // At this point the group is all-subscripted and has no
-        // repeated stripped names.  `build_element_level_loops`
-        // classifies this as either pure-A2A (all leading-subscript
-        // elements match across circuits) or cross-element (they
-        // differ), and emits exactly one Loop either way: pure-A2A
-        // collapses to a dimensioned A2A loop, cross-element collapses
-        // to a scalar approximation over the unique-stripped cycle.
-        // Since both branches contribute 1 to the emitted Loop count,
-        // we don't need to inspect leading subscripts here -- the
-        // classification is a no-op for the purpose of counting.
-        total = total.saturating_add(1);
-    }
-    total
-}
-
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -2170,46 +2055,20 @@ pub fn model_ltm_variables(
 ) -> super::LtmVariablesResult {
     use crate::common::Ident;
     use crate::ltm::{CyclePartitions, Loop};
-    use salsa::Accumulator;
     use std::collections::HashSet;
 
     use super::{
-        CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
-        LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules, generate_max_abs_chain_str,
-        model_causal_edges, model_element_cycle_partitions, model_element_loop_circuits,
-        module_input_pathways_from_edges,
+        LtmLinkId, LtmSyntheticVar, LtmVariablesResult, causal_graph_with_modules,
+        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
+        model_element_loop_circuits, module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
     if edges_result.stocks.is_empty() {
-        return LtmVariablesResult {
-            vars: vec![],
-            loop_partitions: HashMap::new(),
-        };
+        return LtmVariablesResult { vars: vec![] };
     }
 
-    // When the user explicitly requested discovery mode, honor it directly.
-    // Otherwise we let circuit enumeration run (bounded by
-    // `MAX_LTM_ENUMERATION_CAP`'s streaming cutoff) and gate the exhaustive
-    // path on the post-collapse emit count further below.  Previous
-    // iterations had a pre-enumeration gate keyed on the largest
-    // element-level SCC size, but that proved too blunt: a sparse
-    // stock -> aux_1 -> ... -> aux_N -> flow -> stock model has a
-    // single loop that exhaustive mode would happily score, yet an
-    // SCC-size heuristic misclassified the whole SCC as "dense" and
-    // forced the model into discovery.  The downstream
-    // `MAX_LTM_TOTAL_CIRCUITS` gate measures actual Loop-struct emit
-    // count (via `build_element_level_loops`'s per-group collapse
-    // rules) and so accepts sparse large SCCs while still catching
-    // WRLD3-style dense feedback (where enumeration trips the
-    // `MAX_LTM_ENUMERATION_CAP` streaming cap and sets
-    // `LoopCircuitsResult.truncated = true`).  See
-    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
-    let is_discovery_user = project.ltm_discovery_mode(db);
-    // `is_discovery` may be upgraded to true below by the total-circuit
-    // backstop (either the streaming `truncated` signal or the
-    // post-collapse emit-count exceeds `MAX_LTM_TOTAL_CIRCUITS`).
-    let mut is_discovery = is_discovery_user;
+    let is_discovery = project.ltm_discovery_mode(db);
 
     // Determine output ports for this model. Stdlib models always use
     // the "output" convention. For user-defined models, output ports are
@@ -2251,115 +2110,29 @@ pub fn model_ltm_variables(
     // the element-level graph has no variable data populated.
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let circuits_result = model_element_loop_circuits(db, model, project);
-        if circuits_result.is_empty() && !circuits_result.truncated {
+        if circuits_result.is_empty() {
             if !has_input_ports {
-                return LtmVariablesResult {
-                    vars: vec![],
-                    loop_partitions: HashMap::new(),
-                };
+                return LtmVariablesResult { vars: vec![] };
             }
             None
         } else {
-            // Total-circuit backstop.  `model_element_loop_circuits`
-            // enumerates with two streaming caps --
-            // `MAX_LTM_ENUMERATION_CAP` (distinct circuits) and
-            // `MAX_LTM_ENUMERATION_NODES` (cumulative indexed-path
-            // nodes) -- and sets `truncated = true` when either trips,
-            // which we treat as a hard auto-flip here.  The safety
-            // reason is that the partial circuit list truncation
-            // yielded is not safe to hand to
-            // `build_element_level_loops` -- per-group A2A collapse
-            // depends on seeing every circuit in each group before
-            // classifying it as pure-dimension, cross-element, or
-            // mixed.
-            //
-            // For non-truncated results we count *emitted* Loops via
-            // `estimate_emitted_loop_count`, which mirrors
-            // `build_element_level_loops`'s per-group collapse
-            // (pure-A2A groups contribute 1, cross-element groups
-            // contribute 1, scalar/mixed contribute group.len()).
-            // That lets a pure-A2A model with |Region| = 5_000 stay
-            // exhaustive (1 Loop) while a model with 5_000 independent
-            // scalar cycles still flips (5_000 Loops).
-            // Compute the estimate once up front.  Only consulted when
-            // the result has not been truncated by enumeration (the
-            // truncation path has its own tailored diagnostic that
-            // doesn't reference the emit count), but it's still the
-            // input to the `overflow` decision, so computing it here
-            // avoids a double-walk of `circuits_result`.
-            let estimated_loops = if circuits_result.truncated {
-                0
-            } else {
-                estimate_emitted_loop_count(circuits_result)
-            };
-            let overflow =
-                circuits_result.truncated || estimated_loops > crate::ltm::MAX_LTM_TOTAL_CIRCUITS;
-            if overflow {
-                let msg = if circuits_result.truncated {
-                    format!(
-                        "LTM analysis auto-switched from exhaustive to discovery mode: \
-                         element-level feedback-loop enumeration truncated by the \
-                         streaming safety caps (MAX_LTM_ENUMERATION_CAP = {} \
-                         distinct circuits or MAX_LTM_ENUMERATION_NODES = {} \
-                         cumulative indexed-path nodes; whichever fires first \
-                         depends on the model's mean loop length -- see \
-                         docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
-                         Per-loop scores are ranked post-simulation via the \
-                         strongest-path search; see \
-                         docs/design/ltm--loops-that-matter.md for the two-tier \
-                         strategy.",
-                        crate::ltm::MAX_LTM_ENUMERATION_CAP,
-                        crate::ltm::MAX_LTM_ENUMERATION_NODES,
-                    )
-                } else {
-                    let distinct_loops = estimated_loops;
-                    format!(
-                        "LTM analysis auto-switched from exhaustive to discovery mode: \
-                         the element-level graph yields {} feedback loops after \
-                         per-group A2A collapse, exceeding MAX_LTM_TOTAL_CIRCUITS \
-                         = {}.  Materializing one Loop struct per feedback loop \
-                         would allocate ~{} MiB of intermediate state (see \
-                         docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
-                         Per-loop scores are ranked post-simulation via the \
-                         strongest-path search; see \
-                         docs/design/ltm--loops-that-matter.md for the two-tier \
-                         strategy.",
-                        distinct_loops,
-                        crate::ltm::MAX_LTM_TOTAL_CIRCUITS,
-                        // 9 KB/loop from the diagnosis allocation profile, in MiB.
-                        (distinct_loops as u64 * 9) / 1024,
-                    )
-                };
-                CompilationDiagnostic(Diagnostic {
-                    model: model.name(db).clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
-                is_discovery = true;
-                None
-            } else {
-                // Build the variable-level graph with populated variables for
-                // polarity analysis. Element-level graphs have empty variables.
-                let var_graph = causal_graph_with_modules(db, model, project);
+            // Build the variable-level graph with populated variables for
+            // polarity analysis. Element-level graphs have empty variables.
+            let var_graph = causal_graph_with_modules(db, model, project);
 
-                let detected = build_element_level_loops(
-                    circuits_result,
-                    &var_graph,
-                    source_vars,
-                    db,
-                    project,
-                    dm_dims,
-                );
-                Some(detected)
-            }
+            let detected = build_element_level_loops(
+                circuits_result,
+                &var_graph,
+                source_vars,
+                db,
+                project,
+                dm_dims,
+            );
+            Some(detected)
         }
     } else {
         None
     };
-
-    let mut loop_partitions: HashMap<String, Option<usize>> = HashMap::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
@@ -2636,13 +2409,6 @@ pub fn model_ltm_variables(
                 .collect(),
         };
 
-        // Capture each loop's partition index before consuming `partitions`
-        // so post-sim `compute_rel_loop_scores` can group loops into the
-        // same denominator bins the removed compile-time SAFEDIV formula did.
-        for l in detected_loops.iter() {
-            loop_partitions.insert(l.id.clone(), partitions.partition_for_loop(l));
-        }
-
         let loop_vars =
             crate::ltm_augment::generate_loop_score_variables(detected_loops, &partitions);
         for (name, var) in loop_vars {
@@ -2728,7 +2494,9 @@ pub fn model_ltm_variables(
                 3
             } else if name.contains("\u{205A}path\u{205A}") {
                 2
-            } else if name.contains("\u{205A}loop_score\u{205A}") {
+            } else if name.contains("\u{205A}loop_score\u{205A}")
+                || name.contains("\u{205A}rel_loop_score\u{205A}")
+            {
                 1
             } else {
                 0 // link_score and anything else
@@ -2738,10 +2506,7 @@ pub fn model_ltm_variables(
             .cmp(&category(&b.name))
             .then_with(|| a.name.cmp(&b.name))
     });
-    LtmVariablesResult {
-        vars,
-        loop_partitions,
-    }
+    LtmVariablesResult { vars }
 }
 
 #[cfg(test)]

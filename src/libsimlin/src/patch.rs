@@ -350,44 +350,6 @@ pub(crate) fn gather_error_details_with_db(
     all_errors
 }
 
-/// Append captured diagnostics (typically LTM auto-flip warnings
-/// persisted on `SimlinProject::pending_ltm_diagnostics`) to an
-/// existing `ErrorDetailData` list, skipping any whose `(model,
-/// message)` pair is already present.  Used by
-/// `simlin_project_get_errors` to replay LTM-specific warnings that
-/// salsa's accumulator drops when `ltm_enabled` is reset by
-/// `simlin_sim_new`.
-///
-/// The dedup key intentionally uses `(model_name, message)` rather
-/// than the formatted `message` alone.  In a multi-model project two
-/// models can legitimately emit identical Assembly warnings; even
-/// though `format_diagnostic_with_datamodel` does include the model
-/// name in its rendered text today, a future rendering change could
-/// collapse that prefix and silently drop the second model's warning.
-/// Keying on the diagnostic's structural `model` field keeps the
-/// multi-model dedup correct regardless of formatter changes.
-pub(crate) fn append_captured_diagnostics(
-    all_errors: &mut Vec<ErrorDetailData>,
-    captured: &[engine::db::Diagnostic],
-    datamodel: &engine::datamodel::Project,
-) {
-    for diag in captured {
-        let formatted = errors::format_diagnostic_with_datamodel(diag, datamodel);
-        let already_present =
-            all_errors
-                .iter()
-                .any(|e| match (&e.model_name, &e.message, &formatted.message) {
-                    (Some(m), Some(existing), Some(new)) => {
-                        m.as_str() == diag.model && existing.as_str() == new.as_str()
-                    }
-                    _ => false,
-                });
-        if !already_present {
-            all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
-        }
-    }
-}
-
 fn first_error_code(
     diagnostics: &[engine::db::Diagnostic],
     sim_error: Option<&engine::Error>,
@@ -601,16 +563,6 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // Update sync_state and datamodel while holding both locks.
     *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
     *datamodel_locked = staged_datamodel;
-
-    // Clear LTM diagnostics captured by a prior `simlin_sim_new` --
-    // the patched model may no longer trip the same auto-flip or
-    // total-circuits threshold (e.g., a user splitting a dense SCC
-    // into independent subsystems), so the cached warning would be
-    // misleading.  Callers who still need LTM diagnostics after a
-    // patch should re-create the simulation with `enable_ltm = true`.
-    if let Ok(mut pending) = project_ref.pending_ltm_diagnostics.lock() {
-        pending.clear();
-    }
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────
