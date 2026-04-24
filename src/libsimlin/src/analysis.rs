@@ -440,7 +440,24 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
 
     let ltm = engine::db::model_ltm_variables(&*db_locked, synced_model.source, sync.project);
 
-    let state = sim_ref.state.lock().unwrap();
+    // Identify the loop's cycle partition.  A loop missing from
+    // `loop_partitions` is either genuinely unknown or came from a
+    // project where LTM is disabled / auto-flipped to discovery --
+    // either way, no relative score is available.
+    let Some(&partition_key) = ltm.loop_partitions.get(loop_id) else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                "loop '{loop_id}' does not have relative score data"
+            )),
+        );
+        return;
+    };
+
+    let mut state_guard = sim_ref.state.lock().unwrap();
+    // Split the borrow so we can read `results` while mutating
+    // `cached_partition_denominators` in the same scope.
+    let state = &mut *state_guard;
     let Some(ref results) = state.results else {
         store_error(
             out_error,
@@ -450,8 +467,27 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     };
 
-    let scored = engine::ltm_post::compute_rel_loop_scores(results, &ltm.loop_partitions);
-    let Some(series) = scored.get(loop_id) else {
+    // Populate the per-partition denominator lazily: the first FFI
+    // call touching partition P pays O(loops_in_P × step_count); all
+    // subsequent calls for any loop in P (common pattern: pysimlin's
+    // `_populate_loop_behavior` iterates every loop) reuse the
+    // cached vector and cost only the numerator pass.
+    let denom = state
+        .cached_partition_denominators
+        .entry(partition_key)
+        .or_insert_with(|| {
+            let loop_ids_in_partition = ltm.loop_partitions.iter().filter_map(|(id, pk)| {
+                if *pk == partition_key {
+                    Some(id.as_str())
+                } else {
+                    None
+                }
+            });
+            engine::ltm_post::compute_partition_denominator(results, loop_ids_in_partition)
+        });
+
+    let Some(series) = engine::ltm_post::compute_rel_loop_score_for_id(results, loop_id, denom)
+    else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(

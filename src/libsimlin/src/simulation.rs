@@ -98,6 +98,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             vm_error,
             results: None,
             overrides: HashMap::new(),
+            cached_partition_denominators: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -168,6 +169,7 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
+                state.cached_partition_denominators.clear();
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -232,6 +234,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
+    state.cached_partition_denominators.clear();
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation
@@ -508,6 +511,13 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
         let idx = (results.step_count - 1) * results.step_size + offset;
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
+            // Mutating a `loop_score` slot in place would silently
+            // stale any cached partition denominator that summed it.
+            // The cache is keyed by partition, not offset, so without
+            // knowing which partition this offset belongs to we
+            // invalidate the whole map -- correct and cheap (the next
+            // FFI call repopulates lazily).
+            state.cached_partition_denominators.clear();
             return;
         }
     }

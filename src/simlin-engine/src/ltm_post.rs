@@ -116,6 +116,68 @@ pub fn compute_rel_loop_scores(
     out
 }
 
+/// Compute the cycle-partition denominator series:
+/// `denominator[t] = Σ_{j in partition} |loop_score[j, t]|`.
+///
+/// Loops in `loop_ids` whose `loop_score` variable is absent from
+/// `results` (e.g. LTM disabled for that loop, discovery-mode
+/// compilation, or model truncation) are omitted from the sum --
+/// the same semantics [`compute_rel_loop_scores`] uses.  Returns a
+/// length-`results.step_count` `Vec`, zero-filled when the
+/// partition is empty.
+///
+/// Exposed separately from [`compute_rel_loop_scores`] so that
+/// FFI callers that query one loop at a time (e.g.
+/// `simlin_analyze_get_relative_loop_score` iterated over a
+/// project's loops) can cache the per-partition denominator on
+/// the sim state and avoid recomputing it on every call.  Paired
+/// with [`compute_rel_loop_score_for_id`].
+pub fn compute_partition_denominator<'a, I>(results: &Results, loop_ids: I) -> Vec<f64>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let offsets: Vec<usize> = loop_ids
+        .into_iter()
+        .filter_map(|id| results.offsets.get(&loop_score_ident(id)).copied())
+        .collect();
+
+    let mut denom = vec![0.0_f64; results.step_count];
+    for (t, row) in results.iter().enumerate() {
+        denom[t] = offsets.iter().map(|&off| row[off].abs()).sum();
+    }
+    denom
+}
+
+/// Compute a single loop's relative-loop-score series, given a
+/// pre-computed partition denominator from
+/// [`compute_partition_denominator`].
+///
+/// Returns `None` when the loop's `loop_score` variable is absent
+/// from `results` (matching [`compute_rel_loop_scores`], which
+/// simply omits those loops from its output map).  SAFEDIV-0
+/// semantics: `denominator[t] == 0` yields `0`, not `NaN`.
+/// Non-finite numerators propagate through normal IEEE-754
+/// arithmetic, matching the behaviour of the retired compile-time
+/// emitter.
+///
+/// The caller is responsible for ensuring `denominator` covers the
+/// same partition the loop belongs to, and that its length matches
+/// `results.step_count`.
+pub fn compute_rel_loop_score_for_id(
+    results: &Results,
+    loop_id: &str,
+    denominator: &[f64],
+) -> Option<Vec<f64>> {
+    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
+    let mut out = Vec::with_capacity(results.step_count);
+    for (t, row) in results.iter().enumerate() {
+        let num = row[off];
+        let denom = denominator[t];
+        out.push(if denom == 0.0 { 0.0 } else { num / denom });
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +394,58 @@ mod tests {
         // Shared denom of 3 + 1 = 4.
         assert!((rel_a[0] - 0.75).abs() < 1e-12);
         assert!((rel_b[0] - 0.25).abs() < 1e-12);
+    }
+
+    /// The streaming `compute_partition_denominator` +
+    /// `compute_rel_loop_score_for_id` pair must produce the same
+    /// per-loop series as the full-sweep `compute_rel_loop_scores`
+    /// -- that is the contract the libsimlin FFI cache relies on.
+    #[test]
+    fn per_id_helpers_match_full_sweep() {
+        let series_a = &[1.0, 2.0, -4.0, 0.0][..];
+        let series_b = &[3.0, -4.0, 0.0, 7.0][..];
+        let series_c = &[0.5, 0.5, 0.5, 0.5][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b), ("C", series_c)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0)), ("C", Some(1))]);
+
+        let full = compute_rel_loop_scores(&results, &partitions);
+
+        // Partition 0 contains A and B.
+        let denom_0 = compute_partition_denominator(&results, ["A", "B"]);
+        let rel_a = compute_rel_loop_score_for_id(&results, "A", &denom_0).unwrap();
+        let rel_b = compute_rel_loop_score_for_id(&results, "B", &denom_0).unwrap();
+
+        // Partition 1 contains only C.
+        let denom_1 = compute_partition_denominator(&results, ["C"]);
+        let rel_c = compute_rel_loop_score_for_id(&results, "C", &denom_1).unwrap();
+
+        for (id, streamed) in [("A", &rel_a), ("B", &rel_b), ("C", &rel_c)] {
+            let expected = full.get(id).expect("full-sweep must have this loop");
+            assert_eq!(
+                streamed.len(),
+                expected.len(),
+                "series length mismatch for {id}"
+            );
+            for t in 0..expected.len() {
+                // Bit-for-bit: the two paths multiply and divide the
+                // same floats in the same order, so rounding must match.
+                assert_eq!(
+                    streamed[t], expected[t],
+                    "loop {id} t={t}: streamed {} vs full {}",
+                    streamed[t], expected[t]
+                );
+            }
+        }
+    }
+
+    /// A loop whose `loop_score` variable is absent must return
+    /// `None`, matching the "omit absent loops" contract of the
+    /// full-sweep API.
+    #[test]
+    fn per_id_helper_returns_none_for_absent_loop() {
+        let results = make_results_for_loops(&[("A", &[1.0, 2.0][..])]);
+        let denom = compute_partition_denominator(&results, ["A"]);
+        assert!(compute_rel_loop_score_for_id(&results, "missing", &denom).is_none());
     }
 
     proptest! {
