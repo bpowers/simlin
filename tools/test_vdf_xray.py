@@ -49,6 +49,25 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             vdf = parse_fixture(relpath)
             self.assertEqual(len(vdf.sections), 8, relpath)
 
+    def test_section_header_field1_decodes_section6_and_section7_pointers(self) -> None:
+        for relpath in [
+            "test/bobby/vdf/model_editing/run_8.vdf",
+            "test/bobby/vdf/econ/risk2.vdf",
+            "test/metasd/WRLD3-03/SCEN01.VDF",
+            "test/xmutil_test_models/Ref.vdf",
+        ]:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+
+                self.assertEqual(
+                    vdf.section6_class_code_start_from_field1(),
+                    vdf.section6_class_code_start(),
+                )
+                self.assertEqual(
+                    vdf.section7_offset_table_start_from_field1(),
+                    vdf.offset_table_start,
+                )
+
     def test_slot_table_layout_is_contiguous_for_small_edit_chain_files(self) -> None:
         for relpath in [
             "test/bobby/vdf/model_editing/run_8.vdf",
@@ -62,6 +81,32 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             self.assertEqual(layout.base, 44, relpath)
             self.assertEqual(layout.distinct_strides, [16], relpath)
             self.assertEqual(layout.missing_16_slots, 0, relpath)
+
+    def test_name_table_skips_declared_deleted_entries_and_resumes(self) -> None:
+        risk2 = parse_fixture("test/bobby/vdf/econ/risk2.vdf")
+
+        self.assertEqual(len(risk2.names), 113)
+        self.assertEqual(len(risk2.slot_table), 106)
+        self.assertEqual(
+            risk2.section1_slot_area_offset_from_field1(),
+            risk2.slot_table_offset,
+        )
+        self.assertEqual(risk2.names[45], "max risk")
+        self.assertEqual(risk2.names[46], "perceived inflation rate")
+        self.assertIn("effect of hud policies on risk taking behavior", risk2.names)
+
+        risk = parse_fixture("test/bobby/vdf/econ/risk.vdf")
+        self.assertEqual(risk.names[104], "desired risk taking behavior")
+        self.assertIn(
+            "#SMOOTH(interestearnedfromderivatives-investmentslostinderivitivedefaults,timedelayininvestmentearnings)#",
+            risk.names,
+        )
+
+        scen01 = parse_fixture("test/metasd/WRLD3-03/SCEN01.VDF")
+        self.assertIn(
+            "#LV1<SMOOTH3(ResourceConservationTechnology,technologydevelopmentdelay)#",
+            scen01.names,
+        )
 
     def test_slot_table_layout_keeps_ref_fixture_even_when_not_contiguous(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
@@ -94,7 +139,18 @@ class VdfXrayModelEditingTests(unittest.TestCase):
 
             self.assertEqual(skip, 0, relpath)
             self.assertEqual(entries, [], relpath)
+            self.assertEqual(stop, vdf.section6_class_code_start(), relpath)
             self.assertLessEqual(stop, vdf.sections[6].region_end, relpath)
+
+    def test_parse_vdf_accepts_0x53_result_family_magic_for_xray(self) -> None:
+        data = bytearray((REPO_ROOT / "test/bobby/vdf/water/Current.vdf").read_bytes())
+        data[3] = 0x53
+
+        vdf = vdf_xray.parse_vdf(bytes(data))
+
+        self.assertEqual(vdf.data[:4], vdf_xray.VDF_ALT_RESULT_MAGIC)
+        self.assertEqual(len(vdf.sections), 8)
+        self.assertEqual(vdf.names[0], "Time")
 
     def test_run8_section3_captures_dimension_switch(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
@@ -674,6 +730,8 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         risk = parse_fixture("test/bobby/vdf/econ/risk.vdf")
 
         self.assertEqual(risk.time_point_count, 213)
+        self.assertEqual(vdf_xray.u32(risk.data, 0x74), 225)
+        self.assertEqual(vdf_xray.u32(risk.data, 0x7C), 225)
         self.assertEqual(risk.bitmap_size, 27)
         self.assertEqual(risk.block_time_point_count, 225)
         self.assertEqual(risk.block_bitmap_size, 29)
@@ -692,6 +750,71 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertAlmostEqual(federal_funds_rate[0], 6.909999847412109)
         self.assertAlmostEqual(federal_funds_rate[-1], final_values[42])
 
+    def test_risk2_header_splits_saved_suffix_from_full_block_grid(self) -> None:
+        risk2 = parse_fixture("test/bobby/vdf/econ/risk2.vdf")
+
+        self.assertEqual(risk2.time_point_count, 213)
+        self.assertEqual(vdf_xray.u32(risk2.data, 0x74), 225)
+        self.assertEqual(vdf_xray.u32(risk2.data, 0x7C), 225)
+        self.assertEqual(risk2.bitmap_size, 27)
+        self.assertEqual(risk2.block_time_point_count, 225)
+        self.assertEqual(risk2.block_bitmap_size, 29)
+
+    def test_risk_sparse_blocks_choose_bitmap_width_per_block(self) -> None:
+        for relpath, stock_ot, full_grid_ot, expected_first in [
+            ("test/bobby/vdf/econ/risk.vdf", 10, 42, 70.0),
+            ("test/bobby/vdf/econ/risk2.vdf", 10, 43, 75.0),
+        ]:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                time_values = vdf.extract_time_values()
+                codes = vdf.section6_ot_class_codes()
+                final_values = vdf.section6_final_values()
+
+                self.assertIsNotNone(time_values)
+                self.assertIsNotNone(codes)
+                self.assertIsNotNone(final_values)
+                assert time_values is not None
+                assert codes is not None
+                assert final_values is not None
+
+                stock_raw = vdf.offset_table_entry(stock_ot)
+                full_grid_raw = vdf.offset_table_entry(full_grid_ot)
+                self.assertIsNotNone(stock_raw)
+                self.assertIsNotNone(full_grid_raw)
+                assert stock_raw is not None
+                assert full_grid_raw is not None
+
+                stock_count = vdf_xray.u16(vdf.data, stock_raw)
+                full_grid_count = vdf_xray.u16(vdf.data, full_grid_raw)
+                self.assertEqual(
+                    vdf._block_bitmap_layout(stock_raw, stock_count),
+                    (vdf.bitmap_size, vdf.time_point_count),
+                )
+                self.assertEqual(
+                    vdf._block_bitmap_layout(full_grid_raw, full_grid_count),
+                    (vdf.block_bitmap_size, vdf.block_time_point_count),
+                )
+
+                stock_series = vdf.extract_ot_series(stock_ot, time_values, codes, final_values)
+                full_grid_series = vdf.extract_ot_series(full_grid_ot, time_values, codes, final_values)
+                self.assertIsNotNone(stock_series)
+                self.assertIsNotNone(full_grid_series)
+                assert stock_series is not None
+                assert full_grid_series is not None
+                self.assertAlmostEqual(stock_series[0], expected_first)
+                self.assertAlmostEqual(stock_series[-1], final_values[stock_ot])
+                self.assertAlmostEqual(full_grid_series[-1], final_values[full_grid_ot])
+
+                for ot_idx in range(vdf.offset_table_count):
+                    raw = vdf.offset_table_entry(ot_idx)
+                    if raw is None or not vdf.is_data_block_offset(raw):
+                        continue
+                    series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+                    self.assertIsNotNone(series, ot_idx)
+                    assert series is not None
+                    self.assertAlmostEqual(series[-1], final_values[ot_idx], places=5)
+
     def test_ref_raw_zero_dynamic_ot_entries_are_missing_not_zero_constants(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
@@ -708,6 +831,187 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertIsNotNone(series)
         assert series is not None
         self.assertTrue(all(math.isnan(value) for value in series))
+
+    def test_ref_section6_post_ref_records_are_16_byte_ot_width_records(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        records = ref.parse_section6_post_ref_records()
+
+        self.assertIsNotNone(records)
+        assert records is not None
+        self.assertEqual(len(records), 226)
+        self.assertEqual(records[0].file_offset, 0x2020C)
+        self.assertEqual(records[0].words, [0x05EA9ED0, 1817, 7, 0])
+        self.assertEqual(ref.section6_class_code_start(), 0x2102C)
+
+        codes = ref.section6_ot_class_codes()
+        self.assertIsNotNone(codes)
+        assert codes is not None
+        self.assertTrue(all(0 <= record.maybe_ot_index() < ref.offset_table_count for record in records))
+        self.assertEqual(
+            {codes[record.maybe_ot_index()] for record in records},
+            {0x11, 0x16},
+        )
+        self.assertEqual(
+            {record.maybe_block_width() for record in records},
+            {1, 3, 7},
+        )
+
+    def test_ref_section6_post_ref_records_form_lookup_rooted_linked_lists(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        records = ref.parse_section6_post_ref_records()
+        chains = ref.parse_section6_post_ref_chains()
+
+        self.assertIsNotNone(records)
+        self.assertIsNotNone(chains)
+        assert records is not None
+        assert chains is not None
+        self.assertEqual(len(chains), 72)
+        self.assertEqual(sum(len(chain.records) for chain in chains), len(records))
+
+        length_counts: dict[int, int] = {}
+        for chain in chains:
+            length_counts[len(chain.records)] = length_counts.get(len(chain.records), 0) + 1
+        self.assertEqual(length_counts, {1: 30, 2: 7, 3: 28, 14: 7})
+
+        record_refs = {
+            ref.section6_offset_to_word_ref(record.file_offset)
+            for record in records
+        }
+        chain_refs = {
+            ref.section6_offset_to_word_ref(record.file_offset)
+            for chain in chains
+            for record in chain.records
+        }
+        self.assertEqual(chain_refs, record_refs)
+        self.assertEqual(min(record_refs), 3657)
+        self.assertEqual(max(record_refs) + 4, ref.section6_offset_to_word_ref(ref.section6_class_code_start()))
+
+        first = chains[0]
+        self.assertEqual(first.lookup_record_index, 9)
+        self.assertEqual(first.root_ref_word, 3661)
+        self.assertEqual([record.maybe_ot_index() for record in first.records], [3060, 1817])
+
+    def test_record_field11_is_lookup_record_index_for_graphical_descriptors(self) -> None:
+        lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        def record_by_name(vdf: vdf_xray.VdfFile, name: str) -> vdf_xray.VdfRecord:
+            key_to_name = vdf_xray.build_record_name_key_to_name_index(vdf)
+            for record in vdf.records:
+                name_idx = key_to_name.get(record.fields[2])
+                if name_idx is not None and vdf.names[name_idx] == name:
+                    return record
+            raise AssertionError(f"missing record for {name}")
+
+        lookup_records = lookup.section6_lookup_records()
+        self.assertIsNotNone(lookup_records)
+        assert lookup_records is not None
+        table_record = record_by_name(lookup, "lookup table 1")
+        stock_record = record_by_name(lookup, "stock")
+        self.assertEqual(table_record.fields[11], 1)
+        self.assertEqual(stock_record.fields[11], 1)
+        self.assertEqual(lookup_records[table_record.fields[11]].ot_index(), 5)
+
+        ref_lookup_records = ref.section6_lookup_records()
+        self.assertIsNotNone(ref_lookup_records)
+        assert ref_lookup_records is not None
+        rs_n2o = record_by_name(ref, "RS N2O")
+        self.assertEqual(rs_n2o.fields[11], 113)
+        self.assertEqual(ref_lookup_records[rs_n2o.fields[11]].ot_index(), 2278)
+
+    def test_field11_union_facts_expose_owner_and_lookup_interpretations(self) -> None:
+        lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
+        facts = {
+            fact.name: fact
+            for fact in vdf_xray.decoded_field11_union_facts(lookup)
+        }
+
+        table = facts["lookup table 1"]
+        stock = facts["stock"]
+        self.assertEqual((table.owner_start, table.owner_end), (1, 2))
+        self.assertEqual((stock.owner_start, stock.owner_end), (1, 2))
+        self.assertEqual(table.lookup_index, 1)
+        self.assertEqual(stock.lookup_index, 1)
+        self.assertEqual(table.lookup_ot_index, 5)
+        self.assertEqual(stock.lookup_ot_index, 5)
+        self.assertEqual(table.lookup_width, 1)
+        self.assertEqual(stock.lookup_width, 1)
+        self.assertTrue(table.lookup_width_matches_shape)
+        self.assertTrue(stock.lookup_width_matches_shape)
+
+    def test_ref_field11_union_facts_pin_lookup_descriptor_payload(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+        facts = {
+            fact.name: fact
+            for fact in vdf_xray.decoded_field11_union_facts(ref)
+        }
+
+        rs_n2o = facts["RS N2O"]
+        self.assertEqual((rs_n2o.owner_start, rs_n2o.owner_end), (113, 120))
+        self.assertEqual(rs_n2o.lookup_index, 113)
+        self.assertEqual(rs_n2o.lookup_ot_index, 2278)
+        self.assertEqual(rs_n2o.lookup_width, 7)
+        self.assertEqual(rs_n2o.lookup_dependency_ref_word, 4229)
+        self.assertTrue(rs_n2o.lookup_width_matches_shape)
+
+        c_af = facts["C AF Sequestered"]
+        self.assertEqual((c_af.owner_start, c_af.owner_end), (113, 116))
+        self.assertEqual(c_af.lookup_index, 113)
+        self.assertEqual(c_af.lookup_ot_index, 2278)
+        self.assertEqual(c_af.lookup_width, 7)
+        self.assertFalse(c_af.lookup_width_matches_shape)
+
+    def test_field11_union_facts_treat_zero_as_valid_lookup_index(self) -> None:
+        mark2 = parse_fixture("test/bobby/vdf/econ/mark2.vdf")
+        facts = {
+            fact.name: fact
+            for fact in vdf_xray.decoded_field11_union_facts(mark2)
+        }
+
+        federal = facts["federal funds rate lookup"]
+        self.assertIsNone(federal.owner_start)
+        self.assertEqual(federal.raw_field11, 0)
+        self.assertEqual(federal.lookup_index, 0)
+        self.assertEqual(federal.lookup_ot_index, 39)
+        self.assertEqual(federal.lookup_width, 1)
+        self.assertTrue(federal.lookup_width_matches_shape)
+
+    def test_field11_union_correlations_link_records_to_lookup_outputs(self) -> None:
+        lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
+        rows = {
+            row.fact.name: row
+            for row in vdf_xray.decoded_field11_union_correlations(lookup)
+        }
+
+        table = rows["lookup table 1"]
+        stock = rows["stock"]
+        self.assertEqual(table.closest_output_span.name, "net change")
+        self.assertEqual(stock.closest_output_span.name, "net change")
+        self.assertEqual(table.output_sort_delta, 2)
+        self.assertEqual(stock.output_sort_delta, 13)
+        self.assertEqual(table.overlap_component_id, stock.overlap_component_id)
+        self.assertEqual(
+            {span.name for span in table.overlap_component_spans},
+            {"lookup table 1", "stock"},
+        )
+
+    def test_field11_union_correlations_surface_ref_sort_proximity_counterexample(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+        rows = {
+            row.fact.name: row
+            for row in vdf_xray.decoded_field11_union_correlations(ref)
+        }
+
+        solar = rows["Solar and albedo forcings"]
+        humus = rows["C in Humus"]
+        self.assertEqual(solar.fact.lookup_index, humus.fact.lookup_index)
+        self.assertEqual(solar.closest_output_span.name, "Adjusted Other Forcings")
+        self.assertEqual(humus.closest_output_span.name, "Adjusted Other Forcings")
+        self.assertEqual(solar.output_sort_delta, 2778)
+        self.assertEqual(humus.output_sort_delta, 224)
+        self.assertEqual(solar.overlap_component_id, humus.overlap_component_id)
 
     def test_run2_name_mapping_emits_empty_mapping_when_no_model_records(self) -> None:
         run2 = parse_fixture("test/bobby/vdf/model_editing/run_2.vdf")
@@ -884,6 +1188,75 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
         self.assertNotIn("a stock[0]", names)
 
+    def test_precision_report_marks_easy_array_file_exact_by_xray(self) -> None:
+        subscripts = parse_fixture("test/bobby/vdf/subscripts/subscripts.vdf")
+
+        report = vdf_xray.precision_report(subscripts)
+
+        self.assertEqual(report.status, "exact-by-xray")
+        self.assertEqual(report.reasons, [])
+        self.assertGreater(report.array_result_count, 0)
+        self.assertEqual(report.duplicate_result_name_count, 0)
+        self.assertEqual(report.duplicate_result_ot_count, 0)
+        self.assertEqual(report.numeric_array_label_count, 0)
+        self.assertEqual(report.record_span_overlap_slots, 0)
+        self.assertEqual(report.unmapped_block_count, 0)
+        self.assertEqual(report.data_block_tail_mismatches, 0)
+
+    def test_precision_report_surfaces_not_proven_blockers(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        report = vdf_xray.precision_report(ref)
+
+        self.assertEqual(report.status, "not-proven")
+        self.assertIn("record-span-overlap", report.reasons)
+        self.assertIn("numeric-array-labels", report.reasons)
+        self.assertIn("incomplete-dimension-anchors", report.reasons)
+        self.assertGreater(report.record_span_overlap_slots, 0)
+        self.assertEqual(report.unmapped_block_count, 0)
+        self.assertGreater(report.numeric_array_label_count, 0)
+        self.assertGreater(report.incomplete_dimension_anchor_count, 0)
+        self.assertEqual(report.duplicate_result_name_count, 0)
+        self.assertEqual(report.duplicate_result_ot_count, 0)
+        self.assertEqual(report.data_block_tail_mismatches, 0)
+
+    def test_precision_report_tracks_mixed_bitmap_width_without_data_mismatch(self) -> None:
+        risk2 = parse_fixture("test/bobby/vdf/econ/risk2.vdf")
+
+        report = vdf_xray.precision_report(risk2)
+
+        self.assertEqual(report.status, "not-proven")
+        self.assertIn("record-span-overlap", report.reasons)
+        self.assertEqual(report.unmapped_block_count, 0)
+        self.assertEqual(report.bitmap_widths, [27, 29])
+        self.assertEqual(report.data_block_decode_failures, 0)
+        self.assertEqual(report.data_block_tail_mismatches, 0)
+
+    def test_corpus_precision_rows_cover_tracked_result_and_dataset_vdfs(self) -> None:
+        rows = vdf_xray.corpus_precision_rows(REPO_ROOT)
+        by_path = {row.path: row for row in rows}
+
+        self.assertEqual(len(rows), 41)
+        self.assertEqual(
+            by_path["test/bobby/vdf/econ/data.vdf"].status,
+            "dataset/not-implemented",
+        )
+        self.assertEqual(
+            by_path["test/bobby/vdf/subscripts/subscripts.vdf"].status,
+            "exact-by-xray",
+        )
+        self.assertEqual(
+            by_path["test/xmutil_test_models/Ref.vdf"].status,
+            "not-proven",
+        )
+
+        status_counts: dict[str, int] = {}
+        for row in rows:
+            status_counts[row.status] = status_counts.get(row.status, 0) + 1
+        self.assertEqual(status_counts["exact-by-xray"], 31)
+        self.assertEqual(status_counts["not-proven"], 9)
+        self.assertEqual(status_counts["dataset/not-implemented"], 1)
+
     def test_record_field8_recovers_dimension_element_groups(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
@@ -928,6 +1301,53 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             dims["Aggregated Regions"],
             ["Developed Countries", "Developing A Countries", "Developing B Countries"],
         )
+
+    def test_record_field8_exposes_incomplete_dimension_anchors(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        anchors = {
+            anchor.name: anchor
+            for anchor in vdf_xray.decoded_record_dimension_anchors(ref)
+        }
+
+        self.assertEqual(anchors["COP"].status, "complete")
+        self.assertEqual(anchors["COP"].dimension_id, 3)
+        self.assertEqual([name for _, _, name in anchors["COP"].elements], [
+            "OECD US",
+            "OECD EU",
+            "G77 China",
+            "G77 India",
+            "Remaining Developed",
+            "Remaining Developing A",
+            "COP Developing B",
+        ])
+
+        # These are real dimension/subrange anchors, but the VDF records do
+        # not provide their element catalogs through the decoded field[8]
+        # element-record shape. They must stay visible as facts without being
+        # promoted into labels.
+        self.assertEqual(anchors["COP Developed"].status, "no-elements")
+        self.assertEqual(anchors["COP Developed"].dimension_id, 4)
+        self.assertEqual(anchors["lower"].status, "no-elements")
+        self.assertEqual(anchors["upper"].dimension_id, 22)
+
+        # `scenario` has only the saved/recorded element in this structure;
+        # the other element names exist in the name table but have no matching
+        # field[8] element records.
+        self.assertEqual(anchors["scenario"].status, "partial-single-element")
+        self.assertEqual(anchors["scenario"].dimension_id, 13)
+        self.assertEqual(
+            [name for _, _, name in anchors["scenario"].elements],
+            ["Deterministic"],
+        )
+
+        recovered = {
+            dim.name
+            for dim in vdf_xray._recover_dimension_sets(ref)
+        }
+        self.assertIn("COP", recovered)
+        self.assertNotIn("COP Developed", recovered)
+        self.assertNotIn("scenario", recovered)
 
     def test_run8_dimension_set_recovery_uses_record_groups_and_stock_sort_anchor(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
@@ -1190,6 +1610,27 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(by_name["inline lookup table"], 4)
         self.assertEqual(by_name["net change"], 5)
         self.assertNotEqual(by_name.get("lookup table 1"), 4)
+
+    def test_record_key_mapping_keeps_runtime_signature_names(self) -> None:
+        # Direct f[2] keys can point at saved runtime helper signatures. These
+        # are structural time-series owners, not display metadata to filter out.
+        base = parse_fixture("test/bobby/vdf/econ/base.vdf")
+
+        mapping = vdf_xray.map_names_to_owner_blocks(base)
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.unmapped_blocks, [])
+        self.assertIn(
+            "#LV1<DELAY1(insolvencyrisk,averagetimebeforedefault)#",
+            mapping.name_to_block,
+        )
+        self.assertEqual(
+            mapping.name_to_block[
+                "#LV1<DELAY1(insolvencyrisk,averagetimebeforedefault)#"
+            ].start,
+            1,
+        )
 
 
 if __name__ == "__main__":

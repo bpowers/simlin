@@ -13,9 +13,8 @@
 //!    dot-prefix name count exactly, so the partition aligns with the
 //!    dot-prefix partition of the name table.
 //!    The 1:1 alignment is NOT universal:
-//!    - Files edited to drop the trailing `.Control` view keep the view
-//!      header record but lose the dot-prefix name (`risk2.vdf`: 2 headers
-//!      vs 1 dot name).
+//!    - Edited files can keep view header records that no longer have a
+//!      simple 1:1 dot-prefix-name counterpart.
 //!    - Files re-saved from newer Vensim builds may keep a malformed
 //!      view-header record with `f[6]==0` and no sentinel pair
 //!      (`risk.vdf` rec[86]).

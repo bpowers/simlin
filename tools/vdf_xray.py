@@ -10,6 +10,7 @@ Usage:
     python tools/vdf_xray.py <path.vdf> [--section N] [--names] [--records]
                                          [--ot] [--blocks] [--data] [--all]
                                          [--raw-section N] [--json]
+    python tools/vdf_xray.py --corpus-precision [repo-root]
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from itertools import product
 import json
 import math
 import re
+import subprocess
 import struct
 import sys
 from dataclasses import dataclass, field
@@ -52,6 +54,10 @@ RECORD_HEADER_BLOCKS = 3
 RECORD_REGION_START_OFFSET = RECORD_PREAMBLE_BYTES + RECORD_HEADER_BLOCKS * RECORD_SIZE
 
 VDF_FILE_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x52])
+# Observed on local zambaqui sensitivity/optimization runs. The ordinary
+# eight-section result structures parse like 0x52 files, but bytes after the
+# normal sparse-block run contain additional payload we have not decoded.
+VDF_ALT_RESULT_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x53])
 VDF_DATASET_MAGIC = bytes([0x7F, 0xF7, 0x17, 0x41])
 VDF_SECTION_MAGIC = bytes([0xA1, 0x37, 0x4C, 0xBF])
 VDF_SENTINEL = 0xF6800000
@@ -69,6 +75,8 @@ VENSIM_BUILTINS = {
     "delay3", "smooth", "smooth3", "trend", "sum", "prod", "product",
     "vmin", "vmax", "elmcount",
 }
+
+NUMERIC_ARRAY_LABEL_RE = re.compile(r"\[(?:\d+)(?:,\d+)*\]$")
 
 SECTION_ROLES = [
     "simulation command",
@@ -127,6 +135,7 @@ class VdfRecord:
         return self.fields[12]
 
     def ot_index(self) -> int:
+        """field[11] under the owner-record interpretation."""
         return self.fields[11]
 
     def is_arrayed(self) -> bool:
@@ -229,6 +238,34 @@ class LookupRecord:
     def ot_index(self) -> int:
         return self.words[10]
 
+    def output_width(self) -> int:
+        return self.words[11]
+
+    def dependency_ref_word(self) -> int:
+        return self.words[12]
+
+
+@dataclass
+class Section6PostRefRecord:
+    file_offset: int
+    words: list[int]  # 4 x u32
+
+    def maybe_ot_index(self) -> int:
+        return self.words[1]
+
+    def maybe_block_width(self) -> int:
+        return self.words[2]
+
+    def next_ref_word(self) -> int:
+        return self.words[3]
+
+
+@dataclass
+class Section6PostRefChain:
+    lookup_record_index: int
+    root_ref_word: int
+    records: list[Section6PostRefRecord]
+
 
 @dataclass
 class SlotReferenceInfo:
@@ -270,6 +307,29 @@ class RecoveredDimensionSet:
     elements: list[str]
     sec5_index: Optional[int]
     source: str = "sec5"
+
+
+@dataclass
+class RecordDimensionAnchor:
+    """
+    Direct record-field[8] dimension-anchor fact.
+
+    For f[6]=0 dimension metadata records, f[11] is observed as a compact
+    dimension/subscript identifier, not an OT start. Element records in the
+    same f[8] group use f[11] as their zero-based element index.
+    """
+    name: str
+    group_id: int
+    record_index: int
+    dimension_id: int
+    elements: list[tuple[int, int, str]]
+    status: str
+
+
+@dataclass(frozen=True)
+class NameTableEntry:
+    name: str
+    string_offset: int
 
 
 @dataclass
@@ -337,6 +397,69 @@ class DecodedRecordSpan:
 
     def length(self) -> int:
         return self.end - self.start
+
+
+@dataclass
+class RecordSpanOverlapComponent:
+    component_id: int
+    start: int
+    end: int
+    spans: list[DecodedRecordSpan]
+
+
+@dataclass
+class Field11UnionFact:
+    """
+    Direct record `field[11]` interpretation candidates.
+
+    This deliberately does not decide which interpretation is correct. It only
+    reports whether the same raw word is structurally valid as an owner OT
+    start, as a section-6 lookup-record index, or both.
+    """
+    rec_idx: int
+    name_idx: int
+    name: str
+    raw_field11: int
+    shape_code: int
+    shape_length: Optional[int]
+    sort_key: int
+    slot_ref: int
+    has_sentinel: bool
+    owner_start: Optional[int]
+    owner_end: Optional[int]
+    owner_ot_codes: list[int]
+    lookup_index: Optional[int]
+    lookup_ot_index: Optional[int]
+    lookup_width: Optional[int]
+    lookup_dependency_ref_word: Optional[int]
+
+    @property
+    def lookup_width_matches_shape(self) -> bool:
+        return (
+            self.shape_length is not None
+            and self.lookup_width is not None
+            and self.lookup_width == self.shape_length
+        )
+
+
+@dataclass
+class Field11UnionCorrelation:
+    """
+    Diagnostic relation between an ambiguous `field[11]` record and its lookup
+    record's evaluated output OT.
+
+    This is not an owner/descriptor decision. It keeps the relation explicit so
+    fixture runs can show where output-sort proximity is strong evidence and
+    where it fails as a general discriminator.
+    """
+    fact: Field11UnionFact
+    output_spans: list[DecodedRecordSpan]
+    closest_output_span: Optional[DecodedRecordSpan]
+    output_sort_delta: Optional[int]
+    overlap_component_id: Optional[int]
+    overlap_component_start: Optional[int]
+    overlap_component_end: Optional[int]
+    overlap_component_spans: list[DecodedRecordSpan]
 
 
 @dataclass
@@ -603,14 +726,169 @@ class VdfFile:
     def parse_section6_ref_stream(self) -> Optional[tuple[int, list[RefListEntry], int]]:
         if len(self.sections) <= 6:
             return None
-        best = (0, [], 0)
-        for skip in range(9):
-            entries, stop = self._section6_ref_stream_with_skip(skip)
-            if len(entries) > len(best[1]) or (
-                len(entries) == len(best[1]) and entries and stop > best[2]
-            ):
-                best = (skip, entries, stop)
-        return best
+        sec = self.sections[6]
+        skip = max(0, sec.field4 - 1)
+        entries, stop = self._section6_ref_stream_with_skip(skip)
+        return skip, entries, stop
+
+    def section6_class_code_start(self) -> Optional[int]:
+        if self.offset_table_count == 0:
+            return None
+        fv_off = self.header_final_values_offset
+        if fv_off < self.offset_table_count or fv_off > len(self.data):
+            return None
+        return fv_off - self.offset_table_count
+
+    def section6_class_code_start_from_field1(self) -> Optional[int]:
+        """
+        Decode the section-6 class-code start from the section header.
+
+        For simulation-result fixtures, section 6 header field1 is a 1-based
+        word index from the section magic to the OT class-code byte array:
+        `sec6.file_offset + 4 * (field1 - 1)`.
+        """
+        if len(self.sections) <= 6:
+            return None
+        sec = self.sections[6]
+        if sec.field1 == 0:
+            return None
+        return sec.file_offset + 4 * (sec.field1 - 1)
+
+    def section7_offset_table_start_from_field1(self) -> Optional[int]:
+        """
+        Decode the section-7 offset-table start from the section header.
+
+        For simulation-result fixtures, section 7 header field1 is a 1-based
+        word index from the section magic to the offset table:
+        `sec7.file_offset + 4 * (field1 - 1)`.
+        """
+        if len(self.sections) <= 7:
+            return None
+        sec = self.sections[7]
+        if sec.field1 == 0:
+            return None
+        return sec.file_offset + 4 * (sec.field1 - 1)
+
+    def section1_slot_area_offset_from_field1(self) -> Optional[int]:
+        """
+        Observed section-1 slot/reference area pointer.
+
+        This lands at or inside the u32 slot/ref area before the name table.
+        It is not yet the solved visible slot-table start on all edited files:
+        some fixtures have leading helper/stale entries before the visible
+        suffix selected by `find_slot_table`.
+        """
+        if len(self.sections) <= 1:
+            return None
+        sec = self.sections[1]
+        if sec.field1 == 0:
+            return None
+        return sec.file_offset + 4 * (sec.field1 - 1)
+
+    def parse_section6_post_ref_records(self) -> Optional[list[Section6PostRefRecord]]:
+        """
+        Parse the 16-byte record stream between the section-6 ref stream and
+        the OT class-code array.
+
+        Observed records are four little-endian u32 words. In Ref.vdf this
+        stream is a linked-list node pool rooted from section-6 lookup records:
+        word[1] is an OT start, word[2] is a width, and word[3] is a 1-based
+        section-6 word pointer to the next node, or zero.
+        """
+        result = self.parse_section6_ref_stream()
+        cc_start = self.section6_class_code_start()
+        if result is None or cc_start is None:
+            return None
+
+        start = result[2]
+        if start > cc_start:
+            return None
+        byte_len = cc_start - start
+        if byte_len == 0:
+            return []
+        if byte_len % 16 != 0:
+            return None
+
+        records: list[Section6PostRefRecord] = []
+        for offset in range(start, cc_start, 16):
+            records.append(Section6PostRefRecord(
+                file_offset=offset,
+                words=[u32(self.data, offset + i * 4) for i in range(4)],
+            ))
+        return records
+
+    def section6_word_ref_to_offset(self, ref_word: int) -> Optional[int]:
+        """
+        Decode a 1-based section-6 word reference.
+
+        Ref.vdf uses this pointer form for lookup-record dependency-list roots
+        and post-ref node `next` links: `sec6.file_offset + 4 * (ref_word - 1)`.
+        """
+        if len(self.sections) <= 6 or ref_word == 0:
+            return None
+        sec = self.sections[6]
+        offset = sec.file_offset + 4 * (ref_word - 1)
+        if offset < sec.file_offset or offset >= sec.region_end:
+            return None
+        return offset
+
+    def section6_offset_to_word_ref(self, offset: int) -> Optional[int]:
+        if len(self.sections) <= 6:
+            return None
+        sec = self.sections[6]
+        rel = offset - sec.file_offset
+        if rel < 0 or rel % 4 != 0 or offset >= sec.region_end:
+            return None
+        return rel // 4 + 1
+
+    def parse_section6_post_ref_chains(self) -> Optional[list[Section6PostRefChain]]:
+        """
+        Decode post-ref records as lookup-rooted linked lists when possible.
+
+        Each section-6 lookup record's word[12] is either zero or a 1-based
+        section-6 word pointer to a post-ref record. Each post-ref record's
+        word[3] is the next pointer in that list. This returns None if a
+        nonzero pointer targets outside the parsed post-ref record pool or if
+        a cycle is encountered.
+        """
+        records = self.parse_section6_post_ref_records()
+        lookup_records = self.section6_lookup_records()
+        if records is None or lookup_records is None:
+            return None
+
+        by_ref_word: dict[int, Section6PostRefRecord] = {}
+        for record in records:
+            ref_word = self.section6_offset_to_word_ref(record.file_offset)
+            if ref_word is None:
+                return None
+            by_ref_word[ref_word] = record
+
+        chains: list[Section6PostRefChain] = []
+        for lookup_idx, lookup_record in enumerate(lookup_records):
+            root = lookup_record.dependency_ref_word()
+            if root == 0:
+                continue
+
+            chain: list[Section6PostRefRecord] = []
+            seen: set[int] = set()
+            ref_word = root
+            while ref_word != 0:
+                if ref_word in seen:
+                    return None
+                record = by_ref_word.get(ref_word)
+                if record is None:
+                    return None
+                seen.add(ref_word)
+                chain.append(record)
+                ref_word = record.next_ref_word()
+
+            chains.append(Section6PostRefChain(
+                lookup_record_index=lookup_idx,
+                root_ref_word=root,
+                records=chain,
+            ))
+
+        return chains
 
     def section6_ot_class_codes(self) -> Optional[list[int]]:
         if self.offset_table_count == 0:
@@ -732,6 +1010,33 @@ class VdfFile:
             positions.append(pos)
         return positions
 
+    def _block_bitmap_layout(self, block_offset: int, count: int) -> tuple[int, int]:
+        """
+        Decode the bitmap width for a data block from its declared value count.
+
+        Edited econ runs can mix saved-suffix blocks and full-grid blocks in
+        the same file. The C-readable invariant is that the block's u16 count
+        equals the popcount of the bitmap bytes that precede its f32 payload.
+        Prefer the compact saved-time bitmap when both widths happen to match.
+        """
+        candidates: list[tuple[int, int]] = [
+            (self.bitmap_size, self.time_point_count),
+            (self.block_bitmap_size, self.block_time_point_count),
+        ]
+        seen_sizes: set[int] = set()
+        for bitmap_size, grid_count in candidates:
+            if bitmap_size in seen_sizes:
+                continue
+            seen_sizes.add(bitmap_size)
+            bm_start = block_offset + 2
+            bm_end = bm_start + bitmap_size
+            if bm_end > len(self.data):
+                continue
+            bit_count = sum(byte.bit_count() for byte in self.data[bm_start:bm_end])
+            if bit_count == count:
+                return bitmap_size, grid_count
+        return self.block_bitmap_size, self.block_time_point_count
+
     def extract_block_series(self, block_offset: int, time_values: list[float]) -> list[float]:
         if block_offset == self.first_data_block:
             extracted = self.extract_time_values()
@@ -739,11 +1044,11 @@ class VdfFile:
                 return [float("nan")] * len(time_values)
             return extracted
 
-        step_count = self.block_time_point_count
         count = u16(self.data, block_offset)
+        bitmap_size, step_count = self._block_bitmap_layout(block_offset, count)
         bm_start = block_offset + 2
-        data_start = bm_start + self.block_bitmap_size
-        if bm_start + self.block_bitmap_size > len(self.data):
+        data_start = bm_start + bitmap_size
+        if data_start > len(self.data):
             return [float("nan")] * len(time_values)
 
         series = [float("nan")] * step_count
@@ -761,7 +1066,10 @@ class VdfFile:
                 data_idx += 1
             series[time_idx] = last_val
 
-        positions = self._block_positions_for_time_values(time_values)
+        if step_count == len(time_values):
+            positions = list(range(len(time_values)))
+        else:
+            positions = self._block_positions_for_time_values(time_values)
         return [
             series[pos] if 0 <= pos < len(series) else float("nan")
             for pos in positions
@@ -1758,21 +2066,25 @@ def _valid_record_dimension_group_id(group_id: int) -> bool:
     return group_id not in (0, VDF_SENTINEL)
 
 
-def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+def decoded_record_dimension_anchors(vdf: VdfFile) -> list[RecordDimensionAnchor]:
     """
-    Recover dimension element lists from record field[8] grouping.
+    Return direct dimension-anchor facts from record field[8] grouping.
 
     In observed array fixtures, dimension anchors and their element records
     share record field[8]. Element records carry field[12]=124, field[10]=0,
     zero-based field[11] element indices, and do not carry the field[14]
     sentinel used by dimension anchors. This is deliberately stricter than
     "same group id" so view/unit/helper groups do not become dimensions.
+
+    A returned anchor is a fact even when its element catalog is incomplete.
+    `status == "complete"` is the narrower condition used for labeling array
+    elements without guessing.
     """
     key_to_name_idx = build_record_name_key_to_name_index(vdf)
     if not key_to_name_idx:
         return []
 
-    candidate_dims: dict[int, list[tuple[int, str]]] = {}
+    candidate_dims: dict[int, list[tuple[int, str, int]]] = {}
     element_groups: dict[int, list[tuple[int, int, str]]] = {}
 
     for rec_idx, rec in enumerate(vdf.records):
@@ -1798,39 +2110,85 @@ def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
             continue
 
         if rec.fields[14] == VDF_SENTINEL:
-            candidate_dims.setdefault(group_id, []).append((rec_idx, name))
+            candidate_dims.setdefault(group_id, []).append((rec_idx, name, rec.fields[11]))
 
-    dims: list[RecoveredDimensionSet] = []
-    for group_id in sorted(element_groups):
-        raw_elements = element_groups[group_id]
+    anchors: list[RecordDimensionAnchor] = []
+    for group_id in sorted(set(candidate_dims) | set(element_groups)):
+        raw_elements = element_groups.get(group_id, [])
         by_index: dict[int, str] = {}
+        by_record: dict[int, int] = {}
         duplicate_index = False
         for element_idx, _, name in raw_elements:
             previous = by_index.get(element_idx)
             if previous is not None and previous.lower() != name.lower():
                 duplicate_index = True
-                break
-            by_index[element_idx] = name
-        if duplicate_index or len(by_index) < 2:
-            continue
+            else:
+                by_index[element_idx] = name
+        for element_idx, rec_idx, _ in raw_elements:
+            by_record.setdefault(element_idx, rec_idx)
 
         ordered_indices = sorted(by_index)
-        if ordered_indices != list(range(len(ordered_indices))):
-            continue
+        ordered_elements = [
+            (element_idx, by_record[element_idx], by_index[element_idx])
+            for element_idx in ordered_indices
+        ]
 
-        candidates: list[tuple[int, str]] = []
+        candidates: list[tuple[int, str, int]] = []
         seen_candidates: set[str] = set()
-        for rec_idx, name in sorted(candidate_dims.get(group_id, [])):
+        for rec_idx, name, dimension_id in sorted(candidate_dims.get(group_id, [])):
             key = name.lower()
             if key in seen_candidates:
                 continue
             seen_candidates.add(key)
-            candidates.append((rec_idx, name))
+            candidates.append((rec_idx, name, dimension_id))
+
         if len(candidates) != 1:
+            status = "ambiguous-anchor"
+        elif duplicate_index:
+            status = "duplicate-element-index"
+        elif not ordered_indices:
+            status = "no-elements"
+        elif ordered_indices != list(range(len(ordered_indices))):
+            status = "noncontiguous-elements"
+        elif len(ordered_indices) < 2:
+            status = "partial-single-element"
+        else:
+            status = "complete"
+
+        for rec_idx, name, dimension_id in candidates:
+            anchors.append(RecordDimensionAnchor(
+                name=name,
+                group_id=group_id,
+                record_index=rec_idx,
+                dimension_id=dimension_id,
+                elements=ordered_elements,
+                status=status,
+            ))
+
+    return anchors
+
+
+def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+    """
+    Recover complete dimension element lists from record field[8] grouping.
+
+    This consumes only `decoded_record_dimension_anchors(..., status=complete)`.
+    Incomplete anchors are real metadata, but they are not enough to label
+    array elements without an additional decoded subrange relation.
+    """
+    dims: list[RecoveredDimensionSet] = []
+    for anchor in decoded_record_dimension_anchors(vdf):
+        if anchor.status != "complete":
+            continue
+        by_index = {element_idx: name for element_idx, _, name in anchor.elements}
+        ordered_indices = sorted(by_index)
+        if ordered_indices != list(range(len(ordered_indices))):
+            continue
+        if len(ordered_indices) < 2:
             continue
 
         dims.append(RecoveredDimensionSet(
-            name=candidates[0][1],
+            name=anchor.name,
             elements=[by_index[i] for i in ordered_indices],
             sec5_index=None,
             source="record-field8",
@@ -1943,8 +2301,8 @@ def visible_variable_candidates(vdf: VdfFile) -> list[str]:
 @dataclass
 class NameMapping:
     """Result of the current record-key owner-to-OT reconstruction."""
-    variable_names: list[str]  # Alphabetically sorted variable names
-    owner_blocks: list[OwnerRecordBlock]  # Sort-key ordered visible blocks
+    variable_names: list[str]  # Alphabetically sorted structural result names
+    owner_blocks: list[OwnerRecordBlock]  # Sort-key ordered owner blocks
     name_to_block: dict[str, OwnerRecordBlock]
     system_ot_indices: set[int]  # OT indices owned by system variables
     unmapped_blocks: list[OwnerRecordBlock]  # Blocks that couldn't be mapped
@@ -1961,17 +2319,24 @@ def _name_looks_lookupish(name: str) -> bool:
 
 
 def _name_allowed_for_block(name: str, block: OwnerRecordBlock, *,
-                            excluded_names: Optional[set[str]] = None) -> bool:
-    if classify_name(name):
+                            excluded_names: Optional[set[str]] = None,
+                            allow_stock_lookupish: bool = False) -> bool:
+    if not name:
         return False
-    if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+    if name in VENSIM_MODULE_NAMES:
         return False
     if excluded_names is not None and name.lower() in excluded_names:
+        return False
+    # Only display/navigation metadata is excluded structurally. Quoted names,
+    # builtin-looking names, stdlib helpers, and #...# runtime signatures can
+    # carry direct record-key OT bindings and must remain extractable.
+    if name.startswith((".", "-", ":")):
         return False
     # Lookup/table names that land on stock-coded owner blocks behave like
     # internal aliases, not visible stock variables. Keep them out of the
     # stock ordering pass; standalone lookup extraction is handled separately.
     if (
+        not allow_stock_lookupish and
         block.ot_codes
         and all(code == OT_CODE_STOCK for code in block.ot_codes)
         and _name_looks_lookupish(name)
@@ -2320,29 +2685,13 @@ def build_record_name_key_to_name_index(vdf: VdfFile) -> dict[int, int]:
     if not vdf.names:
         return {}
 
-    first_len = (sec.field5 >> 16) & 0xFFFF
-    if first_len == 0 or data_start + first_len > len(vdf.data):
-        return {}
-
     out: dict[int, int] = {}
-    out[7] = 0
-
-    pos = data_start + first_len
-    name_idx = 1
-    while name_idx < len(vdf.names) and pos + 2 <= parse_end:
-        length = u16(vdf.data, pos)
-        pos += 2
-        if length == 0:
-            continue
-        if pos + length > parse_end or length > 256:
+    for name_idx, entry in enumerate(_parse_name_table_entries(vdf.data, sec, parse_end)):
+        if name_idx >= len(vdf.names):
             break
-
-        start_rel = pos - data_start
+        start_rel = entry.string_offset - data_start
         if start_rel % 4 == 0:
             out[start_rel // 4 + 7] = name_idx
-
-        pos += length
-        name_idx += 1
 
     return out
 
@@ -2355,11 +2704,12 @@ def decoded_record_spans(vdf: VdfFile) -> list[DecodedRecordSpan]:
     non-overlap selection, name-category filtering, and array label guessing.
     A span here means only that a record carries:
     - f[2] resolving through the decoded section-2 name key formula;
-    - an in-range f[11] OT start;
+    - an in-range f[11] under the owner OT-start interpretation;
     - a non-zero f[6] shape code whose span is structurally decoded.
 
     Whether that record is an emitted user-facing series owner remains a
-    separate question when spans overlap or names are descriptor-like.
+    separate question when spans overlap or when f[11] is a lookup-record
+    index rather than an owner OT start.
     """
     key_to_name_idx = build_record_name_key_to_name_index(vdf)
     codes = vdf.section6_ot_class_codes() or []
@@ -2401,6 +2751,200 @@ def record_span_overlaps(spans: list[DecodedRecordSpan]) -> dict[int, list[Decod
     return {ot_idx: hits for ot_idx, hits in by_ot.items() if len(hits) > 1}
 
 
+def record_span_overlap_components(spans: list[DecodedRecordSpan]) -> list[RecordSpanOverlapComponent]:
+    """
+    Return connected components of direct spans that overlap in OT space.
+
+    Components are built only from actual overlapping OT slots, not from
+    adjacent ranges. This keeps the diagnostic tied to the unresolved
+    owner/descriptor conflict rather than to normal neighboring variables.
+    """
+    overlaps = record_span_overlaps(spans)
+    if not overlaps:
+        return []
+
+    span_idx_by_rec = {span.rec_idx: idx for idx, span in enumerate(spans)}
+    adjacency: dict[int, set[int]] = {idx: set() for idx in range(len(spans))}
+    for hits in overlaps.values():
+        indices = [
+            span_idx_by_rec[span.rec_idx]
+            for span in hits
+            if span.rec_idx in span_idx_by_rec
+        ]
+        for idx in indices:
+            adjacency[idx].update(other for other in indices if other != idx)
+
+    raw_components: list[list[DecodedRecordSpan]] = []
+    seen: set[int] = set()
+    for idx in range(len(spans)):
+        if idx in seen or not adjacency[idx]:
+            continue
+        stack = [idx]
+        component_indices: set[int] = set()
+        seen.add(idx)
+        while stack:
+            current = stack.pop()
+            component_indices.add(current)
+            for other in adjacency[current]:
+                if other in seen:
+                    continue
+                seen.add(other)
+                stack.append(other)
+
+        raw_components.append(sorted(
+            (spans[i] for i in component_indices),
+            key=lambda span: (span.start, span.end, span.rec_idx),
+        ))
+
+    raw_components.sort(key=lambda component: (
+        min(span.start for span in component),
+        max(span.end for span in component),
+        min(span.rec_idx for span in component),
+    ))
+
+    components: list[RecordSpanOverlapComponent] = []
+    for component_id, component_spans in enumerate(raw_components):
+        components.append(RecordSpanOverlapComponent(
+            component_id=component_id,
+            start=min(span.start for span in component_spans),
+            end=max(span.end for span in component_spans),
+            spans=component_spans,
+        ))
+    return components
+
+
+def decoded_field11_union_facts(vdf: VdfFile) -> list[Field11UnionFact]:
+    """
+    Return direct `field[11]` owner-vs-lookup interpretation candidates.
+
+    A `field[11]` word can be a valid OT start, a valid section-6 lookup
+    record index, or both. Lookup-record indices are zero-based, while OT[0]
+    is Time and is not a record owner start. This function keeps those checks
+    independent so callers can inspect the unresolved union without descriptor
+    pruning, non-overlap owner selection, or name filtering.
+    """
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    lookup_records = vdf.section6_lookup_records() or []
+    codes = vdf.section6_ot_class_codes() or []
+    facts: list[Field11UnionFact] = []
+
+    for rec_idx, rec in enumerate(vdf.records):
+        name_idx = key_to_name_idx.get(rec.fields[2])
+        if name_idx is None:
+            continue
+
+        raw = rec.fields[11]
+        shape_length = decoded_record_shape_length(vdf, rec)
+
+        owner_start: Optional[int] = None
+        owner_end: Optional[int] = None
+        owner_ot_codes: list[int] = []
+        if (
+            shape_length is not None
+            and shape_length > 0
+            and 0 < raw < vdf.offset_table_count
+            and raw + shape_length <= vdf.offset_table_count
+        ):
+            owner_start = raw
+            owner_end = raw + shape_length
+            owner_ot_codes = codes[owner_start:owner_end]
+
+        lookup_index: Optional[int] = None
+        lookup_ot_index: Optional[int] = None
+        lookup_width: Optional[int] = None
+        lookup_dependency_ref_word: Optional[int] = None
+        if raw < len(lookup_records):
+            lookup = lookup_records[raw]
+            lookup_index = raw
+            lookup_ot_index = lookup.ot_index()
+            lookup_width = lookup.output_width()
+            lookup_dependency_ref_word = lookup.dependency_ref_word()
+
+        if owner_start is None and lookup_index is None:
+            continue
+
+        facts.append(Field11UnionFact(
+            rec_idx=rec_idx,
+            name_idx=name_idx,
+            name=vdf.names[name_idx],
+            raw_field11=raw,
+            shape_code=rec.shape_code(),
+            shape_length=shape_length,
+            sort_key=rec.fields[10],
+            slot_ref=rec.slot_ref(),
+            has_sentinel=rec.has_sentinel(),
+            owner_start=owner_start,
+            owner_end=owner_end,
+            owner_ot_codes=owner_ot_codes,
+            lookup_index=lookup_index,
+            lookup_ot_index=lookup_ot_index,
+            lookup_width=lookup_width,
+            lookup_dependency_ref_word=lookup_dependency_ref_word,
+        ))
+
+    return facts
+
+
+def decoded_field11_union_correlations(vdf: VdfFile) -> list[Field11UnionCorrelation]:
+    """
+    Correlate both-valid `field[11]` facts with lookup-record output OTs.
+
+    For each record whose `field[11]` is structurally valid both as an owner OT
+    start and as a zero-based lookup-record index, this reports the spans that
+    cover `lookup[field[11]].word[10]`. Output-sort proximity is useful
+    evidence on several fixtures, but Ref.vdf has counterexamples; callers
+    should treat this as an xray relation, not as the final discriminator.
+    """
+    spans = decoded_record_spans(vdf)
+    components = record_span_overlap_components(spans)
+    component_by_rec: dict[int, RecordSpanOverlapComponent] = {}
+    for component in components:
+        for span in component.spans:
+            component_by_rec[span.rec_idx] = component
+
+    rows: list[Field11UnionCorrelation] = []
+    for fact in decoded_field11_union_facts(vdf):
+        if (
+            fact.owner_start is None
+            or fact.lookup_index is None
+            or fact.lookup_ot_index is None
+        ):
+            continue
+
+        output_spans = [
+            span
+            for span in spans
+            if span.start <= fact.lookup_ot_index < span.end
+        ]
+        closest_output_span: Optional[DecodedRecordSpan] = None
+        output_sort_delta: Optional[int] = None
+        if output_spans:
+            closest_output_span = min(
+                output_spans,
+                key=lambda span: (
+                    0 if span.start == fact.lookup_ot_index else 1,
+                    0 if fact.lookup_width is not None and span.length() == fact.lookup_width else 1,
+                    abs(span.sort_key - fact.sort_key),
+                    span.rec_idx,
+                ),
+            )
+            output_sort_delta = abs(closest_output_span.sort_key - fact.sort_key)
+
+        component = component_by_rec.get(fact.rec_idx)
+        rows.append(Field11UnionCorrelation(
+            fact=fact,
+            output_spans=output_spans,
+            closest_output_span=closest_output_span,
+            output_sort_delta=output_sort_delta,
+            overlap_component_id=component.component_id if component is not None else None,
+            overlap_component_start=component.start if component is not None else None,
+            overlap_component_end=component.end if component is not None else None,
+            overlap_component_spans=component.spans if component is not None else [],
+        ))
+
+    return rows
+
+
 def _mapping_from_record_name_keys(
     vdf: VdfFile,
     visible_blocks: list[OwnerRecordBlock],
@@ -2435,27 +2979,43 @@ def _mapping_from_record_name_keys(
 
     for block in ordered_blocks:
         chosen: Optional[str] = None
-        for rec_idx in block.sentinel_record_indices:
-            name = rec_to_name.get(rec_idx)
-            if name is None or name in used_names:
-                continue
-            if _name_allowed_for_block(name, block, excluded_names=excluded_names):
-                chosen = name
-                break
-
-        for sort_key in block.attached_sort_keys:
+        for allow_stock_lookupish in (False, True):
+            for rec_idx in block.sentinel_record_indices:
+                name = rec_to_name.get(rec_idx)
+                if name is None or name in used_names:
+                    continue
+                if _name_allowed_for_block(
+                    name,
+                    block,
+                    excluded_names=excluded_names,
+                    allow_stock_lookupish=allow_stock_lookupish,
+                ):
+                    chosen = name
+                    break
             if chosen is not None:
                 break
-            candidates = [
-                name
-                for _, _, name in rec_sort_names.get(sort_key, [])
-                if (
-                    name not in used_names
-                    and _name_allowed_for_block(name, block, excluded_names=excluded_names)
-                )
-            ]
-            if candidates:
-                chosen = candidates[0]
+
+        for allow_stock_lookupish in (False, True):
+            for sort_key in block.attached_sort_keys:
+                if chosen is not None:
+                    break
+                candidates = [
+                    name
+                    for _, _, name in rec_sort_names.get(sort_key, [])
+                    if (
+                        name not in used_names
+                        and _name_allowed_for_block(
+                            name,
+                            block,
+                            excluded_names=excluded_names,
+                            allow_stock_lookupish=allow_stock_lookupish,
+                        )
+                    )
+                ]
+                if candidates:
+                    chosen = candidates[0]
+                    break
+            if chosen is not None:
                 break
 
         if chosen is None:
@@ -2545,6 +3105,68 @@ class NamedResult:
     name: str
     ot_index: int
     values: list[float]
+
+
+@dataclass
+class PrecisionReport:
+    """
+    Conservative extraction-precision report for the current xray decoder.
+
+    `exact-by-xray` means the Python decoder found no known blockers in the
+    VDF structures it currently understands. It is not a proof of the whole
+    file format; it is a precise statement about the current extraction path.
+    Any non-empty `reasons` list means the file remains `not-proven`.
+    """
+    status: str
+    reasons: list[str]
+    magic: str
+    header_text: str
+    header_year: Optional[int]
+    header_0x50: int
+    header_0x68: int
+    header_0x6c: int
+    header_0x70: int
+    header_0x74: int
+    time_point_count: int
+    block_time_point_count: int
+    names_total: int
+    slots_total: int
+    records_total: int
+    offset_table_count: int
+    result_count: int
+    duplicate_result_name_count: int
+    duplicate_result_ot_count: int
+    mapped_variable_count: int
+    array_result_count: int
+    numeric_array_label_count: int
+    record_span_count: int
+    record_span_overlap_slots: int
+    unmapped_block_count: int
+    dimension_anchor_count: int
+    incomplete_dimension_anchor_count: int
+    data_block_count: int
+    data_block_decode_failures: int
+    data_block_tail_mismatches: int
+    bitmap_widths: list[int]
+
+    def is_exact_by_xray(self) -> bool:
+        return self.status == "exact-by-xray"
+
+
+@dataclass
+class CorpusPrecisionRow:
+    path: str
+    status: str
+    reasons: list[str]
+    magic: str
+    year: Optional[int]
+    header_0x6c: Optional[int]
+    header_0x74: Optional[int]
+    names_total: Optional[int]
+    records_total: Optional[int]
+    offset_table_count: Optional[int]
+    result_count: Optional[int]
+    array_result_count: Optional[int]
 
 
 def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
@@ -2695,6 +3317,272 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
     return results
 
 
+def _header_text(data: bytes) -> str:
+    raw = data[4:0x78].split(b"\0", 1)[0]
+    return raw.decode("ascii", errors="replace")
+
+
+def _header_year(text: str) -> Optional[int]:
+    match = re.search(r"\b(19|20)\d{2}\b", text)
+    return int(match.group(0)) if match else None
+
+
+def _float_almost_equal(lhs: float, rhs: float) -> bool:
+    if math.isnan(lhs) or math.isnan(rhs):
+        return math.isnan(lhs) and math.isnan(rhs)
+    if math.isinf(lhs) or math.isinf(rhs):
+        return lhs == rhs
+    return abs(lhs - rhs) <= max(1e-5, 1e-6 * max(abs(lhs), abs(rhs), 1.0))
+
+
+def _data_block_precision_stats(
+    vdf: VdfFile,
+    time_values: Optional[list[float]],
+    codes: Optional[list[int]],
+    final_values: Optional[list[float]],
+) -> tuple[int, int, int, list[int]]:
+    data_blocks = 0
+    decode_failures = 0
+    tail_mismatches = 0
+    bitmap_widths: set[int] = set()
+
+    for ot_idx in range(vdf.offset_table_count):
+        raw = vdf.offset_table_entry(ot_idx)
+        if raw is None or not vdf.is_data_block_offset(raw):
+            continue
+
+        data_blocks += 1
+        if raw == vdf.first_data_block:
+            bitmap_widths.add(vdf.bitmap_size)
+        elif raw + 2 <= len(vdf.data):
+            count = u16(vdf.data, raw)
+            bitmap_width, _ = vdf._block_bitmap_layout(raw, count)
+            bitmap_widths.add(bitmap_width)
+
+        if time_values is None or final_values is None or ot_idx >= len(final_values):
+            decode_failures += 1
+            continue
+
+        series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+        if series is None or not series:
+            decode_failures += 1
+            continue
+        if not _float_almost_equal(series[-1], final_values[ot_idx]):
+            tail_mismatches += 1
+
+    return data_blocks, decode_failures, tail_mismatches, sorted(bitmap_widths)
+
+
+def precision_report(vdf: VdfFile) -> PrecisionReport:
+    """
+    Report whether current Python extraction has any known precision blockers.
+
+    The report is deliberately conservative. It marks files as `not-proven`
+    when owner spans overlap, owner blocks remain unmapped, array labels fall
+    back to numeric positions, incomplete dimension anchors are present, or
+    decoded data blocks fail the final-value tail check.
+    """
+    reasons: list[str] = []
+
+    if vdf.data[:4] == VDF_ALT_RESULT_MAGIC:
+        reasons.append("alt-result-extra-payload")
+    if len(vdf.sections) != 8:
+        reasons.append("section-count")
+
+    mapping = map_names_to_owner_blocks(vdf)
+    if mapping is None:
+        reasons.append("name-mapping-unavailable")
+
+    time_values = vdf.extract_time_values()
+    if time_values is None:
+        reasons.append("time-series-unavailable")
+
+    codes = vdf.section6_ot_class_codes()
+    if codes is None or len(codes) != vdf.offset_table_count:
+        reasons.append("ot-class-codes-unavailable")
+
+    final_values = vdf.section6_final_values()
+    if final_values is None or len(final_values) != vdf.offset_table_count:
+        reasons.append("final-values-unavailable")
+
+    results = extract_named_results(vdf)
+    if results is None:
+        reasons.append("named-results-unavailable")
+        results = []
+
+    result_name_counts: dict[str, int] = {}
+    result_ot_counts: dict[int, int] = {}
+    for result in results:
+        result_name_counts[result.name] = result_name_counts.get(result.name, 0) + 1
+        result_ot_counts[result.ot_index] = result_ot_counts.get(result.ot_index, 0) + 1
+    duplicate_result_name_count = sum(count - 1 for count in result_name_counts.values() if count > 1)
+    duplicate_result_ot_count = sum(count - 1 for count in result_ot_counts.values() if count > 1)
+    if duplicate_result_name_count:
+        reasons.append("duplicate-result-names")
+    if duplicate_result_ot_count:
+        reasons.append("duplicate-result-ots")
+
+    spans = decoded_record_spans(vdf)
+    overlaps = record_span_overlaps(spans)
+    if overlaps:
+        reasons.append("record-span-overlap")
+
+    unmapped_block_count = len(mapping.unmapped_blocks) if mapping is not None else 0
+    if unmapped_block_count:
+        reasons.append("unmapped-owner-blocks")
+
+    numeric_array_label_count = sum(
+        1 for result in results
+        if NUMERIC_ARRAY_LABEL_RE.search(result.name) is not None
+    )
+    if numeric_array_label_count:
+        reasons.append("numeric-array-labels")
+
+    anchors = decoded_record_dimension_anchors(vdf)
+    incomplete_anchor_count = sum(1 for anchor in anchors if anchor.status != "complete")
+    if incomplete_anchor_count:
+        reasons.append("incomplete-dimension-anchors")
+
+    data_blocks, decode_failures, tail_mismatches, bitmap_widths = _data_block_precision_stats(
+        vdf,
+        time_values,
+        codes,
+        final_values,
+    )
+    if decode_failures:
+        reasons.append("data-block-decode-failures")
+    if tail_mismatches:
+        reasons.append("data-block-tail-mismatch")
+
+    # Preserve order while dropping duplicate reason strings from cascading
+    # failures in partial parses.
+    reasons = list(dict.fromkeys(reasons))
+    status = "exact-by-xray" if not reasons else "not-proven"
+
+    array_result_count = sum(
+        1 for result in results
+        if "[" in result.name and result.name.endswith("]")
+    )
+
+    header_text = _header_text(vdf.data)
+    return PrecisionReport(
+        status=status,
+        reasons=reasons,
+        magic=vdf.data[:4].hex(),
+        header_text=header_text,
+        header_year=_header_year(header_text),
+        header_0x50=u32(vdf.data, 0x50) if len(vdf.data) >= 0x54 else 0,
+        header_0x68=u32(vdf.data, 0x68) if len(vdf.data) >= 0x6C else 0,
+        header_0x6c=u32(vdf.data, 0x6C) if len(vdf.data) >= 0x70 else 0,
+        header_0x70=u32(vdf.data, 0x70) if len(vdf.data) >= 0x74 else 0,
+        header_0x74=u32(vdf.data, 0x74) if len(vdf.data) >= 0x78 else 0,
+        time_point_count=vdf.time_point_count,
+        block_time_point_count=vdf.block_time_point_count,
+        names_total=len(vdf.names),
+        slots_total=len(vdf.slot_table),
+        records_total=len(vdf.records),
+        offset_table_count=vdf.offset_table_count,
+        result_count=len(results),
+        duplicate_result_name_count=duplicate_result_name_count,
+        duplicate_result_ot_count=duplicate_result_ot_count,
+        mapped_variable_count=len(mapping.variable_names) if mapping is not None else 0,
+        array_result_count=array_result_count,
+        numeric_array_label_count=numeric_array_label_count,
+        record_span_count=len(spans),
+        record_span_overlap_slots=len(overlaps),
+        unmapped_block_count=unmapped_block_count,
+        dimension_anchor_count=len(anchors),
+        incomplete_dimension_anchor_count=incomplete_anchor_count,
+        data_block_count=data_blocks,
+        data_block_decode_failures=decode_failures,
+        data_block_tail_mismatches=tail_mismatches,
+        bitmap_widths=bitmap_widths,
+    )
+
+
+def _tracked_vdf_paths(root: Path) -> list[Path]:
+    root = root.resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return [
+            root / line
+            for line in result.stdout.splitlines()
+            if Path(line).suffix.lower() == ".vdf"
+        ]
+    except (OSError, subprocess.CalledProcessError):
+        return sorted(path for path in root.rglob("*") if path.suffix.lower() == ".vdf")
+
+
+def _corpus_row_for_path(path: Path, root: Path) -> CorpusPrecisionRow:
+    rel = str(path.relative_to(root))
+    data = path.read_bytes()
+    magic = data[:4].hex()
+    text = _header_text(data) if len(data) >= 0x78 else ""
+    year = _header_year(text)
+    h6c = u32(data, 0x6C) if len(data) >= 0x70 else None
+    h74 = u32(data, 0x74) if len(data) >= 0x78 else None
+
+    if data[:4] == VDF_DATASET_MAGIC:
+        return CorpusPrecisionRow(
+            path=rel,
+            status="dataset/not-implemented",
+            reasons=["dataset-vdf"],
+            magic=magic,
+            year=year,
+            header_0x6c=h6c,
+            header_0x74=h74,
+            names_total=None,
+            records_total=None,
+            offset_table_count=None,
+            result_count=None,
+            array_result_count=None,
+        )
+
+    try:
+        report = precision_report(parse_vdf(data))
+    except Exception as exc:
+        return CorpusPrecisionRow(
+            path=rel,
+            status="parse-error",
+            reasons=[type(exc).__name__],
+            magic=magic,
+            year=year,
+            header_0x6c=h6c,
+            header_0x74=h74,
+            names_total=None,
+            records_total=None,
+            offset_table_count=None,
+            result_count=None,
+            array_result_count=None,
+        )
+
+    return CorpusPrecisionRow(
+        path=rel,
+        status=report.status,
+        reasons=report.reasons,
+        magic=report.magic,
+        year=report.header_year,
+        header_0x6c=report.header_0x6c,
+        header_0x74=report.header_0x74,
+        names_total=report.names_total,
+        records_total=report.records_total,
+        offset_table_count=report.offset_table_count,
+        result_count=report.result_count,
+        array_result_count=report.array_result_count,
+    )
+
+
+def corpus_precision_rows(root: Path) -> list[CorpusPrecisionRow]:
+    root = root.resolve()
+    return [_corpus_row_for_path(path, root) for path in _tracked_vdf_paths(root)]
+
+
 def mdl_definition_matches_block(model: MdlModel, definition: MdlDefinition,
                                  block: RecordShapeBlock) -> bool:
     expected_size = mdl_definition_flat_size(model, definition)
@@ -2792,21 +3680,26 @@ def find_name_table_section_idx(data: bytes, sections: list[Section]) -> Optiona
     return None
 
 
-def parse_name_table(data: bytes, sec: Section, parse_end: int) -> list[str]:
-    names = []
+def _decode_visible_name_bytes(raw: bytes) -> Optional[str]:
+    text = raw.split(b"\0", 1)[0]
+    if not text or not all(0x20 <= b < 0x7f for b in text):
+        return None
+    return text.decode("ascii")
+
+
+def _parse_name_table_entries(data: bytes, sec: Section, parse_end: int) -> list[NameTableEntry]:
+    entries: list[NameTableEntry] = []
     data_start = sec.data_offset()
     parse_end = min(parse_end, len(data))
 
     first_len = (sec.field5 >> 16) & 0xFFFF
     if first_len == 0 or data_start + first_len > len(data):
-        return names
+        return entries
 
-    s = ""
-    for b in data[data_start:data_start + first_len]:
-        if b == 0:
-            break
-        s += chr(b)
-    names.append(s)
+    first_name = _decode_visible_name_bytes(data[data_start:data_start + first_len])
+    if first_name is None:
+        return entries
+    entries.append(NameTableEntry(name=first_name, string_offset=data_start))
 
     pos = data_start + first_len
     while pos + 2 <= parse_end:
@@ -2818,16 +3711,15 @@ def parse_name_table(data: bytes, sec: Section, parse_end: int) -> list[str]:
             break
         if length > 256:
             break
-        s = ""
-        for b in data[pos:pos + length]:
-            if b == 0:
-                break
-            s += chr(b)
-        if not s or not all(c in range(0x20, 0x7f) for c in s.encode("ascii", errors="replace")):
-            break
-        names.append(s)
+        name = _decode_visible_name_bytes(data[pos:pos + length])
+        if name is not None:
+            entries.append(NameTableEntry(name=name, string_offset=pos))
         pos += length
-    return names
+    return entries
+
+
+def parse_name_table(data: bytes, sec: Section, parse_end: int) -> list[str]:
+    return [entry.name for entry in _parse_name_table_entries(data, sec, parse_end)]
 
 
 def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
@@ -2948,7 +3840,7 @@ def find_records(data: bytes, search_start: int, search_end: int) -> list[VdfRec
 def parse_vdf(data: bytes) -> VdfFile:
     if len(data) < FILE_HEADER_SIZE:
         raise ValueError("VDF file too small")
-    if data[:4] != VDF_FILE_MAGIC:
+    if data[:4] not in (VDF_FILE_MAGIC, VDF_ALT_RESULT_MAGIC):
         raise ValueError(f"invalid VDF magic: {data[:4].hex()}")
 
     time_point_count = u32(data, 0x78)
@@ -3082,6 +3974,7 @@ def print_header(vdf: VdfFile, path: str) -> None:
 
     print(f"=== VDF File: {path} ===")
     print(f"File size:    {len(vdf.data)} bytes")
+    print(f"Magic:        {vdf.data[:4].hex()}")
     print(f"Timestamp:    {timestamp}")
     print(f"Time points:  {vdf.time_point_count}")
     print(f"Bitmap size:  {vdf.bitmap_size} bytes")
@@ -3093,6 +3986,12 @@ def print_header(vdf: VdfFile, path: str) -> None:
     print(f"  0x58 final_values_offset:    0x{vdf.header_final_values_offset:08x}")
     print(f"  0x5c lookup_mapping_offset:  0x{vdf.header_lookup_mapping_offset:08x}")
     print(f"  0x60 offset_table_offset:    0x{vdf.offset_table_start:08x}")
+    print(f"  0x68 extra/result-tail ptr?:  0x{u32(vdf.data, 0x68):08x}")
+    print(f"  0x6c save/run marker?:       0x{u32(vdf.data, 0x6c):08x}")
+    print(f"  0x70 lookup point pairs:     {u32(vdf.data, 0x70)}")
+    print(f"  0x74 block grid mirror?:     {u32(vdf.data, 0x74)}")
+    print(f"  0x78 saved time points:      {vdf.time_point_count}")
+    print(f"  0x7c block grid points:      {vdf.block_time_point_count}")
     print(f"  OT count (derived):          {vdf.offset_table_count}")
     print(f"  First data block:            0x{vdf.first_data_block:08x}")
     print()
@@ -3257,8 +4156,8 @@ def print_decoded_record_facts(vdf: VdfFile, *, max_spans: int = 80, max_overlap
         for ot_idx in range(span.start, span.end)
     }
     sentinel_spans = sum(1 for span in spans if span.has_sentinel)
-    print("  source: direct record f[2] name key + f[11] OT start + decoded nonzero f[6] shape span")
-    print("  excluded: hidden-slot alignment, descriptor pruning, non-overlap owner selection, array-label guessing")
+    print("  source: direct record f[2] name key + f[11] interpreted as OT start + decoded nonzero f[6] shape span")
+    print("  excluded: hidden-slot alignment, descriptor pruning, lookup-index interpretation, non-overlap owner selection, array-label guessing")
     print(f"  spans={len(spans)} sentinel_spans={sentinel_spans} "
           f"covered_ot_slots={len(covered_ot)} overlap_ot_slots={len(overlaps)}")
 
@@ -3270,6 +4169,24 @@ def print_decoded_record_facts(vdf: VdfFile, *, max_spans: int = 80, max_overlap
             print(f"    {dim.name} ({dim.source}) = [{elements}]")
         if len(dims) > 12:
             print(f"    ... ({len(dims) - 12} more)")
+
+    anchors = decoded_record_dimension_anchors(vdf)
+    incomplete = [anchor for anchor in anchors if anchor.status != "complete"]
+    if incomplete:
+        print("  incomplete record-field8 dimension anchors:")
+        for anchor in incomplete[:16]:
+            elements = ", ".join(
+                f"{idx}:{name}" for idx, _, name in anchor.elements
+            )
+            if not elements:
+                elements = "<none>"
+            print(
+                f"    rec[{anchor.record_index}] \"{anchor.name}\" "
+                f"group={anchor.group_id} dim_id={anchor.dimension_id} "
+                f"status={anchor.status} elements=[{elements}]"
+            )
+        if len(incomplete) > 16:
+            print(f"    ... ({len(incomplete) - 16} more incomplete anchors)")
 
     if spans:
         print("  spans:")
@@ -3294,6 +4211,170 @@ def print_decoded_record_facts(vdf: VdfFile, *, max_spans: int = 80, max_overlap
             print(f"    OT[{ot_idx}] <- {'; '.join(hit_labels)}")
         if len(overlaps) > max_overlaps:
             print(f"    ... ({len(overlaps) - max_overlaps} more overlap slots)")
+    print()
+
+
+def print_field11_union_facts(vdf: VdfFile, *, max_facts: int = 96) -> None:
+    print("=== Record field[11] Union Facts (No Discriminator) ===")
+    facts = decoded_field11_union_facts(vdf)
+    if not facts:
+        print("  (none)\n")
+        return
+
+    both = [
+        fact for fact in facts
+        if fact.owner_start is not None and fact.lookup_index is not None
+    ]
+    owner_only = [
+        fact for fact in facts
+        if fact.owner_start is not None and fact.lookup_index is None
+    ]
+    lookup_only = [
+        fact for fact in facts
+        if fact.owner_start is None and fact.lookup_index is not None
+    ]
+    print("  source: direct record f[2] name key; f[11] independently checked as OT start and lookup-record index")
+    print("  excluded: descriptor pruning, non-overlap owner selection, name filtering, lookup-name pairing")
+    print(f"  facts={len(facts)} owner_only={len(owner_only)} lookup_only={len(lookup_only)} both_valid={len(both)}")
+
+    shown = 0
+    for label, group in [
+        ("both owner+lookup candidates", both),
+        ("lookup-index only candidates", lookup_only),
+    ]:
+        if not group:
+            continue
+        print(f"  {label}:")
+        for fact in group[:max(0, max_facts - shown)]:
+            shown += 1
+            owner = "owner=-"
+            if fact.owner_start is not None and fact.owner_end is not None:
+                owner = (
+                    f"owner=OT[{fact.owner_start}..{fact.owner_end}) "
+                    f"codes={_format_ot_code_span(fact.owner_ot_codes)}"
+                )
+            lookup = "lookup=-"
+            if fact.lookup_index is not None:
+                dep = fact.lookup_dependency_ref_word
+                dep_label = f" dep_ref={dep}" if dep else ""
+                width_match = "yes" if fact.lookup_width_matches_shape else "no"
+                lookup = (
+                    f"lookup[{fact.lookup_index}]->OT[{fact.lookup_ot_index}] "
+                    f"width={fact.lookup_width} width_matches_shape={width_match}{dep_label}"
+                )
+            sentinel = "yes" if fact.has_sentinel else "no"
+            print(
+                f"    rec[{fact.rec_idx:>3}] name[{fact.name_idx:>4}] \"{fact.name}\" "
+                f"f11={fact.raw_field11} shape={fact.shape_code} "
+                f"len={fact.shape_length if fact.shape_length is not None else '?'} "
+                f"sort={fact.sort_key} slot={fact.slot_ref} sentinel={sentinel} "
+                f"{owner}; {lookup}"
+            )
+            if shown >= max_facts:
+                break
+        if shown >= max_facts:
+            break
+
+    remaining = len(both) + len(lookup_only) - shown
+    if remaining > 0:
+        print(f"    ... ({remaining} more lookup-valid facts)")
+    print()
+
+
+def print_field11_union_correlations(vdf: VdfFile, *, max_rows: int = 96) -> None:
+    print("=== Record field[11] Lookup-Output Correlation (No Discriminator) ===")
+    rows = decoded_field11_union_correlations(vdf)
+    if not rows:
+        print("  (none)\n")
+        return
+
+    with_output = sum(1 for row in rows if row.closest_output_span is not None)
+    with_component = sum(1 for row in rows if row.overlap_component_id is not None)
+    print("  source: both-valid field[11] facts; lookup[field[11]].word[10] treated as evaluated-output OT")
+    print("  excluded: owner/descriptor selection, name filtering, lookupish-name assumptions")
+    print(
+        f"  rows={len(rows)} with_output_span={with_output} "
+        f"with_overlap_component={with_component}"
+    )
+
+    groups: dict[tuple[int, int], list[Field11UnionCorrelation]] = {}
+    for row in rows:
+        if row.overlap_component_id is None or row.fact.lookup_index is None:
+            continue
+        groups.setdefault((row.overlap_component_id, row.fact.lookup_index), []).append(row)
+    comparable = [
+        group
+        for group in groups.values()
+        if len(group) > 1 and all(row.output_sort_delta is not None for row in group)
+    ]
+    unique_closest = 0
+    ties = 0
+    for group in comparable:
+        best = min(row.output_sort_delta for row in group if row.output_sort_delta is not None)
+        if sum(1 for row in group if row.output_sort_delta == best) == 1:
+            unique_closest += 1
+        else:
+            ties += 1
+    if comparable:
+        print(
+            f"  same-component/same-lookup groups={len(comparable)} "
+            f"unique_closest_by_sort={unique_closest} ties={ties}"
+        )
+
+    sorted_rows = sorted(rows, key=lambda row: (
+        row.overlap_component_id if row.overlap_component_id is not None else 1_000_000,
+        row.fact.raw_field11,
+        row.fact.rec_idx,
+    ))
+    for row in sorted_rows[:max_rows]:
+        fact = row.fact
+        component = "-"
+        if row.overlap_component_id is not None:
+            component = (
+                f"{row.overlap_component_id}="
+                f"OT[{row.overlap_component_start}..{row.overlap_component_end})"
+            )
+        output = "-"
+        if row.closest_output_span is not None:
+            output_span = row.closest_output_span
+            output = (
+                f"rec[{output_span.rec_idx}] \"{output_span.name}\" "
+                f"OT[{output_span.start}..{output_span.end}) "
+                f"sort={output_span.sort_key} delta={row.output_sort_delta}"
+            )
+
+        closest = "?"
+        group = groups.get((row.overlap_component_id, fact.lookup_index))
+        if group is not None and len(group) > 1 and row.output_sort_delta is not None:
+            deltas = [
+                other.output_sort_delta
+                for other in group
+                if other.output_sort_delta is not None
+            ]
+            if deltas:
+                best = min(deltas)
+                closest = "yes" if row.output_sort_delta == best else "no"
+
+        competitors = [
+            f"rec[{span.rec_idx}] \"{span.name}\""
+            for span in row.overlap_component_spans
+            if span.rec_idx != fact.rec_idx
+        ]
+        competitor_text = ", ".join(competitors[:4]) if competitors else "-"
+        if len(competitors) > 4:
+            competitor_text += f", ... {len(competitors) - 4} more"
+
+        print(
+            f"    rec[{fact.rec_idx:>3}] \"{fact.name}\" "
+            f"owner=OT[{fact.owner_start}..{fact.owner_end}) "
+            f"lookup[{fact.lookup_index}]->OT[{fact.lookup_ot_index}] "
+            f"width={fact.lookup_width} sort={fact.sort_key} "
+            f"component={component} output={output} "
+            f"closest_in_component_lookup={closest} competitors={competitor_text}"
+        )
+
+    if len(rows) > max_rows:
+        print(f"    ... ({len(rows) - max_rows} more correlation rows)")
     print()
 
 
@@ -3390,7 +4471,10 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
     print("=== Section 6 Ref Stream ===")
     result = vdf.parse_section6_ref_stream()
     if result is None or not result[1]:
-        print("  (none)\n")
+        if result is None:
+            print("  (none)\n")
+        else:
+            print(f"  skip_words={result[0]} entries=0 stop=0x{result[2]:08x}\n")
         return
 
     skip, entries, stop = result
@@ -3409,6 +4493,83 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
               f"slot_hits={e.slotted_ref_count} raw_refs={e.refs} refs={refs}")
     if len(entries) > 12:
         print(f"  ... ({len(entries) - 12} more entries)")
+    print()
+
+
+def print_section6_post_ref_records(vdf: VdfFile, *, max_records: int = 48) -> None:
+    print("=== Section 6 Post-Ref 16-Byte Records ===")
+    records = vdf.parse_section6_post_ref_records()
+    result = vdf.parse_section6_ref_stream()
+    cc_start = vdf.section6_class_code_start()
+    if records is None or result is None or cc_start is None:
+        print("  (unparseable)\n")
+        return
+
+    start = result[2]
+    print(f"  region=0x{start:08x}..0x{cc_start:08x} bytes={cc_start - start} records={len(records)}")
+    print("  layout: w1=OT start, w2=width; w3 is a 1-based section-6 word ref to the next node")
+    if not records:
+        print()
+        return
+
+    codes = vdf.section6_ot_class_codes() or []
+    owner_hints: dict[tuple[int, int], list[str]] = {}
+    mapping = map_names_to_owner_blocks(vdf)
+    if mapping is not None:
+        for name, block in mapping.name_to_block.items():
+            owner_hints.setdefault((block.start, block.length()), []).append(name)
+
+    group_counts: dict[tuple[int, int], int] = {}
+    for rec in records:
+        key = (rec.words[1], rec.words[2])
+        group_counts[key] = group_counts.get(key, 0) + 1
+    repeated = sorted(
+        ((count, key) for key, count in group_counts.items() if count > 1),
+        reverse=True,
+    )
+    if repeated:
+        print("  repeated (w1,w2) groups:")
+        for count, key in repeated[:12]:
+            w1, w2 = key
+            names = owner_hints.get((w1, w2), [])
+            label = f" owner?={names[:3]}" if names else ""
+            print(f"    {count:>3}x w1=0x{w1:08x}({w1}) w2={w2}{label}")
+        if len(repeated) > 12:
+            print(f"    ... ({len(repeated) - 12} more repeated groups)")
+
+    chains = vdf.parse_section6_post_ref_chains()
+    if chains is not None:
+        length_counts: dict[int, int] = {}
+        linked_records = 0
+        for chain in chains:
+            chain_len = len(chain.records)
+            linked_records += chain_len
+            length_counts[chain_len] = length_counts.get(chain_len, 0) + 1
+        distribution = ", ".join(
+            f"{count}x len={length}" for length, count in sorted(length_counts.items())
+        )
+        print(f"  lookup dependency chains={len(chains)} linked_records={linked_records} "
+              f"lengths=[{distribution}]")
+
+    print("  records:")
+    for idx, rec in enumerate(records[:max_records]):
+        w0, w1, w2, w3 = rec.words
+        ot_label = ""
+        if 0 <= w1 < vdf.offset_table_count:
+            code = codes[w1] if w1 < len(codes) else None
+            code_label = f" code=0x{code:02x}/{ot_code_label(code)}" if code is not None else ""
+            ot_label = f" OT?={w1}{code_label}"
+        names = owner_hints.get((w1, w2), [])
+        owner_label = f" owner?={names[:3]}" if names else ""
+        next_label = ""
+        next_offset = vdf.section6_word_ref_to_offset(w3)
+        if next_offset is not None:
+            next_label = f" next=0x{next_offset:08x}"
+        print(f"  {idx:>3} @0x{rec.file_offset:08x} "
+              f"w=[{w0:08x} {w1:08x} {w2:08x} {w3:08x}]"
+              f"{ot_label} width={w2}{next_label}{owner_label}")
+    if len(records) > max_records:
+        print(f"  ... ({len(records) - max_records} more records)")
     print()
 
 
@@ -3517,12 +4678,15 @@ def print_data_blocks(vdf: VdfFile) -> None:
 
     print(f"=== Data Blocks ({len(block_offsets)}) ===")
     for idx, offset in enumerate(block_offsets):
-        bitmap_size = vdf.bitmap_size if offset == vdf.first_data_block else vdf.block_bitmap_size
-        grid_count = vdf.time_point_count if offset == vdf.first_data_block else vdf.block_time_point_count
+        count = u16(vdf.data, offset) if offset + 2 <= len(vdf.data) else 0
+        if offset == vdf.first_data_block:
+            bitmap_size = vdf.bitmap_size
+            grid_count = vdf.time_point_count
+        else:
+            bitmap_size, grid_count = vdf._block_bitmap_layout(offset, count)
         if offset + 2 + bitmap_size > len(vdf.data):
             print(f"  {idx:>3}  0x{offset:08x}  (truncated)")
             continue
-        count = u16(vdf.data, offset)
         block_size = 2 + bitmap_size + count * 4
         density = (count / grid_count * 100) if grid_count > 0 else 0
 
@@ -3840,6 +5004,85 @@ def print_extracted_results(vdf: VdfFile) -> None:
     print()
 
 
+def print_precision_report(vdf: VdfFile) -> None:
+    """Show the conservative precision status for the current extraction path."""
+    report = precision_report(vdf)
+
+    print("=== Precision Report ===")
+    print(f"  Status: {report.status}")
+    if report.reasons:
+        print(f"  Blockers: {', '.join(report.reasons)}")
+    else:
+        print("  Blockers: none known in current xray decoder")
+    print(f"  Header: year={report.header_year or '-'} magic={report.magic} "
+          f"0x50=0x{report.header_0x50:08x} 0x6c=0x{report.header_0x6c:08x} "
+          f"0x74=0x{report.header_0x74:08x}")
+    print(f"  Time grid: saved={report.time_point_count} block_grid={report.block_time_point_count} "
+          f"bitmap_widths={report.bitmap_widths}")
+    print(f"  Structures: names={report.names_total} slots={report.slots_total} "
+          f"records={report.records_total} OT={report.offset_table_count}")
+    print(f"  Extraction: results={report.result_count} mapped_vars={report.mapped_variable_count} "
+          f"arrays={report.array_result_count} numeric_array_labels={report.numeric_array_label_count} "
+          f"duplicate_names={report.duplicate_result_name_count} "
+          f"duplicate_ots={report.duplicate_result_ot_count}")
+    print(f"  Owner facts: spans={report.record_span_count} "
+          f"overlap_slots={report.record_span_overlap_slots} "
+          f"unmapped_blocks={report.unmapped_block_count}")
+    print(f"  Dimensions: anchors={report.dimension_anchor_count} "
+          f"incomplete={report.incomplete_dimension_anchor_count}")
+    print(f"  Data blocks: checked={report.data_block_count} "
+          f"decode_failures={report.data_block_decode_failures} "
+          f"tail_mismatches={report.data_block_tail_mismatches}")
+    print()
+
+
+def _markdown_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|")
+
+
+def _format_reason_list(reasons: list[str]) -> str:
+    return ", ".join(reasons) if reasons else "-"
+
+
+def print_corpus_precision_report(root: Path) -> None:
+    """Print a Markdown table for tracked VDF extraction precision."""
+    root = root.resolve()
+    rows = corpus_precision_rows(root)
+
+    print("=== Corpus Precision Report ===")
+    print(f"Root: {root}")
+    print(f"Tracked VDF files: {len(rows)}")
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        status_counts[row.status] = status_counts.get(row.status, 0) + 1
+    print("Status counts: " + ", ".join(
+        f"{status}={count}" for status, count in sorted(status_counts.items())
+    ))
+    print()
+    print("| File | Year | Magic | 0x6c | 0x74 | Names | Records | OT | Results | Arrays | Status | Blockers |")
+    print("|------|------|-------|------|------|-------|---------|----|---------|--------|--------|----------|")
+    for row in sorted(rows, key=lambda r: r.path.lower()):
+        h6c = f"0x{row.header_0x6c:08x}" if row.header_0x6c is not None else "-"
+        h74 = f"0x{row.header_0x74:08x}" if row.header_0x74 is not None else "-"
+        cells = [
+            row.path,
+            row.year if row.year is not None else "-",
+            row.magic,
+            h6c,
+            h74,
+            row.names_total if row.names_total is not None else "-",
+            row.records_total if row.records_total is not None else "-",
+            row.offset_table_count if row.offset_table_count is not None else "-",
+            row.result_count if row.result_count is not None else "-",
+            row.array_result_count if row.array_result_count is not None else "-",
+            row.status,
+            _format_reason_list(row.reasons),
+        ]
+        print("| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |")
+    print()
+
+
 def print_owner_sketch_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> None:
     print("=== Owner Sketch Alignment ===")
     print(f"  mdl: {mdl_path}")
@@ -3974,7 +5217,37 @@ def print_validation(vdf: VdfFile) -> None:
     elif vdf.sections:
         print("  [PASS] section offsets are strictly increasing")
 
-    # 2. Slot tables in small/medium fixtures form a contiguous 16-byte lattice.
+    # 2. Section headers expose direct word offsets for the decoded section tails.
+    sec6_cc_from_header = vdf.section6_class_code_start()
+    sec6_cc_from_field1 = vdf.section6_class_code_start_from_field1()
+    if sec6_cc_from_header is not None and sec6_cc_from_field1 is not None:
+        if sec6_cc_from_header == sec6_cc_from_field1:
+            print("  [PASS] sec6 field1 points to the OT class-code array")
+        else:
+            errors.append(
+                "sec6 field1 pointer does not match header-derived class-code start: "
+                f"field1=0x{sec6_cc_from_field1:x}, header=0x{sec6_cc_from_header:x}")
+
+    sec7_ot_from_field1 = vdf.section7_offset_table_start_from_field1()
+    if sec7_ot_from_field1 is not None:
+        if sec7_ot_from_field1 == vdf.offset_table_start:
+            print("  [PASS] sec7 field1 points to the offset table")
+        else:
+            errors.append(
+                "sec7 field1 pointer does not match header offset-table start: "
+                f"field1=0x{sec7_ot_from_field1:x}, header=0x{vdf.offset_table_start:x}")
+
+    sec1_slot_area = vdf.section1_slot_area_offset_from_field1()
+    if sec1_slot_area is not None and vdf.slot_table_offset > 0:
+        if sec1_slot_area == vdf.slot_table_offset:
+            print("  [PASS] sec1 field1 points to the visible slot table")
+        else:
+            warnings.append(
+                "sec1 field1 points into the slot/ref area but not exactly at the "
+                f"visible slot table: field1=0x{sec1_slot_area:x}, "
+                f"visible=0x{vdf.slot_table_offset:x}")
+
+    # 3. Slot tables in small/medium fixtures form a contiguous 16-byte lattice.
     slot_layout = analyze_slot_table_offsets(vdf.slot_table)
     if slot_layout is None:
         warnings.append("slot table is empty")
@@ -3986,7 +5259,7 @@ def print_validation(vdf: VdfFile) -> None:
             "slot table is structurally valid but not a contiguous 16-byte lattice: "
             f"{format_slot_table_layout(slot_layout)}")
 
-    # 3. Section-3 index_words form arithmetic progression (step=27)
+    # 4. Section-3 index_words form arithmetic progression (step=27)
     directory = vdf.parse_section3_directory()
     if directory and directory.entries:
         idx_words = [e.index_word() for e in directory.entries]
@@ -4010,7 +5283,7 @@ def print_validation(vdf: VdfFile) -> None:
         elif len(idx_words) == 1:
             print(f"  [PASS] sec3 single entry, index_word={idx_words[0]}")
 
-        # 4. All sec3 axis_slot_refs are in the slot table
+        # 5. All sec3 axis_slot_refs are in the slot table
         slot_set = set(vdf.slot_table)
         all_axis_refs: list[int] = []
         for entry in directory.entries:
@@ -4026,7 +5299,7 @@ def print_validation(vdf: VdfFile) -> None:
     else:
         print(f"  [SKIP] no section-3 directory entries")
 
-    # 5. Section-5 trailing refs overlap with sec3 axis_slot_refs
+    # 6. Section-5 trailing refs overlap with sec3 axis_slot_refs
     sec5_entries = vdf.parse_section5_sets()
     if directory and directory.entries and sec5_entries:
         sec3_axis_set: set[int] = set()
@@ -4065,7 +5338,7 @@ def print_validation(vdf: VdfFile) -> None:
     elif not sec5_entries:
         print(f"  [SKIP] no section-5 entries for axis ref overlap check")
 
-    # 6. Record field[6] values are either 0, 5, 32, a sec3 index_word, or in the high range (7000+)
+    # 7. Record field[6] values are either 0, 5, 32, a sec3 index_word, or in the high range (7000+)
     # 0 appears on padding/system/non-model records
     if directory and directory.entries:
         sec3_idx_words = {e.index_word() for e in directory.entries}
@@ -4161,6 +5434,7 @@ def print_json_summary(vdf: VdfFile) -> None:
     stock_count = sum(1 for c in codes[1:] if c == OT_CODE_STOCK) if codes else 0
 
     summary = {
+        "magic": vdf.data[:4].hex(),
         "file_size": len(vdf.data),
         "time_point_count": vdf.time_point_count,
         "sections": len(vdf.sections),
@@ -4213,6 +5487,10 @@ def print_json_summary(vdf: VdfFile) -> None:
             key = f"0x{c:02x}"
             code_counts[key] = code_counts.get(key, 0) + 1
         summary["ot_class_code_counts"] = code_counts
+
+    post_ref_records = vdf.parse_section6_post_ref_records()
+    if post_ref_records is not None:
+        summary["section6_post_ref_record_count"] = len(post_ref_records)
 
     print(json.dumps(summary, indent=2))
 
@@ -4617,7 +5895,9 @@ def main() -> None:
         description="VDF X-Ray: inspect Vensim VDF binary files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("path", help="Path to VDF file")
+    parser.add_argument("path", nargs="?", help="Path to VDF file")
+    parser.add_argument("--corpus-precision", nargs="?", const=".", metavar="ROOT",
+                        help="Scan tracked .vdf files under ROOT and print a precision table")
     parser.add_argument("--compare", metavar="OTHER_VDF",
                         help="Compare this VDF against another simulation-result VDF")
     parser.add_argument("--mdl", metavar="MODEL.mdl",
@@ -4632,6 +5912,8 @@ def main() -> None:
     parser.add_argument("--sec4", action="store_true", help="Show section 4 entries")
     parser.add_argument("--sec5", action="store_true", help="Show section 5 sets")
     parser.add_argument("--sec6", action="store_true", help="Show section 6 ref stream and tail")
+    parser.add_argument("--sec6-post", action="store_true",
+                        help="Show section 6 post-ref 16-byte records")
     parser.add_argument("--slot-xref", action="store_true",
                         help="Show section 3/4/5/6 referenced slot refs with signatures")
     parser.add_argument("--ot", action="store_true", help="Show offset table")
@@ -4642,6 +5924,10 @@ def main() -> None:
                         help="Show record groups merged by decoded shape span")
     parser.add_argument("--record-facts", action="store_true",
                         help="Show direct record->name and record->OT spans without reconstruction")
+    parser.add_argument("--field11-union", action="store_true",
+                        help="Show direct record field[11] owner-vs-lookup candidates")
+    parser.add_argument("--field11-union-correlation", action="store_true",
+                        help="Show ambiguous field[11] records correlated to lookup output OTs")
     parser.add_argument("--owner-blocks", action="store_true",
                         help="Show owner-oriented blocks built from sentinel model records")
     parser.add_argument("--sec35-bridge", action="store_true", help="Show section-3 -> section-5 bridge")
@@ -4651,10 +5937,20 @@ def main() -> None:
                         help="Show current record-key owner-to-OT reconstruction")
     parser.add_argument("--extract", action="store_true",
                         help="Extract named results using current reconstruction")
+    parser.add_argument("--precision", action="store_true",
+                        help="Show whether current extraction has known precision blockers")
     parser.add_argument("--raw-section", type=int, metavar="N", help="Full hexdump of section N")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON summary")
 
     args = parser.parse_args()
+
+    if args.corpus_precision is not None:
+        print_corpus_precision_report(Path(args.corpus_precision))
+        return
+
+    if args.path is None:
+        parser.error("path is required unless --corpus-precision is used")
+
     path = Path(args.path)
 
     data = path.read_bytes()
@@ -4701,9 +5997,10 @@ def main() -> None:
     show_all = args.all
     show_specific = any([
         args.names, args.slots, args.records, args.sec3, args.sec4,
-        args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
+        args.sec5, args.sec6, args.sec6_post, args.slot_xref, args.ot, args.blocks, args.data,
         args.bridge, args.record_blocks, args.sec35_bridge, args.ranges, args.validate,
-        args.record_facts, args.owner_blocks, args.map_names, args.extract,
+        args.record_facts, args.field11_union, args.field11_union_correlation,
+        args.owner_blocks, args.map_names, args.extract, args.precision,
         args.raw_section is not None,
     ])
 
@@ -4727,6 +6024,8 @@ def main() -> None:
         print_section5(vdf)
     if show_all or args.sec6:
         print_section6_ref_stream(vdf)
+    if show_all or args.sec6 or args.sec6_post:
+        print_section6_post_ref_records(vdf)
     if show_all or args.sec6:
         print_ot_codes(vdf)
         print_section6_tail(vdf)
@@ -4740,6 +6039,10 @@ def main() -> None:
         print_record_shape_blocks(vdf)
     if show_all or args.record_facts:
         print_decoded_record_facts(vdf)
+    if show_all or args.field11_union:
+        print_field11_union_facts(vdf)
+    if show_all or args.field11_union_correlation:
+        print_field11_union_correlations(vdf)
     if show_all or args.owner_blocks:
         print_owner_record_blocks(vdf)
     if mdl_model is not None:
@@ -4764,6 +6067,8 @@ def main() -> None:
         print_name_mapping(vdf)
     if args.extract:
         print_extracted_results(vdf)
+    if show_all or args.precision:
+        print_precision_report(vdf)
 
     if not show_specific or show_all:
         print_summary(vdf)

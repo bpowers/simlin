@@ -282,3 +282,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Description**: `generate_stock_to_flow_equation` computes `_is_affecting_stock` and discards it. Either use it (e.g., zero out scores for non-connected stock->flow pairs) or delete. Trivial cleanup.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-17
+
+### 33. VDF 0x53 Result-Family Tail Is Undecoded
+
+- **Component**: VDF tooling / simlin-engine
+- **Severity**: medium
+- **Description**: Local `third_party/uib_sd/zambaqui` files with magic `7f f7 17 53` parse like ordinary eight-section simulation-result VDFs for the primary run, but header word `0x68` points past the normal sparse-block run into an additional sensitivity/optimization-style payload. `tools/vdf_xray.py` can now inspect the ordinary run structures, but the extra tail and production Rust support for this result-family container are not decoded.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-24

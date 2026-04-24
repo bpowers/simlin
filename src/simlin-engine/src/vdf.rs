@@ -12,9 +12,9 @@
 //! - Parsing the file header, sections, records, slot table, name table,
 //!   offset table, and sparse data blocks.
 //! - Model-guided name-to-OT mapping via [`VdfFile::build_section6_guided_ot_map`]:
-//!   uses section-6 OT class codes to identify contiguous stock/non-stock
-//!   blocks, classifies variables using the parsed model, and assigns OT
-//!   indices by alphabetical sort within each block.
+//!   uses section-6 OT class codes and the parsed model to classify variables
+//!   in fixtures whose stock/non-stock entries follow the older contiguous
+//!   layout. `Ref.vdf` shows that contiguity is not a universal invariant.
 
 use std::collections::{HashMap, HashSet};
 use std::{error::Error, result::Result as StdResult};
@@ -98,7 +98,7 @@ fn normalize_vdf_name(name: &str) -> String {
     name.replace([' ', '_'], "").to_lowercase()
 }
 
-/// VDF file magic bytes (first 4 bytes of every VDF file).
+/// Standard simulation-result VDF file magic bytes.
 pub const VDF_FILE_MAGIC: [u8; 4] = [0x7f, 0xf7, 0x17, 0x52];
 
 /// Dataset VDF file magic bytes used by Vensim's imported dataset files.
@@ -265,12 +265,15 @@ impl VdfRecord {
         self.fields[12]
     }
 
-    /// field[11]: OT block start index for this variable.
+    /// field[11] under the owner interpretation: OT block start index.
     ///
     /// For arrayed variables, this points to the first of N consecutive
     /// OT entries (one per subscript element). For scalar variables, it
-    /// points to the single OT entry. Values can exceed the actual OT
-    /// count; callers should check `ot_index < offset_table_count`.
+    /// points to the single OT entry. Lookup/graphical-function descriptor
+    /// records can instead use the same word as a section-6 lookup-record
+    /// index, so callers must validate the intended interpretation.
+    /// Values can exceed the actual OT count; callers should check
+    /// `ot_index < offset_table_count` before treating this as an OT.
     pub fn ot_index(&self) -> u32 {
         self.fields[11]
     }
@@ -464,9 +467,11 @@ impl VdfDimensionSet {
 ///
 /// After the section-6 OT class-code array and the OT-aligned final-value
 /// vector, observed files store a `13 * u32` record stream terminated by a
-/// single zero word. These records correspond 1:1 with lookup table
-/// definitions in the name table; word[10] carries the OT index for each
-/// lookup. The semantic meaning of the other 12 fields is not yet decoded.
+/// single zero word. These records describe lookup/graphical-function payloads;
+/// word[10] carries an associated evaluated-output OT index. Small files can
+/// pair them with lookup definition names by order, but `Ref.vdf` proves that
+/// name-table correspondence is not universal. The semantic meaning of the
+/// other 12 fields is not yet fully decoded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VdfSection6LookupRecord {
     /// Absolute file offset where this record begins.
@@ -1115,11 +1120,10 @@ impl VdfFile {
     ///
     /// The skip is derived deterministically from the section-6 header:
     /// `skip_words = max(0, sec6.field4 - 1)`. `field4 == 1` (the common
-    /// case) encodes no prefix; `field4 == 2` encodes a single slot-ref-like
-    /// prefix word before the ref stream. Verified on 44/46 simulation
-    /// fixtures; the two exceptions are degenerate fixtures whose ref
-    /// stream is empty (`field4 == 1`, `skip_words == 0`, no entries),
-    /// where the rule is still self-consistent.
+    /// case) encodes no prefix; `field4 == 2` encodes a single
+    /// section-1-descriptor-offset-shaped prefix word before the ref stream.
+    /// The prefix word's semantic binding is not decoded and it is not always
+    /// a slot-table entry.
     pub fn parse_section6_ref_stream(&self) -> Option<(usize, Vec<VdfRefListEntry>, usize)> {
         let sec = self.sections.get(6)?;
         let skip = (sec.field4 as usize).saturating_sub(1);
@@ -1199,9 +1203,11 @@ impl VdfFile {
     /// Parse the fixed-width lookup mapping records from section 6.
     ///
     /// Located at `header_lookup_mapping_offset` (0x5c), these records are
-    /// `13 * u32` each, terminated by a single zero word. They correspond
-    /// 1:1 with lookup table definitions in the name table; word[10]
-    /// carries the OT index for each lookup's evaluated output.
+    /// `13 * u32` each, terminated by a single zero word. Word[10] carries
+    /// an associated evaluated-output OT index. Some fixtures have a simple
+    /// 1:1 lookup-name order, but large files can have more lookup records
+    /// than obvious lookupish names and descriptor OTs can overlap ordinary
+    /// owner spans.
     pub fn section6_lookup_records(&self) -> Option<Vec<VdfSection6LookupRecord>> {
         if self.offset_table_count == 0 {
             return None;
@@ -1937,12 +1943,15 @@ impl VdfFile {
         candidates
     }
 
-    /// Build a name→OT mapping using the section-6 contiguous stock/non-stock
-    /// layout, model-based stock classification, and VDF name table filtering.
+    /// Build a name→OT mapping using the section-6 stock/non-stock layout
+    /// observed in the guided fixtures, model-based stock classification, and
+    /// VDF name table filtering.
     ///
-    /// This exploits the discovery that section-6 OT class codes are always
-    /// contiguous: OT[1..S] are all stock (code 0x08), OT[S+1..N-1] are all
-    /// non-stock. Within each block, names are sorted alphabetically
+    /// Small and medium guided fixtures keep stock-coded entries contiguous:
+    /// OT[1..S] are stock (code 0x08), and OT[S+1..N-1] are non-stock.
+    /// `Ref.vdf` disproves this as a universal VDF invariant, so this path is
+    /// a model-guided compatibility decoder rather than the final general
+    /// owner-mapping rule. Within each group, names are sorted alphabetically
     /// (case-insensitive).
     ///
     /// The algorithm:
@@ -2233,10 +2242,11 @@ impl VdfFile {
     /// the deterministic record-to-name correspondence.
     ///
     /// Each record's `field[2]` identifies a section-2 name-table entry,
-    /// `field[11]` gives the start OT index, and `field[6]` selects the shape
-    /// key (5 = scalar; 32 = generic single-shape array; explicit keys resolve
-    /// through section 3, including Ref-style predecessor keys). This path is
-    /// intentionally direct: no offset scan and no external stock classifier.
+    /// `field[11]` is used under the owner-OT interpretation, and `field[6]`
+    /// selects the shape key (5 = scalar; 32 = generic single-shape array;
+    /// explicit keys resolve through section 3, including Ref-style
+    /// predecessor keys). This path is intentionally direct: no offset scan
+    /// and no external stock classifier.
     ///
     /// ### Limitations
     ///
@@ -2257,7 +2267,9 @@ impl VdfFile {
     /// - When record-derived spans overlap, the largest non-overlapping OT
     ///   partition is kept, with lower record sort keys breaking equal-coverage
     ///   ties. This is a conservative reconstruction for observed `Ref.vdf`
-    ///   descriptor conflicts, not a decoded owner/descriptor field.
+    ///   descriptor conflicts. Some descriptor records use `field[11]` as a
+    ///   section-6 lookup-record index rather than an owner OT, but the direct
+    ///   owner/descriptor discriminator is not decoded yet.
     ///
     /// Name category is otherwise not filtered here: if a record legitimately
     /// points to an OT entry, its keyed name is honored even for stdlib helper,

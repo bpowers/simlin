@@ -61,11 +61,19 @@ in `src/simlin-engine/src/vdf.rs`.
 This document intentionally distinguishes pinned file-format facts from current
 decoder reconstruction.
 
-Pinned facts (each one has a Rust test asserting it across the full
-simulation fixture corpus unless otherwise noted):
+Pinned facts below are asserted by Rust tests, xray tests, or both; xray-only
+facts are called out where the Rust parser has not caught up yet.
 
 - Header offsets locate section boundaries, section-6 tails, the offset table,
   and sparse data blocks.
+- Sparse data-block bitmap width is decoded per block by comparing the u16
+  stored-value count to the bitmap popcount. This is currently xray-only.
+- Section header `field1` is a 1-based word pointer from the section magic for
+  the decoded section-6 and section-7 tails:
+  `sec6.file_offset + 4 * (field1 - 1)` points to the OT class-code array, and
+  `sec7.file_offset + 4 * (field1 - 1)` points to the offset table. Section 1
+  `field1` points into the slot/ref area, but it is not yet the solved visible
+  slot-table start on every edited file.
 - Section 2 contains the printable name table. Record `field[2]` directly keys
   this table as `(name_string_start - section2_data_start) / 4 + 7`; it is not
   a rank or heuristic match. `VdfFile::to_results_via_records` consumes this
@@ -74,7 +82,9 @@ simulation fixture corpus unless otherwise noted):
   `names[i]`. `tools/vdf_xray.py` still has a shifted display alignment for
   edited fixtures with leading helper slots, but that alignment is exploratory
   presentation only and must not be used as evidence for on-disk refs.
-- Record `field[11]` is an OT start when it is in range. `field[6] == 5` is a
+- Record `field[11]` is a union field: owner records use it as an OT start,
+  while graphical-function descriptor records can use it as a section-6
+  lookup-record index. Under the owner interpretation, `field[6] == 5` is a
   scalar span; nonzero section-3 shape keys and the single-shape `32` marker
   can provide array spans. `field[6] == 0` remains ambiguous and is excluded
   from fact-only record-span reports.
@@ -82,9 +92,10 @@ simulation fixture corpus unless otherwise noted):
   axis slot refs are decoded for the observed array fixtures.
 - Section 6 contains OT class codes, final-value floats, and fixed-width
   lookup metadata records at header-derived offsets.
-- The section-6 ref-stream skip prefix is `max(0, sec6.field4 - 1)` words
-  (`test_section6_field4_matches_ref_stream_skip`; holds across the corpus
-  except for degenerate fixtures whose ref stream is empty).
+- The section-6 ref-stream starts after `max(0, sec6.field4 - 1)` prefix
+  words (`test_section6_field4_matches_ref_stream_skip`). When `field4 == 2`,
+  the one skipped word is section-1-descriptor-offset-shaped, but its semantic
+  binding is not decoded and it is not always a slot-table entry.
 - Section 1 data begins with three stable words:
   (`test_section1_data_head_structural_invariants`)
   - `sec1.data[0..4] == 124` (WRLD3-03/SCEN01.VDF is the single documented
@@ -95,10 +106,19 @@ simulation fixture corpus unless otherwise noted):
   - `sec1.data[8..12] == section6_lookup_records().len()`.
 - Many dimension element catalogs are recoverable from record `field[8]`
   groups: a dimension anchor and zero-based element records share a compact
-  group id. This is currently implemented in `tools/vdf_xray.py`.
+  group id. `tools/vdf_xray.py` also surfaces incomplete anchors, such as
+  subranges with no element catalog and `scenario` in `Ref.vdf` with only its
+  saved element. This is currently xray-only.
 - Attached dimension-anchor records can bind a recovered element catalog to a
   reusable section-3 shape template. When that binding is unique, sibling
   owners using the same template inherit the same element labels.
+- `tools/vdf_xray.py --precision` reports the current Python extraction
+  boundary for a single file. `exact-by-xray` means no known blockers are
+  present in the current decoder; `not-proven` is emitted with concrete
+  reasons such as overlapping record spans, unmapped owner blocks, numeric
+  fallback array labels, duplicate emitted names/OTs, incomplete dimension
+  anchors, or data-block tail mismatches. `tools/vdf_xray.py
+  --corpus-precision .` prints the same status for every tracked VDF fixture.
 
 Current reconstruction, not format fact:
 
@@ -113,8 +133,57 @@ Current reconstruction, not format fact:
   alone.
 
 For strict debugging, use `tools/vdf_xray.py --record-facts`. It prints only
-direct record-name and record-OT span facts before descriptor pruning,
+direct record-name and record-OT span facts under the owner interpretation of
+`field[11]`, before descriptor pruning, lookup-index interpretation,
 non-overlap selection, hidden-slot display alignment, or array-label guessing.
+Use `tools/vdf_xray.py --field11-union` when investigating the unresolved
+owner/descriptor discriminator: it independently reports whether each record's
+raw `field[11]` is valid as an OT start, as a section-6 lookup-record index,
+or both, without choosing between those interpretations.
+`tools/vdf_xray.py --field11-union-correlation` narrows the same gap by
+linking each both-valid record to `lookup[field11].word[10]`, the lookup
+record's evaluated-output OT. That report is evidence only: it shows useful
+output-sort proximity patterns and the known `Ref.vdf` counterexamples without
+promoting either into an extraction rule.
+
+### Python xray corpus precision snapshot
+
+`tools/vdf_xray.py --corpus-precision .` catalogs the tracked VDF fixtures
+with the current Python decoder. The current tracked corpus contains 41 VDF
+files:
+
+| Status | Count | Meaning |
+|--------|-------|---------|
+| `exact-by-xray` | 31 | No known precision blockers in current Python extraction |
+| `not-proven` | 9 | Extraction returns series, but at least one known blocker remains |
+| `dataset/not-implemented` | 1 | Dataset/reference sibling container, not a normal simulation-result VDF |
+
+The `not-proven` fixtures are structurally hard, not merely old. The 2026
+array-edit fixtures are exact-by-xray, while 2008 scalar fixtures are often
+exact-by-xray. Conversely, WRLD3 has the same descriptor-overlap pattern in a
+2005 `SCEN01.VDF` and a 2026 `experiment.vdf`. The header timestamp is useful
+provenance, but no reliable Vensim version field has been identified.
+
+Current blocker meanings:
+
+- `record-span-overlap`: two or more direct record-derived spans cover the
+  same OT slot. Xray currently selects a non-overlapping owner set, but the
+  C-style descriptor/owner discriminator is not decoded.
+- `unmapped-owner-blocks`: xray found owner-shaped OT blocks that it could
+  not deterministically attach to emitted names. This is currently zero across
+  the tracked result corpus after allowing direct record-key mappings to
+  quoted names and internal runtime signatures.
+- `numeric-array-labels`: one or more emitted array elements fell back to
+  `[0]`, `[1]`, etc.; the values may be decoded, but element names are not
+  proven.
+- `duplicate-result-names` / `duplicate-result-ots`: two emitted results
+  share a visible name or OT slot. This is currently zero across the result
+  fixture corpus.
+- `incomplete-dimension-anchors`: record `field[8]` exposes a dimension
+  anchor whose complete element catalog is not present or not yet decoded.
+- `data-block-tail-mismatch`: decoded sparse blocks disagree with the
+  section-6 final-value array. This is currently zero across the result
+  fixture corpus.
 
 ### Dataset/reference-mode sibling format
 
@@ -135,6 +204,26 @@ the same forward-fill decoding. For `data.vdf`, the visible dataset series are
 recovered by pairing section-1 names with section-0 records sorted by
 `(field[2], file_offset)`, then mapping each record's `field[11]` to the
 section-4 block list.
+
+### 0x53 result-family files
+
+Local `third_party/uib_sd/zambaqui` runs include files whose magic is
+`7f f7 17 53`. They are not present in the tracked fixture corpus, but the
+local evidence is useful:
+
+- they have the same eight section layout as simulation-result `0x52` files;
+- the ordinary header offsets, section-6 class/final/lookup tail, offset table,
+  and sparse data blocks parse with the same rules;
+- header word `0x68` is nonzero and points past the normal sparse-block run
+  into an additional payload; in paired `0x52` zambaqui files this word is
+  zero;
+- the normal sparse-block run ends near header word `0x6c`, while `0x68`
+  points to a later run/sensitivity-like payload that is not decoded.
+
+`tools/vdf_xray.py` accepts `0x53` as a result-family container for
+inspection of the ordinary run structures. Treat any data past the normal
+sparse-block run as unknown; do not assume full sensitivity/optimization
+semantics are decoded.
 
 
 ## File layout
@@ -189,15 +278,18 @@ section-4 block list.
                 section-7 offset table
   0x64    4     u32 offset_table_offset (duplicate, always same as 0x60)
   0x68    4     Zero in observed simulation fixtures; meaning unknown
-  0x6C    4     Save/version marker: nonzero only in re-saved *Current.vdf
-                files; zero for fresh simulation output
+  0x6C    4     Save/run marker: mixed zero/nonzero across old and new result
+                files. Not a reliable Vensim version field.
   0x70    4     Total lookup coordinate-pair count across all graphical
                 functions. Zero when the model has no lookup data; correlates
                 with section-7 lookup-data size (observed: 0 -> 12 bytes,
                 5 -> 52, 8 -> 76, 228 -> 3796)
-  0x74    4     Zero
-  0x78    4     u32 time_point_count
-  0x7C    4     u32 time_point_count (duplicate, always same value)
+  0x74    4     Usually zero in result files. In saved-suffix/full-grid econ
+                files this is 225, matching 0x7C; exact role unknown.
+  0x78    4     u32 saved_time_point_count
+  0x7C    4     u32 block_time_point_count / full bitmap grid count. Usually
+                equals 0x78; risk.vdf and risk2.vdf have 0x78=213 and
+                0x7C=225.
   0x80    20    Zero padding (five u32 words)
   0x94    4     Runtime-state residue word. Sometimes a small integer
                 (e.g. 0x20, 0x26, 0x28, 0x63), sometimes a 0x0b3xxxxx-range
@@ -230,12 +322,16 @@ structures, eliminating the need for heuristic scanning:
 
 These derivations are validated across the observed simulation-result corpus.
 
-The `time_point_count` is the number of output time points stored. Examples:
+The `saved_time_point_count` at 0x78 is the number of output time points
+stored in the Time block and returned to callers. Examples:
 - bact model (t=0..60, saveper=1): 61
 - pop model (t=0..100, saveper=1): 101
 - WRLD3-03 (t=1900..2100, dt=0.5): 401
 
-The bitmap size used in data blocks is `ceil(time_point_count / 8)` bytes.
+The Time block bitmap size is `ceil(header[0x78] / 8)` bytes. Non-time data
+blocks select their bitmap width per block; most use the same width, but
+saved-suffix/full-grid files can mix `ceil(0x78 / 8)` and `ceil(0x7C / 8)`
+within one file. See "Data blocks" below.
 
 
 ## Section framing
@@ -263,6 +359,18 @@ section's magic bytes. The last section extends to end-of-file.
 
 **Identifying sections by position, not field4**: field4 values vary across
 files (e.g., 2, 42, 473 for section 1). Sections must be identified by index.
+
+Decoded `field1` pointer facts:
+
+- Section 6: `sec6.file_offset + 4 * (field1 - 1)` equals the OT class-code
+  array start (`header.final_values_offset - offset_table_count`) across the
+  result fixtures checked by `tools/test_vdf_xray.py`.
+- Section 7: `sec7.file_offset + 4 * (field1 - 1)` equals
+  `header.offset_table_offset`.
+- Section 1: the same formula lands in the slot/ref area before the name
+  table. It is exact for some files (`subscripts.vdf`, `risk2.vdf`,
+  `Ref.vdf`) but can point a word inside or near a larger stale/helper area
+  (`risk.vdf`, WRLD3 `SCEN01.VDF`), so xray still scans for the visible table.
 
 ### Section roles
 
@@ -376,12 +484,13 @@ declared region.
 | group_or_sentinel | 8   | `0xf6800000` on many real owner/system records; zero on some padding/helper records. Non-sentinel positive values also act as compact record-group IDs in observed dimension metadata: a dimension anchor and its element records share this value (see "Record field[8] dimension groups" below). |
 | sentinel_b      | 9     | Often paired with `0xf6800000` on owner/system records; otherwise a secondary small/group value in helper records. |
 | sort_key        | 10    | View-local alphabetical ordering key / sort anchor. It is not global on large multi-view files, and some stock/system records carry `0`; see structural signal #8. |
-| ot_index        | 11    | **OT block start index.** For arrayed variables, points to the first of N consecutive OT entries (one per subscript element). For scalar variables, points to the single OT entry. Values can exceed the actual OT count; check `ot_index < offset_table_count`. |
+| ot_or_lookup_index | 11 | **Union field.** For owner records, this is an OT block start index: arrayed variables point to the first of N consecutive OT entries, scalar variables point to one OT entry. For graphical-function/lookup descriptor records, the same word can instead be a zero-based index into the section-6 lookup-record array; the lookup record's `word[10]` then points at the evaluated caller/output OT, not at the descriptor's own saved series. `0` is not an owner OT start (OT[0] is Time), but it can be lookup record 0. Values can exceed the actual OT count; check both interpretation ranges before treating it as an owner OT. |
 | slot_ref        | 12    | Byte offset into section 1 data; groups records by view/sector |
 | (unknown)       | 13-15 | Not yet decoded |
 
 Code accessors: `VdfRecord::slot_ref()` (field 12), `VdfRecord::ot_index()`
-(field 11), `VdfRecord::is_arrayed()` (field 6 != 5).
+(field 11, owner interpretation only), `VdfRecord::is_arrayed()` (field 6 !=
+5).
 
 #### Classification field (field 1) byte-level structure
 
@@ -413,6 +522,14 @@ offset into section 1 data. Found by scanning backward from section 2 for the
 largest structurally valid table (offsets must be unique, within section 1's
 region, and at minimum 4-byte stride).
 
+This scan is still reconstruction. The likely direct pointer is section 1
+header `field1`: it identifies the slot/ref area and exactly matches the
+visible table in several fixtures, but edited files can retain leading or
+adjacent stale/helper entries. `risk2.vdf` is the positive edited example after
+name-table resync: the visible 106-entry slot table begins exactly at section
+1 `field1`, not at the later 46-entry suffix selected when parsing stopped at
+the first deleted-looking name entry.
+
 
 ## Section 2: name table
 
@@ -421,7 +538,12 @@ Identified by: `field5 >> 16` gives the first name's byte length.
 The first entry has no u16 length prefix -- its length comes from the header.
 In simulation-result files it is `"Time"`. Subsequent entries are
 u16-length-prefixed strings.
-A u16 value of 0 is a group separator (skipped).
+A u16 value of 0 is a group separator (skipped). Some edited files contain
+length-prefixed entries whose payload starts with non-printable/binary bytes
+but whose declared length is sane and followed by valid entries. Treat these
+as deleted/stale entries and skip exactly the declared byte count; do not stop
+the table at the first non-printable payload. This is pinned in xray on
+`econ/risk.vdf`, `econ/risk2.vdf`, and WRLD3 `SCEN01.VDF`.
 
 ### Name categories
 
@@ -637,7 +759,8 @@ dimension anchor record to its element records. This is a compact, C-like
 structure rather than a section-5 ref walk:
 
 - the dimension anchor has the shared field[8] group value and usually carries
-  the field[14] sentinel;
+  the field[14] sentinel; on anchors, `field[11]` is a compact dimension or
+  subscript id, not an OT start;
 - each element record has the same field[8], `field[6]=0`, `field[10]=0`,
   `field[12]=124`, a zero-based element index in `field[11]`, and no
   field[14] sentinel;
@@ -658,12 +781,18 @@ Pinned examples:
 | `Ref.vdf` | 100 | `Target` | `0:t1`, `1:t2`, `2:t3` |
 
 The current `tools/vdf_xray.py` extractor uses this path to recover dimension
-element lists. It labels one-dimensional blocks when the block length matches
-exactly one recovered dimension, or when an attached dimension-anchor record
-binds a same-cardinality catalog to the block's reusable section-3 shape
-template. The latter is what distinguishes `sub2=[i,j]` from `sub3=[x,y]` in
-`run_8.vdf`: the stock owner carries the anchor, and the same-template `flow`
-owner inherits `flow[i]` / `flow[j]`.
+element lists only from complete catalogs. It also reports incomplete anchors
+through `--record-facts` without promoting them to labels. Examples from
+`Ref.vdf` include `COP Developed`, `lower`, `upper`, and other subrange
+anchors with no element records; `scenario` has only element `0:Deterministic`
+even though other scenario names exist in the name table.
+
+The extractor labels one-dimensional blocks when the block length matches
+exactly one recovered complete dimension, or when an attached dimension-anchor
+record binds a same-cardinality catalog to the block's reusable section-3
+shape template. The latter is what distinguishes `sub2=[i,j]` from
+`sub3=[x,y]` in `run_8.vdf`: the stock owner carries the anchor, and the
+same-template `flow` owner inherits `flow[i]` / `flow[j]`.
 
 For multi-axis shapes, xray uses section-3 axis sizes and record-field[8]
 element lists only when each axis cardinality is unique in the recovered
@@ -677,16 +806,24 @@ set; they describe array structure, not independent time-series owners.
 
 Section 6 is the richest source of VDF-native mapping information. Its layout:
 
+Boundary fact: the OT class-code array begins at both
+`header.final_values_offset - offset_table_count` and
+`sec6.file_offset + 4 * (sec6.field1 - 1)`.
+
 1. Skip prefix of `max(0, sec6.field4 - 1)` 4-byte words. In the observed
    corpus this is 0 words (`field4 == 1`, the common case) or 1 word
-   (`field4 == 2`, for `econ/base.vdf`, `econ/risk.vdf`, and WRLD3-03
-   SCEN01.VDF). When present, the single prefix word is a slot-ref-like
-   u32 whose binding is not yet decoded.
+   (`field4 == 2`, observed in econ runs, WRLD3-03 SCEN01, and a few
+   zambaqui old-run files). When present, the single prefix word is a
+   section-1 descriptor-offset-shaped u32 (`44 + 16*k` style in the observed
+   files). It is not consistently a slot-table entry and does not consistently
+   identify Time, the first saved variable, a stock/root stock, or a later
+   section-6 ref. Its semantic binding is not decoded.
 2. Leading ref stream: variable-length `u32 n_refs; u32 refs[n_refs]` entries
 3. **Post-ref-stream record region** (see below). Empty on most small and
    medium fixtures; populated with a fixed-width 16-byte record stream on
-   `Ref.vdf` (226 records) and on the `third_party/uib_sd/zambaqui` files
-   (3-7 records each). Never populated on small scalar fixtures.
+   `Ref.vdf` (226 records), on some large `SimService` files (71 records),
+   and on many local `third_party/uib_sd/zambaqui` files (3 or 7 records
+   each). Never populated on small scalar fixtures.
 4. **OT class-code array**: `offset_table_count` bytes, one per OT entry
 5. **OT final-value array**: `offset_table_count` little-endian f32 values
 6. **Lookup mapping records**: `13 * u32` fixed-width records, terminated by a
@@ -694,48 +831,79 @@ Section 6 is the richest source of VDF-native mapping information. Its layout:
 
 ### Post-ref-stream record region
 
-On array-heavy fixtures the region between the end of the leading ref
-stream and the start of the OT class-code array carries a fixed-width
-16-byte record stream. Observed populations:
+On some larger fixtures the region between the end of the leading ref stream
+and the start of the OT class-code array carries a fixed-width 16-byte record
+stream. The boundary is:
+
+```
+post_ref_start = section6_ref_stream_stop
+post_ref_end   = header.final_values_offset - offset_table_count
+```
+
+Observed populations:
 
 | Fixture                       | Records | First-record pattern                |
 |-------------------------------|---------|-------------------------------------|
-| `Ref.vdf` (C-LEARN)           | 226     | `(0x05ea-heap_ptr, w1, w2, w3)`     |
-| `zambaqui/baserun.vdf`        | 3       | `(0, slot-ref-like, 1, 0)`          |
-| `zambaqui/bp-1.vdf`..`test-1` | 7       | `(0, slot-ref-like, 1, 0)`          |
+| `Ref.vdf` (C-LEARN)           | 226     | `(0x05ea-pointer-like, ot, width, handle)` |
+| local `SimService/.../Base.vdf` | 71    | 16-byte records; not yet summarized |
+| `zambaqui/baserun.vdf`        | 3       | `(0, ot, 1, 0)`                     |
+| `zambaqui/bp-1.vdf`..`test-1` | 7       | `(0, ot, 1, 0)`                     |
 | all other simulation fixtures | 0       | --                                  |
 
-The Ref-style and zambaqui-style records are structurally different and
-likely encode different things. On `Ref.vdf`:
+The records decode cleanly as four little-endian `u32` words. In `Ref.vdf`
+they form a linked-list node pool rooted from section-6 lookup records, using
+the same 1-based section-relative word pointer style as section header
+`field1`:
 
-- `226 == stock_count (209) + view_header_count (17)` exactly.
-- Each record decodes as `(u32 heap_ptr, u32 w1, u32 w2, u32 w3)` where
-  `w2 ∈ {1, 3, 7}` (182x/8x/36x) and `w3` is either `0` or a monotone
-  u32 in `3657..4465`.
-- `heap_ptr` (w0) values are `0x05eaXXXX`-range RAM addresses that
-  increase monotonically in file order with a 24-byte stride between
-  conceptual groups -- textbook runtime-struct-dump pattern. They are
-  volatile across reruns of the same model and cannot be used as
-  durable keys.
-- `w1` repeats in group patterns: the first 14 records form 7 pairs
-  with repeated `(w1=1817, w1=3060)`; the next 22 records form 1
-  header + 7 triplets with `(w1=2809, w1=3022, w1=3081)`. The 7x
-  repetition matches the 7-element `COP` dimension, strongly
-  suggesting per-element records rather than per-variable.
-- `w1` values partially map to section-2 (name table) byte offsets
-  but with inconsistent alignment (some land on u16 length prefixes,
-  others land two bytes past the prefix, inside the string payload).
-  They do not pass a uniform name-table-offset interpretation.
+```
+node_offset = sec6.file_offset + 4 * (ref_word - 1)
+```
 
-The region's purpose is not yet decoded. Leading hypotheses: (a) a
-per-stock-OT runtime-state dump (one record per stock class-coded OT
-plus one per view header) that supports Vensim's UI when opening a
-VDF with scattered stocks, or (b) a per-element dimension-binding
-table that exists only when the model has enough array complexity
-to need the indirection -- small scalar models omit it entirely.
-The region is absent on all small/medium scalar fixtures and present
-on several array-heavy fixtures (`Ref.vdf`, the zambaqui simulation
-files); it is not yet a usable universal decoding signal.
+The decoded node shape is:
+
+```
+word[0] = runtime pointer-like residue; not a file offset
+word[1] = OT start
+word[2] = OT width
+word[3] = next node ref_word, or 0
+```
+
+Section-6 lookup records are 13-word records; `word[12]` is either zero or a
+root ref_word into this post-ref node pool. A reader can walk each dependency
+list in O(n): lookup record `word[12]` -> post-ref node -> `word[3]` -> ...
+until zero. This is a fixed-struct linked list, not an interval-selection
+heuristic.
+
+On local zambaqui files:
+
+- every observed post-ref record has `word[1]` as an in-range OT index with
+  class `0x11`;
+- every observed record has `word[2] == 1` and `word[3] == 0`;
+- `word[1]` is not a slot ref: some values are not 4-byte aligned section-1
+  offsets (for example 63 and 69 in `old runs/Current.vdf`) but are valid OT
+  indices;
+- `word[0]` is usually zero, with pointer-like exceptions in one edited run.
+
+On `Ref.vdf`:
+
+- `word[0]` values are pointer-like values in the `0x05eaXXXX` range, all
+  outside the file. Treat them as runtime handles or arena residue, not
+  durable file offsets.
+- every `word[1]` is an in-range OT index and `word[1] + word[2]` remains in
+  range.
+- `word[2]` is always one of `{1, 3, 7}`.
+- `word[3]` is either zero or a valid post-ref node ref_word.
+- 72 lookup records have nonzero `word[12]`; following their linked lists
+  reaches all 226 post-ref records exactly once, with chain-length
+  distribution `30x len=1`, `7x len=2`, `28x len=3`, `7x len=14`.
+- the last post-ref node has ref_word `0x11cd`; `0x11cd + 4 == 0x11d1`, the
+  section-6 class-code start ref_word.
+
+Rejected interpretations: this is not a section-4 or section-5 continuation,
+not the 52-byte section-6 lookup mapping record stream itself, not 8-byte
+`(ot_index, something)` pairs, not a slot-ref stream, not a data-block pointer
+table, and not the owner/descriptor overlap discriminator. On `Ref.vdf`, the
+post-ref OT ranges cover zero of the 58 direct record-span overlap slots.
 
 ### OT class codes
 
@@ -777,14 +945,63 @@ emission rule: lookup-definition OTs can overlap evaluated variable outputs or
 owner-record spans, and `Ref.vdf` has far more lookup records than simple
 lookupish name-table entries.
 
-**Conservative extraction rule**: on larger models (`econ`, `WRLD3`) these
-lookup-record OT indices land on otherwise-unclaimed OT slots, so the
-name-table order of lookupish names can be paired directly with the section-6
-record order to recover missing lookup outputs. On small fixtures like
-`lookup_ex`, the parsed lookup-record OTs overlap already-owned variable slots,
-so generic extraction should only auto-add lookup names when their OT index is
-otherwise unused. The record payload clearly carries more structure, but that
-name/payload binding is not decoded yet.
+Section-1 record `field[11]` can point into this lookup-record array rather
+than into the OT. Examples pinned by xray tests:
+
+- in `lookup_ex.vdf`, the `lookup table 1` record has `field[11] == 1`, and
+  lookup record 1 has `word[10] == 5`, the evaluated `net change` output OT;
+  the `stock` owner record also has `field[11] == 1`, where it really means
+  OT[1].
+- in `Ref.vdf`, the `RS N2O` record has `field[11] == 113`, and lookup record
+  113 has `word[10] == 2278`, while real carbon-cycle owner records also use
+  OT[113..120).
+- in `mark2.vdf`, `federal funds rate lookup` has `field[11] == 0`, which is
+  invalid as an owner OT start but valid as lookup record 0; lookup record 0
+  has `word[10] == 39`.
+
+The numeric range alone is not a discriminator. In `lookup_ex.vdf`, both the
+lookup descriptor record (`lookup table 1`) and the stock owner record have
+`field[11] == 1`; the word is simultaneously in-range as OT[1] and as lookup
+record 1. Width agreement is also insufficient: in `Ref.vdf`, `RS N2O`
+has a 7-element shape and lookup record 113 also has width 7, while
+`C AF Sequestered` shares the same raw `field[11]` but has a 3-element owner
+span. These are useful facts for narrowing the gap, not a rule.
+
+The current `--field11-union-correlation` diagnostic adds another relation:
+for both-valid records, follow `lookup[field11].word[10]` to the evaluated
+output OT and compare the candidate record's sort key to the output record's
+sort key. This is a strong local signal on many fixtures:
+
+- in `lookup_ex.vdf`, `lookup table 1 -> lookup[1] -> net change` has sort
+  delta 2, while the competing `stock` owner sharing `field[11] == 1` has
+  delta 13.
+- in `WRLD3-03/experiment.vdf`, all 54 same-component/same-lookup conflict
+  pairs have a unique closest record by this relation.
+
+It is still not the discriminator. `Ref.vdf` has direct counterexamples:
+`Solar and albedo forcings` and `C in Humus` both make structural contact with
+lookup record 134 and output `Adjusted Other Forcings`; sort proximity favors
+`C in Humus`, but the interval tiling evidence keeps `C in Humus` as the
+carbon-cycle owner and leaves `Solar and albedo forcings` on the descriptor
+side. The likely final rule must combine the record's stored kind/owner flag
+with the lookup-output relation, not replace that missing stored bit with a
+sort heuristic.
+
+This explains a major class of `record-span-overlap`: some records that look
+owner-shaped under the OT interpretation are graphical-function descriptors
+under the lookup-index interpretation. The remaining missing piece is the
+VDF-local discriminator that says which interpretation applies for a given
+record. Name filtering is not sufficient: descriptor names include obvious
+lookup/table names but also names like `RS N2O`, and real variables can also
+contain lookup/table text.
+
+**Conservative extraction behavior**: when the count of lookupish name-table
+entries exactly matches the section-6 lookup-record count, xray can pair those
+two lists by order as a reconstruction aid. Generic extraction only auto-adds
+those lookup names when the lookup record's OT is otherwise unused. This keeps
+small fixtures like `lookup_ex` from duplicating evaluated variables, but it is
+not a decoded name/payload binding and it is not the owner/descriptor
+discriminator.
 
 `Ref.vdf` adds a second overlap form: ordinary-looking section-1 records for
 graphical-function descriptors can claim OT ranges that cross real saved
@@ -851,22 +1068,25 @@ between referenced blocks. Each referenced block stores:
 
 ```
   +0      2                        u16 count (stored values)
-  +2      ceil(time_point_count/8) Bitmap: bit per time point
+  +2      bm                       Bitmap: bit per time point
   +2+bm   count * 4                f32 values in time order
 ```
 
 Block 0 is always the time series itself (fully dense bitmap).
 
-Most files use the same bitmap width for the Time block and all other sparse
-blocks: `ceil(header[0x78] / 8)`. `risk.vdf` and `risk2.vdf` prove a wider
-case: `header[0x78] = 213`, but `header[0x7c] = 225`, and non-Time sparse
-blocks require `ceil(225 / 8) = 29` bitmap bytes while the Time block uses
-`ceil(213 / 8) = 27`. In those files, the Time block stores the saved suffix
-`13..225`, while variable blocks are bitmapped against the full `1..225` grid.
-Extraction must therefore decode the full block grid and sample positions
-corresponding to the saved Time values. Using the shorter Time bitmap width
-for every block shifts the value payload by two bytes and produces nonsense
-series.
+Most files use one bitmap width: `ceil(header[0x78] / 8)`. `risk.vdf` and
+`risk2.vdf` prove that the bitmap width is actually per block. In those files,
+`header[0x78] = 213` and `header[0x7c] = 225`, so candidate widths are 27
+bytes (saved suffix grid) and 29 bytes (full grid). Ordinary stock/dynamic
+computed blocks often use 27 bytes, while input/data-like `0x05` blocks use
+29 bytes. The deterministic discriminator is local to the block: the u16
+`count` equals the bitmap popcount for the correct width. Prefer the compact
+saved-time width when both candidates happen to match.
+
+When a block uses the full 225-point grid, extraction must decode that full
+grid and sample the positions corresponding to the saved Time values. Using a
+single global bitmap width shifts some value payloads by two bytes and
+produces nonsense series.
 
 Offset-table raw zero is also class-sensitive. In `Ref.vdf`, 455 OT entries
 have raw value `0`, class code `0x11`, and final value
@@ -928,11 +1148,12 @@ their element-name catalogs.
    `32`; the actual shape is the following physical section-3 entry in the
    Ref-style progression. `field[6] == 0` is not an owner shape fact.
 
-7. **Record ot_index (field 11)** gives the OT block start for each
-   variable's contiguous OT entries. For arrayed variables, consecutive
-   OT slots hold one element each in subscript order. In the `subscripts`
-   fixture, ot_index values 1, 6, 9 correspond to the starts of the 3
-   arrayed variables' 3-element blocks.
+7. **Record field[11] under the owner interpretation** gives the OT block
+   start for each variable's contiguous OT entries. For arrayed owner records,
+   consecutive OT slots hold one element each in subscript order. In the
+   `subscripts` fixture, field[11] values 1, 6, 9 correspond to the starts of
+   the 3 arrayed variables' 3-element blocks. Descriptor records can instead
+   interpret this same word as a section-6 lookup-record index.
 
 8. **Overlapping record-derived spans are descriptor/owner conflicts, not
    duplicate saved series.** `Ref.vdf` proves that owner-looking records can
@@ -1060,13 +1281,14 @@ their element-name catalogs.
     | WRLD3 SCEN01         | 20                | 20               |
     | WRLD3 experiment     | 20                | 20               |
 
-    The 1:1 alignment does **not** hold universally. Two divergent cases
-    have been observed and are pinned by tests in
-    `src/simlin-engine/src/vdf/view_blocks.rs`:
+    The 1:1 alignment does **not** hold universally. The previously
+    suspected `risk2.vdf` divergence was a name-table parse artifact:
+    after skipping declared-length deleted/stale entries, `.Control` is
+    visible and the file has 2 headers and 2 dot-prefix names. The large
+    multi-level module divergence remains:
 
     | Fixture        | `f[1]==138` count | dot-prefix count | Divergence cause |
     |----------------|-------------------|------------------|------------------|
-    | `econ/risk2`   | 2                 | 1                | Edited file dropped the `.Control` dot-name but the header record survived |
     | `Ref.vdf`      | 17                | 69               | C-LEARN nests modules, so many dot names describe sub-groups (`.Agriculture.Loop1`) that share a parent view's header record |
 
     Between two consecutive view-header records lies one view's worth of
@@ -1195,17 +1417,17 @@ partially decoded.
    structural:
    a record is dropped from fact-only extraction when its `field[6] == 0`
    (ambiguous no-shape/descriptor metadata) or its `field[11]` falls outside
-   the offset-table range. Name category is mostly
-   not filtered -- stdlib helpers (`DEL`, `LV1`, `LV2`, `LV3`, `ST`, `RT1`,
-   `RT2`, `DL`), internal signatures (`#SMOOTH(x, y)#`), metadata markers
-   (`.mark2`, `-months`), and Vensim builtin tokens (`MIN`, `SMOOTH`,
-   `DELAY1`) all retain their OT claims when a record legitimately points to
-   them. The current exception is a lookup-like graphical-function definition
-   pointing at a stock-coded OT that is also claimed by an evaluated variable;
-   that definition is skipped so the evaluated variable can own the series.
-   Vensim writes helper records deliberately, so broad filtering drops real OT
-   data. Callers that want a cleaner user-facing symbol table can strip these
-   columns from the resulting `Results`.
+   the offset-table range. Fact-only record reports do not filter by name
+   category. The xray extraction layer excludes display/navigation markers
+   (`.`, `-`, `:` prefixes) and module names, but deliberately keeps quoted
+   names, Vensim builtin-looking names, stdlib helpers, and internal runtime
+   signatures (`#SMOOTH(x, y)#`) when a direct record key points to an OT
+   block. Lookup-like graphical-function definitions are skipped only when
+   they compete with a non-lookup owner on the same stock-coded block; a sole
+   direct lookup/table record remains extractable. Vensim writes helper
+   records deliberately, so broad filtering drops real OT data. Callers that
+   want a cleaner user-facing symbol table can strip these columns from the
+   resulting `Results`.
    Remaining limitations are no longer rank/offset alignment; they are
    owner interpretation problems when multiple records share an OT start
    (for example graphical-function definitions vs evaluated variables), and
@@ -1309,11 +1531,11 @@ Remaining gaps:
    `record_view_groups_with_diagnostics` surfaces these unmatched dot
    names so callers can avoid silent misalignment.
 
-6. **Re-saved/edited files with orphan view-header records.** Files
-   edited to delete a trailing view (e.g. `econ/risk2.vdf` dropping
-   `.Control` from the name table) keep the view-header record and
-   emit a header count greater than the dot-prefix count. Pinned by
-   `test_record_view_groups_divergent_fixtures`.
+6. **Former `risk2.vdf` orphan-header interpretation refuted.** The apparent
+   2-header/1-dot-prefix mismatch came from stopping the name-table parser at
+   the first declared-length non-printable entry. After skipping that stale
+   entry by its declared length, `.Control` is visible and `risk2.vdf` has
+   matching 2-header/2-dot-prefix view structure.
 
 
 ## Appendix: reverse-engineering notes
@@ -1564,6 +1786,18 @@ New pinned evidence:
   `Aggregated Regions`, `COP`, `HFC type`, `layers`, `Semi Agg`, and `Target`;
   see `test_record_field8_recovers_dimension_element_groups` in
   `tools/test_vdf_xray.py`.
+- `Ref.vdf` also exposes incomplete record field[8] anchors. Xray reports
+  them as facts but does not use them for array labels unless the element
+  catalog is complete; see
+  `test_record_field8_exposes_incomplete_dimension_anchors`.
+- `econ/risk2.vdf` has declared-length, non-printable name-table entries in
+  the middle of section 2. Skipping those declared byte ranges recovers 113
+  names and the 106-entry slot table at section 1 `field1`; stopping at the
+  first such entry saw only 46 names and selected a later slot-table suffix.
+- `econ/risk.vdf` and `econ/risk2.vdf` mix saved-suffix and full-grid sparse
+  block bitmap widths in the same file. Choosing the width whose bitmap
+  popcount equals the block's u16 count makes every referenced block's
+  extracted tail match the section-6 final-value table.
 - In the edited `run_7`..`run_10` fixtures, an attached dimension-anchor
   record binds a same-cardinality element catalog to the reusable section-3
   shape template. This labels sibling owners with the same template
@@ -1717,8 +1951,9 @@ re-saved files from current Vensim builds.
   before its data offset, yielding zero region data. This is structural, not
   a parsing error.
 
-- **Record ot_index (field 11) overflow**: Some records have ot_index values
-  exceeding the OT count. Exclude via `ot_index < offset_table_count`.
+- **Record field[11] overflow**: Under the owner interpretation, some records
+  have field[11] values exceeding the OT count. Exclude via
+  `field[11] < offset_table_count` before treating the word as an OT start.
 
 ### Signals backed by current tests
 
@@ -1733,10 +1968,11 @@ to the fixtures named below, not proof that every edge case is solved:
   `Layer Depth` (`248 -> 275`, len 4), and `Semi Agg Definition`
   (`302 -> 0`, len 42).
 
-- **Record ot_index as array block start**: In the `subscripts` fixture,
-  ot_index values {1, 6, 9, 13} correspond exactly to the OT block starts
+- **Record field[11] as array block start**: In the `subscripts` fixture,
+  field[11] values {1, 6, 9, 13} correspond exactly to the OT block starts
   for {a stock[3 elem], net flow[3 elem], other const[3 elem], some rate}.
-  Each arrayed variable's 3 consecutive OT entries share the same class code.
+  Each arrayed owner record's 3 consecutive OT entries share the same class
+  code.
 
 - **Section 3 fixed-width directory**: In array models, section 3 is not
   just a cardinality tail. It has a 25-word zero prefix, a run of 27-word
@@ -1759,14 +1995,13 @@ to the fixtures named below, not proof that every edge case is solved:
 
 - **Record field[1] == 138 as view-header marker**: Each VDF contains
   a run of `field[1] == 138` records that act as view-group boundaries.
-  On small single-view fixtures and on WRLD3 SCEN01 / experiment the
-  header count matches the dot-prefix name count exactly (1:1). On
-  edited files (`econ/risk2.vdf` drops `.Control` but keeps its record)
-  and on multi-level module fixtures (`Ref.vdf`, 17 headers vs 69
-  dot-names with sub-groups) the 1:1 alignment breaks. Between two
-  consecutive view-header records lie that view's variable records;
-  on 1:1 fixtures the count matches the names between the two
-  corresponding dot-prefix entries. Exposed as
+  On small single-view fixtures, edited `risk2.vdf` after name-table resync,
+  and WRLD3 SCEN01 / experiment, the header count matches the dot-prefix name
+  count exactly (1:1). On multi-level module fixtures (`Ref.vdf`, 17 headers
+  vs 69 dot-names with sub-groups) the 1:1 alignment breaks. Between two
+  consecutive view-header records lie that view's variable records; on 1:1
+  fixtures the count matches the names between the two corresponding
+  dot-prefix entries. Exposed as
   `VdfFile::record_view_groups()` and
   `VdfFile::record_view_groups_with_diagnostics()` (returns unmatched
   headers / dot-names alongside the groups).
