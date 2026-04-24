@@ -9,6 +9,9 @@
   font-size: 12px;
   font-weight: 500;
   fill: #666666;
+  /* Canvas text defaults to text-anchor: middle; groups anchor at the
+     top-left so the label sits inside the rect, not straddling its edge. */
+  text-anchor: start;
 }
 
 .group.selected rect {
