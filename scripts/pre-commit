@@ -146,8 +146,14 @@ trap cleanup_pipelines EXIT INT TERM
         cat "$CLIPPY_TMP"
         RUST_FAIL=1
     fi
-    wait $PID_TEST
-    TEST_EXIT=$?
+    # The `&& TEST_EXIT=0 || TEST_EXIT=$?` pattern is load-bearing:
+    # the enclosing subshell runs under `set -e`, and inside an `if`
+    # / `!` / `&&` / `||` context errexit is suppressed, so we both
+    # keep the script running on a test failure AND capture the real
+    # exit code (including 124/137 from the timeout) for the
+    # diagnostic below.  `wait $PID_TEST || true; TEST_EXIT=$?`
+    # looks tempting but clobbers $? with `true`'s 0.
+    wait $PID_TEST && TEST_EXIT=0 || TEST_EXIT=$?
     if [ $TEST_EXIT -ne 0 ]; then
         echo "Rust tests failed:"
         cat "$TEST_TMP"
