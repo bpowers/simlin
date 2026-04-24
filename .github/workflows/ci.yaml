@@ -48,22 +48,19 @@ jobs:
       - name: Compile tests
         run: cargo test --workspace --no-run
 
-      # 180s wall-clock cap on `cargo test` (post-compile).  CI
+      # 3-minute wall-clock cap on `cargo test` (post-compile).  CI
       # baseline on ubuntu-latest is ~60s; the cap is a ~3x safety
       # rail against the kind of regression that made PR #461's job
       # hit GitHub's 60-minute per-job cap (one test binary there
-      # took 44 minutes).  Raise in lockstep with scripts/pre-commit
-      # if the suite legitimately grows past it.  See docs/dev/rust.md
+      # took 44 minutes).  Uses the step-level `timeout-minutes`
+      # field rather than coreutils `timeout(1)` so we do not need
+      # to special-case macos-latest (which has no `timeout` on
+      # PATH).  Raise in lockstep with scripts/pre-commit if the
+      # suite legitimately grows past it.  See docs/dev/rust.md
       # for per-test budget guidance.
-      #
-      # macos-latest's base image has no `timeout` but ships
-      # coreutils' `gtimeout`; Linux has `timeout`.  Use whichever
-      # is on PATH.
       - name: Test
-        shell: bash
-        run: |
-          TIMEOUT_CMD=$(command -v timeout || command -v gtimeout)
-          "$TIMEOUT_CMD" --kill-after=30 180 cargo test --workspace
+        timeout-minutes: 3
+        run: cargo test --workspace
 
   rust:
     name: Lint and format Rust
@@ -134,17 +131,13 @@ jobs:
         with:
           tool: cargo-tarpaulin
 
-      # 2700s (45m) outer cap on tarpaulin.  Baseline is ~23 min;
+      # 45-minute outer cap on tarpaulin.  Baseline is ~23 min;
       # tarpaulin also self-polices per-test at 60s, but this backstop
       # catches the case where instrumentation overhead tips a slow
-      # test suite into runaway territory.  Coverage job runs only on
-      # ubuntu-latest so `timeout` is always present; the lookup keeps
-      # the two timeout invocations uniform.
+      # test suite into runaway territory.
       - name: Run cargo-tarpaulin
-        shell: bash
-        run: |
-          TIMEOUT_CMD=$(command -v timeout || command -v gtimeout)
-          "$TIMEOUT_CMD" --kill-after=60 2700 cargo tarpaulin --out Xml
+        timeout-minutes: 45
+        run: cargo tarpaulin --out Xml
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v5

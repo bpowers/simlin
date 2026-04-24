@@ -78,7 +78,7 @@ IMPORTANT: Simple, general, testable, maintainable code is better than preservin
 
 **CRITICAL**: ALL work must follow test-driven development targeting 95%+ code coverage. For TypeScript, follow the functional core / imperative shell pattern.
 
-**CRITICAL**: Individual unit tests must complete in a few seconds on a debug build. `cargo test --workspace` runs under a 180s wall-clock cap in both pre-commit and CI. Do not test production threshold gates by building fixtures large enough to trip them -- use a test-only override and a tiny fixture. See [docs/dev/rust.md](/docs/dev/rust.md#test-time-budgets) for details.
+**CRITICAL**: Individual unit tests must complete in a few seconds on a debug build. `cargo test --workspace` runs under a 3-minute wall-clock cap in both pre-commit and CI. Do not test production threshold gates by building fixtures large enough to trip them -- use a test-only override and a tiny fixture. See [docs/dev/rust.md](/docs/dev/rust.md#test-time-budgets) for details.
 
 IMPORTANT: If feedback seems non-actionable, it means you need comments explaining why the code looks that way.
 
