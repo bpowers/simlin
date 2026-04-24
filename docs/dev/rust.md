@@ -16,6 +16,8 @@ Individual tests should finish in a few seconds on a debug build. Target is unde
 
 `cargo test --workspace` is wrapped in a 180s wall-clock cap in both `scripts/pre-commit` and `.github/workflows/ci.yaml`. CI baseline is ~60s, so the cap is ~3x headroom; a run that trips the cap means something has regressed and the build will fail. If the whole suite legitimately grows past the cap, raise both call sites in the same commit -- do not bypass the hook with `--no-verify`.
 
+The cap uses `timeout(1)` from GNU coreutils. Linux distros ship it as `timeout`; on macOS install via `brew install coreutils` (the binary is named `gtimeout` there, and the pre-commit hook / CI steps pick up whichever is on PATH).
+
 To find slow tests, grep the per-binary durations from a regular run:
 
 ```bash

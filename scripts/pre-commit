@@ -96,6 +96,16 @@ trap cleanup_pipelines EXIT INT TERM
 (
     set -e
 
+    # Locate GNU timeout (coreutils).  macOS has it as `gtimeout` if
+    # coreutils was installed via `brew install coreutils`; Linux
+    # distros ship it as `timeout`.  Either works with the flags below.
+    TIMEOUT_CMD=$(command -v timeout || command -v gtimeout || true)
+    if [ -z "$TIMEOUT_CMD" ]; then
+        echo "[rust] error: neither 'timeout' nor 'gtimeout' found on PATH"
+        echo "[rust] install via your package manager (Linux) or 'brew install coreutils' (macOS)"
+        exit 1
+    fi
+
     # 1. Check formatting
     echo "[rust] Checking formatting..."
     cargo fmt --check
@@ -127,7 +137,7 @@ trap cleanup_pipelines EXIT INT TERM
     # See docs/dev/rust.md for per-test budget guidance.
     cargo clippy --all-targets --all-features -- -D warnings > "$CLIPPY_TMP" 2>&1 &
     PID_CLIPPY=$!
-    RUST_BACKTRACE=1 timeout --kill-after=30 180 cargo test > "$TEST_TMP" 2>&1 &
+    RUST_BACKTRACE=1 "$TIMEOUT_CMD" --kill-after=30 180 cargo test > "$TEST_TMP" 2>&1 &
     PID_TEST=$!
 
     RUST_FAIL=0

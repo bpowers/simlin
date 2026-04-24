@@ -55,8 +55,15 @@ jobs:
       # took 44 minutes).  Raise in lockstep with scripts/pre-commit
       # if the suite legitimately grows past it.  See docs/dev/rust.md
       # for per-test budget guidance.
+      #
+      # macos-latest's base image has no `timeout` but ships
+      # coreutils' `gtimeout`; Linux has `timeout`.  Use whichever
+      # is on PATH.
       - name: Test
-        run: timeout --kill-after=30 180 cargo test --workspace
+        shell: bash
+        run: |
+          TIMEOUT_CMD=$(command -v timeout || command -v gtimeout)
+          "$TIMEOUT_CMD" --kill-after=30 180 cargo test --workspace
 
   rust:
     name: Lint and format Rust
@@ -130,9 +137,14 @@ jobs:
       # 2700s (45m) outer cap on tarpaulin.  Baseline is ~23 min;
       # tarpaulin also self-polices per-test at 60s, but this backstop
       # catches the case where instrumentation overhead tips a slow
-      # test suite into runaway territory.
+      # test suite into runaway territory.  Coverage job runs only on
+      # ubuntu-latest so `timeout` is always present; the lookup keeps
+      # the two timeout invocations uniform.
       - name: Run cargo-tarpaulin
-        run: timeout --kill-after=60 2700 cargo tarpaulin --out Xml
+        shell: bash
+        run: |
+          TIMEOUT_CMD=$(command -v timeout || command -v gtimeout)
+          "$TIMEOUT_CMD" --kill-after=60 2700 cargo tarpaulin --out Xml
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v5
