@@ -405,46 +405,25 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
-    // `rel_loop_score` is no longer materialized as a VM-computed variable
-    // (it caused O(P²) compile-time text blowup on dense models; see
-    // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md). We derive it
-    // post-hoc from the `loop_score` series the VM does write, using the
-    // cycle-partition mapping cached by salsa on `model_ltm_variables`.
-    let model_ref = &*sim_ref.model;
-    let project_ref = &*model_ref.project;
-    let db_locked = project_ref.db.lock().unwrap();
-    let sync_state = project_ref.sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
-        None => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
-            );
-            return;
-        }
-    };
+    // `rel_loop_score` is no longer materialized as a VM-computed
+    // variable (it caused O(P²) compile-time text blowup on dense
+    // models; see
+    // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  We
+    // derive it post-hoc from the `loop_score` series the VM wrote,
+    // using the cycle-partition snapshot captured on SimState at
+    // sim_new time.  Reading from the snapshot (rather than
+    // re-querying `model_ltm_variables` against the current project
+    // DB) keeps score lookups consistent with the VM's results even
+    // when the project has been patched since the simulation was
+    // created -- model renames, variable deletions, or loop-structure
+    // changes in later patches cannot invalidate a query whose
+    // results already exist.
+    let mut state_guard = sim_ref.state.lock().unwrap();
+    // Borrow-split so we can read snapshot + results while we
+    // mutate the cache in the same scope.
+    let state = &mut *state_guard;
 
-    let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
-        None => {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::BadModelName)
-                    .with_message(format!("model '{}' not found", model_ref.model_name)),
-            );
-            return;
-        }
-    };
-
-    let ltm = engine::db::model_ltm_variables(&*db_locked, synced_model.source, sync.project);
-
-    // Identify the loop's cycle partition.  A loop missing from
-    // `loop_partitions` is either genuinely unknown or came from a
-    // project where LTM is disabled / auto-flipped to discovery --
-    // either way, no relative score is available.
-    let Some(&partition_key) = ltm.loop_partitions.get(loop_id) else {
+    let Some(&partition_key) = state.loop_partitions.get(loop_id) else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
@@ -454,10 +433,6 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     };
 
-    let mut state_guard = sim_ref.state.lock().unwrap();
-    // Split the borrow so we can read `results` while mutating
-    // `cached_partition_denominators` in the same scope.
-    let state = &mut *state_guard;
     let Some(ref results) = state.results else {
         store_error(
             out_error,
@@ -472,11 +447,12 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     // subsequent calls for any loop in P (common pattern: pysimlin's
     // `_populate_loop_behavior` iterates every loop) reuse the
     // cached vector and cost only the numerator pass.
+    let partitions_snapshot = &state.loop_partitions;
     let denom = state
         .cached_partition_denominators
         .entry(partition_key)
         .or_insert_with(|| {
-            let loop_ids_in_partition = ltm.loop_partitions.iter().filter_map(|(id, pk)| {
+            let loop_ids_in_partition = partitions_snapshot.iter().filter_map(|(id, pk)| {
                 if *pk == partition_key {
                     Some(id.as_str())
                 } else {

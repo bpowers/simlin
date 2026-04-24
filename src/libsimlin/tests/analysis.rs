@@ -1068,6 +1068,80 @@ fn test_rel_loop_score_cache_invalidated_on_reset() {
     }
 }
 
+/// `simlin_analyze_get_relative_loop_score` must keep working against
+/// results produced before a patch, even when the patch restructures
+/// the project's loops.  The relative-score query reads the
+/// `loop_partitions` snapshot captured on SimState at `sim_new` time,
+/// so it is bound to the loop grouping the VM actually ran under.
+/// Without the snapshot, the FFI would re-query
+/// `model_ltm_variables` against the current DB -- which may have
+/// different loop IDs (or none at all) after a rename / delete /
+/// structural change -- and return `DoesNotExist` for IDs whose
+/// series are still present in `state.results`.
+#[test]
+fn test_rel_loop_score_survives_post_sim_rename() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let before = get_rel_score(sim, &id);
+        simlin_free_loops(loops);
+
+        // Rename a variable that participates in both loops.  This
+        // causes model_ltm_variables to re-run on the renamed
+        // project; the snapshot on SimState is what keeps the
+        // post-sim query answerable against the pre-patch results.
+        let patch_json = br#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "renameVariable",
+                            "payload": {"from": "population", "to": "pop_v2"}
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        err = ptr::null_mut();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_json.as_ptr(),
+            patch_json.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        assert!(err.is_null(), "renameVariable patch must apply cleanly");
+        assert!(collected.is_null());
+
+        // The snapshot on SimState still carries the compilation-era
+        // partition for this loop, so the query must succeed and
+        // return the same series (the VM's results have not changed).
+        let after = get_rel_score(sim, &id);
+        assert_eq!(
+            before, after,
+            "rel_loop_score must read from the sim-time partition snapshot, \
+             not the patched project's current loop mapping"
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 /// After a second `run_to_end` cycle (reset + run), the cache must
 /// be repopulated against the new results, not reused from the
 /// pre-reset state.  Re-running the same sim with the same inputs
