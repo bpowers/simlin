@@ -117,9 +117,17 @@ trap cleanup_pipelines EXIT INT TERM
     CLIPPY_TMP="$(mktemp)"
     TEST_TMP="$(mktemp)"
 
+    # Wall-clock cap on `cargo test`.  A healthy run is well under a
+    # minute on dev machines and ~60s on CI; 180s is a ~3x safety rail
+    # that trips only when a single test or the whole suite regresses
+    # into the pathological territory that caused PR #461 (a single
+    # test binary took 44 minutes there, and the CI job hit GitHub's
+    # 60-minute per-job cap).  SIGTERM first, SIGKILL 30s later so
+    # the in-flight test output flushes before we lose the process.
+    # See docs/dev/rust.md for per-test budget guidance.
     cargo clippy --all-targets --all-features -- -D warnings > "$CLIPPY_TMP" 2>&1 &
     PID_CLIPPY=$!
-    RUST_BACKTRACE=1 cargo test > "$TEST_TMP" 2>&1 &
+    RUST_BACKTRACE=1 timeout --kill-after=30 180 cargo test > "$TEST_TMP" 2>&1 &
     PID_TEST=$!
 
     RUST_FAIL=0
@@ -128,9 +136,17 @@ trap cleanup_pipelines EXIT INT TERM
         cat "$CLIPPY_TMP"
         RUST_FAIL=1
     fi
-    if ! wait $PID_TEST; then
+    wait $PID_TEST
+    TEST_EXIT=$?
+    if [ $TEST_EXIT -ne 0 ]; then
         echo "Rust tests failed:"
         cat "$TEST_TMP"
+        if [ $TEST_EXIT -eq 124 ] || [ $TEST_EXIT -eq 137 ]; then
+            echo
+            echo "cargo test exceeded the 180s wall-clock cap (exit $TEST_EXIT)."
+            echo "Individual unit tests should complete in a few seconds; see"
+            echo "docs/dev/rust.md for per-test budget guidance."
+        fi
         RUST_FAIL=1
     fi
     rm -f "$CLIPPY_TMP" "$TEST_TMP"

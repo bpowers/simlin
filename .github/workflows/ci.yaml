@@ -48,8 +48,15 @@ jobs:
       - name: Compile tests
         run: cargo test --workspace --no-run
 
+      # 180s wall-clock cap on `cargo test` (post-compile).  CI
+      # baseline on ubuntu-latest is ~60s; the cap is a ~3x safety
+      # rail against the kind of regression that made PR #461's job
+      # hit GitHub's 60-minute per-job cap (one test binary there
+      # took 44 minutes).  Raise in lockstep with scripts/pre-commit
+      # if the suite legitimately grows past it.  See docs/dev/rust.md
+      # for per-test budget guidance.
       - name: Test
-        run: cargo test --workspace
+        run: timeout --kill-after=30 180 cargo test --workspace
 
   rust:
     name: Lint and format Rust
@@ -120,8 +127,12 @@ jobs:
         with:
           tool: cargo-tarpaulin
 
+      # 2700s (45m) outer cap on tarpaulin.  Baseline is ~23 min;
+      # tarpaulin also self-polices per-test at 60s, but this backstop
+      # catches the case where instrumentation overhead tips a slow
+      # test suite into runaway territory.
       - name: Run cargo-tarpaulin
-        run: cargo tarpaulin --out Xml
+        run: timeout --kill-after=60 2700 cargo tarpaulin --out Xml
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v5
