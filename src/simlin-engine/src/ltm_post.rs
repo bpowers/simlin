@@ -14,7 +14,7 @@
 //! against the O(P × save_steps) `loop_score` timeseries that the VM
 //! already writes to `Results`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::common::{Canonical, Ident};
 use crate::results::Results;
@@ -56,6 +56,20 @@ pub(crate) fn loop_score_ident(loop_id: &str) -> Ident<Canonical> {
 /// Loops whose `loop_score` is absent from `results` (e.g., because LTM
 /// was disabled for that loop, or the model was compiled in discovery
 /// mode) are omitted from the returned map.
+///
+/// ## Arrayed (A2A) loops read slot 0 only
+///
+/// For arrayed loops whose `loop_score` variable occupies multiple
+/// slots in `results`, this function reads only the first slot
+/// (element 0) for both the numerator and the partition denominator.
+/// That matches the pre-PR FFI semantics (which also returned a
+/// scalar series per loop), so existing libsimlin/pysimlin/TS
+/// callers see no behaviour change.  Callers that need genuine
+/// per-element normalization -- e.g. a dimension-aware importance
+/// ranking in the diagram UI, or a future FFI that exposes arrayed
+/// loop analysis -- should use
+/// [`compute_rel_loop_scores_per_element`], which reproduces the
+/// pre-PR compile-time per-element math.
 pub fn compute_rel_loop_scores(
     results: &Results,
     loop_partitions: &HashMap<String, Option<usize>>,
@@ -116,6 +130,122 @@ pub fn compute_rel_loop_scores(
     out
 }
 
+/// Per-timestep, per-element relative loop scores for arrayed (A2A)
+/// loops.
+///
+/// [`compute_rel_loop_scores`] collapses every loop's `loop_score` to
+/// slot 0.  That matches the scalar FFI contract, but pre-PR's
+/// compile-time `rel_loop_score` synthetic variables were genuinely
+/// per-element for A2A loops; callers that want the same dimension-
+/// aware view (diagram UI per-element importance, dimension-aware
+/// pysimlin consumers, a future arrayed FFI) need a path that
+/// reproduces that math from post-sim `loop_score` data.
+///
+/// Returns a flat `Vec<f64>` per loop id of length
+/// `step_count * max_slots`, where `max_slots` is the largest slot
+/// count among the loops sharing the loop's partition group.  The
+/// value at step `s`, element `k` is at index `s * max_slots + k`.
+/// Scalar loops in a mixed partition broadcast their single value
+/// across every element slot, which is what the pre-PR compile-time
+/// emitter did (a scalar loop_score referenced from an A2A
+/// rel_loop_score equation expanded uniformly across the target's
+/// elements).
+///
+/// `n_slots_by_loop` maps each loop id to its element count.  Missing
+/// entries or a count of 1 are treated as scalar.  The denominator at
+/// element `k` is `Σ_j |loop_score_j[k_j]|` where `k_j = k` for
+/// arrayed loops and `k_j = 0` for scalar ones.  SAFEDIV-0 and NaN
+/// propagation match [`compute_rel_loop_scores`].
+///
+/// `BTreeMap` on partition groups keeps the float summation order
+/// deterministic across runs, the same rationale
+/// [`compute_rel_loop_scores`] documents for its own grouping.
+pub fn compute_rel_loop_scores_per_element(
+    results: &Results,
+    loop_partitions: &HashMap<String, Option<usize>>,
+    n_slots_by_loop: &HashMap<String, usize>,
+) -> HashMap<String, Vec<f64>> {
+    let mut loop_ids: Vec<&String> = loop_partitions.keys().collect();
+    loop_ids.sort();
+
+    let offsets: Vec<Option<usize>> = loop_ids
+        .iter()
+        .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
+        .collect();
+    let slot_counts: Vec<usize> = loop_ids
+        .iter()
+        .map(|id| n_slots_by_loop.get(*id).copied().unwrap_or(1).max(1))
+        .collect();
+
+    let mut partition_groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
+    for (i, id) in loop_ids.iter().enumerate() {
+        let key = loop_partitions.get(*id).copied().unwrap_or(None);
+        partition_groups.entry(key).or_default().push(i);
+    }
+
+    // Per-group max_slots is the stride used for both the numerator
+    // and denominator walks.  Scalar-only groups trivially stride 1
+    // and produce output identical to `compute_rel_loop_scores`.
+    let group_max_slots: BTreeMap<Option<usize>, usize> = partition_groups
+        .iter()
+        .map(|(part, indices)| {
+            let max = indices
+                .iter()
+                .map(|&i| slot_counts[i])
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            (*part, max)
+        })
+        .collect();
+
+    let mut series: Vec<Vec<f64>> = offsets
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            if o.is_some() {
+                let key = loop_partitions.get(loop_ids[i]).copied().unwrap_or(None);
+                let max_slots = group_max_slots.get(&key).copied().unwrap_or(1);
+                vec![0.0_f64; results.step_count * max_slots]
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+
+    for (step, row) in results.iter().enumerate() {
+        for (part_key, indices) in &partition_groups {
+            let max_slots = group_max_slots.get(part_key).copied().unwrap_or(1);
+            for k in 0..max_slots {
+                let denom: f64 = indices
+                    .iter()
+                    .filter_map(|&i| {
+                        offsets[i].map(|off| {
+                            let elem = if slot_counts[i] > 1 { k } else { 0 };
+                            row[off + elem].abs()
+                        })
+                    })
+                    .sum();
+                for &i in indices {
+                    let Some(off) = offsets[i] else { continue };
+                    let elem = if slot_counts[i] > 1 { k } else { 0 };
+                    let num = row[off + elem];
+                    let val = if denom == 0.0 { 0.0 } else { num / denom };
+                    series[i][step * max_slots + k] = val;
+                }
+            }
+        }
+    }
+
+    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loop_ids.len());
+    for (i, id) in loop_ids.iter().enumerate() {
+        if offsets[i].is_some() {
+            out.insert((*id).clone(), std::mem::take(&mut series[i]));
+        }
+    }
+    out
+}
+
 /// Compute the cycle-partition denominator series:
 /// `denominator[t] = Σ_{j in partition} |loop_score[j, t]|`.
 ///
@@ -132,6 +262,13 @@ pub fn compute_rel_loop_scores(
 /// project's loops) can cache the per-partition denominator on
 /// the sim state and avoid recomputing it on every call.  Paired
 /// with [`compute_rel_loop_score_for_id`].
+///
+/// Element-0 scalar semantics: for arrayed loops whose
+/// `loop_score` variable occupies multiple slots, this reads only
+/// the first slot.  See [`compute_rel_loop_scores`] for the
+/// pre-PR-FFI rationale, and
+/// [`compute_rel_loop_scores_per_element`] for a dimension-aware
+/// alternative.
 pub fn compute_partition_denominator<'a, I>(results: &Results, loop_ids: I) -> Vec<f64>
 where
     I: IntoIterator<Item = &'a str>,
@@ -163,6 +300,11 @@ where
 /// The caller is responsible for ensuring `denominator` covers the
 /// same partition the loop belongs to, and that its length matches
 /// `results.step_count`.
+///
+/// Element-0 scalar semantics: for arrayed loops whose
+/// `loop_score` variable occupies multiple slots, this reads only
+/// the first slot.  See [`compute_rel_loop_scores_per_element`]
+/// for dimension-aware output.
 pub fn compute_rel_loop_score_for_id(
     results: &Results,
     loop_id: &str,
@@ -446,6 +588,157 @@ mod tests {
         let results = make_results_for_loops(&[("A", &[1.0, 2.0][..])]);
         let denom = compute_partition_denominator(&results, ["A"]);
         assert!(compute_rel_loop_score_for_id(&results, "missing", &denom).is_none());
+    }
+
+    /// Per-element variant: two A2A loops in a shared partition, each
+    /// with 3 element slots.  At every element k, the sum of absolute
+    /// rel-scores across the partition must equal 1.0 (non-zero
+    /// elements) or 0.0 (zero-denominator elements) independently --
+    /// that is the whole reason the per-element helper exists.  The
+    /// scalar path collapses to slot 0, which would sum to 1.0 only
+    /// for element 0 and miss the others.
+    #[test]
+    fn per_element_helper_normalizes_within_each_slot() {
+        let n_slots: usize = 3;
+        let step_count: usize = 4;
+        // Two A2A loops with distinct per-element magnitudes so each
+        // element has a meaningful partition split.
+        //   A: [1, 3,  5, 2, ...] per element 0, 1, 2, ...
+        //   B: [3, 1, 15, 6, ...] per element 0, 1, 2, ...
+        // Constructing by steps * elements and writing directly into
+        // a Results layout avoids coupling to the rest of the engine.
+        let mut data = vec![0.0_f64; step_count * (2 * n_slots + 1)];
+        let step_size = 2 * n_slots + 1;
+        let a_off = 1;
+        let b_off = 1 + n_slots;
+        for step in 0..step_count {
+            let row = &mut data[step * step_size..(step + 1) * step_size];
+            row[0] = step as f64; // time
+            for k in 0..n_slots {
+                row[a_off + k] = ((step + 1) * (k + 1)) as f64;
+                row[b_off + k] = ((step + 1) * (k + 2)) as f64;
+            }
+        }
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        offsets.insert(loop_score_ident("A"), a_off);
+        offsets.insert(loop_score_ident("B"), b_off);
+
+        let sim_specs = crate::datamodel::SimSpecs {
+            start: 0.0,
+            stop: (step_count - 1) as f64,
+            dt: crate::datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: crate::datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: crate::results::Specs::from(&sim_specs),
+            is_vensim: false,
+        };
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), n_slots);
+        slots.insert("B".to_string(), n_slots);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let a = rel.get("A").expect("A must have a series");
+        let b = rel.get("B").expect("B must have a series");
+        assert_eq!(a.len(), step_count * n_slots);
+        assert_eq!(b.len(), step_count * n_slots);
+
+        for step in 0..step_count {
+            for k in 0..n_slots {
+                let idx = step * n_slots + k;
+                let sum = a[idx].abs() + b[idx].abs();
+                // Magnitudes per element are finite and non-zero here,
+                // so the sum of absolute rel-scores must be 1.0 with
+                // full float precision.
+                assert!(
+                    (sum - 1.0).abs() < 1e-12,
+                    "step {step} elem {k}: |a|+|b| = {sum}, not 1.0"
+                );
+            }
+        }
+    }
+
+    /// Mixed partition: one scalar loop and one A2A loop.  The scalar
+    /// loop's single slot broadcasts into every element of the
+    /// partition's max-slots denominator -- this matches the pre-PR
+    /// compile-time emitter, which expanded a scalar loop_score
+    /// reference across the arrayed rel_loop_score target.
+    #[test]
+    fn per_element_helper_broadcasts_scalar_across_elements() {
+        let n_slots: usize = 2;
+        let step_count: usize = 2;
+        // Layout: time | A (scalar, 1 slot) | B (A2A, 2 slots)
+        let step_size = 1 + 1 + n_slots;
+        let a_off = 1;
+        let b_off = 2;
+        let mut data = vec![0.0_f64; step_count * step_size];
+        // A[t=0] = 2, B[t=0] = [3, 6];   denominators = [5, 8]
+        // A[t=1] = 1, B[t=1] = [1, 4];   denominators = [2, 5]
+        let a_vals = [2.0_f64, 1.0];
+        let b_vals = [[3.0_f64, 6.0], [1.0, 4.0]];
+        for step in 0..step_count {
+            let row = &mut data[step * step_size..(step + 1) * step_size];
+            row[0] = step as f64;
+            row[a_off] = a_vals[step];
+            row[b_off..b_off + n_slots].copy_from_slice(&b_vals[step][..n_slots]);
+        }
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        offsets.insert(loop_score_ident("A"), a_off);
+        offsets.insert(loop_score_ident("B"), b_off);
+
+        let sim_specs = crate::datamodel::SimSpecs {
+            start: 0.0,
+            stop: (step_count - 1) as f64,
+            dt: crate::datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: crate::datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: crate::results::Specs::from(&sim_specs),
+            is_vensim: false,
+        };
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), 1); // scalar
+        slots.insert("B".to_string(), n_slots);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+        assert_eq!(a.len(), step_count * n_slots);
+        assert_eq!(b.len(), step_count * n_slots);
+
+        let at = |step: usize, k: usize| step * n_slots + k;
+
+        // Element 0: denom t0 = |2| + |3| = 5; denom t1 = |1| + |1| = 2.
+        assert!((a[at(0, 0)] - (2.0 / 5.0)).abs() < 1e-12);
+        assert!((b[at(0, 0)] - (3.0 / 5.0)).abs() < 1e-12);
+        assert!((a[at(1, 0)] - (1.0 / 2.0)).abs() < 1e-12);
+        assert!((b[at(1, 0)] - (1.0 / 2.0)).abs() < 1e-12);
+
+        // Element 1: scalar A broadcasts its slot-0 value.  denom t0 =
+        // |2| + |6| = 8; denom t1 = |1| + |4| = 5.  This is the
+        // property that the scalar-only helpers cannot express.
+        assert!((a[at(0, 1)] - (2.0 / 8.0)).abs() < 1e-12);
+        assert!((b[at(0, 1)] - (6.0 / 8.0)).abs() < 1e-12);
+        assert!((a[at(1, 1)] - (1.0 / 5.0)).abs() < 1e-12);
+        assert!((b[at(1, 1)] - (4.0 / 5.0)).abs() < 1e-12);
     }
 
     proptest! {
