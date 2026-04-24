@@ -4,7 +4,7 @@ VDF X-Ray: inspect and debug Vensim VDF (binary data file) format.
 
 Distilled from the Rust parser (src/simlin-engine/src/vdf.rs) and the
 CLI dump tool (src/simlin-cli/src/vdf_dump.rs). See docs/design/vdf.md
-for the full format specification.
+for confirmed structure and reverse-engineering notes.
 
 Usage:
     python tools/vdf_xray.py <path.vdf> [--section N] [--names] [--records]
@@ -15,6 +15,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
+from itertools import product
 import json
 import math
 import re
@@ -118,13 +120,13 @@ class VdfRecord:
         return self.fields[11]
 
     def is_arrayed(self) -> bool:
-        return self.fields[6] != 5
+        return self.fields[6] not in (0, 5)
 
     def has_sentinel(self) -> bool:
         return self.fields[8] == VDF_SENTINEL and self.fields[9] == VDF_SENTINEL
 
     def shape_code(self) -> int:
-        """field[6]: 5=scalar, anything else=arrayed (section-3 index_word or high-range)."""
+        """field[6]: 5=scalar; nonzero values can select section-3 shapes."""
         return self.fields[6]
 
 
@@ -256,7 +258,8 @@ class Section5BridgeMatches:
 class RecoveredDimensionSet:
     name: str
     elements: list[str]
-    sec5_index: int
+    sec5_index: Optional[int]
+    source: str = "sec5"
 
 
 @dataclass
@@ -309,6 +312,24 @@ class OwnerRecordBlock:
 
 
 @dataclass
+class DecodedRecordSpan:
+    rec_idx: int
+    name_idx: int
+    name: str
+    start: int
+    end: int
+    shape_code: int
+    sort_key: int
+    slot_ref: int
+    group_id: int
+    has_sentinel: bool
+    ot_codes: list[int]
+
+    def length(self) -> int:
+        return self.end - self.start
+
+
+@dataclass
 class MdlDimension:
     name: str
     elements: list[str]
@@ -352,6 +373,8 @@ class VdfFile:
     data: bytes
     time_point_count: int
     bitmap_size: int
+    block_time_point_count: int
+    block_bitmap_size: int
     sections: list[Section]
     names: list[str]
     name_section_idx: Optional[int]
@@ -507,7 +530,7 @@ class VdfFile:
         start = sec.data_offset() + skip * 4
         end = min(sec.region_end, len(self.data))
         if start >= end:
-            return [], start
+            return [], end
 
         entries = []
         pos = start
@@ -573,7 +596,9 @@ class VdfFile:
         best = (0, [], 0)
         for skip in range(9):
             entries, stop = self._section6_ref_stream_with_skip(skip)
-            if len(entries) > len(best[1]) or (len(entries) == len(best[1]) and stop > best[2]):
+            if len(entries) > len(best[1]) or (
+                len(entries) == len(best[1]) and entries and stop > best[2]
+            ):
                 best = (skip, entries, stop)
         return best
 
@@ -660,11 +685,56 @@ class VdfFile:
 
     # ---- Data extraction ----
 
+    def extract_time_values(self) -> Optional[list[float]]:
+        if self.first_data_block + 2 + self.bitmap_size > len(self.data):
+            return None
+        count = u16(self.data, self.first_data_block)
+        if count != self.time_point_count:
+            return None
+        data_start = self.first_data_block + 2 + self.bitmap_size
+        if data_start + count * 4 > len(self.data):
+            return None
+        return [f32(self.data, data_start + i * 4) for i in range(count)]
+
+    def _block_positions_for_time_values(self, time_values: list[float]) -> list[int]:
+        if not time_values:
+            return []
+        if self.block_time_point_count == len(time_values):
+            return list(range(len(time_values)))
+        if len(time_values) == 1:
+            return [0]
+
+        step = time_values[1] - time_values[0]
+        if abs(step) < 1e-12:
+            return list(range(len(time_values)))
+        if any(abs((time_values[i] - time_values[i - 1]) - step) > 1e-5
+               for i in range(1, len(time_values))):
+            return list(range(len(time_values)))
+
+        # Some files save only a suffix of the full output grid. The variable
+        # block bitmaps still cover the full grid, while the Time block stores
+        # only the selected save points. Derive the grid origin from the final
+        # saved time so extraction samples the same absolute time positions.
+        origin = time_values[-1] - (self.block_time_point_count - 1) * step
+        positions: list[int] = []
+        for value in time_values:
+            pos = int(round((value - origin) / step))
+            positions.append(pos)
+        return positions
+
     def extract_block_series(self, block_offset: int, time_values: list[float]) -> list[float]:
-        step_count = len(time_values)
+        if block_offset == self.first_data_block:
+            extracted = self.extract_time_values()
+            if extracted is None:
+                return [float("nan")] * len(time_values)
+            return extracted
+
+        step_count = self.block_time_point_count
         count = u16(self.data, block_offset)
         bm_start = block_offset + 2
-        data_start = bm_start + self.bitmap_size
+        data_start = bm_start + self.block_bitmap_size
+        if bm_start + self.block_bitmap_size > len(self.data):
+            return [float("nan")] * len(time_values)
 
         series = [float("nan")] * step_count
         data_idx = 0
@@ -674,16 +744,51 @@ class VdfFile:
             bit_idx = time_idx % 8
             bit_set = (self.data[bm_start + byte_idx] >> bit_idx) & 1 == 1
             if bit_set and data_idx < count:
-                last_val = f32(self.data, data_start + data_idx * 4)
+                val_off = data_start + data_idx * 4
+                if val_off + 4 > len(self.data):
+                    break
+                last_val = f32(self.data, val_off)
                 data_idx += 1
             series[time_idx] = last_val
-        return series
+
+        positions = self._block_positions_for_time_values(time_values)
+        return [
+            series[pos] if 0 <= pos < len(series) else float("nan")
+            for pos in positions
+        ]
+
+    def extract_ot_series(self, ot_idx: int, time_values: list[float],
+                          codes: Optional[list[int]] = None,
+                          final_values: Optional[list[float]] = None) -> Optional[list[float]]:
+        raw = self.offset_table_entry(ot_idx)
+        if raw is None:
+            return None
+        if self.is_data_block_offset(raw):
+            return self.extract_block_series(raw, time_values)
+
+        code = codes[ot_idx] if codes is not None and ot_idx < len(codes) else None
+        final = final_values[ot_idx] if final_values is not None and ot_idx < len(final_values) else None
+        if raw == 0 and code == OT_CODE_DYNAMIC and final is not None and final != 0.0:
+            return [float("nan")] * len(time_values)
+        const_val = u32_as_f32(raw)
+        return [const_val] * len(time_values)
 
 
 # ---- Slot-to-name helpers ----
 
 def build_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
     return build_slot_to_names_with_offset(vdf, 0)
+
+
+def build_direct_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
+    """
+    Direct slot-table pairing: slot_table[i] belongs to names[i].
+
+    This is the structural mapping used for format claims. The preferred
+    display alignment below is an exploratory xray heuristic for edited files
+    with leading helper slots; do not use it as evidence for on-disk refs.
+    """
+    return build_slot_to_names(vdf)
 
 
 def build_slot_to_names_with_offset(vdf: VdfFile, leading_extra_slots: int) -> dict[int, list[str]]:
@@ -777,10 +882,9 @@ def score_slot_name_alignment(vdf: VdfFile, leading_extra_slots: int) -> SlotNam
     """
     Score a visible-name alignment against section-4/5/6 reference usage.
 
-    This is intentionally an analysis-layer heuristic. It does not change the
-    raw slot table or claim to decode the hidden slot/name relationship; it
-    only helps the xray output avoid obviously shifted name labels when helper
-    entries appear to occupy leading slot-table positions.
+    This is an exploratory alignment heuristic, not a decoded file-format
+    structure. It is used by xray display helpers and by owner-block discovery
+    only to avoid treating obvious leading helper slots as visible owners.
     """
     slot_to_names = build_slot_to_names_with_offset(vdf, leading_extra_slots)
 
@@ -1115,14 +1219,59 @@ def build_sec3_index_to_entry(vdf: VdfFile) -> dict[int, Section3Entry]:
     return {entry.index_word(): entry for entry in directory.entries}
 
 
+def _section3_uses_predecessor_shape_codes(entries: list[Section3Entry]) -> bool:
+    """
+    Return true for the Ref-style multi-shape directory layout.
+
+    In that layout, record field[6] values equal the index_word of the
+    previous 27-word section-3 entry, while the following physical entry holds
+    the actual shape. This looks like a pointer-to-struct-field artifact:
+    field[6] stores a self-positional word offset, and the payload of interest
+    starts one entry later. Small single-shape files use the generic field[6]
+    value 32 and do not exercise this path.
+    """
+    if len(entries) < 3 or entries[-1].index_word() != 0:
+        return False
+    index_words = [entry.index_word() for entry in entries[:-1]]
+    return all(
+        index_words[i + 1] - index_words[i] == SECTION3_ENTRY_WORDS
+        for i in range(len(index_words) - 1)
+    )
+
+
+def section3_entry_for_record_shape_code(vdf: VdfFile, shape_code: int) -> Optional[Section3Entry]:
+    directory = vdf.parse_section3_directory()
+    if directory is None:
+        return None
+
+    entries = directory.entries
+    if _section3_uses_predecessor_shape_codes(entries):
+        for idx, entry in enumerate(entries[:-1]):
+            if entry.index_word() == shape_code:
+                candidate = entries[idx + 1]
+                if candidate.flat_size() > 0:
+                    return candidate
+
+    for entry in entries:
+        if entry.index_word() == shape_code and entry.flat_size() > 0:
+            return entry
+    return None
+
+
 def record_shape_length(vdf: VdfFile, rec: VdfRecord) -> Optional[int]:
     """
-    Recover the OT span implied by record field[6], when the binding is decoded.
+    Recover the OT span implied by record field[6] for current reconstruction.
 
-    This is deterministic structure rather than a display heuristic:
+    This helper intentionally preserves older exploratory behavior around
+    active `index_word=0` shapes because some small edit-chain analyses still
+    compare those candidates. Use `decoded_record_shape_length` for fact-only
+    record reports that exclude the ambiguous `f[6]=0` case.
+
+    Current decoded/reconstruction rules:
     - `5` always means scalar (len=1)
-    - an active sec3 `index_word` gives its flat size, including `index_word=0`
-      when that entry is active
+    - an active sec3 `index_word` gives its flat size
+    - Ref-style multi-shape directories bind explicit field[6] codes to the
+      following physical sec3 entry
     - `32` is the generic array marker and resolves only when section 3 exposes
       a single active flat size
     """
@@ -1130,29 +1279,73 @@ def record_shape_length(vdf: VdfFile, rec: VdfRecord) -> Optional[int]:
     if code == 5:
         return 1
 
-    idx_to_entry = build_sec3_index_to_entry(vdf)
-    entry = idx_to_entry.get(code)
+    entry = section3_entry_for_record_shape_code(vdf, code)
     if entry is not None and entry.flat_size() > 0:
         return entry.flat_size()
 
     if code == 32:
+        idx_to_entry = build_sec3_index_to_entry(vdf)
         active_sizes = sorted({e.flat_size() for e in idx_to_entry.values() if e.flat_size() > 0})
         if len(active_sizes) == 1:
             return active_sizes[0]
     return None
 
 
-# Canonical f[2] values for system records. INITIAL TIME = 9, FINAL TIME = 13,
-# TIME STEP = 17, SAVEPER = 21. INITIAL TIME and FINAL TIME records carry the
-# sentinel pair; TIME STEP and SAVEPER do not. All four point at system OT
-# slots rather than at model-variable spans, so record-derived block builders
-# filter them here so downstream analyses (MDL alignment, stock
-# classification, name mapping) see only model variables. Values documented
-# in docs/design/vdf.md and stable across every observed fixture (small
-# models, edited models, and large models). Before the record-region fix,
-# the buggy search-start happened to skip most of these records; they are
-# now always present in `vdf.records` and must be filtered explicitly.
-_CANONICAL_SYSTEM_RECORD_F2: frozenset[int] = frozenset({9, 13, 17, 21})
+def decoded_record_shape_length(vdf: VdfFile, rec: VdfRecord) -> Optional[int]:
+    """
+    Fact-only shape span for direct record reports.
+
+    Records with `f[6]=0` are excluded here. They can coincide with an active
+    section-3 `index_word=0` in some files, but Ref.vdf shows many such records
+    are dimension anchors, dimension elements, builtins, or descriptors rather
+    than emitted series owners. Until the direct discriminator is decoded, that
+    case remains reconstruction-only.
+    """
+    code = rec.shape_code()
+    if code == 0:
+        return None
+    return record_shape_length(vdf, rec)
+
+
+def system_record_name_keys(vdf: VdfFile) -> set[int]:
+    """
+    Return record f[2] keys whose decoded names are Vensim system variables.
+
+    The f[2] key is a string-pool word offset plus seven, so the numeric keys
+    move when a file stores builtin/function names before `Time`. Small files
+    often use 9/13/17/21 for INITIAL/FINAL/TIME STEP/SAVEPER, but WRLD3
+    SCEN01 shifts them to 17/21/25/29. Treating the numeric values as canonical
+    is a rank-style mistake; decode the key to a name first.
+    """
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    return {
+        key
+        for key, name_idx in key_to_name_idx.items()
+        if vdf.names[name_idx] in SYSTEM_NAMES and vdf.names[name_idx] != "Time"
+    }
+
+
+def system_ot_indices_from_records(vdf: VdfFile) -> dict[str, int]:
+    """
+    Direct system-name -> OT mapping from decoded section-1 records.
+
+    System values are ordinary scalar records in the VDF record table (except
+    `Time`, which is always OT[0]). Use those direct records before falling
+    back to any ordering/gap reconstruction.
+    """
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    out: dict[str, int] = {}
+    for rec in vdf.records:
+        name_idx = key_to_name_idx.get(rec.fields[2])
+        if name_idx is None:
+            continue
+        name = vdf.names[name_idx]
+        if name == "Time" or name not in SYSTEM_NAMES:
+            continue
+        ot_idx = rec.ot_index()
+        if 0 < ot_idx < vdf.offset_table_count:
+            out.setdefault(name, ot_idx)
+    return out
 
 
 def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
@@ -1165,6 +1358,7 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
     unresolved when the file does not force it.
     """
     codes = vdf.section6_ot_class_codes() or []
+    system_keys = system_record_name_keys(vdf)
     by_range: dict[tuple[int, int], RecordShapeBlock] = {}
 
     def add_record(block: RecordShapeBlock, rec_idx: int, rec: VdfRecord, *,
@@ -1184,11 +1378,10 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
             block.slot_refs.append(slot_ref)
 
     for rec_idx, rec in enumerate(vdf.records):
-        # Canonical system records (INITIAL TIME, FINAL TIME, TIME STEP,
-        # SAVEPER) point at system OT slots, not model-variable spans.
+        # System records point at system OT slots, not model-variable spans.
         # Filter them here so that record-shape blocks reflect only model
         # owners.
-        if rec.fields[2] in _CANONICAL_SYSTEM_RECORD_F2:
+        if rec.fields[2] in system_keys:
             continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count:
@@ -1209,7 +1402,7 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
         add_record(block, rec_idx, rec, is_shape_record=True)
 
     for rec_idx, rec in enumerate(vdf.records):
-        if rec.fields[2] in _CANONICAL_SYSTEM_RECORD_F2:
+        if rec.fields[2] in system_keys:
             continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count or rec.fields[10] <= 0:
@@ -1235,14 +1428,11 @@ def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
     Return indices of records that are structurally model-variable owners.
 
     The sentinel pair (f[8]=f[9]=0xf6800000) is a strong signal, but not
-    exclusive to model variables: INITIAL TIME (f[2]=9) and FINAL TIME
-    (f[2]=13) system records carry sentinels too and pair (via the
-    f[2]-offset formula) with the matching system name-table entries. They
-    point at the OT slots that store those system values but they are not
-    owners of *model* variables, so we drop them before constructing
-    owner blocks. After the record-region fix (docs/design/vdf.md) those
-    records are always present in `vdf.records`; the old skipped-record
-    behavior happened to mask them, but they exist in the file.
+    exclusive to model variables: INITIAL TIME and FINAL TIME system records
+    carry sentinels too and pair (via the f[2] string-key formula) with the
+    matching system name-table entries. Their numeric f[2] keys are not
+    globally fixed, so system filtering decodes f[2] to names before dropping
+    them from model-owner block construction.
 
     After reformat, model records can carry f[0]=0 or f[1]=23, so those
     fields cannot be used as filters. Further system-record discrimination
@@ -1250,10 +1440,11 @@ def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
     layer.
     """
     out: list[int] = []
+    system_keys = system_record_name_keys(vdf)
     for rec_idx, rec in enumerate(vdf.records):
         if not rec.has_sentinel():
             continue
-        if rec.fields[2] in _CANONICAL_SYSTEM_RECORD_F2:
+        if rec.fields[2] in system_keys:
             continue
         start = rec.ot_index()
         if start <= 0 or start >= vdf.offset_table_count:
@@ -1372,9 +1563,10 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
         block.attached_sort_keys.sort()
         block.sort_anchor_record_indices.sort()
 
-    # Some compiled helpers are structurally real one-element stock owners that
-    # sit immediately before the visible stock array block. They can survive
-    # cleanup/reformat passes even when slot-based hidden detection collapses.
+    # Fixture-backed cleanup for run_9/run_10-style edited models: a one-element
+    # stock helper can sit immediately before the visible stock array block even
+    # when slot-based hidden detection does not mark it. Treat this as
+    # conservative ownership cleanup, not as a fully decoded helper rule.
     for block in blocks:
         if block.hidden:
             continue
@@ -1450,6 +1642,56 @@ def owner_blocks_in_sentinel_order(vdf: VdfFile, *,
     )
 
 
+def _block_sort_rank(block: OwnerRecordBlock) -> int:
+    keys = block.direct_sort_keys or block.attached_sort_keys
+    if not keys:
+        return 1_000_000_000
+    return min(keys)
+
+
+def _select_non_overlapping_owner_blocks(
+    blocks: list[OwnerRecordBlock],
+) -> list[OwnerRecordBlock]:
+    """
+    Resolve conflicting record-derived owner spans into an OT partition.
+
+    `field[11]` is an owner OT start for ordinary model-variable records, but
+    `Ref.vdf` shows lookup/graphical-function descriptor records whose
+    address-like fields point into the same runtime OT region as real saved
+    variables. A Vensim-era C writer would not need to normalize that before
+    dumping structs, so the xray layer resolves it by keeping the largest
+    non-overlapping set of candidate spans. When two choices cover the same
+    number of OT slots, the lower sort/order keys win; in observed conflicts
+    those are the real variable records, while late lookup descriptors sort far
+    away from the local owner run.
+    """
+    if len(blocks) <= 1:
+        return blocks[:]
+
+    ordered = sorted(blocks, key=lambda block: (block.end, block.start))
+    ends = [block.end for block in ordered]
+
+    # dp[i] covers ordered[:i] and stores (score, selected ordered indices).
+    dp: list[tuple[tuple[int, int, int], list[int]]] = [((0, 0, 0), [])]
+    for idx, block in enumerate(ordered):
+        prev_idx = bisect_right(ends, block.start) - 1
+        prev_score, prev_selection = dp[prev_idx + 1] if prev_idx >= 0 else ((0, 0, 0), [])
+
+        rank = _block_sort_rank(block)
+        weight = (block.length(), -rank, 1)
+        include_score = tuple(prev_score[i] + weight[i] for i in range(3))
+        include_selection = prev_selection + [idx]
+
+        exclude_score, exclude_selection = dp[-1]
+        if include_score > exclude_score:
+            dp.append((include_score, include_selection))
+        else:
+            dp.append((exclude_score, exclude_selection))
+
+    selected_ids = {id(ordered[idx]) for idx in dp[-1][1]}
+    return [block for block in blocks if id(block) in selected_ids]
+
+
 def owner_block_runtime_class(block: OwnerRecordBlock) -> str:
     if block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes):
         return "stock"
@@ -1460,7 +1702,9 @@ def owner_block_runtime_class(block: OwnerRecordBlock) -> str:
 
 # ---- VDF-native name mapping ----
 
-# Names that are module IO / stdlib helpers and never own OT entries.
+# Names excluded from the visible user-variable candidate set. Some stdlib
+# helper names can still own runtime OT entries and are handled by record-based
+# paths; they are not user-facing model variables.
 VENSIM_MODULE_NAMES = {"IN", "INI", "OUTPUT"}
 VENSIM_STDLIB_HELPERS = {"DEL", "LV1", "LV2", "LV3", "ST", "RT1", "RT2", "DL"}
 
@@ -1473,9 +1717,93 @@ def _is_visible_model_name(name: str) -> bool:
     return True
 
 
-def _recover_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+def _valid_record_dimension_group_id(group_id: int) -> bool:
+    return group_id not in (0, VDF_SENTINEL)
+
+
+def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
     """
-    Recover dimension names and element labels when section 5 is unambiguous.
+    Recover dimension element lists from record field[8] grouping.
+
+    In observed array fixtures, dimension anchors and their element records
+    share record field[8]. Element records carry field[12]=124, field[10]=0,
+    zero-based field[11] element indices, and do not carry the field[14]
+    sentinel used by dimension anchors. This is deliberately stricter than
+    "same group id" so view/unit/helper groups do not become dimensions.
+    """
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    if not key_to_name_idx:
+        return []
+
+    candidate_dims: dict[int, list[tuple[int, str]]] = {}
+    element_groups: dict[int, list[tuple[int, int, str]]] = {}
+
+    for rec_idx, rec in enumerate(vdf.records):
+        if rec.fields[6] != 0:
+            continue
+        group_id = rec.fields[8]
+        if not _valid_record_dimension_group_id(group_id):
+            continue
+        name_idx = key_to_name_idx.get(rec.fields[2])
+        if name_idx is None:
+            continue
+        name = vdf.names[name_idx]
+        if not _is_visible_model_name(name):
+            continue
+
+        if (
+            rec.fields[12] == 124
+            and rec.fields[10] == 0
+            and rec.fields[14] != VDF_SENTINEL
+            and rec.fields[11] < 4096
+        ):
+            element_groups.setdefault(group_id, []).append((rec.fields[11], rec_idx, name))
+            continue
+
+        if rec.fields[14] == VDF_SENTINEL:
+            candidate_dims.setdefault(group_id, []).append((rec_idx, name))
+
+    dims: list[RecoveredDimensionSet] = []
+    for group_id in sorted(element_groups):
+        raw_elements = element_groups[group_id]
+        by_index: dict[int, str] = {}
+        duplicate_index = False
+        for element_idx, _, name in raw_elements:
+            previous = by_index.get(element_idx)
+            if previous is not None and previous.lower() != name.lower():
+                duplicate_index = True
+                break
+            by_index[element_idx] = name
+        if duplicate_index or len(by_index) < 2:
+            continue
+
+        ordered_indices = sorted(by_index)
+        if ordered_indices != list(range(len(ordered_indices))):
+            continue
+
+        candidates: list[tuple[int, str]] = []
+        seen_candidates: set[str] = set()
+        for rec_idx, name in sorted(candidate_dims.get(group_id, [])):
+            key = name.lower()
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            candidates.append((rec_idx, name))
+        if len(candidates) != 1:
+            continue
+
+        dims.append(RecoveredDimensionSet(
+            name=candidates[0][1],
+            elements=[by_index[i] for i in ordered_indices],
+            sec5_index=None,
+            source="record-field8",
+        ))
+    return dims
+
+
+def _recover_sec5_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+    """
+    Recover the original single-section-5 dimension layout.
 
     The straightforward case is the old single-dimension layout: one sec5
     entry, one non-metadata payload ref naming the dimension, and the next `n`
@@ -1488,7 +1816,7 @@ def _recover_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
     if len(sec5_entries) != 1:
         return []
 
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
     entry = sec5_entries[0]
     payload_names: list[str] = []
     seen_payload: set[str] = set()
@@ -1532,6 +1860,25 @@ def _recover_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
     return [RecoveredDimensionSet(name=anchor, elements=elements, sec5_index=0)]
 
 
+def _recover_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
+    """
+    Recover dimension names and element labels through decoded structural paths.
+
+    Record field[8] grouping is preferred because it directly pairs dimension
+    anchors with zero-based element records in both `subscripts.vdf` and
+    `Ref.vdf`. The older single-section-5 path remains as a fallback for
+    fixtures where the record grouping is absent.
+    """
+    dims = _recover_record_dimension_sets(vdf)
+    seen = {dim.name.lower() for dim in dims}
+    for dim in _recover_sec5_dimension_sets(vdf):
+        if dim.name.lower() in seen:
+            continue
+        dims.append(dim)
+        seen.add(dim.name.lower())
+    return dims
+
+
 def visible_variable_candidates(vdf: VdfFile) -> list[str]:
     """
     Filter the name table to candidate variable names (names that could own OT
@@ -1555,7 +1902,7 @@ def visible_variable_candidates(vdf: VdfFile) -> list[str]:
 
 @dataclass
 class NameMapping:
-    """Result of VDF-native name-to-OT mapping."""
+    """Result of the current record-key owner-to-OT reconstruction."""
     variable_names: list[str]  # Alphabetically sorted variable names
     owner_blocks: list[OwnerRecordBlock]  # Sort-key ordered visible blocks
     name_to_block: dict[str, OwnerRecordBlock]
@@ -1573,10 +1920,13 @@ def _name_looks_lookupish(name: str) -> bool:
     return "lookup" in lower or "table" in lower or "graphical function" in lower
 
 
-def _name_allowed_for_block(name: str, block: OwnerRecordBlock) -> bool:
+def _name_allowed_for_block(name: str, block: OwnerRecordBlock, *,
+                            excluded_names: Optional[set[str]] = None) -> bool:
     if classify_name(name):
         return False
     if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
+        return False
+    if excluded_names is not None and name.lower() in excluded_names:
         return False
     # Lookup/table names that land on stock-coded owner blocks behave like
     # internal aliases, not visible stock variables. Keep them out of the
@@ -1706,9 +2056,10 @@ def _lookup_record_names(vdf: VdfFile) -> list[str]:
     """
     Return lookup/table names in slotted name-table order.
 
-    Section-6 lookup records are written 1:1 with these lookupish name-table
-    entries, so an old-school linear pass can pair them by position without
-    searching.
+    Some files write section-6 lookup records 1:1 with lookupish name-table
+    entries, so the caller may pair them by position when the counts match.
+    Ref.vdf proves this is not universal; count mismatch means the lookup
+    payload structure still needs a more direct decoder.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -1726,61 +2077,176 @@ def _lookup_record_names(vdf: VdfFile) -> list[str]:
 
 
 def _array_element_labels_for_block(
+    vdf: VdfFile,
     block: OwnerRecordBlock,
     dimension_sets: list[RecoveredDimensionSet],
+    shape_label_bindings: Optional[dict[int, list[str]]] = None,
 ) -> Optional[list[str]]:
     if block.length() <= 1:
         return None
 
+    anchor_labels = _array_element_labels_from_sort_anchor(vdf, block, dimension_sets)
+    if anchor_labels is not None:
+        return anchor_labels
+
+    shape_key = _shape_template_key_for_block(vdf, block)
+    if shape_label_bindings is not None and shape_key is not None:
+        labels = shape_label_bindings.get(shape_key)
+        if labels is not None and len(labels) == block.length():
+            return labels
+
     matches = [dim.elements for dim in dimension_sets if len(dim.elements) == block.length()]
+    if len(matches) == 1:
+        return matches[0]
+
+    shape_entries = [
+        entry
+        for code in block.shape_codes
+        if (entry := section3_entry_for_record_shape_code(vdf, code)) is not None
+        and entry.flat_size() == block.length()
+    ]
+    if len(shape_entries) != 1:
+        return None
+
+    axis_sizes = shape_entries[0].axis_sizes()
+    if len(axis_sizes) <= 1 or math.prod(axis_sizes) != block.length():
+        return None
+
+    axes: list[list[str]] = []
+    for axis_size in axis_sizes:
+        axis_matches = [dim.elements for dim in dimension_sets if len(dim.elements) == axis_size]
+        if len(axis_matches) != 1:
+            return None
+        axes.append(axis_matches[0])
+
+    return [",".join(coords) for coords in product(*axes)]
+
+
+def _shape_template_entry_for_block(
+    vdf: VdfFile,
+    block: OwnerRecordBlock,
+) -> Optional[Section3Entry]:
+    """
+    Resolve the section-3 shape template used by an owner block.
+
+    Explicit shape codes can point directly through the decoded section-3
+    bridge. The generic `32` array marker needs the same conservative handling
+    as span decoding: it resolves only when exactly one active section-3 entry
+    has the block's flat size.
+    """
+    by_offset: dict[int, Section3Entry] = {}
+    for code in block.shape_codes:
+        entry = section3_entry_for_record_shape_code(vdf, code)
+        if entry is not None and entry.flat_size() == block.length():
+            by_offset[entry.file_offset] = entry
+
+    if not by_offset and 32 in block.shape_codes:
+        directory = vdf.parse_section3_directory()
+        if directory is not None:
+            active = [
+                entry
+                for entry in directory.entries
+                if entry.flat_size() == block.length() and entry.flat_size() > 0
+            ]
+            if len(active) == 1:
+                by_offset[active[0].file_offset] = active[0]
+
+    if len(by_offset) != 1:
+        return None
+    return next(iter(by_offset.values()))
+
+
+def _shape_template_key_for_block(vdf: VdfFile, block: OwnerRecordBlock) -> Optional[int]:
+    entry = _shape_template_entry_for_block(vdf, block)
+    return entry.file_offset if entry is not None else None
+
+
+def _shape_template_label_bindings(
+    vdf: VdfFile,
+    blocks: list[OwnerRecordBlock],
+    dimension_sets: list[RecoveredDimensionSet],
+) -> dict[int, list[str]]:
+    """
+    Bind reusable section-3 shape templates to dimension labels.
+
+    Edited fixtures show one owner with an attached dimension-anchor record
+    and sibling owners with the same generic section-3 shape. Treat the
+    template as the binding target; conflicting anchors leave it unbound.
+    """
+    bindings: dict[int, list[str]] = {}
+    conflicts: set[int] = set()
+    for block in blocks:
+        shape_key = _shape_template_key_for_block(vdf, block)
+        if shape_key is None:
+            continue
+        labels = _array_element_labels_from_sort_anchor(vdf, block, dimension_sets)
+        if labels is None or len(labels) != block.length():
+            continue
+        previous = bindings.get(shape_key)
+        if previous is not None and previous != labels:
+            conflicts.add(shape_key)
+            continue
+        bindings[shape_key] = labels
+
+    for shape_key in conflicts:
+        bindings.pop(shape_key, None)
+    return bindings
+
+
+def _array_element_labels_from_sort_anchor(
+    vdf: VdfFile,
+    block: OwnerRecordBlock,
+    dimension_sets: list[RecoveredDimensionSet],
+) -> Optional[list[str]]:
+    """
+    Use an attached dimension-anchor record as a same-cardinality tie-breaker.
+
+    In the model-edit fixtures, stock records can have sort_key=0 and borrow
+    their visible sort anchor from the dimension record whose elements define
+    the stock array. That is a structural relation: the anchor record lands
+    inside the stock's OT block, has field[6]=0, has the dimension-anchor
+    sentinel in field[14], and its name is one of the decoded dimension sets.
+    """
+    if not block.sort_anchor_record_indices:
+        return None
+
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    dims_by_name = {
+        dim.name.lower(): dim
+        for dim in dimension_sets
+        if len(dim.elements) == block.length()
+    }
+    if not dims_by_name:
+        return None
+
+    matches: list[RecoveredDimensionSet] = []
+    for rec_idx in block.sort_anchor_record_indices:
+        if rec_idx >= len(vdf.records):
+            continue
+        rec = vdf.records[rec_idx]
+        if rec.fields[6] != 0 or rec.fields[14] != VDF_SENTINEL:
+            continue
+        if not _valid_record_dimension_group_id(rec.fields[8]):
+            continue
+        name_idx = key_to_name_idx.get(rec.fields[2])
+        if name_idx is None:
+            continue
+        dim = dims_by_name.get(vdf.names[name_idx].lower())
+        if dim is not None and dim not in matches:
+            matches.append(dim)
+
     if len(matches) != 1:
         return None
-    return matches[0]
-
-
-def _validate_name_block_assignment(
-    name_to_block: dict[str, OwnerRecordBlock],
-    vdf: VdfFile,
-) -> bool:
-    """
-    Check that a name-to-block assignment produces an OT layout consistent
-    with the stocks-first-alphabetical ordering rule.
-
-    For each model variable, its expected OT position (derived from alphabetical
-    sorting within the stock/non-stock group) must match its assigned block's
-    actual OT start position.
-    """
-    codes = vdf.section6_ot_class_codes() or []
-    if not codes:
-        return False
-
-    stock_names = sorted(
-        (
-            name for name, block in name_to_block.items()
-            if block.ot_codes and all(code == OT_CODE_STOCK for code in block.ot_codes)
-        ),
-        key=_vensim_sort_key,
-    )
-    stock_items = [
-        (name, name_to_block[name].length(), name_to_block[name].start)
-        for name in stock_names
-    ]
-    stock_positions = _group_ot_positions(codes, want_stock=True)
-    if _assign_group_positions(stock_items, stock_positions) is None:
-        return False
-
-    nonstock_items = _nonstock_assignment_items(name_to_block)
-    nonstock_positions = _group_ot_positions(codes, want_stock=False)
-    return _assign_group_positions(nonstock_items, nonstock_positions) is not None
+    return matches[0].elements
 
 
 def _recover_dimension_element_names(vdf: VdfFile) -> set[str]:
     """
-    Return element labels from the structurally unambiguous sec5 cases.
+    Return element labels from structurally decoded dimension sets.
 
-    This intentionally stays conservative: edited models can keep stale sec5
-    entries around, so only the simple single-entry layout is treated as
-    decoded.
+    This intentionally stays conservative: record field[8] groups and the
+    simple single-entry section-5 fallback are decoded, but ambiguous same-size
+    dimension ownership is handled later by the block-labeling path.
     """
     elements: set[str] = set()
     for dim in _recover_dimension_sets(vdf):
@@ -1788,47 +2254,118 @@ def _recover_dimension_element_names(vdf: VdfFile) -> set[str]:
     return elements
 
 
-def _offset_sort_key_breaks(
-    sorted_recs: list[tuple[int, VdfRecord]],
-    offset: int,
-    vdf: VdfFile,
-) -> int:
-    pairs: list[tuple[int, str]] = []
-    for rank, (_, rec) in enumerate(sorted_recs):
-        name_idx = rank + offset
-        if not (0 <= name_idx < len(vdf.names)):
-            continue
-        name = vdf.names[name_idx]
-        if classify_name(name):
-            continue
-        if name in VENSIM_MODULE_NAMES or name in VENSIM_STDLIB_HELPERS:
-            continue
-        sort_key = rec.fields[10]
-        if sort_key > 0:
-            pairs.append((sort_key, name))
+def build_record_name_key_to_name_index(vdf: VdfFile) -> dict[int, int]:
+    """
+    Map record field[2] values to name-table indices.
 
-    pairs.sort()
-    breaks = 0
-    prev_key: Optional[str] = None
-    for _, name in pairs:
-        name_key = _vensim_sort_key(name)
-        if prev_key is not None and prev_key > name_key:
-            breaks += 1
-        prev_key = name_key
-    return breaks
+    In the observed simulation corpus, record f[2] is the section-2 string-pool
+    word offset of the name's first character, plus seven words. Name starts
+    are 4-byte aligned in every decoded simulation fixture so far.
+    """
+    if vdf.name_section_idx is None:
+        return {}
+    sec = vdf.sections[vdf.name_section_idx]
+    data_start = sec.data_offset()
+    parse_end = min(sec.region_end, len(vdf.data))
+    if not vdf.names:
+        return {}
+
+    first_len = (sec.field5 >> 16) & 0xFFFF
+    if first_len == 0 or data_start + first_len > len(vdf.data):
+        return {}
+
+    out: dict[int, int] = {}
+    out[7] = 0
+
+    pos = data_start + first_len
+    name_idx = 1
+    while name_idx < len(vdf.names) and pos + 2 <= parse_end:
+        length = u16(vdf.data, pos)
+        pos += 2
+        if length == 0:
+            continue
+        if pos + length > parse_end or length > 256:
+            break
+
+        start_rel = pos - data_start
+        if start_rel % 4 == 0:
+            out[start_rel // 4 + 7] = name_idx
+
+        pos += length
+        name_idx += 1
+
+    return out
 
 
-def _mapping_from_record_names(
-    sorted_recs: list[tuple[int, VdfRecord]],
-    offset: int,
+def decoded_record_spans(vdf: VdfFile) -> list[DecodedRecordSpan]:
+    """
+    Return direct record -> name -> OT span facts, without owner selection.
+
+    This deliberately avoids hidden-slot alignment, descriptor pruning,
+    non-overlap selection, name-category filtering, and array label guessing.
+    A span here means only that a record carries:
+    - f[2] resolving through the decoded section-2 name key formula;
+    - an in-range f[11] OT start;
+    - a non-zero f[6] shape code whose span is structurally decoded.
+
+    Whether that record is an emitted user-facing series owner remains a
+    separate question when spans overlap or names are descriptor-like.
+    """
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    codes = vdf.section6_ot_class_codes() or []
+    spans: list[DecodedRecordSpan] = []
+    for rec_idx, rec in enumerate(vdf.records):
+        name_idx = key_to_name_idx.get(rec.fields[2])
+        if name_idx is None:
+            continue
+        start = rec.ot_index()
+        if start <= 0 or start >= vdf.offset_table_count:
+            continue
+        length = decoded_record_shape_length(vdf, rec)
+        if length is None or length <= 0:
+            continue
+        end = start + length
+        if end > vdf.offset_table_count:
+            continue
+        spans.append(DecodedRecordSpan(
+            rec_idx=rec_idx,
+            name_idx=name_idx,
+            name=vdf.names[name_idx],
+            start=start,
+            end=end,
+            shape_code=rec.shape_code(),
+            sort_key=rec.fields[10],
+            slot_ref=rec.slot_ref(),
+            group_id=rec.fields[8],
+            has_sentinel=rec.has_sentinel(),
+            ot_codes=codes[start:end],
+        ))
+    return spans
+
+
+def record_span_overlaps(spans: list[DecodedRecordSpan]) -> dict[int, list[DecodedRecordSpan]]:
+    by_ot: dict[int, list[DecodedRecordSpan]] = {}
+    for span in spans:
+        for ot_idx in range(span.start, span.end):
+            by_ot.setdefault(ot_idx, []).append(span)
+    return {ot_idx: hits for ot_idx, hits in by_ot.items() if len(hits) > 1}
+
+
+def _mapping_from_record_name_keys(
     vdf: VdfFile,
     visible_blocks: list[OwnerRecordBlock],
 ) -> dict[str, OwnerRecordBlock]:
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+    excluded_names: set[str] = set()
+    for dim in _recover_dimension_sets(vdf):
+        excluded_names.add(dim.name.lower())
+        excluded_names.update(element.lower() for element in dim.elements)
+
     rec_to_name: dict[int, str] = {}
     rec_sort_names: dict[int, list[tuple[int, VdfRecord, str]]] = {}
-    for rank, (ri, rec) in enumerate(sorted_recs):
-        name_idx = rank + offset
-        if not (0 <= name_idx < len(vdf.names)):
+    for ri, rec in enumerate(vdf.records):
+        name_idx = key_to_name_idx.get(rec.fields[2])
+        if name_idx is None:
             continue
         name = vdf.names[name_idx]
         rec_to_name[ri] = name
@@ -1848,24 +2385,28 @@ def _mapping_from_record_names(
 
     for block in ordered_blocks:
         chosen: Optional[str] = None
+        for rec_idx in block.sentinel_record_indices:
+            name = rec_to_name.get(rec_idx)
+            if name is None or name in used_names:
+                continue
+            if _name_allowed_for_block(name, block, excluded_names=excluded_names):
+                chosen = name
+                break
+
         for sort_key in block.attached_sort_keys:
+            if chosen is not None:
+                break
             candidates = [
                 name
                 for _, _, name in rec_sort_names.get(sort_key, [])
-                if name not in used_names and _name_allowed_for_block(name, block)
+                if (
+                    name not in used_names
+                    and _name_allowed_for_block(name, block, excluded_names=excluded_names)
+                )
             ]
             if candidates:
                 chosen = candidates[0]
                 break
-
-        if chosen is None:
-            for rec_idx in block.sentinel_record_indices:
-                name = rec_to_name.get(rec_idx)
-                if name is None or name in used_names:
-                    continue
-                if _name_allowed_for_block(name, block):
-                    chosen = name
-                    break
 
         if chosen is None:
             continue
@@ -1875,83 +2416,37 @@ def _mapping_from_record_names(
     return name_to_block
 
 
-def _try_f2_offset_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
+def _try_f2_name_key_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
     """
-    Deterministic record-to-name mapping via the f[2]-offset formula.
+    Deterministic record-to-name mapping via the decoded f[2] name key.
 
-    Records sorted by f[2] correspond 1:1 with name-table entries at
-    position `(slot_count - record_count) + rank`. The offset is
-    structural: every record consumes one name slot, and `slot_count`
-    minus `record_count` counts the leading slots (typically `Time` plus
-    a short run of header-like names) that have no backing record.
-
-    This path is deliberately O(records). The earlier implementation
-    scanned a `[nominal - 3, nominal + 3]` offset window and picked via
-    `_validate_name_block_assignment`, which applied a stocks-first-
-    alphabetical filter that rejected correct nominal offsets when the
-    mapping hadn't yet been assembled. Keeping the scan around papered
-    over that downstream bug; we instead trust the nominal offset
-    directly and leave the validator to other callers (e.g. diagnostics).
+    Record f[2] is not a rank. It is the section-2 name string's 4-byte word
+    offset plus seven. That gives a direct record -> name-table entry link and
+    removes the need for offset scans or fixture-specific shifts.
     """
     n_recs = len(vdf.records)
-    n_slots = len(vdf.slot_table)
-    if n_recs == 0 or n_slots == 0:
+    if n_recs == 0 or not vdf.names:
         return None
 
-    sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
     all_blocks = build_owner_record_blocks(vdf)
-    visible_blocks = [b for b in all_blocks if not b.hidden]
+    visible_blocks = _select_non_overlapping_owner_blocks(
+        [b for b in all_blocks if not b.hidden]
+    )
 
-    # When records <= slots (small/medium fixtures) the nominal offset
-    # `n_slots - n_recs` is the deterministic delta. Large fixtures where
-    # Vensim emits records in compilation order can have n_recs > n_slots
-    # (e.g., WRLD3 SCEN01 after the record-region fix). In that case we
-    # saturate the offset to zero so the remaining pairings still surface
-    # the partial coverage that existed before the fix. Follow-up task #9
-    # will replace this with a slot-ref-based record->name link.
-    nominal_offset = max(0, n_slots - n_recs)
-    return _mapping_from_record_names(sorted_recs, nominal_offset, vdf, visible_blocks)
-
-
-def _debug_f2_offset_scan(vdf: VdfFile) -> list[tuple[int, int, bool, int]]:
-    """
-    Diagnostic variant of the f[2] offset mapping: reports mapping count,
-    stocks-first-alphabetical validity, and sort-key breaks for a small
-    window around the nominal offset.
-
-    Not used in production code paths; retained so that tooling can still
-    inspect neighbor offsets when investigating new fixtures.
-    """
-    n_recs = len(vdf.records)
-    n_slots = len(vdf.slot_table)
-    if n_recs == 0 or n_slots == 0:
-        return []
-
-    sorted_recs = sorted(enumerate(vdf.records), key=lambda x: x[1].fields[2])
-    all_blocks = build_owner_record_blocks(vdf)
-    visible_blocks = [b for b in all_blocks if not b.hidden]
-
-    nominal_offset = max(0, n_slots - n_recs)
-    rows: list[tuple[int, int, bool, int]] = []
-    for offset in range(max(0, nominal_offset - 3), nominal_offset + 4):
-        trial = _mapping_from_record_names(sorted_recs, offset, vdf, visible_blocks)
-        valid = _validate_name_block_assignment(trial, vdf)
-        sort_breaks = _offset_sort_key_breaks(sorted_recs, offset, vdf)
-        rows.append((offset, len(trial), valid, sort_breaks))
-    return rows
-
+    return _mapping_from_record_name_keys(vdf, visible_blocks)
 
 def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
     """
-    Map visible variable names to owner blocks using the stocks-first-
-    alphabetical ordering rule, validated against actual OT positions.
+    Map visible variable names to owner blocks through decoded record keys.
 
-    Uses the f[2]-offset formula plus sort-key anchored block ownership.
-    This stays linear in the number of records/blocks and avoids the
-    combinatorial fallback entirely.
+    Uses the direct f[2] string-table key plus sort-key anchored block
+    ownership. Descriptor/owner overlap handling is still a reconstruction
+    step, not a fully decoded Vensim emission rule.
     """
     all_blocks = build_owner_record_blocks(vdf)
-    visible_blocks = [b for b in all_blocks if not b.hidden]
+    visible_blocks = _select_non_overlapping_owner_blocks(
+        [b for b in all_blocks if not b.hidden]
+    )
 
     if not visible_blocks:
         hidden_ots: set[int] = set()
@@ -1968,7 +2463,7 @@ def map_names_to_owner_blocks(vdf: VdfFile) -> Optional[NameMapping]:
             unmapped_blocks=hidden_unmapped,
         )
 
-    f2_result = _try_f2_offset_mapping(vdf)
+    f2_result = _try_f2_name_key_mapping(vdf)
     if f2_result is None:
         return None
 
@@ -2004,7 +2499,7 @@ class NamedResult:
 
 def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
     """
-    Extract named time series from a VDF file using VDF-native structure only.
+    Extract named time series using the current record-derived reconstruction.
 
     Returns a list of NamedResult for each mapped variable (scalar variables
     get one entry, arrayed variables get one entry per element). System
@@ -2015,14 +2510,17 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
         return None
 
     # Extract time values
-    if vdf.first_data_block + 2 + vdf.bitmap_size > len(vdf.data):
+    time_values = vdf.extract_time_values()
+    if time_values is None:
         return None
-    time_count = u16(vdf.data, vdf.first_data_block)
-    if time_count != vdf.time_point_count:
-        return None
-    data_start = vdf.first_data_block + 2 + vdf.bitmap_size
-    time_values = [f32(vdf.data, data_start + i * 4) for i in range(time_count)]
     dimension_sets = _recover_dimension_sets(vdf)
+    shape_label_bindings = _shape_template_label_bindings(
+        vdf,
+        list(mapping.name_to_block.values()),
+        dimension_sets,
+    )
+    codes = vdf.section6_ot_class_codes()
+    final_values = vdf.section6_final_values()
 
     results: list[NamedResult] = []
     emitted_names: set[str] = set()
@@ -2042,30 +2540,25 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
         if block.length() == 1:
             # Scalar variable
             ot_idx = block.start
-            raw = vdf.offset_table_entry(ot_idx)
-            if raw is None:
+            series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+            if series is None:
                 continue
-            if vdf.is_data_block_offset(raw):
-                series = vdf.extract_block_series(raw, time_values)
-            else:
-                const_val = u32_as_f32(raw)
-                series = [const_val] * len(time_values)
             results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
             emitted_names.add(name)
             emitted_ot_indices.add(ot_idx)
         else:
             # Arrayed variable: one result per OT element
-            element_labels = _array_element_labels_for_block(block, dimension_sets)
+            element_labels = _array_element_labels_for_block(
+                vdf,
+                block,
+                dimension_sets,
+                shape_label_bindings,
+            )
             for elem_offset in range(block.length()):
                 ot_idx = block.start + elem_offset
-                raw = vdf.offset_table_entry(ot_idx)
-                if raw is None:
+                series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+                if series is None:
                     continue
-                if vdf.is_data_block_offset(raw):
-                    series = vdf.extract_block_series(raw, time_values)
-                else:
-                    const_val = u32_as_f32(raw)
-                    series = [const_val] * len(time_values)
                 if element_labels is not None and elem_offset < len(element_labels):
                     elem_name = f"{name}[{element_labels[elem_offset]}]"
                 else:
@@ -2086,36 +2579,49 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
             raw = vdf.offset_table_entry(ot_idx)
             if raw is None:
                 continue
-            if vdf.is_data_block_offset(raw):
-                series = vdf.extract_block_series(raw, time_values)
-            else:
-                const_val = u32_as_f32(raw)
-                series = [const_val] * len(time_values)
+            series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+            if series is None:
+                continue
             results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
             emitted_names.add(name)
             emitted_ot_indices.add(ot_idx)
 
-    # System variables fill whatever non-stock OT positions remain after
-    # the record-based mapping is applied. We first try the gap-aware
-    # stocks-first-alphabetical layout (which the old offset-scan code
-    # implicitly relied on), but if it cannot satisfy the constraints --
-    # for example when a lookupish name lands between two system names
-    # alphabetically -- we fall back to filling unclaimed non-stock
-    # positions in OT order. The final values array in section 6 is the
-    # authoritative source for a system variable's numeric value, but its
-    # OT index is no longer forced by an alphabetical fit that the nominal
-    # offset mapping does not always support.
+    # System variables have direct scalar records of their own (except Time,
+    # which is OT[0]). Prefer those decoded record bindings; the gap-aware
+    # nonstock layout remains only as a fallback for malformed/partial files.
     codes = vdf.section6_ot_class_codes() or []
-    nonstock_positions = _group_ot_positions(codes, want_stock=False)
-    system_positions = _assign_group_positions(
-        _nonstock_assignment_items(mapping.name_to_block),
-        nonstock_positions,
-    )
-    if system_positions is None:
+    system_positions = system_ot_indices_from_records(vdf)
+    missing_system_names = [
+        name
+        for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key)
+        if name not in system_positions
+    ]
+    if missing_system_names:
+        nonstock_positions = _group_ot_positions(codes, want_stock=False)
+        fallback_positions = _assign_group_positions(
+            _nonstock_assignment_items(mapping.name_to_block),
+            nonstock_positions,
+        )
+        if fallback_positions is None:
+            claimed = {block.start + i for block in mapping.name_to_block.values()
+                       for i in range(block.length())}
+            remaining = [pos for pos in nonstock_positions if pos not in claimed]
+            fallback_positions = {
+                name: pos
+                for name, pos in zip(
+                    sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key),
+                    remaining,
+                )
+            }
+        for name in missing_system_names:
+            if name in fallback_positions:
+                system_positions[name] = fallback_positions[name]
+
+    if not system_positions:
         claimed = {block.start + i for block in mapping.name_to_block.values()
                    for i in range(block.length())}
+        nonstock_positions = _group_ot_positions(codes, want_stock=False)
         remaining = [pos for pos in nonstock_positions if pos not in claimed]
-        system_positions = {}
         for name, pos in zip(
             sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key),
             remaining,
@@ -2129,11 +2635,9 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
         raw = vdf.offset_table_entry(ot_idx)
         if raw is None:
             continue
-        if vdf.is_data_block_offset(raw):
-            series = vdf.extract_block_series(raw, time_values)
-        else:
-            const_val = u32_as_f32(raw)
-            series = [const_val] * len(time_values)
+        series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+        if series is None:
+            continue
         results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
         emitted_names.add(name)
         emitted_ot_indices.add(ot_idx)
@@ -2391,6 +2895,10 @@ def parse_vdf(data: bytes) -> VdfFile:
 
     time_point_count = u32(data, 0x78)
     bitmap_size = math.ceil(time_point_count / 8)
+    block_time_point_count = u32(data, 0x7C) if len(data) >= 0x80 else 0
+    if block_time_point_count < time_point_count:
+        block_time_point_count = time_point_count
+    block_bitmap_size = math.ceil(block_time_point_count / 8)
 
     header_fv_off = u32(data, 0x58)
     header_lm_off = u32(data, 0x5C)
@@ -2438,6 +2946,8 @@ def parse_vdf(data: bytes) -> VdfFile:
         data=data,
         time_point_count=time_point_count,
         bitmap_size=bitmap_size,
+        block_time_point_count=block_time_point_count,
+        block_bitmap_size=block_bitmap_size,
         sections=sections,
         names=names,
         name_section_idx=name_section_idx,
@@ -2517,6 +3027,8 @@ def print_header(vdf: VdfFile, path: str) -> None:
     print(f"Timestamp:    {timestamp}")
     print(f"Time points:  {vdf.time_point_count}")
     print(f"Bitmap size:  {vdf.bitmap_size} bytes")
+    if vdf.block_time_point_count != vdf.time_point_count:
+        print(f"Block grid:   {vdf.block_time_point_count} points ({vdf.block_bitmap_size} bitmap bytes)")
     print()
 
     print("=== Header Offsets ===")
@@ -2598,6 +3110,7 @@ def print_slots(vdf: VdfFile) -> None:
         hidden = ", ".join(str(slot) for slot in alignment.hidden_slots)
         print(f"  visible-name alignment: skip {alignment.leading_extra_slots} leading slot entries "
               f"(score {alignment.score} vs default {default_alignment.score})")
+        print("  note: this is an exploratory display alignment; structural refs use direct slot_table[i] -> names[i]")
         print(f"  hidden slot refs: [{hidden}]")
     print(f"  {'Idx':>3}  {'Sec1Off':>7}  {'Name':<36}  {'w[0]':>8} {'w[1]':>8} {'w[2]':>8} {'w[3]':>8}")
     for i, offset in enumerate(vdf.slot_table):
@@ -2620,7 +3133,7 @@ def print_records(vdf: VdfFile) -> None:
         return
 
     slot_to_name: dict[int, str] = {}
-    for slot, names in build_display_slot_to_names(vdf).items():
+    for slot, names in build_direct_slot_to_names(vdf).items():
         if names:
             slot_to_name[slot] = names[0]
 
@@ -2664,6 +3177,68 @@ def print_records(vdf: VdfFile) -> None:
     print()
 
 
+def _format_ot_code_span(codes: list[int]) -> str:
+    if not codes:
+        return "[]"
+    counts: dict[int, int] = {}
+    for code in codes:
+        counts[code] = counts.get(code, 0) + 1
+    if len(counts) == 1:
+        code = codes[0]
+        return f"{len(codes)}x0x{code:02x}/{ot_code_label(code)}"
+    return "[" + ", ".join(f"0x{code:02x}/{ot_code_label(code)}" for code in codes) + "]"
+
+
+def print_decoded_record_facts(vdf: VdfFile, *, max_spans: int = 80, max_overlaps: int = 16) -> None:
+    print("=== Decoded Record Facts (No Reconstruction) ===")
+    spans = decoded_record_spans(vdf)
+    overlaps = record_span_overlaps(spans)
+    covered_ot = {
+        ot_idx
+        for span in spans
+        for ot_idx in range(span.start, span.end)
+    }
+    sentinel_spans = sum(1 for span in spans if span.has_sentinel)
+    print("  source: direct record f[2] name key + f[11] OT start + decoded nonzero f[6] shape span")
+    print("  excluded: hidden-slot alignment, descriptor pruning, non-overlap owner selection, array-label guessing")
+    print(f"  spans={len(spans)} sentinel_spans={sentinel_spans} "
+          f"covered_ot_slots={len(covered_ot)} overlap_ot_slots={len(overlaps)}")
+
+    dims = _recover_dimension_sets(vdf)
+    if dims:
+        print("  decoded dimension sets:")
+        for dim in dims[:12]:
+            elements = ", ".join(dim.elements)
+            print(f"    {dim.name} ({dim.source}) = [{elements}]")
+        if len(dims) > 12:
+            print(f"    ... ({len(dims) - 12} more)")
+
+    if spans:
+        print("  spans:")
+        for span in spans[:max_spans]:
+            sentinel = " yes" if span.has_sentinel else " no"
+            print(f"    rec[{span.rec_idx:>3}] name[{span.name_idx:>4}] \"{span.name}\" "
+                  f"OT[{span.start}..{span.end}) len={span.length()} "
+                  f"shape={span.shape_code} sort={span.sort_key} slot={span.slot_ref} "
+                  f"group={span.group_id} sentinel={sentinel} codes={_format_ot_code_span(span.ot_codes)}")
+        if len(spans) > max_spans:
+            print(f"    ... ({len(spans) - max_spans} more spans)")
+
+    if overlaps:
+        print("  overlap examples:")
+        for ot_idx in sorted(overlaps)[:max_overlaps]:
+            hit_labels = [
+                f"rec[{span.rec_idx}] \"{span.name}\" OT[{span.start}..{span.end})"
+                for span in overlaps[ot_idx][:4]
+            ]
+            if len(overlaps[ot_idx]) > 4:
+                hit_labels.append(f"... {len(overlaps[ot_idx]) - 4} more")
+            print(f"    OT[{ot_idx}] <- {'; '.join(hit_labels)}")
+        if len(overlaps) > max_overlaps:
+            print(f"    ... ({len(overlaps) - max_overlaps} more overlap slots)")
+    print()
+
+
 def print_section3(vdf: VdfFile) -> None:
     print("=== Section 3 Directory ===")
     directory = vdf.parse_section3_directory()
@@ -2677,7 +3252,7 @@ def print_section3(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
     sec4_entries = vdf.parse_section4_entries()
     sec4_idx_words = set()
     if sec4_entries:
@@ -2707,7 +3282,7 @@ def print_section4(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
     for i, e in enumerate(entries[:30]):
         refs = [resolve_slot_ref(r, slot_to_names) for r in e.refs]
         print(f"  {i:>3} @0x{e.file_offset:08x} packed=0x{e.packed_word:08x} "
@@ -2729,7 +3304,7 @@ def print_section5(vdf: VdfFile) -> None:
         print()
         return
 
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
     directory = vdf.parse_section3_directory()
     sec3_entries = directory.entries if directory else []
     for i, e in enumerate(entries[:16]):
@@ -2761,7 +3336,7 @@ def print_section6_ref_stream(vdf: VdfFile) -> None:
         return
 
     skip, entries, stop = result
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
     slot_to_name_flat: dict[int, str] = {}
     for s, names in slot_to_names.items():
         slot_to_name_flat[s] = names[0] if names else ""
@@ -2884,19 +3459,21 @@ def print_data_blocks(vdf: VdfFile) -> None:
 
     print(f"=== Data Blocks ({len(block_offsets)}) ===")
     for idx, offset in enumerate(block_offsets):
-        if offset + 2 + vdf.bitmap_size > len(vdf.data):
+        bitmap_size = vdf.bitmap_size if offset == vdf.first_data_block else vdf.block_bitmap_size
+        grid_count = vdf.time_point_count if offset == vdf.first_data_block else vdf.block_time_point_count
+        if offset + 2 + bitmap_size > len(vdf.data):
             print(f"  {idx:>3}  0x{offset:08x}  (truncated)")
             continue
         count = u16(vdf.data, offset)
-        block_size = 2 + vdf.bitmap_size + count * 4
-        density = (count / vdf.time_point_count * 100) if vdf.time_point_count > 0 else 0
+        block_size = 2 + bitmap_size + count * 4
+        density = (count / grid_count * 100) if grid_count > 0 else 0
 
-        data_start = offset + 2 + vdf.bitmap_size
+        data_start = offset + 2 + bitmap_size
         first_val = f32(vdf.data, data_start) if count > 0 and data_start + 4 <= len(vdf.data) else float("nan")
         last_val = f32(vdf.data, data_start + (count - 1) * 4) if count > 1 and data_start + count * 4 <= len(vdf.data) else first_val
 
         label = "  [TIME]" if offset == vdf.first_data_block else ""
-        print(f"  {idx:>3}  0x{offset:08x}  {count}/{vdf.time_point_count} "
+        print(f"  {idx:>3}  0x{offset:08x}  {count}/{grid_count} "
               f"({density:.0f}%)  {block_size}B  first={first_val} last={last_val}{label}")
     print()
 
@@ -2905,19 +3482,13 @@ def print_data_series(vdf: VdfFile) -> None:
     """Extract and print first/last values for every OT entry."""
     print("=== Data Series (first/last values per OT) ===")
     # Get time values first
-    if vdf.first_data_block + 2 + vdf.bitmap_size > len(vdf.data):
-        print("  (time block truncated)\n")
+    time_values = vdf.extract_time_values()
+    if time_values is None:
+        print("  (time block unavailable)\n")
         return
-
-    count = u16(vdf.data, vdf.first_data_block)
-    if count != vdf.time_point_count:
-        print(f"  (time block count {count} != expected {vdf.time_point_count})\n")
-        return
-
-    data_start = vdf.first_data_block + 2 + vdf.bitmap_size
-    time_values = [f32(vdf.data, data_start + i * 4) for i in range(count)]
 
     codes = vdf.section6_ot_class_codes()
+    final_values = vdf.section6_final_values()
     for i in range(vdf.offset_table_count):
         raw = vdf.offset_table_entry(i)
         if raw is None:
@@ -2927,13 +3498,19 @@ def print_data_series(vdf: VdfFile) -> None:
             code_str = f" ({ot_code_label(codes[i])})"
 
         if vdf.is_data_block_offset(raw):
-            series = vdf.extract_block_series(raw, time_values)
+            series = vdf.extract_ot_series(i, time_values, codes, final_values)
+            if series is None:
+                continue
             first = series[0] if series else float("nan")
             last = series[-1] if series else float("nan")
             print(f"  OT[{i:>3}]{code_str}  first={first}  last={last}")
         else:
-            fval = u32_as_f32(raw)
-            print(f"  OT[{i:>3}]{code_str}  const={fval}")
+            series = vdf.extract_ot_series(i, time_values, codes, final_values)
+            if series is not None and series and math.isnan(series[0]):
+                print(f"  OT[{i:>3}]{code_str}  missing")
+            else:
+                fval = u32_as_f32(raw)
+                print(f"  OT[{i:>3}]{code_str}  const={fval}")
     print()
 
 
@@ -3137,8 +3714,8 @@ def print_owner_mdl_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -> N
 
 
 def print_name_mapping(vdf: VdfFile) -> None:
-    """Show the VDF-native name-to-OT mapping."""
-    print("=== VDF-Native Name Mapping ===")
+    """Show the current record-key owner-to-OT reconstruction."""
+    print("=== Record-Key Owner Mapping (Current Reconstruction) ===")
 
     candidates = visible_variable_candidates(vdf)
     all_blocks = build_owner_record_blocks(vdf)
@@ -3189,7 +3766,7 @@ def print_name_mapping(vdf: VdfFile) -> None:
 
 
 def print_extracted_results(vdf: VdfFile) -> None:
-    """Extract and show named results using VDF-native mapping."""
+    """Extract and show named results using the current reconstruction."""
     print("=== Extracted Named Results ===")
     results = extract_named_results(vdf)
     if results is None:
@@ -3265,7 +3842,7 @@ def print_section35_bridge(vdf: VdfFile) -> None:
         print("  (no section-5 entries)\n")
         return
 
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
 
     for i, sec3 in enumerate(directory.entries):
         axis_refs = set(sec3.axis_slot_refs())
@@ -3610,7 +4187,7 @@ def format_ref_signature_fingerprint(vdf: VdfFile, refs: list[int]) -> str:
 
 
 def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = False) -> str:
-    names = build_display_slot_to_names(vdf).get(slot_ref, [])
+    names = build_direct_slot_to_names(vdf).get(slot_ref, [])
     label = resolve_slot_ref(slot_ref, {slot_ref: names} if names else {})
     if not include_signature:
         return label
@@ -3618,7 +4195,7 @@ def describe_slot_ref(vdf: VdfFile, slot_ref: int, *, include_signature: bool = 
 
 
 def collect_slot_reference_inventory(vdf: VdfFile) -> dict[int, SlotReferenceInfo]:
-    slot_to_names = build_display_slot_to_names(vdf)
+    slot_to_names = build_direct_slot_to_names(vdf)
     inventory: dict[int, SlotReferenceInfo] = {}
 
     def add(slot_ref: int, use: str) -> None:
@@ -3910,8 +4487,8 @@ def print_compare(left: VdfFile, left_path: str, right: VdfFile, right_path: str
         _, right_entries, right_stop = right_ref_stream
         print(f"  stop_offset: left=0x{left_stop:08x} right=0x{right_stop:08x}")
         max_entries = max(len(left_entries), len(right_entries))
-        left_slots = build_display_slot_to_names(left)
-        right_slots = build_display_slot_to_names(right)
+        left_slots = build_direct_slot_to_names(left)
+        right_slots = build_direct_slot_to_names(right)
         for i in range(max_entries):
             lentry = left_entries[i] if i < len(left_entries) else None
             rentry = right_entries[i] if i < len(right_entries) else None
@@ -4005,15 +4582,17 @@ def main() -> None:
     parser.add_argument("--bridge", action="store_true", help="Show record shape -> sec3 bridge")
     parser.add_argument("--record-blocks", action="store_true",
                         help="Show record groups merged by decoded shape span")
+    parser.add_argument("--record-facts", action="store_true",
+                        help="Show direct record->name and record->OT spans without reconstruction")
     parser.add_argument("--owner-blocks", action="store_true",
                         help="Show owner-oriented blocks built from sentinel model records")
     parser.add_argument("--sec35-bridge", action="store_true", help="Show section-3 -> section-5 bridge")
     parser.add_argument("--ranges", action="store_true", help="Show record-derived OT ranges")
     parser.add_argument("--validate", action="store_true", help="Check structural invariants")
     parser.add_argument("--map-names", action="store_true",
-                        help="Show VDF-native name-to-OT mapping")
+                        help="Show current record-key owner-to-OT reconstruction")
     parser.add_argument("--extract", action="store_true",
-                        help="Extract named results using VDF-native mapping")
+                        help="Extract named results using current reconstruction")
     parser.add_argument("--raw-section", type=int, metavar="N", help="Full hexdump of section N")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON summary")
 
@@ -4066,7 +4645,7 @@ def main() -> None:
         args.names, args.slots, args.records, args.sec3, args.sec4,
         args.sec5, args.sec6, args.slot_xref, args.ot, args.blocks, args.data,
         args.bridge, args.record_blocks, args.sec35_bridge, args.ranges, args.validate,
-        args.owner_blocks, args.map_names, args.extract,
+        args.record_facts, args.owner_blocks, args.map_names, args.extract,
         args.raw_section is not None,
     ])
 
@@ -4101,6 +4680,8 @@ def main() -> None:
         print_shape_record_bridge(vdf)
     if show_all or args.record_blocks:
         print_record_shape_blocks(vdf)
+    if show_all or args.record_facts:
+        print_decoded_record_facts(vdf)
     if show_all or args.owner_blocks:
         print_owner_record_blocks(vdf)
     if mdl_model is not None:

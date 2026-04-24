@@ -24,11 +24,13 @@ use crate::{
     results::{Method, Results, Specs},
 };
 
+mod record_results;
 mod section3;
 mod signatures;
 mod stdlib_call;
 mod view_blocks;
 
+use record_results::{RecordResultCandidate, select_non_overlapping_record_candidates};
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
 
 // Stdlib call analysis used by the model-guided OT mapping lives in
@@ -147,17 +149,12 @@ pub const VDF_SECTION6_OT_CODE_STOCK: u8 = 0x08;
 
 /// Record classification value (`field[1]`) that marks a view header record.
 ///
-/// Every VDF file observed so far contains exactly one record with
-/// `field[1] == 138` for each dot-prefix view marker in the name table
-/// (`.Agriculture`, `.Population`, etc.). These view header records also
-/// carry `field[0] == 0` (padding marker) and act as boundary sentinels:
-/// records before a view header belong to the previous view; records after
-/// it belong to the view named by its dot-prefix entry.
-///
-/// Validated 1:1 on every scalar fixture (`f138_count == dot_prefix_count`)
-/// across the full test corpus, including WRLD3 SCEN01 (20/20), WRLD3
-/// experiment (20/20), and every small single-view fixture (bact, water,
-/// pop, consts, lookups, model_editing, etc., all 2/2).
+/// Small and medium fixtures often contain one such record per dot-prefix
+/// view marker, and these records act as useful boundary sentinels. That 1:1
+/// relationship is not universal: edited files can retain orphan headers, and
+/// `Ref.vdf` has many sub-group dot names without dedicated header records.
+/// Use the diagnostics in `view_blocks` before treating this as a name-table
+/// partition.
 pub const VDF_RECORD_VIEW_HEADER_CLASS: u32 = 138;
 
 /// Size of a VDF section header in bytes (magic + 5 u32 fields).
@@ -283,16 +280,19 @@ impl VdfRecord {
     /// Known values:
     /// - 5: scalar (no array dimensions)
     /// - 32 (0x20): generic arrayed marker (first or only array shape)
-    /// - other: section-3 index_word linking to a specific shape template
+    /// - other: section-3 shape key; some multi-shape directories use the
+    ///   following physical entry as the actual shape payload
+    /// - 0: ambiguous padding/dimension/descriptor marker, not a decoded
+    ///   arrayed-owner shape by itself
     ///
     /// Use `is_arrayed()` to test scalar vs. arrayed, or `shape_code()`
     /// to retrieve the raw value for shape-template lookups.
     pub fn is_arrayed(&self) -> bool {
-        self.fields[6] != 5
+        self.fields[6] != 0 && self.fields[6] != 5
     }
 
-    /// Raw field[6] value: the shape selector linking this record to a
-    /// section-3 shape template (or 5 for scalar, 32 for generic arrayed).
+    /// Raw field[6] value: the shape selector/key for section-3 shape lookup
+    /// (or 5 for scalar, 32 for generic arrayed, 0 for ambiguous metadata).
     pub fn shape_code(&self) -> u32 {
         self.fields[6]
     }
@@ -336,14 +336,16 @@ pub struct VdfRefListEntry {
 /// - marker=0: refs_len = n + 1 (dimension elements plus one trailing anchor)
 /// - marker=1: refs_len = n + 2 (dimension elements plus two axis anchors)
 ///
-/// In array-heavy files, `n` is the associated subscript-set cardinality.
-/// This structure preserves `n` and `marker` explicitly rather than inferring
-/// only from `refs.len()`.
+/// In simple fixtures `n` can match a subscript-set cardinality, but edited
+/// files show it is safer to treat it as a header count for the leading
+/// payload refs before the trailing axis anchors. This structure preserves
+/// `n` and `marker` explicitly rather than inferring only from `refs.len()`.
 #[derive(Debug, Clone)]
 pub struct VdfSection5SetEntry {
     /// Absolute file offset where this entry begins.
     pub file_offset: usize,
-    /// Header count field (`n`): the dimension cardinality.
+    /// Header count field (`n`): often cardinality-like, but not a decoded
+    /// dimension cardinality in every fixture.
     pub n: usize,
     /// Second header word: 0 for standard entries, 1 for entries with an
     /// extra axis-anchor ref.
@@ -431,12 +433,13 @@ pub struct VdfSection4EntryStream {
     pub entries: Vec<VdfSection4Entry>,
 }
 
-/// A named dimension set inferred from section 5 and nearby name-table entries.
+/// A named dimension set inferred from VDF-local array metadata.
 ///
-/// Observed array VDFs carry the dimension name as the only non-metadata name
-/// referenced from the section-5 entry. Element names are not referenced
-/// directly; instead they appear immediately after the dimension name in the
-/// name table, interleaved only with metadata entries.
+/// The Rust parser still primarily uses the older single-section-5 fallback
+/// where a dimension anchor and adjacent name-table entries reveal elements.
+/// The Python xray tool has a stronger decoded path through record
+/// `field[8]` groups, where a dimension anchor and zero-based element records
+/// share a compact group id; Rust should be kept in sync with that path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VdfDimensionSet {
     /// Dimension name as stored in the VDF name table.
@@ -1478,6 +1481,57 @@ impl VdfFile {
         out
     }
 
+    /// Map record `field[2]` name keys to section-2 name-table indices.
+    ///
+    /// The key is the 4-byte word offset of the printable name within the
+    /// section-2 data region, plus seven words. The first name (`Time`) has no
+    /// length prefix; every following name's key points at the first character
+    /// after its u16 length prefix.
+    fn record_name_key_to_name_index(&self) -> HashMap<u32, usize> {
+        let Some(name_section_idx) = self.name_section_idx else {
+            return HashMap::new();
+        };
+        let Some(section) = self.sections.get(name_section_idx) else {
+            return HashMap::new();
+        };
+        if self.names.is_empty() {
+            return HashMap::new();
+        }
+
+        let data_start = section.data_offset();
+        let parse_end = section.region_end.min(self.data.len());
+        let first_len = (section.field5 >> 16) as usize;
+        if first_len == 0 || data_start + first_len > self.data.len() {
+            return HashMap::new();
+        }
+
+        let mut out = HashMap::new();
+        out.insert(7, 0);
+
+        let mut pos = data_start + first_len;
+        let mut name_idx = 1usize;
+        while name_idx < self.names.len() && pos + 2 <= parse_end {
+            let len = read_u16(&self.data, pos) as usize;
+            pos += 2;
+            if len == 0 {
+                continue;
+            }
+            if pos + len > parse_end || len > 256 {
+                break;
+            }
+
+            let start_rel = pos - data_start;
+            if start_rel.is_multiple_of(4) {
+                out.insert((start_rel / 4 + 7) as u32, name_idx);
+            }
+
+            pos += len;
+            name_idx += 1;
+        }
+
+        out
+    }
+
     /// Extract all time series data from data blocks, returning a `VdfData`.
     pub fn extract_data(&self) -> StdResult<VdfData, Box<dyn Error>> {
         let time_values = extract_time_series(
@@ -1534,24 +1588,11 @@ impl VdfFile {
 
     /// Build a `Results` struct using only VDF structural data.
     ///
-    /// This path is intentionally conservative: it succeeds only when the VDF
-    /// itself forces a unique stock/non-stock partition for the visible scalar
-    /// names. When the section-6 stock boundary is known but multiple visible
-    /// names could legally occupy the stock-coded OT slots, this returns an
-    /// explicit ambiguity error instead of guessing.
-    ///
-    /// Algorithm:
-    /// 1. Parse name table and filter out metadata/builtins/signatures
-    /// 2. Use section-6 class codes to get stock count S
-    /// 3. Trim excess lookup definitions when they are the only over-capacity names
-    /// 4. Treat system variables as deterministically non-stock
-    /// 5. Succeed only when the remaining unresolved names are forced entirely
-    ///    into the stock block or entirely into the non-stock block
-    /// 6. Sort stocks alphabetically into OT[1..S], non-stocks into OT[S+1..]
-    ///    and build Results
-    ///
-    /// Array-bearing VDFs remain unsupported because their base-variable to
-    /// shape/dimension ownership is still not fully decoded.
+    /// This conservative path succeeds only when VDF structure forces a unique
+    /// stock/non-stock partition for visible scalar names. It filters candidate
+    /// names, trims lookup-definition over-capacity, treats system variables as
+    /// non-stock, then alphabetically assigns forced stocks/non-stocks into the
+    /// class-code partition. Array-bearing VDFs remain unsupported here.
     ///
     /// For a less restrictive structural path that accepts an external stock
     /// classifier, see [`VdfFile::to_results_with_stock_classifier`].
@@ -2196,30 +2237,19 @@ impl VdfFile {
     /// Build a `Results` struct using only VDF structural data, driven by
     /// the deterministic record-to-name correspondence.
     ///
-    /// Records sorted by `field[2]` correspond 1:1 with name-table entries
-    /// at position `(slot_count - record_count) + rank`. Each record's
-    /// `field[11]` gives the start OT index; `field[6]` selects the shape
-    /// template (5 = scalar; other = section-3 directory entry). This path
-    /// is intentionally direct: no scoring, no offset scan, no external
-    /// stock classifier -- the mapping is whatever the records deterministically
-    /// produce.
+    /// Each record's `field[2]` identifies a section-2 name-table entry,
+    /// `field[11]` gives the start OT index, and `field[6]` selects the shape
+    /// key (5 = scalar; 32 = generic single-shape array; explicit keys resolve
+    /// through section 3, including Ref-style predecessor keys). This path is
+    /// intentionally direct: no offset scan and no external stock classifier.
     ///
     /// ### Limitations
     ///
-    /// This pairing is only **correct** when Vensim emits records in
-    /// name-table order, which holds for small/medium scalar fixtures
-    /// (`water`, `pop`, `bact`, `lookup_ex`, `level_vs_aux/*`, most
-    /// `model_editing/run_*`). On re-saved or large compilation-order
-    /// files (`econ/*.vdf`, `WRLD3-03/*.VDF`, `Ref.vdf`/C-LEARN) the
-    /// record order is Vensim's internal compilation order, not name-table
-    /// order, so the sort-by-`f[2]` + `(slot_count - record_count)` offset
-    /// pairs many records with the wrong name. The column count may look
-    /// healthy, but individual labels will be misassigned. Callers that
-    /// need correct labels on compilation-order fixtures should use
-    /// `build_section6_guided_ot_map` or `to_results_with_model` -- both
-    /// require a parsed model. The deterministic direct-link for records
-    /// in compilation order is still open; see notes in
-    /// `docs/design/vdf.md` section "Name-to-OT mapping".
+    /// Record `field[2]` is a direct key into the section-2 name table:
+    /// `(name_string_start - section2_data_start) / 4 + 7`, where
+    /// `name_string_start` points at the first printable byte after any u16
+    /// length prefix. This is stable on edited and compilation-order files
+    /// because it is an address-like string-pool word offset, not a sort rank.
     ///
     /// ### Filtering rules (structural only)
     ///
@@ -2229,48 +2259,32 @@ impl VdfFile {
     ///   entries and skipped.
     /// - Name-table entries that are empty or whose index is past the end
     ///   of the name table are skipped (no name to assign).
-    /// - If two records claim the same OT index the first winner keeps it.
+    /// - When record-derived spans overlap, the largest non-overlapping OT
+    ///   partition is kept, with lower record sort keys breaking equal-coverage
+    ///   ties. This is a conservative reconstruction for observed `Ref.vdf`
+    ///   descriptor conflicts, not a decoded owner/descriptor field.
     ///
-    /// Name category is NOT filtered here: when a record legitimately
-    /// points to an OT entry, the name at its paired slot is honored as-is
-    /// even when it looks like a stdlib helper (`DEL`, `LV1`, `ST`, ...),
-    /// an internal signature (`#SMOOTH(x,y)#`), a metadata marker
-    /// (`.mark2`, `-months`), or a Vensim builtin token (`MIN`, `SMOOTH`).
-    /// Vensim writes those records deliberately -- they mark real runtime
-    /// slots -- so discarding them at read time would deterministically
-    /// drop real OT data. Callers that want a cleaner symbol table can
-    /// filter results-side (e.g., by dropping columns whose Ident begins
-    /// with a metadata-prefix character).
+    /// Name category is otherwise not filtered here: if a record legitimately
+    /// points to an OT entry, its keyed name is honored even for stdlib helper,
+    /// internal signature, metadata, or builtin-looking names. Callers that
+    /// want cleaner symbols can filter results-side.
     ///
     /// The method always returns `Results` (possibly an empty one beyond
     /// Time) so callers can chain with other paths: it does not propagate
     /// ambiguity errors the way `to_results` does.
     pub fn to_results_via_records(&self) -> StdResult<Results, Box<dyn Error>> {
         let n_recs = self.records.len();
-        let n_slots = self.slot_table.len();
-        if n_recs == 0 || n_slots == 0 {
+        if n_recs == 0 || self.names.is_empty() {
             return Err(format!(
-                "record-based mapping requires non-empty records and slots: records={n_recs}, slots={n_slots}"
+                "record-based mapping requires non-empty records and names: records={n_recs}, names={}",
+                self.names.len()
             )
             .into());
         }
 
-        // When records <= slots (small/medium fixtures) the nominal offset
-        // `n_slots - n_recs` is the deterministic delta for records[k]
-        // pairing with names[k + offset]. Large fixtures where Vensim
-        // emits records in compilation order can have n_recs > n_slots
-        // (e.g., WRLD3 SCEN01 has 419 records vs 404 slots after the
-        // record-region fix). In that case we saturate the offset to zero
-        // so records still pair with some name-table entries. The result
-        // has known quality issues on compilation-order files -- see
-        // follow-up task #9 for the proper fix -- but saturating keeps
-        // whatever partial coverage the callers relied on before.
-        let nominal_offset = n_slots.saturating_sub(n_recs);
+        let name_key_to_name_index = self.record_name_key_to_name_index();
+        let class_codes = self.section6_ot_class_codes();
         let vdf_data = self.extract_data()?;
-
-        // Sort record indices by field[2] ascending.
-        let mut sorted_indices: Vec<usize> = (0..n_recs).collect();
-        sorted_indices.sort_by_key(|&i| self.records[i].fields[2]);
 
         // Look up section-3 shape directory for arrayed spans. Scalar
         // models return an empty directory (section 3 is all zeros), which
@@ -2300,11 +2314,13 @@ impl VdfFile {
         let mut claimed_ot: HashSet<usize> = HashSet::new();
         claimed_ot.insert(0);
 
-        for (rank, &ri) in sorted_indices.iter().enumerate() {
-            let name_idx = rank + nominal_offset;
-            if name_idx >= self.names.len() {
+        let mut candidates_by_range: HashMap<(usize, usize), RecordResultCandidate> =
+            HashMap::new();
+        for ri in 0..n_recs {
+            let rec = &self.records[ri];
+            let Some(&name_idx) = name_key_to_name_index.get(&rec.fields[2]) else {
                 continue;
-            }
+            };
             let name = &self.names[name_idx];
             if name.is_empty() {
                 continue;
@@ -2313,7 +2329,6 @@ impl VdfFile {
             // and typically come from the block-0..block-2 header region
             // or from padded tail entries that Vensim has not bound to an
             // OT slot.
-            let rec = &self.records[ri];
             if rec.fields[6] == 0 {
                 continue;
             }
@@ -2324,21 +2339,21 @@ impl VdfFile {
             }
 
             // Determine the OT span. Scalar records (field[6] == 5) always
-            // consume one slot. For arrayed records we look up the
-            // section-3 shape entry whose index_word equals the record's
-            // field[6]. field[6] == 32 is the single-shape generic marker.
+            // consume one slot. For arrayed records we resolve field[6]
+            // through section 3. Ref-style multi-shape directories store
+            // predecessor keys, so the directory helper may return the
+            // following physical entry rather than the entry whose index_word
+            // equals field[6]. field[6] == 32 is the single-shape generic
+            // marker.
             let span = if rec.fields[6] == 5 {
                 1usize
             } else {
                 let shape_code = rec.fields[6];
                 let mut found: Option<usize> = None;
-                if let Some(ref dir) = section3_directory {
-                    for entry in &dir.entries {
-                        if entry.index_word() == shape_code && entry.flat_size() > 0 {
-                            found = Some(entry.flat_size());
-                            break;
-                        }
-                    }
+                if let Some(ref dir) = section3_directory
+                    && let Some(entry) = dir.entry_for_record_shape_code(shape_code)
+                {
+                    found = Some(entry.flat_size());
                 }
                 if found.is_none() && shape_code == 32 {
                     found = sec3_sole_flat_size;
@@ -2353,18 +2368,72 @@ impl VdfFile {
                 continue;
             }
 
+            let end = ot_start + span;
+            let candidate = candidates_by_range
+                .entry((ot_start, end))
+                .or_insert_with(|| RecordResultCandidate {
+                    start: ot_start,
+                    span,
+                    sort_rank: usize::MAX,
+                    first_name_key: rec.fields[2],
+                    record_indices: Vec::new(),
+                });
+            candidate.record_indices.push(ri);
+            candidate.first_name_key = candidate.first_name_key.min(rec.fields[2]);
+            if rec.fields[10] > 0 {
+                candidate.sort_rank = candidate.sort_rank.min(rec.fields[10] as usize);
+            }
+        }
+
+        let selected_candidates =
+            select_non_overlapping_record_candidates(candidates_by_range.into_values().collect());
+
+        for mut candidate in selected_candidates {
+            candidate
+                .record_indices
+                .sort_by_key(|&ri| self.records[ri].fields[2]);
+
+            let stock_coded_block = class_codes.as_ref().is_some_and(|codes| {
+                (candidate.start..candidate.end()).all(|ot| {
+                    codes
+                        .get(ot)
+                        .is_some_and(|&code| code == VDF_SECTION6_OT_CODE_STOCK)
+                })
+            });
+
+            let mut chosen_name: Option<String> = None;
+            for ri in &candidate.record_indices {
+                let rec = &self.records[*ri];
+                let Some(&name_idx) = name_key_to_name_index.get(&rec.fields[2]) else {
+                    continue;
+                };
+                let name = &self.names[name_idx];
+                if name.is_empty() {
+                    continue;
+                }
+                if stock_coded_block && is_lookupish_name(name) {
+                    continue;
+                }
+                chosen_name = Some(name.clone());
+                break;
+            }
+
+            let Some(name) = chosen_name else {
+                continue;
+            };
+
             // System and user names flow through `Ident::new`, which
             // lowercases and strips spaces/underscores. `#`-prefixed
             // internal signatures (and other names that carry
             // non-canonicalizable characters) use `from_str_unchecked`
             // so the raw name is preserved as the result column key;
             // otherwise they would collapse into an empty Ident.
-            for elem in 0..span {
-                let ot = ot_start + elem;
+            for elem in 0..candidate.span {
+                let ot = candidate.start + elem;
                 if !claimed_ot.insert(ot) {
                     continue;
                 }
-                let display = if span > 1 {
+                let display = if candidate.span > 1 {
                     format!("{name}[{elem}]")
                 } else {
                     name.clone()
@@ -3149,6 +3218,39 @@ mod tests {
         let data = std::fs::read(path)
             .unwrap_or_else(|e| panic!("failed to read VDF file {}: {}", path, e));
         VdfFile::parse(data).unwrap_or_else(|e| panic!("failed to parse VDF file {}: {}", path, e))
+    }
+
+    fn assert_result_column_matches_ot(
+        label: &str,
+        results: &crate::Results,
+        vdf_data: &VdfData,
+        name: &str,
+        expected_ot: usize,
+    ) {
+        let ident = Ident::<Canonical>::new(name);
+        let col = *results
+            .offsets
+            .get(&ident)
+            .unwrap_or_else(|| panic!("{label}: missing result column {name}"));
+        let expected = vdf_data
+            .entries
+            .get(expected_ot)
+            .unwrap_or_else(|| panic!("{label}: missing OT[{expected_ot}]"));
+        assert!(
+            expected.len() >= results.step_count,
+            "{label}: OT[{expected_ot}] has {} values but Results has {} steps",
+            expected.len(),
+            results.step_count
+        );
+
+        for (step, &expected_value) in expected.iter().take(results.step_count).enumerate() {
+            let actual = results.data[step * results.step_size + col];
+            assert!(
+                (actual - expected_value).abs() <= 1e-6,
+                "{label}: {name} step {step} mapped to wrong series: \
+                 got {actual}, expected OT[{expected_ot}] value {expected_value}"
+            );
+        }
     }
 
     fn remove_model_var(project: &mut crate::datamodel::Project, ident: &str) {
@@ -5335,13 +5437,13 @@ mod tests {
     #[test]
     fn test_to_results_via_records_scalar_stock_fixture() {
         // level_vs_aux/x_is_stock.vdf: a one-variable scalar fixture with
-        // `x` as a stock. The record-based mapping should at minimum
-        // succeed -- it returns Results keyed by the time column plus any
-        // system-name records that resolve at the nominal offset.
+        // `x` as a stock. The direct f[2] string-key mapping should recover
+        // the visible variable, not just Time/system records.
         let vdf = vdf_file("../../test/bobby/vdf/level_vs_aux/x_is_stock.vdf");
         let results = vdf
             .to_results_via_records()
             .expect("record-based mapping should succeed on scalar stock fixture");
+        let vdf_data = vdf.extract_data().unwrap();
 
         assert!(
             results
@@ -5354,17 +5456,19 @@ mod tests {
             let v = results.data[col];
             assert!(v.is_finite(), "column {col} must be finite: {v}");
         }
+        assert_result_column_matches_ot("x_is_stock", &results, &vdf_data, "x", 1);
     }
 
     #[test]
     fn test_to_results_via_records_scalar_aux_fixture() {
         // level_vs_aux/x_is_aux.vdf: same shape as the stock variant but
-        // `x` is a non-stock auxiliary. The record-based mapping should
-        // still land system names at the OT slots forced by their records.
+        // `x` is a non-stock auxiliary. This fixture has too few records for
+        // the old rank-offset approximation; the direct f[2] key recovers it.
         let vdf = vdf_file("../../test/bobby/vdf/level_vs_aux/x_is_aux.vdf");
         let results = vdf
             .to_results_via_records()
             .expect("record-based mapping should succeed on scalar aux fixture");
+        let vdf_data = vdf.extract_data().unwrap();
 
         assert!(
             results
@@ -5372,6 +5476,64 @@ mod tests {
                 .contains_key(&Ident::<Canonical>::new("time"))
         );
         assert_eq!(results.step_count, vdf.time_point_count);
+        assert_result_column_matches_ot("x_is_aux", &results, &vdf_data, "x", 5);
+    }
+
+    #[test]
+    fn test_record_name_key_maps_to_section2_string_start() {
+        let run8 = vdf_file("../../test/bobby/vdf/model_editing/run_8.vdf");
+        let run8_keys = run8.record_name_key_to_name_index();
+
+        assert_eq!(run8.names[*run8_keys.get(&49).unwrap()], "v");
+        assert_eq!(run8.names[*run8_keys.get(&51).unwrap()], "constant");
+        assert_eq!(run8.names[*run8_keys.get(&54).unwrap()], "stock");
+        assert_eq!(run8.names[*run8_keys.get(&57).unwrap()], "flow");
+
+        let lookup = vdf_file("../../test/bobby/vdf/lookups/lookup_ex.vdf");
+        let lookup_keys = lookup.record_name_key_to_name_index();
+
+        assert_eq!(
+            lookup.names[*lookup_keys.get(&32).unwrap()],
+            "lookup table 1"
+        );
+        assert_eq!(
+            lookup.names[*lookup_keys.get(&37).unwrap()],
+            "inline lookup table"
+        );
+        assert_eq!(lookup.names[*lookup_keys.get(&43).unwrap()], "stock");
+        assert_eq!(lookup.names[*lookup_keys.get(&46).unwrap()], "net change");
+    }
+
+    #[test]
+    fn test_to_results_via_records_uses_ref_style_predecessor_shape_codes() {
+        let vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should produce Ref.vdf columns");
+        let vdf_data = vdf.extract_data().unwrap();
+
+        assert_result_column_matches_ot("Ref.vdf", &results, &vdf_data, "GWP of HFC[8]", 1672);
+        assert_result_column_matches_ot("Ref.vdf", &results, &vdf_data, "Layer Depth[3]", 2202);
+        assert_result_column_matches_ot(
+            "Ref.vdf",
+            &results,
+            &vdf_data,
+            "Proportion of COP to global HFC134a eq[62]",
+            2801,
+        );
+        assert_result_column_matches_ot(
+            "Ref.vdf",
+            &results,
+            &vdf_data,
+            "Semi Agg Definition[41]",
+            3353,
+        );
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new("Layer Depth[4]")),
+            "Layer Depth is a 4-element layers array, not a 63-element COP x HFC block"
+        );
     }
 
     #[test]
@@ -5436,17 +5598,7 @@ mod tests {
     fn test_to_results_via_records_fixture_with_hidden_stdlib_helpers() {
         // model_editing/run_10.vdf: edited fixture containing a SMOOTH
         // invocation (expanded into hidden stock-backed helpers). The
-        // record-based path should still succeed and produce a usable
-        // `Results`; it is allowed to miss names whose backing record was
-        // downgraded to padding (f[6] == 0) during the edit sequence,
-        // because the deterministic nominal offset does not attempt to
-        // reorder records around an inserted hidden helper.
-        //
-        // Rationale for the weaker assertion: run_10 is the trickiest
-        // case in the corpus (added subscript dimensions, renamed stock,
-        // inserted SMOOTH). We accept partial results here and rely on
-        // the model-guided path (`build_section6_guided_ot_map`) or the
-        // stock-classifier path for a fully resolved mapping.
+        // direct f[2] key should still succeed and produce a usable `Results`.
         let vdf = vdf_file("../../test/bobby/vdf/model_editing/run_10.vdf");
         let results = vdf
             .to_results_via_records()
@@ -5463,6 +5615,63 @@ mod tests {
                 .contains_key(&Ident::<Canonical>::new("time")),
             "Time must always be present"
         );
+    }
+
+    #[test]
+    fn test_to_results_via_records_edited_run_9_and_run_10_use_direct_name_keys_for_array_owners() {
+        for (label, path) in [
+            ("run_9", "../../test/bobby/vdf/model_editing/run_9.vdf"),
+            ("run_10", "../../test/bobby/vdf/model_editing/run_10.vdf"),
+        ] {
+            let vdf = vdf_file(path);
+            let results = vdf
+                .to_results_via_records()
+                .unwrap_or_else(|e| panic!("{label}: record-based mapping should succeed: {e}"));
+            let vdf_data = vdf.extract_data().unwrap();
+
+            for (name, ot) in [
+                ("stock[0]", 2),
+                ("stock[1]", 3),
+                ("constant", 4),
+                ("flow[0]", 6),
+                ("flow[1]", 7),
+                ("v", 11),
+            ] {
+                assert_result_column_matches_ot(label, &results, &vdf_data, name, ot);
+            }
+        }
+    }
+
+    #[test]
+    fn test_to_results_via_records_lookup_ex_separates_lookup_definition_from_output() {
+        let vdf = vdf_file("../../test/bobby/vdf/lookups/lookup_ex.vdf");
+        let results = vdf
+            .to_results_via_records()
+            .expect("record-based mapping should resolve lookup_ex");
+        let vdf_data = vdf.extract_data().unwrap();
+
+        for (name, ot) in [("stock", 1), ("inline lookup table", 4), ("net change", 5)] {
+            assert_result_column_matches_ot("lookup_ex", &results, &vdf_data, name, ot);
+        }
+
+        if let Some(&col) = results
+            .offsets
+            .get(&Ident::<Canonical>::new("lookup table 1"))
+        {
+            let ot4 = vdf_data.entries.get(4).expect("lookup_ex missing OT[4]");
+            let is_ot4 =
+                ot4.iter()
+                    .take(results.step_count)
+                    .enumerate()
+                    .all(|(step, &expected_value)| {
+                        (results.data[step * results.step_size + col] - expected_value).abs()
+                            <= 1e-6
+                    });
+            assert!(
+                !is_ot4,
+                "lookup_ex: lookup table 1 must not steal the inline lookup table OT[4] series"
+            );
+        }
     }
 
     #[test]
@@ -5498,16 +5707,11 @@ mod tests {
 
     #[test]
     fn test_to_results_via_records_handles_records_exceeding_slots() {
-        // WRLD3-03/SCEN01.VDF emits records in Vensim's internal
-        // compilation order, and after the record-region fix the record
-        // count (419) exceeds the slot count (404). The earlier guard
-        // `n_recs > n_slots -> error` would have produced zero coverage
-        // for this fixture, a regression from the 202-of-297 OTs it
-        // resolved before the fix. The current code saturates the nominal
-        // offset to zero so records still pair with name-table entries,
-        // keeping partial coverage alive. Follow-up task #9 will replace
-        // the offset with a slot-ref-based link so the pairings are
-        // actually correct on compilation-order files.
+        // WRLD3-03/SCEN01.VDF emits more records than slot-table entries.
+        // The direct f[2] key path should not care about that cardinality
+        // relationship; it decodes each record's section-2 name pointer
+        // independently and keeps the partial coverage available on this
+        // still-ambiguous large fixture.
         let vdf = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
         assert!(
             vdf.records.len() > vdf.slot_table.len(),
@@ -5577,18 +5781,16 @@ mod tests {
 
     #[test]
     fn test_to_results_via_records_matches_guided_on_econ_base_is_known_low() {
-        // On econ/base.vdf, Vensim emits records in compilation order, not
-        // name-table order. The `(slot_count - record_count)` nominal offset
-        // pairing therefore misassigns the majority of labels -- the column
-        // count looks healthy post-filter-removal but individual labels are
-        // wrong. `build_section6_guided_ot_map` is the authoritative ground
-        // truth (model-guided, section-6 class codes + alphabetical sort).
+        // On econ/base.vdf, the direct f[2] key resolves records to their
+        // section-2 names, but record ownership still diverges from the
+        // model-guided map around stdlib helpers, aliases, and duplicate OT
+        // owners. `build_section6_guided_ot_map` is the authoritative ground
+        // truth here (model-guided, section-6 class codes + alphabetical sort).
         //
         // This test PINS the current low label-agreement rate so a future
-        // improvement to `to_results_via_records` -- e.g. resolving the
-        // compilation-order record->name link in follow-up task #9 -- would
-        // raise the ratio and fail the assertion, signalling that this test
-        // and the function's docstring should be updated.
+        // improvement to duplicate-owner/alias interpretation would raise the
+        // ratio and fail the assertion, signalling that this test and the
+        // function's docstring should be updated.
         let vdf = vdf_file("../../test/bobby/vdf/econ/base.vdf");
         let contents = std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").unwrap();
         let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
@@ -5607,8 +5809,8 @@ mod tests {
             ratio < 0.60,
             "econ/base: label-correctness (time-series match against guided) \
              is {ratio:.2} ({agreed}/{compared} names compared). \
-             If this exceeds 60% the compilation-order record->name link has \
-             likely been fixed -- update the docstring of `to_results_via_records` \
+             If this exceeds 60% the duplicate-owner/alias interpretation has \
+             likely improved -- update the docstring of `to_results_via_records` \
              and this assertion accordingly."
         );
         // Some agreement is expected (Time, and any records that happen to
@@ -5625,11 +5827,9 @@ mod tests {
         // Regression guard: the record-based mapping must still produce a
         // non-empty Results on each econ sibling and must not panic when
         // `to_results_via_records` is invoked. Label correctness on these
-        // fixtures is NOT asserted here -- they share the compilation-order
-        // limitation with econ/base (see the matches_guided test for
-        // econ/base) and the sort-by-f[2]/offset pairing mislabels the
-        // majority of columns. A Rust-side correctness fix is tracked as
-        // task #9.
+        // fixtures is NOT asserted here -- they share the duplicate-owner and
+        // alias limitations with econ/base (see the matches_guided test for
+        // econ/base), even though record f[2] now decodes names directly.
         for (label, vdf_path) in [
             ("econ/mark2", "../../test/bobby/vdf/econ/mark2.vdf"),
             ("econ/policy", "../../test/bobby/vdf/econ/policy.vdf"),
@@ -5663,14 +5863,11 @@ mod tests {
     #[test]
     fn test_to_results_via_records_admits_stdlib_helper_names_on_econ() {
         // Verify the filter-removal specifically: names that used to be
-        // discarded (stdlib helpers like DEL/LV1/ST, module IO names
-        // like IN, Vensim builtin tokens like MIN/SMOOTH/DELAY1, unit/view
-        // markers like -months/.mark2, single-char placeholders) now
-        // appear as result columns when their paired record has a valid
-        // f[6] and f[11]. Record-based mapping alone cannot reason about
-        // WHICH variable each name aliases -- that is a model-guided
-        // concern -- but the column must surface rather than be silently
-        // dropped.
+        // discarded (notably `#` stdlib-call signatures) now appear as result
+        // columns when their keyed record has a valid f[6] and f[11].
+        // Record-based mapping alone cannot reason about WHICH variable each
+        // name aliases -- that is a model-guided concern -- but the column
+        // must surface rather than be silently dropped.
         //
         // We assert that at least one such previously-filtered name is
         // present, which is enough to catch a regression re-introducing
@@ -5679,16 +5876,14 @@ mod tests {
         let results = vdf
             .to_results_via_records()
             .expect("econ/base: record-based mapping should succeed");
-        let has_stdlib_name = results.offsets.keys().any(|id| {
-            matches!(
-                id.as_str(),
-                "del" | "lv1" | "lv2" | "lv3" | "st" | "rt1" | "rt2" | "dl" | "in"
-            )
-        });
+        let has_stdlib_name = results
+            .offsets
+            .keys()
+            .any(|id| id.as_str().starts_with('#'));
         assert!(
             has_stdlib_name,
-            "econ/base: expected at least one stdlib-helper name column \
-             (DEL/LV1/ST/IN/...) after filter relaxation; got columns \
+            "econ/base: expected at least one stdlib-helper signature column \
+             after filter relaxation; got columns \
              {:?}",
             results
                 .offsets
@@ -5700,19 +5895,16 @@ mod tests {
 
     #[test]
     fn test_to_results_via_records_matches_guided_on_wrld3_scen01_is_known_low() {
-        // WRLD3 SCEN01 is the canonical compilation-order fixture: records
-        // outnumber slots (419 vs 404 after the record-region fix) and
-        // Vensim emits them in its internal declaration/view-sector order,
-        // not name-table order. Probing in prior investigation showed the
-        // sort-by-f[2]/offset pairing mislabels essentially every column
-        // on this fixture -- 0/335 agreement with the model-guided map in
-        // one dataset.
+        // WRLD3 SCEN01 is the canonical large ambiguous fixture: records
+        // outnumber slots (419 vs 404 after the record-region fix), it has
+        // placeholder records, scattered stocks, and partially decoded array
+        // metadata. The direct f[2] name key improves the record-name link,
+        // but record-only ownership still disagrees with the model-guided map.
         //
         // This test pins the known-low label-agreement ratio so a future
-        // fix to `to_results_via_records` on compilation-order files (the
-        // task #9 direct record->name link) will make the assertion fail,
-        // forcing whoever lands the fix to also update this test and the
-        // function's docstring.
+        // fix to record-only ownership on large files will make the assertion
+        // fail, forcing whoever lands the fix to also update this test and
+        // the function's docstring.
         let vdf = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
         let contents = std::fs::read_to_string("../../test/metasd/WRLD3-03/wrld3-03.mdl").unwrap();
         let datamodel_project = crate::compat::open_vensim(&contents).unwrap();
@@ -5731,8 +5923,8 @@ mod tests {
             ratio < 0.20,
             "WRLD3 SCEN01: label-correctness (time-series match against guided) \
              is {ratio:.2} ({agreed}/{compared} names compared). \
-             If this exceeds 20% the compilation-order record->name link has \
-             likely been fixed -- update the docstring of `to_results_via_records` \
+             If this exceeds 20% the large-file record-only ownership path has \
+             likely improved -- update the docstring of `to_results_via_records` \
              and this assertion accordingly."
         );
     }
@@ -5743,9 +5935,9 @@ mod tests {
         // in name-table order (small/medium non-arrayed scalar models),
         // `to_results_via_records` should agree with `build_section6_guided_ot_map`
         // on the vast majority of labels. The two paths take different
-        // routes to the same answer -- via_records uses f[2]-sort +
-        // (slot_count - record_count) offset; guided uses section-6 class
-        // codes + model-driven alphabetical sort -- and their agreement
+        // routes to the same answer -- via_records uses the direct f[2]
+        // string-table key; guided uses section-6 class codes + model-driven
+        // alphabetical sort -- and their agreement
         // confirms both paths are sound on name-ordered fixtures.
         //
         // This complements the WRLD3/econ compilation-order tests: when

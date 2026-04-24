@@ -34,12 +34,10 @@
 //!    bound to OT[0] implicitly. [`VdfFile::to_results_via_file_order_records`]
 //!    applies this rule.
 //!
-//!    On small single-view files this reproduces the canonical mapping;
-//!    on WRLD3 it reproduces most of it but loses a handful of names via
-//!    the `f[11]==0` "no OT" sentinel (documented below); on
-//!    compilation-order files with sub-group dot names, arrayed
-//!    variables, and dimension-element names in the name table, the
-//!    pairing is approximate.
+//!    On small single-view files this is a useful mapping signal. On WRLD3
+//!    and other compilation-order files it is only partial: unmatched dot
+//!    names, arrayed variables, dimension-element names, and `f[11]==0`
+//!    successors can shift the pair stream.
 //!
 //! See `docs/design/vdf.md` for the full format reverse-engineering notes.
 
@@ -188,14 +186,13 @@ impl VdfFile {
     /// receives the label `name[i]` (0-indexed), matching the convention
     /// used in [`VdfFile::to_results_via_records`].
     ///
-    /// On small single-view fixtures (water, pop, bact, ...) and on the
-    /// multi-view WRLD3 files this yields the canonical mapping Vensim
-    /// itself recovers when opening the VDF without its MDL. On large
-    /// compilation-order files (`Ref.vdf`) and edited/re-saved files
-    /// (`risk2.vdf`) the mapping is approximate because the file-order
-    /// pair stream itself drifts on unmatched dot names / orphan headers
-    /// (see diagnostics returned by
-    /// [`VdfFile::record_view_groups_with_diagnostics`]).
+    /// On small single-view fixtures (water, pop, bact, ...) this can recover
+    /// useful mappings. On WRLD3, large compilation-order files (`Ref.vdf`),
+    /// and edited/re-saved files (`risk2.vdf`) the mapping is approximate
+    /// because the file-order pair stream can drift on unmatched dot names,
+    /// orphan headers, array metadata, and alias/signature regions. Use the
+    /// diagnostics returned by [`VdfFile::record_view_groups_with_diagnostics`]
+    /// to detect those cases.
     pub fn to_results_via_file_order_records(&self) -> StdResult<Results, Box<dyn Error>> {
         let vdf_data = self.extract_data()?;
 

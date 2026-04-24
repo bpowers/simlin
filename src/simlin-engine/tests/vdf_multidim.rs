@@ -13,12 +13,74 @@
 
 use std::collections::{HashMap, HashSet};
 
-use simlin_engine::vdf::VdfFile;
+use simlin_engine::Results;
+use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::vdf::{VdfData, VdfFile};
 
 fn load_ref_vdf() -> VdfFile {
     let data =
         std::fs::read("../../test/xmutil_test_models/Ref.vdf").expect("read Ref.vdf fixture");
     VdfFile::parse(data).expect("parse Ref.vdf")
+}
+
+fn assert_result_column_matches_ot(results: &Results, vdf_data: &VdfData, name: &str, ot: usize) {
+    let ident = Ident::<Canonical>::new(name);
+    let col = results
+        .offsets
+        .get(&ident)
+        .unwrap_or_else(|| panic!("missing result column {name}"));
+    let expected = vdf_data
+        .entries
+        .get(ot)
+        .unwrap_or_else(|| panic!("missing OT[{ot}]"));
+    for (step, expected_value) in expected.iter().take(results.step_count).enumerate() {
+        let actual = results.data[step * results.step_size + col];
+        assert!(
+            (actual - expected_value).abs() <= 1e-6,
+            "{name}: step {step} actual {actual} != OT[{ot}] value {expected_value}"
+        );
+    }
+}
+
+#[test]
+fn ref_vdf_record_results_prune_descriptor_overlaps() {
+    let ref_vdf = load_ref_vdf();
+    let results = ref_vdf
+        .to_results_via_records()
+        .expect("record-based mapping should produce Ref.vdf columns");
+    let vdf_data = ref_vdf.extract_data().unwrap();
+
+    for (name, ot) in [
+        ("C in Mixed Layer[0]", 137),
+        ("C in Mixed Layer[1]", 138),
+        ("C in Mixed Layer[2]", 139),
+        ("Cum CO2 at start[0]", 146),
+        ("Cum CO2eq at start[0]", 153),
+        ("Cumulative CO2[0]", 160),
+    ] {
+        assert_result_column_matches_ot(&results, &vdf_data, name, ot);
+    }
+
+    for descriptor_name in [
+        "RS N2O[0]",
+        "RS PFC[0]",
+        "RS SF6[0]",
+        "UN population HIGH LOOKUP[0]",
+        "UN population LOW LOOKUP[0]",
+        "UN population MED LOOKUP[0]",
+        "Specified CO2eq emissions scenario in CO2",
+        "Specified Developed CO2eq emissions",
+        "Specified Developing A CO2eq emissions",
+        "Specified Developing B CO2eq emissions",
+        "Specified Global CH4",
+    ] {
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(descriptor_name)),
+            "Ref.vdf descriptor overlap should not be emitted: {descriptor_name}"
+        );
+    }
 }
 
 #[test]
@@ -177,4 +239,41 @@ fn ref_vdf_multidim_binding_candidates_are_ruled_out() {
         span > 500,
         "HFC type's 9 elements span hundreds of name-table slots (actual span={span})"
     );
+}
+
+#[test]
+fn ref_vdf_section6_ref_stream_contains_direct_dimension_refs() {
+    let ref_vdf = load_ref_vdf();
+
+    let slot_to_name: HashMap<u32, &str> = ref_vdf
+        .slot_table
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| ref_vdf.names.get(i).map(|n| (*s, n.as_str())))
+        .collect();
+    let (_, sec6, _) = ref_vdf
+        .parse_section6_ref_stream()
+        .expect("parse sec6 ref stream");
+
+    let names_for = |entry_index: usize| -> Vec<&str> {
+        sec6[entry_index]
+            .refs
+            .iter()
+            .filter_map(|r| slot_to_name.get(r).copied())
+            .collect()
+    };
+
+    // These are not enough to map multidim arrays yet, but they prove section
+    // 6 carries direct references to dimension names. Future decoding work
+    // should treat the ref stream as a candidate dim-ownership signal rather
+    // than only as formula/reference metadata.
+    assert_eq!(names_for(5), vec!["lower"]);
+    assert_eq!(names_for(6), vec!["upper"]);
+    assert_eq!(names_for(294), vec!["Target"]);
+    assert_eq!(names_for(427), vec!["layers"]);
+    assert_eq!(names_for(453), vec!["set targets"]);
+    assert_eq!(names_for(638), vec!["set targets"]);
+    assert_eq!(names_for(865), vec!["Semi Agg"]);
+    assert_eq!(names_for(699), vec!["Global CO2eq target", "COP Developed"]);
+    assert_eq!(names_for(700), vec!["COP Developing A", "Initial N2O conc"]);
 }

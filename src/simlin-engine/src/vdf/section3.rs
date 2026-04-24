@@ -129,6 +129,46 @@ impl VdfSection3Directory {
         let step = SECTION3_DIRECTORY_ENTRY_WORDS as u32;
         non_zero.windows(2).all(|pair| pair[1] == pair[0] + step)
     }
+
+    /// Whether explicit record shape codes select the following entry.
+    ///
+    /// `Ref.vdf` exposes a multi-shape directory whose non-zero index words
+    /// form a 27-word progression and whose final physical entry carries
+    /// `index_word=0`. In that layout, owner-record field[6] stores the
+    /// previous entry's self-positional word offset, while the following
+    /// physical entry carries the actual flat size and axis factors.
+    pub fn uses_predecessor_shape_codes(&self) -> bool {
+        if self.entries.len() < 3 || self.entries.last().map(|e| e.index_word()) != Some(0) {
+            return false;
+        }
+        self.entries[..self.entries.len() - 1]
+            .windows(2)
+            .all(|pair| {
+                pair[1].index_word() == pair[0].index_word() + SECTION3_DIRECTORY_ENTRY_WORDS as u32
+            })
+    }
+
+    /// Resolve a record field[6] shape code to the section-3 entry that
+    /// determines the OT span.
+    pub fn entry_for_record_shape_code(
+        &self,
+        shape_code: u32,
+    ) -> Option<&VdfSection3DirectoryEntry> {
+        if self.uses_predecessor_shape_codes() {
+            for (idx, entry) in self.entries[..self.entries.len() - 1].iter().enumerate() {
+                if entry.index_word() == shape_code {
+                    let candidate = &self.entries[idx + 1];
+                    if candidate.flat_size() > 0 {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+
+        self.entries
+            .iter()
+            .find(|entry| entry.index_word() == shape_code && entry.flat_size() > 0)
+    }
 }
 
 impl VdfFile {

@@ -159,6 +159,15 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Last reviewed**: 2026-02-22
 
+### 19. Rust VDF Parser Boundary Parity
+
+- **Component**: simlin-engine (src/simlin-engine/src/vdf.rs)
+- **Severity**: high
+- **Description**: `tools/vdf_xray.py` now handles several VDF boundary cases that the Rust parser still needs to adopt: section-6 empty ref streams must not advance past the section end, `SCEN01.VDF` slot-table detection should prefer the referenced prefix at `0x6b28` over the later candidate at `0x6b34`, non-Time sparse blocks can require `ceil(header[0x7c] / 8)` bitmap bytes while the Time block uses `ceil(header[0x78] / 8)` (`risk.vdf`, `risk2.vdf`), and raw-zero OT entries with class `0x11` plus missing final sentinel in `Ref.vdf` should decode as missing data rather than numeric zero constants.
+- **Measure**: Port the Python assertions in `tools/test_vdf_xray.py` for `risk.vdf`, `risk2.vdf`, `run_1.vdf`, `run_2.vdf`, and `Ref.vdf` into Rust VDF tests.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-24
+
 ### 19. Flaky Hypothesis Tests in pysimlin Due to Slow Input Generation
 
 - **Component**: pysimlin (src/pysimlin/tests/test_json_types.py)
