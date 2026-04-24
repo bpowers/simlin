@@ -28,7 +28,17 @@ from typing import Optional
 
 # ---- Constants ----
 
+# The file header spans 0x00..0xA7 (168 bytes) and is followed by Section 0
+# magic at 0xA8. Bytes 0x00..0x7F hold the documented fixed-layout header
+# (magic, timestamp, OT/lookup/offset-table offsets, time-point count); bytes
+# 0x80..0xA7 are an undocumented trailer of zero padding plus one
+# runtime-state residue word and a constant `00 00 43 00` tail (see
+# docs/design/vdf.md "File header"). Parsers locate Section 0 by scanning for
+# the section magic starting at 0x80, so this constant is the minimum file
+# length needed before the scan is safe -- not the full documented header
+# size.
 FILE_HEADER_SIZE = 0x80
+FILE_HEADER_DOCUMENTED_END = 0xA8
 SECTION_HEADER_SIZE = 24
 RECORD_SIZE = 64
 SECTION3_ENTRY_WORDS = 27
@@ -849,6 +859,13 @@ def format_slot_table_layout(layout: Optional[SlotTableLayout]) -> str:
 
 def _slot_name_alignment_class_score(name: Optional[str], cls: str,
                                      *, section_kind: str) -> int:
+    """RECONSTRUCTION HEURISTIC: score a (name, classification) pair against
+    the section that references it.
+
+    Not a decoded format fact: the scoring weights below are tuned to keep
+    obvious leading helper slots from shadowing visible owner names in the
+    xray display; a 90s C reader would not have needed such a score.
+    """
     if name is None:
         return 0
     if section_kind == "sec4":
@@ -879,12 +896,13 @@ def _slot_name_alignment_class_score(name: Optional[str], cls: str,
 
 
 def score_slot_name_alignment(vdf: VdfFile, leading_extra_slots: int) -> SlotNameAlignment:
-    """
-    Score a visible-name alignment against section-4/5/6 reference usage.
+    """RECONSTRUCTION HEURISTIC: score a visible-name alignment against
+    section-4/5/6 reference usage.
 
     This is an exploratory alignment heuristic, not a decoded file-format
     structure. It is used by xray display helpers and by owner-block discovery
     only to avoid treating obvious leading helper slots as visible owners.
+    A 90s C reader would have indexed names directly from the slot table.
     """
     slot_to_names = build_slot_to_names_with_offset(vdf, leading_extra_slots)
 
@@ -934,6 +952,11 @@ def score_slot_name_alignment(vdf: VdfFile, leading_extra_slots: int) -> SlotNam
 
 
 def best_slot_name_alignment(vdf: VdfFile, max_leading_extra_slots: int = 8) -> SlotNameAlignment:
+    """RECONSTRUCTION HEURISTIC: pick the highest-scoring alignment across
+    leading_extra_slots in `0..=max_leading_extra_slots`.
+
+    Supports `preferred_slot_name_alignment` only. Not a decoded format fact.
+    """
     if not vdf.slot_table:
         return SlotNameAlignment(0, 0, [], 0, {})
 
@@ -947,7 +970,15 @@ def best_slot_name_alignment(vdf: VdfFile, max_leading_extra_slots: int = 8) -> 
 
 
 def preferred_slot_name_alignment(vdf: VdfFile) -> SlotNameAlignment:
-    """Use a shifted visible-name mapping only when it beats the default clearly."""
+    """RECONSTRUCTION HEURISTIC: use a shifted visible-name mapping only when
+    it beats the default clearly.
+
+    The +4 threshold below is an empirical tie-break margin; not a decoded
+    format fact. The authoritative slot→name pairing is
+    `build_direct_slot_to_names` (slot_table[i] ↔ names[i]); this helper only
+    covers edited fixtures where leading helper slots break that direct
+    pairing visually.
+    """
     default = score_slot_name_alignment(vdf, 0)
     best = best_slot_name_alignment(vdf)
     if best.leading_extra_slots > 0 and best.score >= default.score + 4:
@@ -956,6 +987,10 @@ def preferred_slot_name_alignment(vdf: VdfFile) -> SlotNameAlignment:
 
 
 def build_display_slot_to_names(vdf: VdfFile) -> dict[int, list[str]]:
+    """RECONSTRUCTION HEURISTIC wrapper: display-only slot→name map using the
+    preferred (possibly shifted) alignment. For the pinned structural
+    pairing use `build_direct_slot_to_names`.
+    """
     return preferred_slot_name_alignment(vdf).slot_to_names
 
 
@@ -1652,18 +1687,20 @@ def _block_sort_rank(block: OwnerRecordBlock) -> int:
 def _select_non_overlapping_owner_blocks(
     blocks: list[OwnerRecordBlock],
 ) -> list[OwnerRecordBlock]:
-    """
-    Resolve conflicting record-derived owner spans into an OT partition.
+    """RECONSTRUCTION HEURISTIC: resolve conflicting record-derived owner
+    spans into an OT partition.
 
     `field[11]` is an owner OT start for ordinary model-variable records, but
     `Ref.vdf` shows lookup/graphical-function descriptor records whose
     address-like fields point into the same runtime OT region as real saved
     variables. A Vensim-era C writer would not need to normalize that before
-    dumping structs, so the xray layer resolves it by keeping the largest
-    non-overlapping set of candidate spans. When two choices cover the same
-    number of OT slots, the lower sort/order keys win; in observed conflicts
-    those are the real variable records, while late lookup descriptors sort far
-    away from the local owner run.
+    dumping structs (because the writer knows which record owns which OT),
+    so this layer resolves it by keeping the largest non-overlapping set of
+    candidate spans via DP. When two choices cover the same number of OT
+    slots, the lower sort/order keys win; in observed conflicts those are
+    the real variable records, while late lookup descriptors sort far away
+    from the local owner run. The fact that we need this at all means we
+    have not yet decoded the format's owner/descriptor discriminator.
     """
     if len(blocks) <= 1:
         return blocks[:]
@@ -1802,15 +1839,18 @@ def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
 
 
 def _recover_sec5_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
-    """
-    Recover the original single-section-5 dimension layout.
+    """RECONSTRUCTION HEURISTIC: recover the original single-section-5
+    dimension layout.
 
     The straightforward case is the old single-dimension layout: one sec5
     entry, one non-metadata payload ref naming the dimension, and the next `n`
     simple visible names after that anchor providing the element labels.
 
     Edited models can leave multiple sec5 entries with stale/stuttering refs.
-    Those are left unresolved instead of guessed through.
+    Those are left unresolved instead of guessed through. The authoritative
+    dimension-element path is `_recover_record_dimension_sets` (record
+    field[8] grouping); this function remains only as a fallback for the
+    simple single-entry layout.
     """
     sec5_entries = vdf.parse_section5_sets() or []
     if len(sec5_entries) != 1:
@@ -1951,13 +1991,14 @@ def _assign_group_positions(
     items: list[tuple[str, int, Optional[int]]],
     positions: list[int],
 ) -> Optional[dict[str, int]]:
-    """
-    Assign ordered named items into the available OT positions.
+    """RECONSTRUCTION HEURISTIC: assign ordered named items into available OT
+    positions.
 
     Anchored items carry a concrete OT start and must land there. Unanchored
     items are placed greedily at the earliest position that still leaves room
     for the remaining anchored items. This is a linear feasibility check over
     the real OT layout, allowing anonymous helper gaps anywhere in the group.
+    Used only as a fallback when deterministic record→OT mapping leaves gaps.
     """
     total_len = sum(length for _, length, _ in items)
     if total_len > len(positions):
@@ -2015,6 +2056,15 @@ def _assign_group_positions(
 def _nonstock_assignment_items(
     name_to_block: dict[str, OwnerRecordBlock],
 ) -> list[tuple[str, int, Optional[int]]]:
+    """RECONSTRUCTION HEURISTIC: merge non-stock model names with system
+    names into a single Vensim-sorted item stream for gap-filled OT
+    assignment.
+
+    The merge interleaves two alphabetically-sorted sequences; a 90s C
+    reader would read system variables directly from their dedicated OT
+    slots. Kept as fallback when a deterministic mapping does not reach
+    system variables.
+    """
     nonstock_names = sorted(
         (
             name for name, block in name_to_block.items()
@@ -2782,6 +2832,14 @@ def parse_name_table(data: bytes, sec: Section, parse_end: int) -> list[str]:
 
 def find_slot_table(data: bytes, name_sec: Section, max_name_count: int,
                     sec1_data_size: int) -> tuple[int, list[int]]:
+    """RECONSTRUCTION HEURISTIC: locate the slot table by scanning backward
+    from the name-table section magic, trying every `(gap, name_count)`
+    pair and picking the largest structurally valid candidate.
+
+    A 90s C reader would have computed the slot-table offset directly from
+    a header or section field; we have not yet identified that field, so
+    this scan is the xray's current workaround.
+    """
     if max_name_count == 0:
         return 0, []
     end = name_sec.file_offset
@@ -3041,7 +3099,7 @@ def print_header(vdf: VdfFile, path: str) -> None:
 
 
 def print_layout(vdf: VdfFile) -> None:
-    entries = [(0, f"File header ({FILE_HEADER_SIZE} bytes)")]
+    entries = [(0, f"File header ({FILE_HEADER_DOCUMENTED_END} bytes)")]
     for i, sec in enumerate(vdf.sections):
         role = SECTION_ROLES[i] if i < len(SECTION_ROLES) else "unknown"
         region_size = sec.region_end - sec.file_offset

@@ -61,13 +61,15 @@ in `src/simlin-engine/src/vdf.rs`.
 This document intentionally distinguishes pinned file-format facts from current
 decoder reconstruction.
 
-Pinned facts:
+Pinned facts (each one has a Rust test asserting it across the full
+simulation fixture corpus unless otherwise noted):
 
 - Header offsets locate section boundaries, section-6 tails, the offset table,
   and sparse data blocks.
 - Section 2 contains the printable name table. Record `field[2]` directly keys
   this table as `(name_string_start - section2_data_start) / 4 + 7`; it is not
-  a rank or heuristic match.
+  a rank or heuristic match. `VdfFile::to_results_via_records` consumes this
+  as the authoritative record-to-name link.
 - The slot table's structural pairing is direct: `slot_table[i]` belongs to
   `names[i]`. `tools/vdf_xray.py` still has a shifted display alignment for
   edited fixtures with leading helper slots, but that alignment is exploratory
@@ -80,6 +82,17 @@ Pinned facts:
   axis slot refs are decoded for the observed array fixtures.
 - Section 6 contains OT class codes, final-value floats, and fixed-width
   lookup metadata records at header-derived offsets.
+- The section-6 ref-stream skip prefix is `max(0, sec6.field4 - 1)` words
+  (`test_section6_field4_matches_ref_stream_skip`; holds across the corpus
+  except for degenerate fixtures whose ref stream is empty).
+- Section 1 data begins with three stable words:
+  (`test_section1_data_head_structural_invariants`)
+  - `sec1.data[0..4] == 124` (WRLD3-03/SCEN01.VDF is the single documented
+    exception at 188; the test pins both the 124 default and the 188
+    exception).
+  - `sec1.data[4..8] == offset_table_count - 1 - max_stock_ot_index`, where
+    `max_stock_ot_index` is the largest OT index with class code 0x08.
+  - `sec1.data[8..12] == section6_lookup_records().len()`.
 - Many dimension element catalogs are recoverable from record `field[8]`
   groups: a dimension anchor and zero-based element records share a compact
   group id. This is currently implemented in `tools/vdf_xray.py`.
@@ -128,9 +141,9 @@ section-4 block list.
 
 ```
   +--------------------------------------+
-  | File header (128 bytes)              |  0x00..0x7F
+  | File header (168 bytes)              |  0x00..0xA7
   +--------------------------------------+
-  | Section 0 (simulation command)       |
+  | Section 0 (simulation command)       |  starts at 0xA8
   +--------------------------------------+
   | Section 1 (string table + metadata)  |
   |   - string table entries             |
@@ -157,7 +170,7 @@ section-4 block list.
 
 ## File header
 
-128 bytes (0x00..0x7F):
+168 bytes (0x00..0xA7). Section 0's magic bytes begin at offset 0xA8.
 
 ```
   Offset  Size  Description
@@ -185,7 +198,23 @@ section-4 block list.
   0x74    4     Zero
   0x78    4     u32 time_point_count
   0x7C    4     u32 time_point_count (duplicate, always same value)
+  0x80    20    Zero padding (five u32 words)
+  0x94    4     Runtime-state residue word. Sometimes a small integer
+                (e.g. 0x20, 0x26, 0x28, 0x63), sometimes a 0x0b3xxxxx-range
+                RAM-pointer-like value. Volatile across reruns of the same
+                model; not a durable key.
+  0x98    4     Constant u32 = 1 across all observed simulation fixtures.
+  0x9C    8     Zero padding (two u32 words)
+  0xA4    4     Constant u32 = 0x00430000 across all observed simulation
+                fixtures (the byte sequence 00 00 43 00). Reinterpreted as
+                f32 this is 128.0; meaning is unknown.
 ```
+
+The parser locates Section 0 by scanning for the section magic bytes
+`A1 37 4C BF` starting at byte 0x80, so the 0x80..0xA7 region does not
+currently affect decoded output. It is documented here for completeness
+and to record that not every byte of the header region is structurally
+accounted for.
 
 ### Derived quantities from header fields
 
@@ -271,26 +300,26 @@ change across reruns of the same model. They are NOT a stable "has OT entry"
 flag, OT index, or record back-pointer, and they cannot be used as durable
 keys for name-to-record linking.
 
-Three side observations from this region ARE stable across the non-dataset
-corpus, and are useful as cross-checks during parsing:
+Three leading words of section-1 data are stable cross-corpus invariants,
+pinned by `test_section1_data_head_structural_invariants`:
 
-- `section[1].data[0..4] == 124` -- a canonical base-slot offset constant
-  (39/40 fixtures; WRLD3-03/SCEN01.VDF is the lone exception, carrying 188).
-- `section[1].data[4..8] == offset_table_count - 1 - max_stock_ot_index`
-  (40/40 fixtures). `max_stock_ot_index` is the largest OT index carrying
-  class code `0x08`. On every fixture with a contiguous stock block this
-  equals `offset_table_count - 1 - stock_count`; the two formulas diverge
-  only on `Ref.vdf` (C-LEARN), where stocks are scattered across 8 OT
-  ranges. Ref.vdf is the canary that disambiguates the correct formula:
+- `section[1].data[0..4] == 124` -- a canonical base-slot offset constant.
+  WRLD3-03/SCEN01.VDF is the single documented exception at `188`; the
+  test pins both the default and the SCEN01 exception.
+- `section[1].data[4..8] == offset_table_count - 1 - max_stock_ot_index`,
+  where `max_stock_ot_index` is the largest OT index carrying class code
+  `0x08`. On every fixture with a contiguous stock block this equals
+  `offset_table_count - 1 - stock_count`; the two formulas diverge only on
+  `Ref.vdf` (C-LEARN), where stocks are scattered across 8 OT ranges.
+  `Ref.vdf` is the canary that disambiguates the correct formula:
   `d4 = 3441`, `ot - 1 - max_stock_ot = 3441`,
   `ot - 1 - stock_count = 3704`.
 - `section[1].data[8..12] == count(section-6 lookup mapping records)` --
   the number of lookup-table-definition records at the tail of section 6.
-  Validated on 40/40 non-dataset fixtures. This is a MORE RELIABLE signal
-  than the header field at `0x70`, which is the total lookup data-point
-  count (total x,y pairs), not the lookup count
-  (e.g. Ref.vdf: `data[8..12] = 165` lookup records vs `header[0x70] = 251`
-  total data points across them).
+  This is a MORE RELIABLE signal than the header field at `0x70`, which
+  is the total lookup data-point count (total x,y pairs), not the lookup
+  count (e.g. Ref.vdf: `data[8..12] = 165` lookup records vs
+  `header[0x70] = 251` total data points across them).
 
 Additionally, `#`-prefixed internal signature names (for example
 `#SMOOTH(x, 3)#` or `#LV1<SMOOTH3...>#`) participate in OT entries but do
@@ -648,22 +677,36 @@ set; they describe array structure, not independent time-series owners.
 
 Section 6 is the richest source of VDF-native mapping information. Its layout:
 
-1. Optional one-word prefix
+1. Skip prefix of `max(0, sec6.field4 - 1)` 4-byte words. In the observed
+   corpus this is 0 words (`field4 == 1`, the common case) or 1 word
+   (`field4 == 2`, for `econ/base.vdf`, `econ/risk.vdf`, and WRLD3-03
+   SCEN01.VDF). When present, the single prefix word is a slot-ref-like
+   u32 whose binding is not yet decoded.
 2. Leading ref stream: variable-length `u32 n_refs; u32 refs[n_refs]` entries
-3. **Post-ref-stream padding region** (see below). Zero bytes on 39/40
-   fixtures; populated with a fixed-width 16-byte record stream on
-   `Ref.vdf` only.
+3. **Post-ref-stream record region** (see below). Empty on most small and
+   medium fixtures; populated with a fixed-width 16-byte record stream on
+   `Ref.vdf` (226 records) and on the `third_party/uib_sd/zambaqui` files
+   (3-7 records each). Never populated on small scalar fixtures.
 4. **OT class-code array**: `offset_table_count` bytes, one per OT entry
 5. **OT final-value array**: `offset_table_count` little-endian f32 values
 6. **Lookup mapping records**: `13 * u32` fixed-width records, terminated by a
    single zero word
 
-### Post-ref-stream record region (Ref.vdf only)
+### Post-ref-stream record region
 
-Between the end of the leading ref stream and the start of the OT
-class-code array, `Ref.vdf` carries a 3616-byte region parsing as 226
-fixed-width 16-byte records. Every other non-dataset VDF in the
-corpus has exactly zero bytes here. On `Ref.vdf`:
+On array-heavy fixtures the region between the end of the leading ref
+stream and the start of the OT class-code array carries a fixed-width
+16-byte record stream. Observed populations:
+
+| Fixture                       | Records | First-record pattern                |
+|-------------------------------|---------|-------------------------------------|
+| `Ref.vdf` (C-LEARN)           | 226     | `(0x05ea-heap_ptr, w1, w2, w3)`     |
+| `zambaqui/baserun.vdf`        | 3       | `(0, slot-ref-like, 1, 0)`          |
+| `zambaqui/bp-1.vdf`..`test-1` | 7       | `(0, slot-ref-like, 1, 0)`          |
+| all other simulation fixtures | 0       | --                                  |
+
+The Ref-style and zambaqui-style records are structurally different and
+likely encode different things. On `Ref.vdf`:
 
 - `226 == stock_count (209) + view_header_count (17)` exactly.
 - Each record decodes as `(u32 heap_ptr, u32 w1, u32 w2, u32 w3)` where
@@ -690,8 +733,9 @@ plus one per view header) that supports Vensim's UI when opening a
 VDF with scattered stocks, or (b) a per-element dimension-binding
 table that exists only when the model has enough array complexity
 to need the indirection -- small scalar models omit it entirely.
-Either way it is structurally absent on 39/40 fixtures and cannot be
-a universal decoding signal.
+The region is absent on all small/medium scalar fixtures and present
+on several array-heavy fixtures (`Ref.vdf`, the zambaqui simulation
+files); it is not yet a usable universal decoding signal.
 
 ### OT class codes
 
@@ -1488,9 +1532,11 @@ None of the following signals, however, encodes a deterministic
   structure, not dim structure. Partition tests (group records by
   classifier-pattern and check whether group sizes sum to the 18 dim
   cardinalities) FAIL: R5b's natural groups are 14-record (7 pairs) and
-  22-record (1 header + 7 triplets) blocks, not per-dim blocks. R5b
-  is also empty on 39/40 fixtures, so even if it encoded dim data on
-  Ref.vdf it cannot be a universal decoding signal.
+  22-record (1 header + 7 triplets) blocks, not per-dim blocks. R5b is
+  also absent from small/medium scalar fixtures and exists in a
+  structurally different (3-7 records, different field pattern) form on
+  the zambaqui simulation files, so even if it encoded dim data on
+  `Ref.vdf` it cannot be a universal decoding signal.
 
 Practical consequence after the field[8] discovery: section 5 should no
 longer be treated as the only dimension-element source. `tools/vdf_xray.py`

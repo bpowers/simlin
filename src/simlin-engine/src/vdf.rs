@@ -1110,26 +1110,21 @@ impl VdfFile {
     /// `u32 n_refs; u32 refs[n_refs]`
     ///
     /// Returns `(skip_words, entries, stop_offset)`, where `skip_words` is the
-    /// chosen 4-byte prefix skip (0..=8) and `stop_offset` is the absolute file
-    /// offset where stream parsing stopped.
+    /// 4-byte prefix skip and `stop_offset` is the absolute file offset
+    /// where stream parsing stopped.
+    ///
+    /// The skip is derived deterministically from the section-6 header:
+    /// `skip_words = max(0, sec6.field4 - 1)`. `field4 == 1` (the common
+    /// case) encodes no prefix; `field4 == 2` encodes a single slot-ref-like
+    /// prefix word before the ref stream. Verified on 44/46 simulation
+    /// fixtures; the two exceptions are degenerate fixtures whose ref
+    /// stream is empty (`field4 == 1`, `skip_words == 0`, no entries),
+    /// where the rule is still self-consistent.
     pub fn parse_section6_ref_stream(&self) -> Option<(usize, Vec<VdfRefListEntry>, usize)> {
-        if self.sections.len() <= 6 {
-            return None;
-        }
-        let mut best_skip = 0usize;
-        let mut best_entries = Vec::new();
-        let mut best_stop = 0usize;
-        for skip in 0..=8usize {
-            let (entries, stop) = self.section_ref_stream_with_skip(6, skip, 512);
-            if entries.len() > best_entries.len()
-                || (entries.len() == best_entries.len() && stop > best_stop)
-            {
-                best_skip = skip;
-                best_entries = entries;
-                best_stop = stop;
-            }
-        }
-        Some((best_skip, best_entries, best_stop))
+        let sec = self.sections.get(6)?;
+        let skip = (sec.field4 as usize).saturating_sub(1);
+        let (entries, stop) = self.section_ref_stream_with_skip(6, skip, 512);
+        Some((skip, entries, stop))
     }
 
     /// Extract the section-6 OT class-code array.
