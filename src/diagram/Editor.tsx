@@ -75,6 +75,7 @@ import { Point, searchableName } from './drawing/common';
 import { UpdateCloudAndFlow } from './drawing/Flow';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
+import { preserveLiveView } from './merge-live-view';
 import { type ModuleStackEntry, currentModelName, pushModule, popModule, navigateToLevel, isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { BreadcrumbBar } from './BreadcrumbBar';
@@ -414,6 +415,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (this.state.data) {
       activeProject = projectAttachData(activeProject, this.state.data, 'main');
     }
+    // Preserve the latest optimistic view for the active model. This
+    // updateProject call may have raced with a newer setView() (e.g. the
+    // user kept panning while our engine round-trip was in flight), so the
+    // engine snapshot we just rebuilt is potentially behind. Without this,
+    // the rebuilt activeProject would snap the diagram back to the engine's
+    // older view, then the next engine round-trip would catch up -- producing
+    // the visible "pan jumps back and forth" effect.
+    activeProject = preserveLiveView(activeProject, this.state.activeProject, this.state.modelName);
 
     const priorHistory = this.state.projectHistory.slice();
 

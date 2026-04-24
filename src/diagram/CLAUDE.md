@@ -1,6 +1,6 @@
 # @simlin/diagram
 
-Last verified: 2026-04-08
+Last verified: 2026-04-24
 
 React components for model visualization and editing. Designed as a general-purpose SD model editor toolkit without dependencies on the Simlin app or server API.
 
@@ -52,6 +52,7 @@ Material-style UI component library (40+ components): Accordion, AppBar, Button,
 ## Invariants
 
 - **Optimistic view updates**: `updateView()` and `queueViewUpdate()` in Editor.tsx call `setView(view)` + increment `projectVersion` synchronously before awaiting the engine round-trip. Any new handler that modifies the view must go through these methods to avoid flicker.
+- **updateProject preserves the live view**: `Editor.updateProject()` rebuilds `activeProject` from the engine's serialized JSON, but then merges via `preserveLiveView()` so that the active model's view comes from `state.activeProject` (the most recent optimistic `setView`). Without this, a slow engine round-trip racing with a newer pan/move would snap the diagram back to the engine's older view. The live view is round-tripped through JSON to re-link element `var` refs and stock inflow/outflow UIDs against the incoming variables.
 - **Link drag arc ownership**: During any single-link arrowhead drag (creation or reattachment), Canvas.tsx's `connector()` has exclusive control over the arc. `applyGroupMovement` is intentionally given `arcPoint: undefined` during link drags so `processLinks` does not interfere. The last-rendered arc is cached in `draggedLinkArc` and used at mouse-up for exact visual consistency.
 - **Collinear defense in Connector geometry**: `takeoffθ()` and `arcCircle()` catch `circleFromPoints` throws for collinear points (cursor on the source-to-target line). Any code passing user cursor positions as arc points must handle this gracefully or go through these functions.
 - **Module navigation stack**: `Editor.modelStack` is an immutable array of `ModuleStackEntry`. Each entry stores the child model name, module ident, and the parent's selection/viewBox/zoom for restoration. `currentModelName(stack)` returns the active model. All navigation goes through `pushModule`/`popModule`/`navigateToLevel` pure functions.
