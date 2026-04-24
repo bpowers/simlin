@@ -90,7 +90,18 @@ fn wrld3_ltm_compilation_finishes_in_time() {
 /// synthetic-variable pipeline at `model_ltm_variables`.  Pure
 /// enumeration stays uncapped so diagnostic tools and future stress tests
 /// can measure the raw graph structure.
+///
+/// Gated with `#[ignore]` because Johnson's algorithm on WRLD3's 166-node
+/// SCC takes ~30s in debug -- over the per-test budget and a meaningful
+/// fraction of the 180s workspace cap.  The sibling
+/// `wrld3_ltm_compilation_finishes_in_time` already protects the
+/// every-push compilation path under its own 60s thread budget.  Run this
+/// one on demand when changing enumeration logic:
+///
+///     cargo test --release -p simlin-engine --test wrld3_ltm_panic \
+///         -- --ignored wrld3_element_level_enumeration_is_uncapped
 #[test]
+#[ignore]
 fn wrld3_element_level_enumeration_is_uncapped() {
     let project = load_wrld3();
     let mut db = SimlinDb::default();
