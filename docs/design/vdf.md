@@ -96,6 +96,10 @@ facts are called out where the Rust parser has not caught up yet.
   words (`test_section6_field4_matches_ref_stream_skip`). When `field4 == 2`,
   the one skipped word is section-1-descriptor-offset-shaped, but its semantic
   binding is not decoded and it is not always a slot-table entry.
+- Section 7's lookup-point float stream starts at `sec7.file_offset + 16`,
+  not at `sec7.data_offset()`. The first two floats can occupy section header
+  words `field4` and `field5`; `sec7.data_offset()` is therefore already two
+  words into the lookup-point stream.
 - Section 1 data begins with three stable words:
   (`test_section1_data_head_structural_invariants`)
   - `sec1.data[0..4] == 124` (WRLD3-03/SCEN01.VDF is the single documented
@@ -104,6 +108,10 @@ facts are called out where the Rust parser has not caught up yet.
   - `sec1.data[4..8] == offset_table_count - 1 - max_stock_ot_index`, where
     `max_stock_ot_index` is the largest OT index with class code 0x08.
   - `sec1.data[8..12] == section6_lookup_records().len()`.
+- Section 1 full metadata records start at `sec1.data_offset() + 204` and
+  proceed in 64-byte strides until just before the slot table. Several files
+  leave a short non-record trailer before `slot_table_offset`; xray pins this
+  as residual bytes, not as another complete record.
 - Many dimension element catalogs are recoverable from record `field[8]`
   groups: a dimension anchor and zero-based element records share a compact
   group id. `tools/vdf_xray.py` also surfaces incomplete anchors, such as
@@ -114,7 +122,8 @@ facts are called out where the Rust parser has not caught up yet.
   owners using the same template inherit the same element labels.
 - `tools/vdf_xray.py --precision` reports the current Python extraction
   boundary for a single file. `exact-by-xray` means no known blockers are
-  present in the current decoder; `not-proven` is emitted with concrete
+  present in the current decoder, not that the underlying format rule is fully
+  proven; `not-proven` is emitted with concrete
   reasons such as overlapping record spans, unmapped owner blocks, numeric
   fallback array labels, duplicate emitted names/OTs, incomplete dimension
   anchors, or data-block tail mismatches. `tools/vdf_xray.py
@@ -123,9 +132,15 @@ facts are called out where the Rust parser has not caught up yet.
 Current reconstruction, not format fact:
 
 - Choosing which overlapping record span owns a saved series.
+- The current sentinel-record owner-block builder and non-overlap span
+  selection used by xray. These are diagnostics/reconstruction aids and can
+  still pick the wrong side of an owner/descriptor conflict in `not-proven`
+  files.
 - Labeling axes when two or more recovered dimensions have the same
   cardinality and no decoded shape-template or axis binding distinguishes
   them.
+- Labeling array elements from unique cardinality alone.
+- Pairing lookup-like names to section-6 lookup records by matching order.
 - Non-overlap interval selection, file-order/shift-by-one owner mapping, and
   stock-first alphabetical assignment.
 - Section-4 view/sketch semantics beyond the fixed-width reference stream.
@@ -137,9 +152,9 @@ direct record-name and record-OT span facts under the owner interpretation of
 `field[11]`, before descriptor pruning, lookup-index interpretation,
 non-overlap selection, hidden-slot display alignment, or array-label guessing.
 Use `tools/vdf_xray.py --field11-union` when investigating the unresolved
-owner/descriptor discriminator: it independently reports whether each record's
-raw `field[11]` is valid as an OT start, as a section-6 lookup-record index,
-or both, without choosing between those interpretations.
+owner/descriptor discriminator: it independently reports whether each keyed
+record's raw `field[11]` is valid as an OT start, as a section-6 lookup-record
+index, or both, without choosing between those interpretations.
 `tools/vdf_xray.py --field11-union-correlation` narrows the same gap by
 linking each both-valid record to `lookup[field11].word[10]`, the lookup
 record's evaluated-output OT. That report is evidence only: it shows useful
@@ -167,8 +182,10 @@ provenance, but no reliable Vensim version field has been identified.
 Current blocker meanings:
 
 - `record-span-overlap`: two or more direct record-derived spans cover the
-  same OT slot. Xray currently selects a non-overlapping owner set, but the
-  C-style descriptor/owner discriminator is not decoded.
+  same OT slot. Xray currently selects a non-overlapping owner set as a
+  diagnostic reconstruction, but the C-style descriptor/owner discriminator is
+  not decoded and this selection is not evidence of the true owner in
+  `not-proven` files.
 - `unmapped-owner-blocks`: xray found owner-shaped OT blocks that it could
   not deterministically attach to emitted names. This is currently zero across
   the tracked result corpus after allowing direct record-key mappings to
@@ -451,17 +468,19 @@ The 12-byte preamble and the first three 64-byte blocks are reserved as
 a **header region**. Block 0 contains runtime pointer state, block 1
 holds a small counter word plus a constant `0x64`, and block 2 carries a
 float-1.0 marker and other metadata. They never represent variable
-records and carry no sentinel pair. Blocks 3 and later are the real
-records. This layout is validated across every observed simulation-result VDF
+records and carry no sentinel pair. Blocks 3 and later are full 64-byte record
+strides. This layout is validated across every observed simulation-result VDF
 fixture (small models, edited models, WRLD3, C-LEARN). The dataset sibling
 format has an analogous structure shifted into a different section.
 
 The sentinel pair (two consecutive `0xf6800000` values at field offsets
-8 and 9) is still useful for distinguishing many owner/system records from
-padding records (the latter carry `f[6] = 0` and zeroed-out sentinel fields).
-The parser's search **start** is no longer derived from the slot-table offsets:
-it is the fixed `sec1.data_offset() + 12 + 3*64` offset. After the observed
-record anchor, records are read on fixed 64-byte strides until the slot table.
+8 and 9) is still useful for distinguishing many owner/system/descriptor
+records from padding records (the latter carry `f[6] = 0` and zeroed-out
+sentinel fields), but it is not the owner/descriptor discriminator. The
+parser's search **start** is no longer derived from the slot-table offsets: it
+is the fixed `sec1.data_offset() + 12 + 3*64` offset. After the observed
+record anchor, full records are read on fixed 64-byte strides until just before
+the slot table; any residual trailer shorter than 64 bytes is not a record.
 The previous slot-offset-derived search start skipped large portions of the
 record array in medium and large models.
 
@@ -481,8 +500,8 @@ declared region.
 | (unknown)       | 4-5   | Usually zero |
 | arrayed_flag    | 6     | Shape selector/key. `5` = scalar variable. `32` = arrayed variable (unambiguous when only one sec3 entry exists; in multi-shape files, 32 is a generic "arrayed" marker whose shape must be resolved elsewhere). Other nonzero values observed so far are section-3 shape keys. In `Ref.vdf`, these keys match the **previous** section-3 `index_word`; the following physical section-3 entry carries the actual shape. `0` is ambiguous: it appears on padding, dimension anchors/elements, builtins, descriptors, and some small-file reconstruction candidates, so it is not a fact-only owner shape. |
 | (unknown)       | 7     | Usually zero; nonzero in some system records |
-| group_or_sentinel | 8   | `0xf6800000` on many real owner/system records; zero on some padding/helper records. Non-sentinel positive values also act as compact record-group IDs in observed dimension metadata: a dimension anchor and its element records share this value (see "Record field[8] dimension groups" below). |
-| sentinel_b      | 9     | Often paired with `0xf6800000` on owner/system records; otherwise a secondary small/group value in helper records. |
+| group_or_sentinel | 8   | `0xf6800000` on many owner/system/descriptor records; zero on some padding/helper records. Non-sentinel positive values also act as compact record-group IDs in observed dimension metadata: a dimension anchor and its element records share this value (see "Record field[8] dimension groups" below). |
+| sentinel_b      | 9     | Often paired with `0xf6800000` on owner/system/descriptor records; otherwise a secondary small/group value in helper records. |
 | sort_key        | 10    | View-local alphabetical ordering key / sort anchor. It is not global on large multi-view files, and some stock/system records carry `0`; see structural signal #8. |
 | ot_or_lookup_index | 11 | **Union field.** For owner records, this is an OT block start index: arrayed variables point to the first of N consecutive OT entries, scalar variables point to one OT entry. For graphical-function/lookup descriptor records, the same word can instead be a zero-based index into the section-6 lookup-record array; the lookup record's `word[10]` then points at the evaluated caller/output OT, not at the descriptor's own saved series. `0` is not an owner OT start (OT[0] is Time), but it can be lookup record 0. Values can exceed the actual OT count; check both interpretation ranges before treating it as an owner OT. |
 | slot_ref        | 12    | Byte offset into section 1 data; groups records by view/sector |
@@ -967,6 +986,18 @@ has a 7-element shape and lookup record 113 also has width 7, while
 `C AF Sequestered` shares the same raw `field[11]` but has a 3-element owner
 span. These are useful facts for narrowing the gap, not a rule.
 
+The remaining words in a lookup record have also been probed as direct
+back-pointers to section-1 descriptor records. No fixed interpretation has
+survived across the local corpus: lookup words `5..9`, section-1 byte/word
+offset transforms, record ordinals, name keys, sort keys, and slot refs all
+miss most candidates. The section-6 ref-stream is not a descriptor backlink
+either; descriptor name slots are often absent or appear in multiple entries.
+On `Ref.vdf`, lookup `word[12]` roots post-ref dependency chains, but those
+chains point at dependency owner spans, not at the descriptor record using the
+lookup. The deterministic facts retained for now are `word[10]` as evaluated
+output OT, `word[11]` as output width, and `word[12]` as an optional dependency
+chain root.
+
 The current `--field11-union-correlation` diagnostic adds another relation:
 for both-valid records, follow `lookup[field11].word[10]` to the evaluated
 output OT and compare the candidate record's sort key to the output record's
@@ -978,14 +1009,14 @@ sort key. This is a strong local signal on many fixtures:
 - in `WRLD3-03/experiment.vdf`, all 54 same-component/same-lookup conflict
   pairs have a unique closest record by this relation.
 
-It is still not the discriminator. `Ref.vdf` has direct counterexamples:
-`Solar and albedo forcings` and `C in Humus` both make structural contact with
-lookup record 134 and output `Adjusted Other Forcings`; sort proximity favors
-`C in Humus`, but the interval tiling evidence keeps `C in Humus` as the
-carbon-cycle owner and leaves `Solar and albedo forcings` on the descriptor
-side. The likely final rule must combine the record's stored kind/owner flag
-with the lookup-output relation, not replace that missing stored bit with a
-sort heuristic.
+It is still not the discriminator. `Ref.vdf` has direct counterexamples and
+stress cases: `Solar and albedo forcings` and `C in Humus` both make structural
+contact with lookup record 134 and output `Adjusted Other Forcings`, while
+other overlap components can make the current sentinel-only selection choose
+scalar graphical-function descriptors over non-sentinel stock/equation owner
+records. The likely final rule must combine the record's stored kind/owner
+flag with the lookup-output relation, not replace that missing stored bit with
+a sort or interval-tiling heuristic.
 
 This explains a major class of `record-span-overlap`: some records that look
 owner-shaped under the OT interpretation are graphical-function descriptors
@@ -1009,9 +1040,9 @@ variable ranges (`RS N2O` over `C AF Sequestered` / `C in Atmosphere`, and
 `UN population * LOOKUP` over cumulative CO2 variables). Current extraction
 uses a largest non-overlapping span selection as a diagnostic reconstruction
 step, breaking equal-coverage ties by lower record sort keys. That behavior is
-not yet decoded as an original Vensim format rule; it is a way to keep the
-emitted result table from duplicating OT slots while we look for the direct
-descriptor/owner discriminator.
+not decoded as an original Vensim format rule and must not be promoted to one;
+it is a way to keep the emitted result table from duplicating OT slots while we
+look for the direct descriptor/owner discriminator.
 
 Validated counts:
 
@@ -1610,11 +1641,13 @@ the most recent findings come first.
   RAM descriptor indices, not file-structural metadata.
 
 - **Gap between the last record and `slot_table_offset` as a
-  compilation-order-to-name-order translation table**: on `WRLD3
-  experiment.vdf` the gap is zero bytes, so no such region exists there.
-  On `WRLD3 SCEN01.VDF` the 60-byte gap decodes to 15 u32s of
-  section-1-internal byte offsets that do not correspond to slot_table
-  entries, f[12] anchors, or record file offsets.
+  compilation-order-to-name-order translation table**: after the fixed
+  record-region start was pinned, tracked result files leave only a short
+  residual trailer before the slot table: zero bytes in `WRLD3
+  experiment.vdf`, four bytes in `WRLD3 SCEN01.VDF`, and less than one
+  64-byte record in the other pinned fixtures. This residual is not large
+  enough to carry a general translation table and is ignored by the record
+  stride walk.
 
 #### Claims about section 4
 
@@ -1968,11 +2001,12 @@ to the fixtures named below, not proof that every edge case is solved:
   `Layer Depth` (`248 -> 275`, len 4), and `Semi Agg Definition`
   (`302 -> 0`, len 42).
 
-- **Record field[11] as array block start**: In the `subscripts` fixture,
-  field[11] values {1, 6, 9, 13} correspond exactly to the OT block starts
-  for {a stock[3 elem], net flow[3 elem], other const[3 elem], some rate}.
-  Each arrayed owner record's 3 consecutive OT entries share the same class
-  code.
+- **Record field[11] under the owner interpretation as array block start**:
+  In the `subscripts` fixture, field[11] values {1, 6, 9, 13} correspond
+  exactly to the OT block starts for {a stock[3 elem], net flow[3 elem],
+  other const[3 elem], some rate}. Each arrayed owner record's 3 consecutive
+  OT entries share the same class code. The same raw word can instead be a
+  section-6 lookup-record index on descriptor records.
 
 - **Section 3 fixed-width directory**: In array models, section 3 is not
   just a cardinality tail. It has a 25-word zero prefix, a run of 27-word

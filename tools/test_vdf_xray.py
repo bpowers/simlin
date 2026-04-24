@@ -68,6 +68,54 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                     vdf.offset_table_start,
                 )
 
+    def test_section1_records_start_at_fixed_offset_with_short_trailer(self) -> None:
+        cases = {
+            "test/bobby/vdf/model_editing/run_8.vdf": (8, [32, 131]),
+            "test/bobby/vdf/econ/base.vdf": (4, [13352]),
+            "test/xmutil_test_models/Ref.vdf": (24, [124, 0, 0, 0, 12320, 26]),
+            "test/metasd/WRLD3-03/experiment.vdf": (0, []),
+            "test/metasd/WRLD3-03/SCEN01.VDF": (4, [12328]),
+            "test/bobby/vdf/lookups/lookup_ex.vdf": (8, [12320, 26]),
+        }
+        for relpath, (residual_bytes, residual_words) in cases.items():
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                self.assertGreater(len(vdf.records), 0)
+
+                expected_start = vdf.sections[1].data_offset() + vdf_xray.RECORD_REGION_START_OFFSET
+                self.assertEqual(vdf.records[0].file_offset, expected_start)
+
+                record_end = vdf.records[-1].file_offset + vdf_xray.RECORD_SIZE
+                self.assertEqual(vdf.slot_table_offset - record_end, residual_bytes)
+                self.assertLess(vdf.slot_table_offset - record_end, vdf_xray.RECORD_SIZE)
+                self.assertEqual(
+                    [
+                        vdf_xray.u32(vdf.data, offset)
+                        for offset in range(record_end, vdf.slot_table_offset, 4)
+                    ],
+                    residual_words,
+                )
+
+    def test_section7_lookup_point_stream_includes_header_payload_words(self) -> None:
+        cases = {
+            "test/bobby/vdf/lookups/lookup_ex.vdf": [0.0, 30.0, 100.0, 6.0],
+            "test/xmutil_test_models/Ref.vdf": [1850.0, 1851.0, 1852.0, 1853.0],
+        }
+        for relpath, expected_points in cases.items():
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                sec7 = vdf.sections[7]
+                stream_start = sec7.file_offset + 16
+
+                self.assertEqual(
+                    [
+                        vdf_xray.f32(vdf.data, stream_start + i * 4)
+                        for i in range(len(expected_points))
+                    ],
+                    expected_points,
+                )
+                self.assertEqual(sec7.data_offset(), stream_start + 8)
+
     def test_slot_table_layout_is_contiguous_for_small_edit_chain_files(self) -> None:
         for relpath in [
             "test/bobby/vdf/model_editing/run_8.vdf",
@@ -921,6 +969,20 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(rs_n2o.fields[11], 113)
         self.assertEqual(ref_lookup_records[rs_n2o.fields[11]].ot_index(), 2278)
 
+    def test_record_display_keeps_field11_as_unresolved_union(self) -> None:
+        lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
+
+        out = StringIO()
+        with redirect_stdout(out):
+            vdf_xray.print_records(lookup)
+        text = out.getvalue()
+
+        self.assertIn("f[11]=raw owner/lookup union", text)
+        self.assertNotIn("f[11]=ot_idx", text)
+        self.assertNotIn("model sort=", text)
+        self.assertIn("owner?=1", text)
+        self.assertIn("lookup?=1", text)
+
     def test_field11_union_facts_expose_owner_and_lookup_interpretations(self) -> None:
         lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
         facts = {
@@ -1456,12 +1518,12 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         ]:
             self.assertNotIn(name, mapping.name_to_block)
 
-    def test_ref_owner_mapping_prunes_lookup_descriptor_overlaps(self) -> None:
-        # Several Ref graphical-function descriptor records carry sentinel
-        # owner-looking fields and start inside the same OT ranges as real
-        # saved variables. The VDF-native extraction path should keep the
-        # non-overlapping owner partition, not emit duplicate series for both
-        # descriptor and variable names.
+    def test_ref_owner_mapping_is_non_overlapping_but_not_owner_proven(self) -> None:
+        # Several Ref graphical-function descriptor records carry owner-looking
+        # fields and overlap real saved variables. The current xray mapping is
+        # a non-overlap diagnostic partition, not a decoded owner/descriptor
+        # rule; pin both the no-duplicate invariant and a known wrong-side
+        # selection so callers keep treating Ref as not-proven.
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
         mapping = vdf_xray.map_names_to_owner_blocks(ref)
@@ -1485,6 +1547,10 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(mapping.name_to_block["Cum CO2 at start"].start, 146)
         self.assertEqual(mapping.name_to_block["Cum CO2eq at start"].start, 153)
         self.assertEqual(mapping.name_to_block["Cumulative CO2"].start, 160)
+        self.assertNotIn("CH4 in Atm", mapping.name_to_block)
+        self.assertEqual(mapping.name_to_block["Specified Global HFC134a eq"].start, 140)
+        self.assertEqual(mapping.name_to_block["Specified Global N2O"].start, 141)
+        self.assertEqual(mapping.name_to_block["Specified Global PFC"].start, 142)
 
         for descriptor_name in [
             "RS N2O",

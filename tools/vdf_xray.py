@@ -1768,7 +1768,7 @@ def build_record_shape_blocks(vdf: VdfFile) -> list[RecordShapeBlock]:
 
 def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
     """
-    Return indices of records that are structurally model-variable owners.
+    Return indices of sentinel records used as owner-candidate anchors.
 
     The sentinel pair (f[8]=f[9]=0xf6800000) is a strong signal, but not
     exclusive to model variables: INITIAL TIME and FINAL TIME system records
@@ -1777,7 +1777,7 @@ def sentinel_model_record_indices(vdf: VdfFile) -> list[int]:
     globally fixed, so system filtering decodes f[2] to names before dropping
     them from model-owner block construction.
 
-    After reformat, model records can carry f[0]=0 or f[1]=23, so those
+    After reformat, owner records can carry f[0]=0 or f[1]=23, so those
     fields cannot be used as filters. Further system-record discrimination
     (lookup definitions, stdlib-helper records) is handled at the mapping
     layer.
@@ -1802,11 +1802,12 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
     """
     Build the narrower owner-oriented block set from sentinel model records.
 
-    In the model-edit fixtures, the structurally "real" visible owners are
-    carried by the sentinel model records. Non-sentinel records still matter
-    as sort/order anchors, but they over-generate overlapping shape spans.
-    This helper keeps the owner candidate set narrow while still attaching
-    visible sort anchors back onto those owners.
+    In the model-edit fixtures, visible owners are carried by sentinel
+    records. Larger fixtures show that sentinel-ness is not the final
+    discriminator, so this helper is an owner-candidate reconstruction step,
+    not a format proof. Non-sentinel records still matter as sort/order
+    anchors, but they over-generate overlapping shape spans in the current
+    decoder.
     """
     codes = vdf.section6_ot_class_codes() or []
     alignment = preferred_slot_name_alignment(vdf)
@@ -3785,11 +3786,12 @@ def find_records(data: bytes, search_start: int, search_end: int) -> list[VdfRec
     (inclusive) and `search_end` (exclusive).
 
     Callers pass `search_start = sec_data_offset + RECORD_REGION_START_OFFSET`;
-    the layout guarantees every 64-byte block from there on is part of the
-    record array. Some records carry the sentinel pair (0xf6800000 at
-    fields 8 and 9); others -- padding, lookup table metadata, subscript
-    elements -- do not. All are valid records at the same stride, so we
-    walk the region in 64-byte steps and return every block.
+    the observed layout stores full records in 64-byte strides from there
+    until just before the slot table. Some files leave a short non-record
+    trailer before the slot table; the stride walk ignores any residual bytes
+    shorter than a full record. Some records carry the sentinel pair
+    (0xf6800000 at fields 8 and 9); others -- padding, lookup table metadata,
+    subscript elements -- do not.
 
     The function still anchors the forward walk to the first sentinel pair
     it finds as a cross-check, and scans backward through recordish blocks
@@ -3872,8 +3874,9 @@ def parse_vdf(data: bytes) -> VdfFile:
     # Find records. The record region lives at a fixed offset within section
     # 1's data: the first 12 bytes are a preamble and the next three 64-byte
     # blocks are header blocks (string-pool pointer array and misc state).
-    # Real 64-byte variable metadata records start at
-    # `sec1.data_offset() + 204` and extend to `slot_table_offset`.
+    # Full 64-byte variable metadata records start at
+    # `sec1.data_offset() + 204`; a short residual trailer may sit between the
+    # last complete record and `slot_table_offset`.
     sec1_data_start = sections[1].data_offset() if len(sections) > 1 else FILE_HEADER_SIZE
     search_start = sec1_data_start + RECORD_REGION_START_OFFSET
 
@@ -4095,7 +4098,8 @@ def print_records(vdf: VdfFile) -> None:
             slot_to_name[slot] = names[0]
 
     print(f"  SENT = sentinel 0x{VDF_SENTINEL:08x}")
-    print(f"  Known: f[0]=type f[1]=class f[6]=shape f[10]=sort f[11]=ot_idx f[12]=slot_ref")
+    print("  Known: f[0]=type f[1]=class f[6]=shape f[10]=sort "
+          "f[11]=raw owner/lookup union f[12]=slot_ref")
     print()
 
     # Header
@@ -4106,18 +4110,31 @@ def print_records(vdf: VdfFile) -> None:
     print(hdr)
 
     ot_count = vdf.offset_table_count
+    lookup_records = vdf.section6_lookup_records() or []
     for i, rec in enumerate(vdf.records):
         f = rec.fields
+        tags: list[str] = []
         if f[0] == 0:
-            cls = "zero"
-        elif f[1] == 23:
-            cls = "system"
-        elif f[10] > 0 and f[11] > 0 and f[11] < ot_count:
-            cls = f"model sort={f[10]} ot={f[11]}"
+            tags.append("zero")
+        if f[1] == 23:
+            tags.append("system?")
+
+        shape_length = decoded_record_shape_length(vdf, rec)
+        if (
+            shape_length is not None
+            and shape_length > 0
+            and 0 < f[11] < ot_count
+            and f[11] + shape_length <= ot_count
+        ):
+            tags.append(f"owner?={f[11]}")
         elif f[11] > 0 and f[11] >= ot_count:
-            cls = f"ot_oob({f[11]})"
-        else:
-            cls = ""
+            tags.append(f"owner-oob?={f[11]}")
+
+        if f[11] < len(lookup_records):
+            tags.append(f"lookup?={f[11]}")
+        if f[10] > 0:
+            tags.append(f"sort={f[10]}")
+        cls = " ".join(tags)
 
         line = f"  {i:>3} 0x{rec.file_offset:08x}"
         for val in f:
@@ -4147,7 +4164,7 @@ def _format_ot_code_span(codes: list[int]) -> str:
 
 
 def print_decoded_record_facts(vdf: VdfFile, *, max_spans: int = 80, max_overlaps: int = 16) -> None:
-    print("=== Decoded Record Facts (No Reconstruction) ===")
+    print("=== Owner-Interpretation Record Spans (No Owner Selection) ===")
     spans = decoded_record_spans(vdf)
     overlaps = record_span_overlaps(spans)
     covered_ot = {
@@ -4156,7 +4173,7 @@ def print_decoded_record_facts(vdf: VdfFile, *, max_spans: int = 80, max_overlap
         for ot_idx in range(span.start, span.end)
     }
     sentinel_spans = sum(1 for span in spans if span.has_sentinel)
-    print("  source: direct record f[2] name key + f[11] interpreted as OT start + decoded nonzero f[6] shape span")
+    print("  source: direct record f[2] name key + f[11] interpreted as owner OT start + decoded nonzero f[6] shape span")
     print("  excluded: hidden-slot alignment, descriptor pruning, lookup-index interpretation, non-overlap owner selection, array-label guessing")
     print(f"  spans={len(spans)} sentinel_spans={sentinel_spans} "
           f"covered_ot_slots={len(covered_ot)} overlap_ot_slots={len(overlaps)}")

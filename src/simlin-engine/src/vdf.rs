@@ -300,8 +300,12 @@ impl VdfRecord {
         self.fields[6]
     }
 
-    /// Whether this record has the sentinel pair identifying it as a
-    /// proper variable metadata record (vs. a padding or alignment block).
+    /// Whether this record has the common sentinel pair seen on many
+    /// owner/system/descriptor records.
+    ///
+    /// This is not the final owner-vs-descriptor discriminator; large fixtures
+    /// contain sentinel lookup descriptors and at least one non-sentinel stock
+    /// owner.
     pub fn has_sentinel(&self) -> bool {
         self.fields[8] == VDF_SENTINEL && self.fields[9] == VDF_SENTINEL
     }
@@ -833,11 +837,13 @@ impl VdfFile {
         // Find records. The record region lives at a fixed offset within
         // section 1's data: `RECORD_REGION_START_OFFSET` bytes past
         // `data_offset()` (12-byte preamble + three 64-byte header blocks).
-        // Real 64-byte variable metadata records extend from there to the
-        // slot table. The slot table does not fence the record region on the
-        // low side (that job belongs to the header blocks), so deriving the
-        // search start from slot offsets would skip over records in medium+
-        // fixtures; use the fixed offset instead.
+        // Full 64-byte variable metadata records start there and continue
+        // until just before the slot table. Some files leave a short residual
+        // trailer before the slot table; `find_records` ignores any bytes that
+        // do not make up a complete record. The slot table does not fence the
+        // record region on the low side (that job belongs to the header
+        // blocks), so deriving the search start from slot offsets would skip
+        // over records in medium+ fixtures; use the fixed offset instead.
         let sec1_data_start = sections
             .get(1)
             .map(|s| s.data_offset())
@@ -2690,12 +2696,12 @@ pub fn find_slot_table(
 /// `search_end` (exclusive).
 ///
 /// Callers pass `search_start = sec_data_offset + RECORD_REGION_START_OFFSET`;
-/// the layout guarantees that every 64-byte block at that stride is part of
-/// the record array. Some records carry the sentinel pair (two consecutive
-/// `0xf6800000` values at field offsets 8 and 9), while others (padding
-/// records, lookup table metadata, subscript elements) do not. All of them
-/// are valid records at the same stride, so this function simply walks the
-/// region in 64-byte steps and returns every block.
+/// the observed layout stores full records in 64-byte strides from there
+/// until just before the slot table. Some files leave a short non-record
+/// trailer before the slot table; the stride walk ignores any residual bytes
+/// shorter than a full record. Some records carry the sentinel pair (two
+/// consecutive `0xf6800000` values at field offsets 8 and 9), while others
+/// (padding records, lookup table metadata, subscript elements) do not.
 ///
 /// As a defensive cross-check, the function still anchors its forward walk
 /// to the first sentinel pair it finds, then scans backward through blocks
