@@ -865,3 +865,323 @@ fn test_analyze_get_relative_loop_score_renamed() {
         simlin_project_unref(proj);
     }
 }
+
+/// Helper: build a two-loops-in-one-partition project
+/// (reinforcing births + balancing deaths on a shared population
+/// stock) and run it with LTM enabled.  Returns an open sim, ready
+/// for `simlin_analyze_get_relative_loop_score` calls.
+unsafe fn setup_two_loop_sim() -> (*mut SimlinProject, *mut SimlinModel, *mut SimlinSim) {
+    let test_project = TestProject::new("two_loop_partition")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(err.is_null());
+    assert!(!proj.is_null());
+
+    err = ptr::null_mut();
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+    assert!(err.is_null());
+    assert!(!model.is_null());
+
+    err = ptr::null_mut();
+    let sim = simlin_sim_new(model, true, &mut err);
+    assert!(err.is_null());
+    assert!(!sim.is_null());
+
+    err = ptr::null_mut();
+    simlin_sim_run_to_end(sim, &mut err);
+    assert!(err.is_null());
+
+    (proj, model, sim)
+}
+
+/// Helper: fetch one loop's relative-loop-score series.
+unsafe fn get_rel_score(sim: *mut SimlinSim, loop_id: &str) -> Vec<f64> {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let mut step_count: usize = 0;
+    simlin_sim_get_stepcount(sim, &mut step_count as *mut usize, &mut err);
+    assert!(err.is_null());
+
+    let id_c = CString::new(loop_id).unwrap();
+    let mut scores = vec![0.0_f64; step_count];
+    let mut written: usize = 0;
+    err = ptr::null_mut();
+    simlin_analyze_get_relative_loop_score(
+        sim,
+        id_c.as_ptr(),
+        scores.as_mut_ptr(),
+        scores.len(),
+        &mut written as *mut usize,
+        &mut err,
+    );
+    assert!(err.is_null(), "expected rel score lookup to succeed");
+    assert_eq!(written, scores.len());
+    scores
+}
+
+/// Repeated FFI queries for the same loop must return the same
+/// series bit-for-bit -- the cache must be stable across reads.
+#[test]
+fn test_rel_loop_score_cache_is_stable_across_calls() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        assert!(
+            (*loops).count >= 2,
+            "two-flow stock must expose at least two loops"
+        );
+        let id_first = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let first_call = get_rel_score(sim, &id_first);
+        let second_call = get_rel_score(sim, &id_first);
+        assert_eq!(
+            first_call, second_call,
+            "cached denominator must yield bit-identical output on repeat query"
+        );
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Two loops in the same cycle partition must share a denominator
+/// and produce |rel_r| + |rel_b| == 1.0 at every timestep (the
+/// denominator is Σ|loop_score_j| across the partition by
+/// construction).  If the cache were incorrectly keyed per-loop,
+/// the two series would self-normalize independently and sum
+/// closer to 2.0; the partition-keyed cache preserves the math.
+#[test]
+fn test_rel_loop_score_partition_sums_to_one_for_in_partition_loops() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        assert_eq!(
+            (*loops).count,
+            2,
+            "population + births + deaths should produce exactly two loops"
+        );
+        let id_a = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let id_b = CStr::from_ptr(loop_slice[1].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let score_a = get_rel_score(sim, &id_a);
+        let score_b = get_rel_score(sim, &id_b);
+        assert_eq!(score_a.len(), score_b.len());
+        for t in 0..score_a.len() {
+            // Once dynamics are nonzero (after the first step), the
+            // absolute values must sum to 1.0.  SAFEDIV-0 means the
+            // initial step can be 0 + 0.
+            let magnitude_sum = score_a[t].abs() + score_b[t].abs();
+            assert!(
+                magnitude_sum < 1e-9 || (magnitude_sum - 1.0).abs() < 1e-9,
+                "|rel_a| + |rel_b| at t={} should be 0 or 1, got {}",
+                t,
+                magnitude_sum
+            );
+        }
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// After `simlin_sim_reset`, the cache must not serve stale
+/// denominators.  Without re-running, `results` is `None` and the
+/// FFI should return a "no results" error rather than using a
+/// cached vector tied to the previous run.
+#[test]
+fn test_rel_loop_score_cache_invalidated_on_reset() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Prime the cache.
+        let _ = get_rel_score(sim, &id);
+
+        // Reset wipes results AND the cache.  The next query must
+        // fail with "no results", proving the cached vector is not
+        // being served against stale (now-absent) results.
+        err = ptr::null_mut();
+        simlin_sim_reset(sim, &mut err);
+        assert!(err.is_null());
+
+        let id_c = CString::new(id.as_str()).unwrap();
+        let mut scores = vec![0.0_f64; 16];
+        let mut written: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_relative_loop_score(
+            sim,
+            id_c.as_ptr(),
+            scores.as_mut_ptr(),
+            scores.len(),
+            &mut written as *mut usize,
+            &mut err,
+        );
+        assert!(
+            !err.is_null(),
+            "after reset, relative loop score must report missing results"
+        );
+        simlin_error_free(err);
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// `simlin_analyze_get_relative_loop_score` must keep working against
+/// results produced before a patch, even when the patch restructures
+/// the project's loops.  The relative-score query reads the
+/// `loop_partitions` snapshot captured on SimState at `sim_new` time,
+/// so it is bound to the loop grouping the VM actually ran under.
+/// Without the snapshot, the FFI would re-query
+/// `model_ltm_variables` against the current DB -- which may have
+/// different loop IDs (or none at all) after a rename / delete /
+/// structural change -- and return `DoesNotExist` for IDs whose
+/// series are still present in `state.results`.
+#[test]
+fn test_rel_loop_score_survives_post_sim_rename() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let before = get_rel_score(sim, &id);
+        simlin_free_loops(loops);
+
+        // Rename a variable that participates in both loops.  This
+        // causes model_ltm_variables to re-run on the renamed
+        // project; the snapshot on SimState is what keeps the
+        // post-sim query answerable against the pre-patch results.
+        let patch_json = br#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "renameVariable",
+                            "payload": {"from": "population", "to": "pop_v2"}
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        err = ptr::null_mut();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_json.as_ptr(),
+            patch_json.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        assert!(err.is_null(), "renameVariable patch must apply cleanly");
+        assert!(collected.is_null());
+
+        // The snapshot on SimState still carries the compilation-era
+        // partition for this loop, so the query must succeed and
+        // return the same series (the VM's results have not changed).
+        let after = get_rel_score(sim, &id);
+        assert_eq!(
+            before, after,
+            "rel_loop_score must read from the sim-time partition snapshot, \
+             not the patched project's current loop mapping"
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// After a second `run_to_end` cycle (reset + run), the cache must
+/// be repopulated against the new results, not reused from the
+/// pre-reset state.  Re-running the same sim with the same inputs
+/// produces identical results, so the post-reset series must match
+/// the pre-reset series bit-for-bit.  A bug that served stale cache
+/// after reset would either fail (empty cache + wrong denominator)
+/// or silently return stale values.
+#[test]
+fn test_rel_loop_score_cache_repopulated_after_rerun() {
+    unsafe {
+        let (proj, model, sim) = setup_two_loop_sim();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let before = get_rel_score(sim, &id);
+
+        // Reset and re-run: new results, cache cleared, same inputs.
+        err = ptr::null_mut();
+        simlin_sim_reset(sim, &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        let after = get_rel_score(sim, &id);
+        assert_eq!(
+            before, after,
+            "re-running with identical inputs must reproduce the same series"
+        );
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

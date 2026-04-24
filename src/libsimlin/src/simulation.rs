@@ -56,27 +56,54 @@ pub unsafe extern "C" fn simlin_sim_new(
     // on the SourceProject input. The DB is kept in sync by apply_patch
     // and project constructors, so this is typically a cache hit when
     // nothing changed since the last patch.
-    let incremental_result: std::result::Result<engine::CompiledSimulation, engine::Error> = {
+    let (incremental_result, captured_loop_partitions): (
+        std::result::Result<engine::CompiledSimulation, engine::Error>,
+        HashMap<String, Option<usize>>,
+    ) = {
         let mut db = project_ref.db.lock().unwrap();
         let sync_state = project_ref.sync_state.lock().unwrap();
         if let Some(ref state) = *sync_state {
-            let source_project = state.to_sync_result().project;
+            let sync = state.to_sync_result();
+            let source_project = sync.project;
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
             let result =
                 engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
+            // Snapshot the LTM loop-partition mapping *while* the
+            // ltm_enabled flag is still set and the db is still
+            // locked.  Post-sim relative-loop-score queries look up
+            // this snapshot instead of re-querying the db, so a
+            // subsequent `apply_patch` (rename/delete/restructure)
+            // does not invalidate scores against results that are
+            // still valid for the compilation-era loop structure.
+            let loop_partitions = if enable_ltm && result.is_ok() {
+                let canonical = engine::canonicalize(&model_ref.model_name);
+                sync.models
+                    .get(canonical.as_ref())
+                    .map(|sm| {
+                        engine::db::model_ltm_variables(&*db, sm.source, source_project)
+                            .loop_partitions
+                            .clone()
+                    })
+                    .unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
             // the same SourceProject.
             if enable_ltm {
                 engine::db::set_project_ltm_enabled(&mut db, source_project, false);
             }
-            result
+            (result, loop_partitions)
         } else {
-            Err(engine::Error {
-                kind: engine::ErrorKind::Simulation,
-                code: engine::ErrorCode::NotSimulatable,
-                details: Some("incremental compilation: no sync state available".to_string()),
-            })
+            (
+                Err(engine::Error {
+                    kind: engine::ErrorKind::Simulation,
+                    code: engine::ErrorCode::NotSimulatable,
+                    details: Some("incremental compilation: no sync state available".to_string()),
+                }),
+                HashMap::new(),
+            )
         }
     };
 
@@ -98,6 +125,8 @@ pub unsafe extern "C" fn simlin_sim_new(
             vm_error,
             results: None,
             overrides: HashMap::new(),
+            loop_partitions: captured_loop_partitions,
+            cached_partition_denominators: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -168,6 +197,7 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
         match vm.run_to_end() {
             Ok(_) => {
                 state.results = Some(vm.into_results());
+                state.cached_partition_denominators.clear();
             }
             Err(err) => {
                 state.vm = Some(vm);
@@ -232,6 +262,7 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *
 
     let mut state = sim_ref.state.lock().unwrap();
     state.results = None;
+    state.cached_partition_denominators.clear();
 
     if let Some(ref mut vm) = state.vm {
         // Fast path: reuse existing VM allocation
@@ -508,6 +539,13 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
         let idx = (results.step_count - 1) * results.step_size + offset;
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
+            // Mutating a `loop_score` slot in place would silently
+            // stale any cached partition denominator that summed it.
+            // The cache is keyed by partition, not offset, so without
+            // knowing which partition this offset belongs to we
+            // invalidate the whole map -- correct and cheap (the next
+            // FFI call repopulates lazily).
+            state.cached_partition_denominators.clear();
             return;
         }
     }

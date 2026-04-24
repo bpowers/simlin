@@ -1064,7 +1064,9 @@ pub fn model_loop_circuits(
 ) -> LoopCircuitsResult {
     let edges_result = model_causal_edges(db, model, project);
     let graph = causal_graph_from_edges(edges_result);
-    let (names, circuits) = graph.find_indexed_circuits();
+    let (names, circuits) = graph
+        .find_indexed_circuits_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
     LoopCircuitsResult { names, circuits }
 }
 
@@ -1074,6 +1076,18 @@ pub fn model_loop_circuits(
 /// reconstructed variable ASTs, then runs Johnson's algorithm with
 /// polarity analysis. Loop IDs (r1, b1, u1, ...) match those used
 /// by LTM augmentation.
+///
+/// Short-circuits to an empty result when the graph's largest SCC
+/// exceeds [`crate::ltm::MAX_LTM_SCC_NODES`], for the same reason
+/// the LTM pipeline's gate does: Johnson's enumeration on an SCC
+/// larger than the threshold can produce millions of elementary
+/// circuits (1.86M on WRLD3's 166-node SCC) and consume gigabytes
+/// of intermediate state.  FFI callers (`simlin_analyze_get_loops`)
+/// and the layout path (`layout::try_detect_ltm_loops_incremental`)
+/// hit this function directly without going through the LTM gate,
+/// so we apply the same structural guard here.  Returning empty
+/// matches the pre-existing behaviour for graphs that would
+/// exhaust the (now-retired) `MAX_LTM_CIRCUITS` cap.
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
@@ -1081,7 +1095,13 @@ pub fn model_detected_loops(
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
 
-    let loops = graph.find_loops();
+    if graph.largest_scc_size() > crate::ltm::MAX_LTM_SCC_NODES {
+        return DetectedLoopsResult { loops: vec![] };
+    }
+
+    let loops = graph
+        .find_loops_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
     DetectedLoopsResult {
         loops: loops
             .into_iter()
@@ -1202,7 +1222,9 @@ pub fn model_element_loop_circuits(
 ) -> LoopCircuitsResult {
     let element_edges = model_element_causal_edges(db, model, project);
     let graph = causal_graph_from_element_edges(element_edges);
-    let (names, circuits) = graph.find_indexed_circuits();
+    let (names, circuits) = graph
+        .find_indexed_circuits_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
     LoopCircuitsResult { names, circuits }
 }
 
@@ -1627,6 +1649,73 @@ mod loop_circuits_result_tests {
         assert!(
             result.names.is_empty(),
             "empty circuits must produce empty names table so salsa stays stable under acyclic-variable renames"
+        );
+    }
+}
+
+#[cfg(test)]
+mod detected_loops_scc_gate_tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    /// Build a project whose causal graph contains an SCC of size
+    /// `2 * stocks_in_cycle` by wiring `stocks_in_cycle` stocks in a
+    /// ring: each `f_i` depends on `s_{i-1}` and feeds `s_i`.  The
+    /// resulting SCC contains both the stocks and the flows.
+    fn ring_project(stocks_in_cycle: usize) -> TestProject {
+        let mut p = TestProject::new("ring").with_sim_time(0.0, 1.0, 1.0);
+        for i in 0..stocks_in_cycle {
+            let prev = (i + stocks_in_cycle - 1) % stocks_in_cycle;
+            let stock = format!("s_{i}");
+            let flow = format!("f_{i}");
+            let prev_stock = format!("s_{prev}");
+            p = p
+                .stock(&stock, "0", &[flow.as_str()], &[], None)
+                .flow(&flow, &prev_stock, None);
+        }
+        p
+    }
+
+    fn detect_loops(project: &TestProject) -> DetectedLoopsResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        model_detected_loops(&db, source_model, sync.project)
+    }
+
+    /// A small feedback loop must still be detected -- the SCC-size
+    /// gate only fires when the largest SCC exceeds
+    /// `MAX_LTM_SCC_NODES`.
+    #[test]
+    fn small_feedback_loop_is_detected() {
+        let project = ring_project(2); // 2 stocks + 2 flows = 4-node SCC
+        let result = detect_loops(&project);
+        assert!(
+            !result.loops.is_empty(),
+            "4-node SCC is well under the 50-node gate; loops must still be returned"
+        );
+    }
+
+    /// An SCC larger than `MAX_LTM_SCC_NODES` must short-circuit to
+    /// an empty result without paying for Johnson's enumeration.
+    /// This matches the behaviour of `model_ltm_variables`'s
+    /// auto-flip gate on the element-level graph, so FFI and layout
+    /// consumers of `model_detected_loops` do not force full
+    /// enumeration on WRLD3-shape models (166-node SCC, 1.86M
+    /// circuits, seconds-to-minutes of Johnson's work) before the
+    /// LTM pipeline's own gate gets a chance to fire.
+    #[test]
+    fn oversized_scc_short_circuits_to_empty() {
+        // Ring of 30 stocks + 30 flows = 60-node SCC, comfortably
+        // above the 50-node threshold.
+        let project = ring_project(30);
+        let result = detect_loops(&project);
+        assert!(
+            result.loops.is_empty(),
+            "60-node SCC must trip the MAX_LTM_SCC_NODES = 50 gate, got {} loops",
+            result.loops.len()
         );
     }
 }

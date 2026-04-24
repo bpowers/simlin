@@ -297,6 +297,28 @@ pub(crate) struct SimState {
     /// Constant value overrides survive VM consumption (run_to_end consumes the VM).
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
+    /// Snapshot of `model_ltm_variables().loop_partitions` taken at
+    /// `simlin_sim_new` time, while the db is locked and the
+    /// `ltm_enabled` flag is still set.  Binds post-sim
+    /// relative-loop-score queries to the loop grouping the VM
+    /// actually ran under, so the FFI stays consistent when the
+    /// project is patched (rename/delete/restructure) after the
+    /// simulation is created.  Empty when LTM was not enabled, when
+    /// the LTM pipeline auto-flipped to discovery (which empties
+    /// `loop_partitions` intentionally), or when compilation
+    /// itself failed.
+    pub(crate) loop_partitions: HashMap<String, Option<usize>>,
+    /// Per-cycle-partition denominators cached across FFI calls to
+    /// `simlin_analyze_get_relative_loop_score`.  The rel-loop-score
+    /// definition is `loop_score / Σ|loop_score|` *within a cycle
+    /// partition*, so the numerator is per-loop but the denominator
+    /// is per-partition; keying the cache on partition turns repeated
+    /// FFI queries (e.g. pysimlin's `_populate_loop_behavior` loop over
+    /// every loop in the project) from O(L² × T) to O(L × T) amortized.
+    /// Invalidated in lockstep with `results`: cleared on
+    /// `simlin_sim_run_to_end`, `simlin_sim_reset`, and
+    /// `simlin_sim_set_value_by_offset`.
+    pub(crate) cached_partition_denominators: HashMap<Option<usize>, Vec<f64>>,
 }
 
 /// Opaque simulation structure

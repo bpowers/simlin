@@ -33,6 +33,8 @@ Run at the start of every session:
 | `pnpm test` | Run all TypeScript tests |
 | `pnpm tsc` | TypeScript type checking |
 
+`cargo test --workspace` runs under a 3-minute wall-clock cap in both the pre-commit hook (`timeout(1)`) and CI (GitHub Actions `timeout-minutes: 3`). See [rust.md](rust.md#test-time-budgets) for per-test budget guidance and how to handle legitimately expensive tests.
+
 ## Code Coverage
 
 | Command | Description |

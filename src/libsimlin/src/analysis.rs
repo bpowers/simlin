@@ -405,33 +405,79 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
-    let var_name = format!("$\u{205A}ltm\u{205A}rel_loop_score\u{205A}{loop_id}");
-    let var_ident = canonicalize(&var_name);
+    // `rel_loop_score` is no longer materialized as a VM-computed
+    // variable (it caused O(P²) compile-time text blowup on dense
+    // models; see
+    // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  We
+    // derive it post-hoc from the `loop_score` series the VM wrote,
+    // using the cycle-partition snapshot captured on SimState at
+    // sim_new time.  Reading from the snapshot (rather than
+    // re-querying `model_ltm_variables` against the current project
+    // DB) keeps score lookups consistent with the VM's results even
+    // when the project has been patched since the simulation was
+    // created -- model renames, variable deletions, or loop-structure
+    // changes in later patches cannot invalidate a query whose
+    // results already exist.
+    let mut state_guard = sim_ref.state.lock().unwrap();
+    // Borrow-split so we can read snapshot + results while we
+    // mutate the cache in the same scope.
+    let state = &mut *state_guard;
 
-    let state = sim_ref.state.lock().unwrap();
-    if let Some(ref results) = state.results {
-        if let Some(&offset) = results.offsets.get(&*var_ident) {
-            let count = std::cmp::min(results.step_count, len);
-            for (i, row) in results.iter().take(count).enumerate() {
-                *results_ptr.add(i) = row[offset];
-            }
-            *out_written = count;
-        } else {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                    "loop '{}' does not have relative score data",
-                    loop_id
-                )),
-            );
-        }
-    } else {
+    let Some(&partition_key) = state.loop_partitions.get(loop_id) else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                "loop '{loop_id}' does not have relative score data"
+            )),
+        );
+        return;
+    };
+
+    let Some(ref results) = state.results else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
                 .with_message("simulation has no results; run the simulation first"),
         );
+        return;
+    };
+
+    // Populate the per-partition denominator lazily: the first FFI
+    // call touching partition P pays O(loops_in_P × step_count); all
+    // subsequent calls for any loop in P (common pattern: pysimlin's
+    // `_populate_loop_behavior` iterates every loop) reuse the
+    // cached vector and cost only the numerator pass.
+    let partitions_snapshot = &state.loop_partitions;
+    let denom = state
+        .cached_partition_denominators
+        .entry(partition_key)
+        .or_insert_with(|| {
+            let loop_ids_in_partition = partitions_snapshot.iter().filter_map(|(id, pk)| {
+                if *pk == partition_key {
+                    Some(id.as_str())
+                } else {
+                    None
+                }
+            });
+            engine::ltm_post::compute_partition_denominator(results, loop_ids_in_partition)
+        });
+
+    let Some(series) = engine::ltm_post::compute_rel_loop_score_for_id(results, loop_id, denom)
+    else {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                "loop '{loop_id}' does not have relative score data"
+            )),
+        );
+        return;
+    };
+
+    let count = std::cmp::min(series.len(), len);
+    for (i, v) in series.iter().take(count).enumerate() {
+        *results_ptr.add(i) = *v;
     }
+    *out_written = count;
 }
 
 /// # Safety
