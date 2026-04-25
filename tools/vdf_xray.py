@@ -2169,15 +2169,185 @@ def decoded_record_dimension_anchors(vdf: VdfFile) -> list[RecordDimensionAnchor
     return anchors
 
 
+def sec5_anchor_binding(
+    vdf: VdfFile,
+) -> list[tuple[RecordDimensionAnchor, Section5SetEntry, int]]:
+    """
+    Pair section-5 entries with record dimension anchors by shared f[8] order.
+
+    Validated across Ref.vdf, subscripts.vdf, and run_7/8/9/10.vdf: sorting
+    record dimension anchors by record field[8] ascending produces a sequence
+    whose length and cardinalities line up with the section-5 entries in file
+    order. The random-match probability on Ref.vdf alone (18 dims with an
+    identifiable cardinality multiset) is about 2e-10, so we treat this as
+    structural, not coincidental.
+
+    Returns one `(anchor, sec5_entry, rank)` tuple per paired dim, where
+    `rank` is the anchor's position under f[8]-ascending ordering (also the
+    section-5 file-order index). Returns an empty list when the anchor and
+    section-5 counts disagree; the count mismatch is itself the diagnostic.
+    """
+    anchors = sorted(
+        decoded_record_dimension_anchors(vdf),
+        key=lambda a: a.group_id,
+    )
+    sec5_entries = vdf.parse_section5_sets() or []
+    if len(anchors) != len(sec5_entries):
+        return []
+    return [(anchor, entry, rank) for rank, (anchor, entry) in enumerate(zip(anchors, sec5_entries))]
+
+
+def _subsequence_positions(needle: tuple[int, ...], haystack: tuple[int, ...]) -> Optional[list[int]]:
+    """
+    Return the in-order subsequence positions of `needle` within `haystack`,
+    or None if `needle` is not an in-order subsequence.
+
+    Treats zero tokens as inert: a zero in `needle` never binds to a non-zero
+    haystack entry. All observed Ref.vdf subrange payloads are strictly
+    positive slot-ref tokens, so this behavior is conservative.
+    """
+    i = 0
+    positions: list[int] = []
+    for j, token in enumerate(haystack):
+        if i < len(needle) and needle[i] == token:
+            positions.append(j)
+            i += 1
+    return positions if i == len(needle) else None
+
+
+def recover_all_dimension_elements(vdf: VdfFile) -> dict[str, list[str]]:
+    """
+    Recover every decoded dimension's element list, including subranges.
+
+    Combines two structural signals documented in
+    `/docs/design/vdf.md`:
+
+    1. Root dimensions with complete element-record groups: the element
+       records (field[8]-matched, f[6]=0, f[14]!=sentinel) carry zero-based
+       element indices in f[11], so sorting by f[11] yields the canonical
+       element list directly.
+    2. Subrange dimensions: their section-5 payload is an in-order
+       subsequence of a root dimension's section-5 payload. The subsequence
+       positions are the root-relative element indices, which we then use to
+       project the root's element list down to the subrange.
+
+    Root detection uses the "no other strict-longer dim has this dim's
+    payload as a subseq" rule; when a subrange could bind to either a root
+    or another subrange, we prefer the root. Incomplete anchors (partial or
+    ambiguous) keep whatever elements we do have; callers can inspect
+    `decoded_record_dimension_anchors` for status details.
+    """
+    pairings = sec5_anchor_binding(vdf)
+    if not pairings:
+        return {}
+
+    payloads: list[tuple[int, ...]] = [
+        tuple(section5_payload_refs(entry)) for _, entry, _ in pairings
+    ]
+    anchors = [anchor for anchor, _, _ in pairings]
+
+    # An anchor is a root iff no strictly longer anchor's payload contains it
+    # as an in-order subsequence. That pattern matches Ref.vdf exactly: seven
+    # roots (one per MDL-declared root dim) and eleven subranges. When two
+    # same-length payloads are equal, neither is considered a subsequence of
+    # the other, so equal-length twins stay roots.
+    is_root = [True] * len(anchors)
+    for i in range(len(anchors)):
+        for j in range(len(anchors)):
+            if i == j:
+                continue
+            if len(payloads[i]) >= len(payloads[j]):
+                continue
+            if _subsequence_positions(payloads[i], payloads[j]) is not None:
+                is_root[i] = False
+                break
+
+    results: dict[str, list[str]] = {}
+
+    # Step 1: resolve roots. Complete anchors use their decoded element
+    # records. Partial-single-element roots keep the one recorded element
+    # (e.g. Ref.vdf's `scenario`); callers already treat those as partial
+    # via precision diagnostics.
+    root_elements: dict[int, list[str]] = {}
+    for idx, anchor in enumerate(anchors):
+        if not is_root[idx]:
+            continue
+        elements = [name for _, _, name in anchor.elements]
+        card = payloads[idx] and len(payloads[idx]) or 0
+        if anchor.status == "complete" and len(elements) == card:
+            root_elements[idx] = elements
+            results[anchor.name] = elements
+        elif len(elements) > 0:
+            # Preserve partial roots; they are still decoded facts.
+            root_elements[idx] = elements
+            results[anchor.name] = elements
+
+    # Step 2: resolve subranges. Prefer root parents over subrange parents;
+    # the "bottom" vs "lower+layers" tie in Ref.vdf is the canonical test.
+    for idx, anchor in enumerate(anchors):
+        if is_root[idx]:
+            continue
+        parent_idx: Optional[int] = None
+        parent_positions: Optional[list[int]] = None
+        # Pass 1: look only at roots.
+        for root_i, root_payload in enumerate(payloads):
+            if not is_root[root_i]:
+                continue
+            if root_i not in root_elements:
+                continue
+            positions = _subsequence_positions(payloads[idx], root_payload)
+            if positions is None:
+                continue
+            if parent_idx is None:
+                parent_idx = root_i
+                parent_positions = positions
+            else:
+                # Multiple root parents: keep the shorter one (more specific)
+                # to stay closer to the MDL's declared parent.
+                if len(root_payload) < len(payloads[parent_idx]):
+                    parent_idx = root_i
+                    parent_positions = positions
+        if parent_idx is None:
+            # Pass 2: fall back to subrange parents.
+            for other_i, other_payload in enumerate(payloads):
+                if other_i == idx or is_root[other_i]:
+                    continue
+                if anchors[other_i].name not in results:
+                    continue
+                positions = _subsequence_positions(payloads[idx], other_payload)
+                if positions is None:
+                    continue
+                if parent_idx is None or len(other_payload) < len(payloads[parent_idx]):
+                    parent_idx = other_i
+                    parent_positions = positions
+
+        if parent_idx is None or parent_positions is None:
+            continue
+        parent_name = anchors[parent_idx].name
+        parent_list = results.get(parent_name)
+        if parent_list is None:
+            continue
+        if any(pos >= len(parent_list) for pos in parent_positions):
+            continue
+        results[anchor.name] = [parent_list[pos] for pos in parent_positions]
+
+    return results
+
+
 def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
     """
-    Recover complete dimension element lists from record field[8] grouping.
+    Recover dimension element lists from record field[8] grouping plus the
+    sec5-payload subsequence subrange rule.
 
-    This consumes only `decoded_record_dimension_anchors(..., status=complete)`.
-    Incomplete anchors are real metadata, but they are not enough to label
-    array elements without an additional decoded subrange relation.
+    Step 1 consumes `decoded_record_dimension_anchors(..., status=complete)`:
+    root dimensions with a complete element-record set yield their labels
+    directly. Step 2 adds subrange dims via `recover_all_dimension_elements`
+    (see that function's docstring for the subsequence rule). Incomplete
+    anchors that cannot be resolved through either path are left out so
+    callers can still see the unresolved anchor facts.
     """
     dims: list[RecoveredDimensionSet] = []
+    seen: set[str] = set()
     for anchor in decoded_record_dimension_anchors(vdf):
         if anchor.status != "complete":
             continue
@@ -2194,6 +2364,23 @@ def _recover_record_dimension_sets(vdf: VdfFile) -> list[RecoveredDimensionSet]:
             sec5_index=None,
             source="record-field8",
         ))
+        seen.add(anchor.name.lower())
+
+    # Layer subrange recovery over the top. This fills in dims whose element
+    # records are not present in the VDF (Ref.vdf's 11 subrange dims).
+    subrange_elements = recover_all_dimension_elements(vdf)
+    for name, elements in subrange_elements.items():
+        if name.lower() in seen:
+            continue
+        if len(elements) < 1:
+            continue
+        dims.append(RecoveredDimensionSet(
+            name=name,
+            elements=elements,
+            sec5_index=None,
+            source="sec5-subsequence",
+        ))
+        seen.add(name.lower())
     return dims
 
 
@@ -2314,14 +2501,35 @@ def _vensim_sort_key(name: str) -> str:
     return name.lower()
 
 
-def _name_looks_lookupish(name: str) -> bool:
+def _heuristic_name_looks_lookupish(name: str) -> bool:
+    """
+    RECONSTRUCTION HEURISTIC: lexical test for lookup/table/graphical-function
+    names.
+
+    Matches any name containing the substrings "lookup", "table", or
+    "graphical function" (case-insensitive). This is a pure name-string
+    heuristic, not a decoded file-format rule. Callers use it to route
+    lookup-shaped names away from stock ownership decisions; see
+    `_heuristic_name_allowed_for_block` and `_lookup_record_names`.
+    """
     lower = name.lower()
     return "lookup" in lower or "table" in lower or "graphical function" in lower
 
 
-def _name_allowed_for_block(name: str, block: OwnerRecordBlock, *,
-                            excluded_names: Optional[set[str]] = None,
-                            allow_stock_lookupish: bool = False) -> bool:
+def _heuristic_name_allowed_for_block(name: str, block: OwnerRecordBlock, *,
+                                      excluded_names: Optional[set[str]] = None,
+                                      allow_stock_lookupish: bool = False) -> bool:
+    """
+    RECONSTRUCTION HEURISTIC: decide whether a name may own `block`.
+
+    Filters out display/navigation-metadata prefixes (".", "-", ":") and
+    module names, then, when `allow_stock_lookupish` is False, rejects
+    lookup/table names from stock-coded owner blocks. This second step is a
+    lexical rule (via `_heuristic_name_looks_lookupish`), not a decoded
+    Vensim field. Callers run the mapping pass twice, first with
+    `allow_stock_lookupish=False` and then with `True`, so the heuristic
+    narrows ambiguous stock blocks without hiding lookup-shaped real stocks.
+    """
     if not name:
         return False
     if name in VENSIM_MODULE_NAMES:
@@ -2340,7 +2548,7 @@ def _name_allowed_for_block(name: str, block: OwnerRecordBlock, *,
         not allow_stock_lookupish and
         block.ot_codes
         and all(code == OT_CODE_STOCK for code in block.ot_codes)
-        and _name_looks_lookupish(name)
+        and _heuristic_name_looks_lookupish(name)
     ):
         return False
     return True
@@ -2482,7 +2690,7 @@ def _lookup_record_names(vdf: VdfFile) -> list[str]:
     for name in vdf.names[:len(vdf.slot_table)]:
         if classify_name(name):
             continue
-        if not _name_looks_lookupish(name):
+        if not _heuristic_name_looks_lookupish(name):
             continue
         key = name.lower()
         if key in seen:
@@ -2985,7 +3193,7 @@ def _mapping_from_record_name_keys(
                 name = rec_to_name.get(rec_idx)
                 if name is None or name in used_names:
                     continue
-                if _name_allowed_for_block(
+                if _heuristic_name_allowed_for_block(
                     name,
                     block,
                     excluded_names=excluded_names,
@@ -3005,7 +3213,7 @@ def _mapping_from_record_name_keys(
                     for _, _, name in rec_sort_names.get(sort_key, [])
                     if (
                         name not in used_names
-                        and _name_allowed_for_block(
+                        and _heuristic_name_allowed_for_block(
                             name,
                             block,
                             excluded_names=excluded_names,
@@ -3029,11 +3237,18 @@ def _mapping_from_record_name_keys(
 
 def _try_f2_name_key_mapping(vdf: VdfFile) -> Optional[dict[str, OwnerRecordBlock]]:
     """
-    Deterministic record-to-name mapping via the decoded f[2] name key.
+    Record-to-name mapping via the decoded f[2] name key, composed with
+    non-overlap owner-block selection.
 
-    Record f[2] is not a rank. It is the section-2 name string's 4-byte word
-    offset plus seven. That gives a direct record -> name-table entry link and
-    removes the need for offset scans or fixture-specific shifts.
+    The f[2] key is a fact: it decodes to the section-2 name string's 4-byte
+    word offset plus seven, giving a direct record -> name-table entry link
+    and avoiding fixture-specific shifts. But this function wraps the fact
+    with `_select_non_overlapping_owner_blocks` (a DP-over-intervals
+    reconstruction step; see audit B.2.1). The output is therefore a
+    reconstruction composed from one decoded key and one reconstruction
+    filter, not a fully decoded mapping. Use the underlying
+    `_mapping_from_record_name_keys` when the caller already has an
+    owner-block set and does not want the non-overlap filter rerun.
     """
     n_recs = len(vdf.records)
     if n_recs == 0 or not vdf.names:
@@ -3149,6 +3364,11 @@ class PrecisionReport:
     data_block_decode_failures: int
     data_block_tail_mismatches: int
     bitmap_widths: list[int]
+    # Flags mirroring the two silent-reconstruction reasons. Equivalent to
+    # scanning `reasons` for the matching string, but faster to inspect in
+    # aggregate corpus reports.
+    used_system_variable_fallback: bool = False
+    used_lookup_name_order_pairing: bool = False
 
     def is_exact_by_xray(self) -> bool:
         return self.status == "exact-by-xray"
@@ -3170,22 +3390,47 @@ class CorpusPrecisionRow:
     array_result_count: Optional[int]
 
 
-def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
+@dataclass
+class NamedResultsDiagnostics:
     """
-    Extract named time series using the current record-derived reconstruction.
+    Side-channel diagnostics from `extract_named_results_with_diagnostics`.
 
-    Returns a list of NamedResult for each mapped variable (scalar variables
-    get one entry, arrayed variables get one entry per element). System
-    variables (FINAL TIME, INITIAL TIME, SAVEPER, TIME STEP) are also included.
+    The `used_*` flags record when extraction fell back onto a known
+    reconstruction step. `precision_report` forwards each flag into the
+    blocker list so `exact-by-xray` status never hides reconstruction.
     """
+    used_system_variable_fallback: bool = False
+    used_lookup_name_order_pairing: bool = False
+
+
+def extract_named_results_with_diagnostics(
+    vdf: VdfFile,
+) -> tuple[Optional[list[NamedResult]], NamedResultsDiagnostics]:
+    """
+    Like `extract_named_results`, but also returns a diagnostics record
+    flagging any reconstruction paths taken during extraction.
+
+    `used_system_variable_fallback` is set when system variables (INITIAL
+    TIME, FINAL TIME, SAVEPER, TIME STEP) are placed via
+    `_assign_group_positions(_nonstock_assignment_items(...))` or the bare
+    alphabetical zip-onto-remaining fallback. Both are reconstruction rules
+    (Vensim-sort-order placement), not decoded fields.
+
+    `used_lookup_name_order_pairing` is set when the zip-by-order pairing
+    between lookupish name-table entries and section-6 lookup records is
+    taken. That pairing is explicitly reconstruction and breaks on Ref.vdf,
+    so callers using it deserve to see the blocker string.
+    """
+    diagnostics = NamedResultsDiagnostics()
+
     mapping = map_names_to_owner_blocks(vdf)
     if mapping is None:
-        return None
+        return None, diagnostics
 
     # Extract time values
     time_values = vdf.extract_time_values()
     if time_values is None:
-        return None
+        return None, diagnostics
     dimension_sets = _recover_dimension_sets(vdf)
     shape_label_bindings = _shape_template_label_bindings(
         vdf,
@@ -3242,9 +3487,13 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
                 emitted_ot_indices.add(ot_idx)
 
     # Standalone lookup/table outputs have direct OT bindings in section 6.
+    # The "zip by order" pairing below is reconstruction: it assumes that
+    # lookupish name-table entries align 1:1 with section-6 lookup records.
+    # Flag it on the diagnostics so precision_report can surface it.
     lookup_names = _lookup_record_names(vdf)
     lookup_records = vdf.section6_lookup_records() or []
-    if len(lookup_names) == len(lookup_records):
+    if lookup_names and lookup_records and len(lookup_names) == len(lookup_records):
+        paired_any = False
         for name, record in zip(lookup_names, lookup_records):
             ot_idx = record.ot_index()
             if name in emitted_names or ot_idx in emitted_ot_indices:
@@ -3258,6 +3507,9 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
             results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
             emitted_names.add(name)
             emitted_ot_indices.add(ot_idx)
+            paired_any = True
+        if paired_any:
+            diagnostics.used_lookup_name_order_pairing = True
 
     # System variables have direct scalar records of their own (except Time,
     # which is OT[0]). Prefer those decoded record bindings; the gap-aware
@@ -3286,20 +3538,28 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
                     remaining,
                 )
             }
+        # Only mark the fallback as "used" if at least one of the missing
+        # system variables actually picked up a position through it. A file
+        # whose system records supplied everything directly does not trip.
         for name in missing_system_names:
             if name in fallback_positions:
                 system_positions[name] = fallback_positions[name]
+                diagnostics.used_system_variable_fallback = True
 
     if not system_positions:
         claimed = {block.start + i for block in mapping.name_to_block.values()
                    for i in range(block.length())}
         nonstock_positions = _group_ot_positions(codes, want_stock=False)
         remaining = [pos for pos in nonstock_positions if pos not in claimed]
+        fallback_count = 0
         for name, pos in zip(
             sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key),
             remaining,
         ):
             system_positions[name] = pos
+            fallback_count += 1
+        if fallback_count:
+            diagnostics.used_system_variable_fallback = True
 
     for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key):
         ot_idx = system_positions.get(name)
@@ -3315,6 +3575,22 @@ def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
         emitted_names.add(name)
         emitted_ot_indices.add(ot_idx)
 
+    return results, diagnostics
+
+
+def extract_named_results(vdf: VdfFile) -> Optional[list[NamedResult]]:
+    """
+    Extract named time series using the current record-derived reconstruction.
+
+    Returns a list of NamedResult for each mapped variable (scalar variables
+    get one entry, arrayed variables get one entry per element). System
+    variables (FINAL TIME, INITIAL TIME, SAVEPER, TIME STEP) are also included.
+
+    This is a thin wrapper over `extract_named_results_with_diagnostics`;
+    callers that need to see reconstruction flags should use that function
+    directly.
+    """
+    results, _ = extract_named_results_with_diagnostics(vdf)
     return results
 
 
@@ -3406,7 +3682,7 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
     if final_values is None or len(final_values) != vdf.offset_table_count:
         reasons.append("final-values-unavailable")
 
-    results = extract_named_results(vdf)
+    results, diagnostics = extract_named_results_with_diagnostics(vdf)
     if results is None:
         reasons.append("named-results-unavailable")
         results = []
@@ -3439,10 +3715,28 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
     if numeric_array_label_count:
         reasons.append("numeric-array-labels")
 
+    # Dimension anchors are considered "incomplete" only when the subseq
+    # recovery also fails to provide an element list. Ref.vdf has 11
+    # subrange anchors with no element records; those are fully decodable
+    # via the sec5 payload subsequence rule and should not count as
+    # blockers once recovery has run.
     anchors = decoded_record_dimension_anchors(vdf)
-    incomplete_anchor_count = sum(1 for anchor in anchors if anchor.status != "complete")
+    recovered_dim_names = {dim.name for dim in _recover_dimension_sets(vdf)}
+    incomplete_anchor_count = sum(
+        1 for anchor in anchors
+        if anchor.status != "complete" and anchor.name not in recovered_dim_names
+    )
     if incomplete_anchor_count:
         reasons.append("incomplete-dimension-anchors")
+
+    # Flag silent reconstruction paths that would otherwise let a file pass
+    # as "exact-by-xray" while the underlying mapping relies on the
+    # lookup-name zip-by-order pairing or the system-variable alphabetical
+    # placement fallback. See /tmp/vdf_audit_phase1.md Section B.3.1.
+    if diagnostics.used_system_variable_fallback:
+        reasons.append("used-system-variable-fallback")
+    if diagnostics.used_lookup_name_order_pairing:
+        reasons.append("used-lookup-name-order-pairing")
 
     data_blocks, decode_failures, tail_mismatches, bitmap_widths = _data_block_precision_stats(
         vdf,
@@ -3498,6 +3792,8 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
         data_block_decode_failures=decode_failures,
         data_block_tail_mismatches=tail_mismatches,
         bitmap_widths=bitmap_widths,
+        used_system_variable_fallback=diagnostics.used_system_variable_fallback,
+        used_lookup_name_order_pairing=diagnostics.used_lookup_name_order_pairing,
     )
 
 

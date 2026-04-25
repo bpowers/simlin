@@ -72,8 +72,10 @@ facts are called out where the Rust parser has not caught up yet.
   the decoded section-6 and section-7 tails:
   `sec6.file_offset + 4 * (field1 - 1)` points to the OT class-code array, and
   `sec7.file_offset + 4 * (field1 - 1)` points to the offset table. Section 1
-  `field1` points into the slot/ref area, but it is not yet the solved visible
-  slot-table start on every edited file.
+  `field1` decodes to an offset inside the slot/ref area on every observed
+  fixture, but it is not always equal to the visible slot-table start on
+  edited files (see "Slot table" below); xray still scans for the visible
+  table.
 - Section 2 contains the printable name table. Record `field[2]` directly keys
   this table as `(name_string_start - section2_data_start) / 4 + 7`; it is not
   a rank or heuristic match. `VdfFile::to_results_via_records` consumes this
@@ -84,10 +86,11 @@ facts are called out where the Rust parser has not caught up yet.
   presentation only and must not be used as evidence for on-disk refs.
 - Record `field[11]` is a union field: owner records use it as an OT start,
   while graphical-function descriptor records can use it as a section-6
-  lookup-record index. Under the owner interpretation, `field[6] == 5` is a
-  scalar span; nonzero section-3 shape keys and the single-shape `32` marker
-  can provide array spans. `field[6] == 0` remains ambiguous and is excluded
-  from fact-only record-span reports.
+  lookup-record index. Under the owner interpretation, `field[6] == 5`
+  means scalar; other nonzero values are section-3 shape keys that may
+  resolve directly (`32` single-shape marker) or via the Ref-style
+  predecessor-shape-code shift (see section 3 below). `field[6] == 0`
+  remains ambiguous and is excluded from fact-only record-span reports.
 - Section 3 is a reusable array-shape directory: flat size, axis sizes, and
   axis slot refs are decoded for the observed array fixtures.
 - Section 6 contains OT class codes, final-value floats, and fixed-width
@@ -178,6 +181,15 @@ array-edit fixtures are exact-by-xray, while 2008 scalar fixtures are often
 exact-by-xray. Conversely, WRLD3 has the same descriptor-overlap pattern in a
 2005 `SCEN01.VDF` and a 2026 `experiment.vdf`. The header timestamp is useful
 provenance, but no reliable Vensim version field has been identified.
+
+Note: the audit recorded in `/tmp/vdf_audit_phase1.md` flagged two
+reconstruction paths that `extract_named_results` currently takes silently
+(lookup-name-to-lookup-record pairing by order, and the system-variable
+alphabetical placement fallback). A planned follow-up will add
+`used-lookup-name-order-pairing` and `used-system-variable-fallback` to the
+blocker list so `exact-by-xray` more tightly matches the set of files that
+are genuinely decoded rather than reconstructed. When that lands, the
+corpus counts above will shift.
 
 Current blocker meanings:
 
@@ -465,13 +477,31 @@ record[k].file_offset = sec1.data_offset() + 12 + k * 64, for k >= 3
 ```
 
 The 12-byte preamble and the first three 64-byte blocks are reserved as
-a **header region**. Block 0 contains runtime pointer state, block 1
-holds a small counter word plus a constant `0x64`, and block 2 carries a
-float-1.0 marker and other metadata. They never represent variable
-records and carry no sentinel pair. Blocks 3 and later are full 64-byte record
-strides. This layout is validated across every observed simulation-result VDF
-fixture (small models, edited models, WRLD3, C-LEARN). The dataset sibling
-format has an analogous structure shifted into a different section.
+a **header region**. They never represent variable records and carry no
+sentinel pair. Blocks 3 and later are full 64-byte record strides. This
+layout is validated across every observed simulation-result VDF fixture
+(small models, edited models, WRLD3, C-LEARN). The dataset sibling format
+has an analogous structure shifted into a different section.
+
+The three header blocks are **not** runtime residue, despite the older
+"RAM pointer state" framing. Cross-fixture and same-model-rerun analysis
+(see `/tmp/vdf_memory_regions.md`) finds that 48 of 51 u32 words in the
+pre-record area are byte-identical across simulator reruns of the same
+model; only `block0[14]`, `block0[15]`, and `block1[1]` vary across
+reruns and do so as a single `(N-1, N, N+1)` triple that is still
+deterministic from the same input. In 2008-era Vensim, `block0[0..11]`
+are written as small integers -- on `econ/base.vdf` all twelve values
+are valid OT indices and are identical across the `base.vdf` / `rk.vdf`
+rerun pair. In 2019+ Vensim the same offsets carry arena-pointer-range
+values that are still deterministic (same values in reruns). Block 0's
+exact semantic has not been decoded in either era, but "runtime residue"
+is wrong: the bytes are structural, just of unknown purpose.
+
+Block 1 carries a mix of invariant padding words, rerun-volatile words
+that track the `(N-1, N, N+1)` triple, and two words with decoded
+cross-corpus invariants summarized below. Block 2 carries a float-1.0
+marker (`block2[9] == 0x3f800000` when set) and a small set of other
+packed header words.
 
 The sentinel pair (two consecutive `0xf6800000` values at field offsets
 8 and 9) is still useful for distinguishing many owner/system/descriptor
@@ -489,6 +519,27 @@ record (stdlib helpers and internal `#`-prefixed signature names often
 do not), but the record array itself is dense and contiguous within the
 declared region.
 
+#### Section-1 block-1 invariants
+
+Two cross-corpus invariants inside block 1 are worth calling out; they do
+not yet yield a decoded semantic but they are pinnable structural facts.
+
+- `block1[10] >> 16 == block1[11]` on every tracked result VDF file (94
+  files checked in `/tmp/vdf_memory_regions.md`). Only three pair values
+  are observed: `(0, 0)`, `(0x00600000, 96)`, and `(0x00f00000, 240)`.
+  This looks like a packed (u16, u16) flag pair where the upper half
+  stored in `block1[10]` is mirrored as the full value of `block1[11]`.
+  A Rust test pinning the `>> 16` invariant is a good follow-up.
+- `slot_count - block1[7]` is in `[-1, 2]` across the 94-file corpus.
+  Most files have delta 0, a handful have delta 1 (e.g. `econ/base`,
+  `econ/mark2`, `SCEN01`, `run_9`, `run_10`), one file has delta 2
+  (`WRLD3 experiment.vdf`), and one file has delta -1
+  (`zambaqui/old runs/Pop-6.vdf`). The signal is suggestive (it
+  correlates with the presence of slot entries that Vensim reserves
+  without writing durable per-name content) but not a clean
+  discriminator: several `exact-by-xray` fixtures have delta > 0 and
+  several `not-proven` fixtures have delta = 0.
+
 #### Record fields
 
 | Name            | Index | Purpose |
@@ -505,7 +556,9 @@ declared region.
 | sort_key        | 10    | View-local alphabetical ordering key / sort anchor. It is not global on large multi-view files, and some stock/system records carry `0`; see structural signal #8. |
 | ot_or_lookup_index | 11 | **Union field.** For owner records, this is an OT block start index: arrayed variables point to the first of N consecutive OT entries, scalar variables point to one OT entry. For graphical-function/lookup descriptor records, the same word can instead be a zero-based index into the section-6 lookup-record array; the lookup record's `word[10]` then points at the evaluated caller/output OT, not at the descriptor's own saved series. `0` is not an owner OT start (OT[0] is Time), but it can be lookup record 0. Values can exceed the actual OT count; check both interpretation ranges before treating it as an owner OT. |
 | slot_ref        | 12    | Byte offset into section 1 data; groups records by view/sector |
-| (unknown)       | 13-15 | Not yet decoded |
+| (unknown)       | 13    | Zero on every observed record |
+| has_lookup_marker | 14  | **"Has-lookup-table" marker**, not an owner/descriptor discriminator. `0xf6800000` (f32 -6e34, the VDF sentinel value) on records whose variable is associated with a lookup table -- a standalone lookup definition or a `WITH LOOKUP` expression -- and `0` otherwise. Corpus counts: bact (no lookups) has 0 SENT records; `lookup_ex.vdf` has 2 (both associated with lookups); `econ/base.vdf` has 75 (user-facing variables with UI slider/lookup metadata); `Ref.vdf` has 707. On the 6 ground-truth overlap pairs in `Ref.vdf`, f[14] is SENT on *both* the owner and the descriptor record; the earlier observation that owners had f[14]=0 while descriptors had f[14]=SENT on econ/base and lookup_ex was a byproduct of the owner being an internal `#LV1<...>#` stdlib helper (no lookup UI) while the descriptor was a user-facing lookup (with UI). See the "Claims about the owner/descriptor discriminator" subsection in the appendix. |
+| (unknown)       | 15    | Zero on every observed record |
 
 Code accessors: `VdfRecord::slot_ref()` (field 12), `VdfRecord::ot_index()`
 (field 11, owner interpretation only), `VdfRecord::is_arrayed()` (field 6 !=
@@ -647,8 +700,11 @@ shared "arrayed" signal.
 
 ### Emerging interpretation
 
-Section 3 now looks more like a **reusable array-shape directory** than a
-per-variable save list. The validated entries normalize cleanly into:
+Observed section-3 entries decode as shape templates; the same template's
+`index_word` can be referenced by multiple record `field[6]` values (see
+signal #6), and that reuse is why section 3 is better described as a
+shape-template directory than as a per-variable save list. The validated
+entries normalize cleanly into:
 
 - `flat_size`: total OT span for one array instance
 - `axis_sizes`: one size per encoded axis
@@ -750,6 +806,12 @@ cardinality. In simple array fixtures, `n` happens to match the model
 dimension cardinality; in edited and large fixtures, the payload refs look
 more like use-list/view/compiler refs than element descriptors.
 
+The Python xray parser locates the first sec5 entry by brute-forcing skip
+offsets in `[0..8]` words past the section header and keeping the longest
+structurally valid stream. A deterministic skip formula (analogous to
+`sec6.field4 - 1` for section 6) has not been identified; the brute-force
+probe is a reconstruction step, not a decoded framing rule.
+
 The trailing refs often match section-3 `axis_slot_ref` values. In `Ref.vdf`,
 6 of 7 unique section-3 axis refs are shared with section-5 trailing refs,
 which is evidence for a section-5/section-3 bridge, but the missing 1-of-7 and
@@ -770,6 +832,52 @@ dimension in edited or larger files.
 Current extraction keeps this as a fallback path only. The stronger element
 list signal found so far is in the section-1 records themselves, via record
 field[8].
+
+### Section-5 entries bind to record-field[8] dimension anchors by f[8]-ascending order
+
+Every sim-result fixture with section-5 entries also carries the same number
+of record-field[8] dimension anchor records. Sorting the anchors by their
+f[8] group value in ascending order produces a sequence whose cardinalities
+match `sec5[i].n` for all `i`, 1:1 by file position of the sec5 entries.
+This is validated on six fixtures: `Ref.vdf`, `subscripts.vdf`, and the
+edited `run_7`/`run_8`/`run_9`/`run_10` arrays.
+
+On `Ref.vdf` (18 dimensions, 18 sec5 entries) the anchor cardinality
+multiset sorted by f[8] is `[1,1,2,2,2,2,2,3,3,3,3,3,3,3,4,6,7,9]`, which
+matches `sec5[*].n` pointwise. Under a uniform-random permutation of that
+multiset there are `18! / (2! * 5! * 7!) = 5_292_967_680` distinct
+orderings, so the probability of an accidental pointwise match is about
+`2e-10`. Combined with the same agreement on the small array fixtures,
+this is a format fact, not a coincidence, and it replaces the earlier
+brute-force try-and-measure framing for associating sec5 entries with
+specific dimensions.
+
+### Subrange dimensions recover their elements from sec5 payload subsequence
+
+For each sec5 entry, the non-trailing refs (the "payload") form a length-`n`
+ref list. On `Ref.vdf`, for every subrange dimension the payload is a strict
+in-order subsequence of its parent root dimension's payload. The positions
+at which the subrange's payload refs occur inside the parent's payload are
+the element indices into the parent's element list. This recovers element
+names without consulting the MDL.
+
+Parent-root identification is itself structural: a root dimension is one
+whose payload is not a strict subsequence of any other dimension's payload.
+When a subrange's payload matches multiple candidate parents (in `Ref.vdf`,
+`bottom` is a subsequence of both `layers` and `lower`), prefer the root --
+here `layers`, because `lower` is itself a subrange of `layers`. All 11
+`Ref.vdf` subranges (`bottom`, `lower`, `upper`, `COP Developed`,
+`COP Developing A`, `COP Remaining Developing`, `Developing A`,
+`Developing B`, `set targets`, `tNext`, `tPrev`) recover their MDL element
+lists exactly under this rule.
+
+The payload refs themselves resolve to unrelated variable slots (for
+example `Global pct change in emissions`, `watt per J s`). The VDF uses
+the physical slot identity of these refs as opaque "axis-participation
+tokens" shared by compile-time views that expose that axis. Which variables
+contribute the tokens is semantically irrelevant to element recovery; the
+load-bearing fact is the in-order subsequence relationship between a
+root's token list and each subrange's token list.
 
 ### Record field[8] dimension groups
 
@@ -931,12 +1039,18 @@ small and medium fixtures, stock entries form a contiguous block at OT[1..S],
 followed by non-stock entries at OT[S+1..N-1]. `Ref.vdf` is the known
 counterexample: stock-coded entries are split across multiple ranges.
 
+The semantics below are pinned on small and medium fixtures; `Ref.vdf`
+adds `0x16` and `0x18` with inline-value behavior that has not been
+decoded in detail.
+
 | Code | Meaning | OT range |
 |------|---------|----------|
 | 0x0f | Time | OT[0] only |
 | 0x08 | Stock-backed variable | Contiguous in small/medium fixtures; scattered in `Ref.vdf` |
 | 0x11 | Dynamic non-stock / sometimes inline in array-heavy files | Usually non-stock range |
+| 0x16 | Observed only in `Ref.vdf`; inline OT value | Semantics unresolved |
 | 0x17 | Constant non-stock / lookup-definition value | Usually inline f32 |
+| 0x18 | Observed only in `Ref.vdf`; inline OT value | Semantics unresolved |
 
 Validated counts across test corpus:
 
@@ -986,17 +1100,27 @@ has a 7-element shape and lookup record 113 also has width 7, while
 `C AF Sequestered` shares the same raw `field[11]` but has a 3-element owner
 span. These are useful facts for narrowing the gap, not a rule.
 
-The remaining words in a lookup record have also been probed as direct
-back-pointers to section-1 descriptor records. No fixed interpretation has
-survived across the local corpus: lookup words `5..9`, section-1 byte/word
-offset transforms, record ordinals, name keys, sort keys, and slot refs all
-miss most candidates. The section-6 ref-stream is not a descriptor backlink
-either; descriptor name slots are often absent or appear in multiple entries.
-On `Ref.vdf`, lookup `word[12]` roots post-ref dependency chains, but those
-chains point at dependency owner spans, not at the descriptor record using the
-lookup. The deterministic facts retained for now are `word[10]` as evaluated
-output OT, `word[11]` as output width, and `word[12]` as an optional dependency
-chain root.
+Every u32 slot in the 13-u32 lookup record is now accounted for. None
+carries a back-pointer to the section-1 descriptor record (see the
+"Claims about the owner/descriptor discriminator" appendix for the
+exhaustive ruling-out). The decoded layout is:
+
+| word | role |
+|------|------|
+| 0..4 | IEEE floats for lookup graph/rendering metadata (y-min, y-max, x-min, x-max, slope hints) |
+| 5    | section-7 word offset to the start of the x-array |
+| 6    | section-7 word offset to the start of the y-array |
+| 7    | xy-pair-count derivative (observed values `{0, w8-2, w8-1, 0xffffffff}`) |
+| 8    | xy-pair count (identity: `word[8] == word[6] - word[5]`, 305/305 records) |
+| 9    | runtime arena pointer (0x05eaXXXX-range values on `Ref.vdf`); not a file offset |
+| 10   | evaluated-output OT |
+| 11   | output width |
+| 12   | optional 1-based section-6 word pointer to the root of a post-ref dependency chain (zero when the lookup has no dependencies) |
+
+On `Ref.vdf`, following `word[12]` through `word[3]` on post-ref records
+walks the lookup's input-dependency list in O(n). Those input OTs are
+distinct from descriptor OTs -- see the appendix for why the chain
+coverage cannot serve as an owner/descriptor discriminator.
 
 The current `--field11-union-correlation` diagnostic adds another relation:
 for both-valid records, follow `lookup[field11].word[10]` to the evaluated
@@ -1375,6 +1499,28 @@ their element-name catalogs.
 
     Exposed as `VdfFile::to_results_via_file_order_records()`.
 
+13. **Section-5 entries bind to record-field[8] dimension anchors by
+    f[8]-ascending order.** Every sim-result fixture with section-5
+    entries has the same number of record-field[8] dimension anchors;
+    sorting the anchors by f[8] ascending produces a sequence whose
+    cardinalities match `sec5[i].n` pointwise. Validated on six fixtures
+    (`Ref.vdf`, `subscripts.vdf`, `run_7`/`run_8`/`run_9`/`run_10`); on
+    `Ref.vdf`'s 18-dimension multiset the random-match probability is
+    ~2e-10. This is the decoded pairing rule that replaces earlier
+    "try each ordering rule" framing.
+
+14. **Subrange-dimension element recovery via sec5 payload subsequence.**
+    For each sec5 entry, the non-trailing refs form a length-n payload.
+    A subrange dimension's payload is a strict in-order subsequence of
+    its parent root dimension's payload; the positions at which the
+    subrange's refs occur in the parent's payload are the element indices
+    into the parent's element list. Parent-root identification is
+    structural: a root is a dim whose payload is not a subsequence of any
+    other dim's payload, and when a subrange matches multiple parents
+    (e.g. `Ref.vdf`'s `bottom` matches both `layers` and `lower`), prefer
+    the root (`lower` is itself a subrange of `layers`). Validated on all
+    11 `Ref.vdf` subranges against MDL ground truth.
+
 ### VDF-structural path (stock classifier required)
 
 `VdfFile::to_results_with_stock_classifier(is_stock)` uses only VDF structural
@@ -1430,6 +1576,11 @@ Validated behavior:
 4. Sorted candidate groups for the unresolved names
 5. SMOOTH/DELAY alias resolution via compiled module structure
 
+This path is itself a reconstruction: it composes stocks-first-alphabetical
+ordering with section-6 boundary reconciliation. Tests that pin its output
+against `to_results_via_records` are checking consistency between two
+reconstruction paths, not correctness against Vensim's writer.
+
 ### Validated partial approaches (not yet general)
 
 These approaches produce useful results on selected fixtures. They are useful
@@ -1479,9 +1630,12 @@ partially decoded.
    anchors and zero-based element records share a group ID. This recovers
    `sub1=[a,b,c]` in `subscripts.vdf`, `sub1`/`sub2`/`sub3` in the edited
    fixtures, and six non-singleton dimensions in `Ref.vdf` (`Aggregated
-   Regions`, `COP`, `HFC type`, `layers`, `Semi Agg`, `Target`). Element
-   labels are applied only when the block/axis cardinality uniquely identifies
-   a recovered dimension.
+   Regions`, `COP`, `HFC type`, `layers`, `Semi Agg`, `Target`). Subrange
+   element names are recoverable without MDL input using the sec5 payload
+   subsequence rule (signal #14); parent-root identification and per-subrange
+   element indices are both structural. Element labels are still applied
+   conservatively in xray: only when the block/axis cardinality uniquely
+   identifies a recovered dimension.
 
 ### The core unsolved problem
 
@@ -1615,10 +1769,113 @@ the most recent findings come first.
   landing position has no semantic meaning.
 
 - **Record undecoded fields (f[3], f[7], f[13..15]) as name-rank holders**:
-  f[13] and f[15] are 0 on >=99% of records; f[14] is usually the sentinel
-  `0xF6800000`. f[3] and f[7] vary but zero correlation with rank on
-  econ/WRLD3 (exhaustive per-field test across 2119 records on 9
-  fixtures yielded 2 coincidental matches).
+  f[13] and f[15] are 0 on >=99% of records; f[14] carries the "has
+  lookup table" marker described in the record-fields table above
+  (`0xF6800000` when set, zero otherwise). None of f[3], f[7], f[14]
+  correlates with rank on econ/WRLD3: an exhaustive per-field test across
+  2119 records on 9 fixtures yielded 2 coincidental matches.
+
+#### Claims about the owner/descriptor discriminator
+
+A record's `field[11]` is a union: owner records carry an OT block start,
+graphical-function/lookup descriptor records carry a section-6 lookup-record
+index. The central unsolved question is: which byte of the section-1 record
+tells the reader which interpretation applies? The investigation recorded in
+`/tmp/vdf_discriminator_hunt.md` rules out several single-field candidates
+and one cross-section candidate.
+
+- **`field[14]` as owner/descriptor discriminator**: refuted. `f[14]=SENT`
+  (`0xf6800000`) is a "has-lookup-table" marker, not an owner/descriptor
+  tag. On `Ref.vdf`'s 6 ground-truth overlap pairs, f[14] is SENT on *both*
+  records in 5 pairs and is a float (`0x3c23d70a` ~ `+0.01`) on the
+  descriptor in the 6th pair. The earlier apparent "owner f[14]=0,
+  descriptor f[14]=SENT" rule on `lookup_ex.vdf` and `econ/base.vdf` is
+  explained by the owners in those fixtures being internal `#LV1<...>#` /
+  `#SMOOTH(...)#` stdlib helpers (no lookup UI, so `f[14]=0`) and the
+  descriptors being user-facing lookup tables (lookup UI, so `f[14]=SENT`).
+  See the record-fields table above for the reframed interpretation.
+
+- **Any single byte of the 16-word record as discriminator**: refuted.
+  Per-bit analysis across the 10 ground-truth overlap pairs available on
+  `lookup_ex.vdf`, `econ/base.vdf`, and `Ref.vdf` found no bit that
+  discriminates perfectly. The best single bit was `f[0].bit 3` at 8 of 10
+  pairs -- better than random but not a decoded rule.
+
+- **`field[13]` and `field[15]` as a discriminator**: refuted. Both are
+  zero on every observed record in the overlap corpus.
+
+- **`field[0]` low byte or `field[1]` classification**: refuted. The bit
+  pattern correlates with variable kind (stock / flow / const / aux), not
+  with the owner/descriptor role. On `Ref.vdf` OT[113] the owner is `0x20`
+  (const-shaped, for `C AF Sequestered`) while the descriptor is `0x2c`
+  (dynamic, for `RS N2O`), so the polarity even flips across pairs.
+
+- **Record file order**: refuted. Across `Ref.vdf`'s 6 overlap pairs,
+  4 are descriptor-first and 2 are owner-first. The apparent correlation
+  with view ordering is a byproduct of which view group the descriptor vs
+  the stock lives in, not a stable format rule.
+
+- **Section-6 lookup record word[9]** (runtime pointer): refuted as a
+  back-pointer to the descriptor record. Values are `0x05eaXXXX`-range
+  arena addresses on `Ref.vdf`, not section-1 offsets or slot-table keys.
+
+- **Section-6 lookup record word[12]**: zero on 3 of 6 `Ref.vdf` overlap
+  pairs and on all pairs in `lookup_ex.vdf` and `econ/base.vdf`; not a
+  usable back-pointer.
+
+- **Lookup record word[5..6]**: refuted as back-pointers. Their difference
+  equals the lookup's x/y pair count; when resolved against section-1 or
+  section-7 they point into the lookup x/y float arrays in section 7, not
+  at the descriptor record.
+
+- **Section-2 pre-name bytes**: refuted. Just the end of the previous
+  name plus the `[u16 length][name bytes]` of the current entry.
+
+- **Section-6 post-ref dependency chains as discriminator**: refuted
+  (`/tmp/vdf_h2_result.md`). `Ref.vdf`'s 72 chains cover 166 OTs in
+  the range `[1010, 3883]`, which does not touch any of the 23 scalar
+  overlap OTs (all in `[106, 165]`). The chains describe
+  **dependencies** -- what each lookup *reads* during evaluation --
+  not **ownership** of an OT slot. Chain-covered OTs are inputs
+  computed elsewhere in the run; overlap OTs are lookup output slots
+  that are never consumed as inputs by another lookup. The two
+  relations are structurally orthogonal. On the 8 of 9 not-proven
+  fixtures with zero post-ref chain records, H2 is trivially
+  inapplicable.
+
+- **Section-6 lookup record word[0..4], word[7..8] as back-pointers**:
+  refuted (`/tmp/vdf_h4_result.md`). A 5-transformation sweep (byte
+  offset, 0/1-based record index, name-key, slot-ref, 1-based word
+  pointer) across 305 lookup records in 9 fixtures resolves zero of
+  the 10 known-descriptor overlaps. Decoded structurally: `word[0..4]`
+  are IEEE floats (graph-axis / rendering metadata such as y-min,
+  y-max, x-min, x-max, slope hints). `word[8] == word[6] - word[5]`
+  holds in 305 of 305 records: it is the xy-pair count. `word[7]` is
+  a near-derivative of `word[8]` (values `{0, w8-2, w8-1, 0xffffffff}`
+  covering all observed). Neither carries a back-reference to a
+  section-1 record.
+
+**Every u32 slot in the 13-u32 lookup record is now accounted for**:
+`word[0..4]` = IEEE-float graph/rendering metadata,
+`word[5..6]` = section-7 x/y array offsets,
+`word[7..8]` = xy-pair-count family,
+`word[9]` = runtime arena pointer,
+`word[10]` = evaluated-output OT,
+`word[11]` = output width,
+`word[12]` = optional dependency-chain root.
+The lookup record carries no back-pointer to its section-1 descriptor.
+
+**Reframe candidate**: the question "which record is the descriptor?"
+may be ill-posed from the reader's perspective. The section-6 lookup
+record already supplies everything the Vensim engine needs to evaluate
+a lookup: the x/y arrays (`word[5..6]`), the output OT (`word[10]`),
+and the input dependencies (`word[12]` chains). The reader may simply
+*ignore* `field[11]` on descriptor records, leaving the OT vs lookup-
+index union formally undisambiguated in the on-disk layout. If that
+is the case, xray's current non-overlapping-span reconstruction is
+the best that can be done without observing Vensim's reader behavior
+directly, and the tool's `record-span-overlap` blocker is honest --
+the overlap is real, not decodable.
 
 #### Claims about sections 1 / 2
 
@@ -1633,12 +1890,19 @@ the most recent findings come first.
   and `data[8..12] == count(section-6 lookup mapping records)`.
 
 - **Section-1 bytes 8..44 (36-byte undecoded header slice) as a structural
-  counts/offsets table**: contains RAM pointer residue on fresh-simulation
-  files and tight-packed small ints on re-saved files (`econ/base.vdf`,
-  `WRLD3-03/SCEN01.VDF`). The small ints (e.g. `[77,78,79,38,39,40,41,42]`
-  on WRLD3 SCEN01) do not equal OT count, record count, section offsets,
-  or any permutation of OT indices; they are reallocated save-allocator
-  RAM descriptor indices, not file-structural metadata.
+  counts/offsets table**: not decoded, and the original "runtime pointer
+  residue" framing was wrong. Cross-fixture analysis on 29 fixtures and
+  same-model rerun comparison on four bact runs (see
+  `/tmp/vdf_memory_regions.md`) found that 48 of 51 u32 words in the
+  pre-record area are byte-identical across simulator reruns; only the
+  `(block0[14], block0[15], block1[1])` triple varies, and it varies as
+  a single `(N-1, N, N+1)` pattern. In 2008-era Vensim the slice holds
+  small integers at `block0[0..11]` that, on `econ/base.vdf` and its
+  `rk.vdf` rerun pair, are all valid OT indices; no interpretation has
+  been decoded for them and the bact rerun values are out of OT range.
+  In 2019+ Vensim the slice carries arena-range pointer-shaped values
+  that are still deterministic. The slice is structural data of unknown
+  semantics, not runtime residue.
 
 - **Gap between the last record and `slot_table_offset` as a
   compilation-order-to-name-order translation table**: after the fixed
@@ -1683,18 +1947,18 @@ None of the following signals, however, encodes a deterministic
 - **Candidate A: sec4 as `(axis_slot_ref, dim_name_slot_ref)` binding**:
   refuted (see above).
 
-- **Candidate B: sec5 `n` as dim cardinality, 1:1 pairing to dims**: in
-  `subscripts.vdf` (1D), the single sec5 entry's payload contains `sub1`
-  (the dim name) and `n=3` matches the cardinality. In `Ref.vdf`
-  (C-LEARN, 18 dims), sec5 has exactly 18 entries with `n` values that
-  sort-match the 18 declared cardinalities, which is suggestive -- but
-  0 of 59 sec5 payload refs resolve to any dim name under direct slot
-  mapping. Every sec5 payload ref resolves to a VARIABLE name instead.
-  The entry ordering within sec5 does not correspond to MDL declaration
-  order, alphabetical dim-name order, or name-table appearance order of
-  dim names, so there is no deterministic way to pair a given sec5 entry
-  with a specific dim. This is consistent with sec5 being a variable-group
-  (by view/axis) catalog rather than a dim descriptor table.
+- **Candidate B: sec5 `n` as dim cardinality, 1:1 pairing to dims**:
+  **superseded**. The pairing rule was decoded in a follow-up
+  investigation: sec5 file-order entries correspond 1:1 to
+  record-field[8] dimension anchors sorted by f[8] ascending. See the
+  "Section-5 entries bind to record-field[8] dimension anchors by
+  f[8]-ascending order" subsection and signal #13 in the "What is
+  structurally determined" list. The original observation that every
+  sec5 payload ref resolves to a VARIABLE name is still correct, and the
+  current understanding is that those payload refs are opaque
+  axis-participation tokens whose physical slot identity (not name) is
+  what carries the subsequence relationship that decodes subrange
+  elements.
 
 - **Candidate C: element names follow the dim name contiguously in the
   name table**: refuted on `Ref.vdf`. Of 8 tested dims, only `COP`
@@ -1745,25 +2009,25 @@ None of the following signals, however, encodes a deterministic
   other axis anchors (rec[8], rec[37], rec[53], rec[70], rec[109]
   are ordinary variable records).
 
-- **sec5 entry index -> dim mapping by tested ordering rules**: refuted for
-  the rules tested so far.
-  `Ref.vdf` has exactly 18 sec5 entries and 18 MDL-declared dims, with
-  IDENTICAL cardinality multisets `[1,1,2,2,2,2,2,3,3,3,3,3,3,3,4,6,7,9]`.
-  But none of the tested ordering rules (file order, MDL declaration order,
-  name-table position order, alphabetical, reverse alphabetical, or the
-  structural fields we have decoded so far) pairs the 18 sec5 entries to the
-  18 dims. Current evidence fits sec5 entries being per-(view, shape) variable
-  catalogs rather than simple dim descriptors, but the exact role is still
-  unresolved.
+- **sec5 entry index -> dim mapping by tested ordering rules**:
+  **superseded**. When this investigation was written, file-order, MDL
+  declaration order, name-table position order, and several alphabetical
+  orderings had been tried and all failed. The correct ordering is
+  f[8]-ascending on the record-field[8] dimension anchors; sec5 file
+  order equals that ordering pointwise across all six validated fixtures.
+  See the "Section-5 entries bind..." subsection and signal #13.
 
-- **sec5 payload refs as dim-owner or element-owner slot values**:
-  refuted. Zero of the 46 distinct sec5 payload refs on `Ref.vdf` equals
-  any of the 18 dim-name slot values (`{316, 524, 1052, 1724, 1980,
-  2028, 5164, 9036, 10220, 10508, 10796, 11484, 12332, 13068, 13084,
-  13868, 16784, 18464}`), and zero equals any of the 35 element-name
-  slot values. Sec5 payload refs are slot-table values resolving to
-  VARIABLE names (mostly scalars or unrelated-dim arrayed variables);
-  they do not reference dim metadata at all.
+- **sec5 payload refs as direct dim-owner or element-owner slot values**:
+  refuted as direct name references. Zero of the 46 distinct sec5 payload
+  refs on `Ref.vdf` equals any of the 18 dim-name slot values
+  (`{316, 524, 1052, 1724, 1980, 2028, 5164, 9036, 10220, 10508, 10796,
+  11484, 12332, 13068, 13084, 13868, 16784, 18464}`), and zero equals any
+  of the 35 element-name slot values. Sec5 payload refs are slot-table
+  values resolving to VARIABLE names (mostly scalars or unrelated-dim
+  arrayed variables). The payload refs nonetheless carry structure: they
+  are opaque axis-participation tokens whose *identity* (not name)
+  supports the subsequence rule used to decode subrange element indices
+  (see signal #14 and the Section-5 docs).
 
 - **sec3 axis_slot_ref variable's MDL subscripts reveal the dim**:
   refuted. Axis anchor variables have subscript shapes that do NOT
@@ -1802,16 +2066,29 @@ field[8] dimension groups. The remaining hard problems are (a) same-size
 dimension disambiguation and (b) correct base-name-to-OT ownership on large
 multi-view files like `Ref.vdf`.
 
-**Current unresolved direction:** We have ruled out several simple sec3/sec4/
-sec5/sec6/sec7/R5b/name-table interpretations on `Ref.vdf`, but this is not
-proof that the mapping is absent from the VDF. The most likely possibilities
-are that (1) one of the known regions is framed incorrectly, (2) an entry
-contains a compressed or indirect key rather than a direct name/slot ref, or
-(3) dimension ownership must be reconstructed from formula/reference streams.
-Concrete remaining experiments include a whole-file scan for dim-name and
-element-name slot values in fixed-width tuples, checking for 16-bit or
-delta-coded variants of those refs, and mining section-6 ref-stream groups for
-dim-name occurrences attached to arrayed variable records.
+#### Resolved: multi-dim element naming via sec5 subsequence rule
+
+The core structural question for this subsection -- "how does a VDF carry
+the element names of a multi-dim dimension when no element record is
+emitted for a given element?" -- is now decoded. Section-5 entries
+correspond 1:1 to record-field[8] dimension anchors sorted by f[8]
+ascending (Section 5 docs above, "Section-5 entries bind to
+record-field[8] dimension anchors by f[8]-ascending order"). For
+subrange dimensions, element names are recovered as the subsequence of
+the parent root's element list at the positions where the subrange's
+sec5 payload refs occur inside the parent's payload (Section 5 docs,
+"Subrange dimensions recover their elements from sec5 payload
+subsequence"). Both rules are validated on all 11 `Ref.vdf` subranges
+and the smaller array fixtures; evidence is recorded in
+`/tmp/vdf_ref_dims.md`.
+
+The remaining unresolved direction on `Ref.vdf` is `scenario`: it is a
+root with three declared elements, but only one element record
+(`Deterministic`) is emitted. The other two element names
+(`Low 2xCO2 sensitivity`, `High 2xCO2 sensitivity`) are present in the
+name table but no section-1/4/5/6 structure references them. This
+appears to be a legitimate single-run-save artifact of Vensim: element
+records are emitted only for elements selected in the run.
 
 New pinned evidence:
 

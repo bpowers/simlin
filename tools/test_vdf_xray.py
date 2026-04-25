@@ -1272,12 +1272,16 @@ class VdfXrayModelEditingTests(unittest.TestCase):
 
         self.assertEqual(report.status, "not-proven")
         self.assertIn("record-span-overlap", report.reasons)
+        # After sec5-subseq subrange recovery, incomplete-dimension-anchors
+        # no longer fires on Ref.vdf: every anchor is either complete or has
+        # its element list recovered through the sec5 payload subsequence
+        # rule. Numeric array labels remain because per-block dim binding
+        # for ambiguous same-cardinality dims is still unresolved.
+        self.assertNotIn("incomplete-dimension-anchors", report.reasons)
         self.assertIn("numeric-array-labels", report.reasons)
-        self.assertIn("incomplete-dimension-anchors", report.reasons)
         self.assertGreater(report.record_span_overlap_slots, 0)
         self.assertEqual(report.unmapped_block_count, 0)
         self.assertGreater(report.numeric_array_label_count, 0)
-        self.assertGreater(report.incomplete_dimension_anchor_count, 0)
         self.assertEqual(report.duplicate_result_name_count, 0)
         self.assertEqual(report.duplicate_result_ot_count, 0)
         self.assertEqual(report.data_block_tail_mismatches, 0)
@@ -1403,13 +1407,22 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             ["Deterministic"],
         )
 
+        # Subrange dims whose element records are missing are nonetheless
+        # recovered through the sec5-payload-subsequence rule: their payload
+        # is an in-order subseq of a root dim's payload, so the subseq
+        # positions yield element indices into the root's element list.
         recovered = {
-            dim.name
+            dim.name: dim.elements
             for dim in vdf_xray._recover_dimension_sets(ref)
         }
         self.assertIn("COP", recovered)
-        self.assertNotIn("COP Developed", recovered)
-        self.assertNotIn("scenario", recovered)
+        self.assertEqual(
+            recovered["COP Developed"],
+            ["OECD US", "OECD EU", "Remaining Developed"],
+        )
+        # `scenario` is partial: only the Deterministic element has a VDF
+        # element record, so we expose that one element as a single-item list.
+        self.assertEqual(recovered["scenario"], ["Deterministic"])
 
     def test_run8_dimension_set_recovery_uses_record_groups_and_stock_sort_anchor(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
@@ -1697,6 +1710,137 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             ].start,
             1,
         )
+
+    def test_sec5_entries_align_with_anchor_f8_ascending(self) -> None:
+        # The breakthrough: sorting record-field[8] dimension anchors by
+        # f[8] ascending produces a sequence whose cardinalities match
+        # section-5 entries in file order. Validated here across every
+        # fixture known to carry section-5 dimension metadata.
+        cases = [
+            "test/xmutil_test_models/Ref.vdf",
+            "test/bobby/vdf/subscripts/subscripts.vdf",
+            "test/bobby/vdf/model_editing/run_7.vdf",
+            "test/bobby/vdf/model_editing/run_8.vdf",
+            "test/bobby/vdf/model_editing/run_9.vdf",
+            "test/bobby/vdf/model_editing/run_10.vdf",
+        ]
+        for relpath in cases:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                pairings = vdf_xray.sec5_anchor_binding(vdf)
+                anchors = vdf_xray.decoded_record_dimension_anchors(vdf)
+                sec5 = vdf.parse_section5_sets() or []
+
+                # Counts must align before pairing is meaningful.
+                self.assertEqual(len(anchors), len(sec5), relpath)
+                self.assertEqual(len(pairings), len(sec5), relpath)
+
+                # After sorting anchors by group_id asc, cardinalities
+                # (sec5.n) must match the element-record cardinality for
+                # every anchor whose element catalog is complete.
+                sorted_anchors = sorted(anchors, key=lambda a: a.group_id)
+                for rank, (entry, anchor) in enumerate(zip(sec5, sorted_anchors)):
+                    if anchor.status == "complete":
+                        self.assertEqual(
+                            entry.n, len(anchor.elements),
+                            f"{relpath}: sec5[{rank}].n mismatch for {anchor.name!r}",
+                        )
+                # The pairings tuple reports the same sort positions.
+                for rank, (anchor, entry, rank_in_tuple) in enumerate(pairings):
+                    self.assertEqual(rank, rank_in_tuple, relpath)
+                    # Compare by identity-safe attributes: anchor identity is
+                    # group_id, sec5 entry identity is file offset.
+                    self.assertEqual(
+                        anchor.group_id, sorted_anchors[rank].group_id, relpath,
+                    )
+                    self.assertEqual(entry.file_offset, sec5[rank].file_offset, relpath)
+
+    def test_subrange_payload_is_parent_subseq_on_ref_vdf(self) -> None:
+        # Every Ref.vdf subrange dim's section-5 payload is an in-order
+        # subseq of its parent root dim's payload, and the subseq positions
+        # are the MDL element indices. Locking these in pins the subrange
+        # decoder against future accidental regressions.
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+        pairings = vdf_xray.sec5_anchor_binding(ref)
+        payloads_by_name = {
+            anchor.name: tuple(vdf_xray.section5_payload_refs(entry))
+            for anchor, entry, _ in pairings
+        }
+
+        expected = {
+            # (subrange name, parent root, expected subseq positions)
+            "bottom": ("layers", [3]),
+            "lower": ("layers", [1, 2, 3]),
+            "upper": ("layers", [0, 1, 2]),
+            "COP Developed": ("COP", [0, 1, 4]),
+            "COP Developing A": ("COP", [2, 3, 5]),
+            "COP Remaining Developing": ("COP", [5, 6]),
+            "Developing A": ("Semi Agg", [2, 3]),
+            "Developing B": ("Semi Agg", [5]),
+            "set targets": ("Target", [0, 1]),
+            "tNext": ("Target", [1, 2]),
+            "tPrev": ("Target", [0, 1]),
+        }
+
+        for subrange, (parent, expected_positions) in expected.items():
+            with self.subTest(subrange=subrange):
+                sub_payload = payloads_by_name[subrange]
+                parent_payload = payloads_by_name[parent]
+                positions = vdf_xray._subsequence_positions(sub_payload, parent_payload)
+                self.assertIsNotNone(positions, subrange)
+                assert positions is not None
+                self.assertEqual(positions, expected_positions, subrange)
+
+    def test_dimension_element_recovery_closes_ref_vdf_numeric_array_labels(self) -> None:
+        # After implementing the sec5-payload subsequence rule, every
+        # Ref.vdf dimension has a decoded element list (roots directly from
+        # element records, subranges via parent-root subseq projection).
+        # The `incomplete-dimension-anchors` blocker therefore no longer
+        # fires, even though 11 anchors still carry status='no-elements'.
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        recovered = {
+            dim.name: dim.elements
+            for dim in vdf_xray._recover_dimension_sets(ref)
+        }
+        # All 17 fully-recoverable dims: 7 roots + 11 subranges (scenario
+        # is a partial root and is excluded from this assertion because it
+        # has card=1 of 3 saved elements).
+        for expected_name in [
+            "Aggregated Regions",
+            "COP", "COP Developed", "COP Developing A", "COP Remaining Developing",
+            "Developing A", "Developing B",
+            "HFC type",
+            "layers", "bottom", "lower", "upper",
+            "Semi Agg",
+            "Target", "set targets", "tNext", "tPrev",
+        ]:
+            self.assertIn(expected_name, recovered, expected_name)
+
+        self.assertEqual(recovered["bottom"], ["layer4"])
+        self.assertEqual(recovered["lower"], ["layer2", "layer3", "layer4"])
+        self.assertEqual(recovered["upper"], ["layer1", "layer2", "layer3"])
+        self.assertEqual(
+            recovered["COP Developed"],
+            ["OECD US", "OECD EU", "Remaining Developed"],
+        )
+        self.assertEqual(
+            recovered["COP Developing A"],
+            ["G77 China", "G77 India", "Remaining Developing A"],
+        )
+        self.assertEqual(
+            recovered["COP Remaining Developing"],
+            ["Remaining Developing A", "COP Developing B"],
+        )
+        self.assertEqual(recovered["Developing A"], ["China", "India"])
+        self.assertEqual(recovered["Developing B"], ["Other Developing"])
+        self.assertEqual(recovered["set targets"], ["t1", "t2"])
+        self.assertEqual(recovered["tNext"], ["t2", "t3"])
+        self.assertEqual(recovered["tPrev"], ["t1", "t2"])
+
+        # And finally: precision_report must drop the blocker.
+        report = vdf_xray.precision_report(ref)
+        self.assertNotIn("incomplete-dimension-anchors", report.reasons)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ use crate::{
 
 mod record_results;
 mod section3;
+mod section5_dims;
 mod signatures;
 mod stdlib_call;
 mod view_blocks;
@@ -1440,6 +1441,11 @@ impl VdfFile {
         }
 
         out
+    }
+
+    /// Recover dim names + elements via the section-5 payload-subsequence rule (see [`section5_dims`]).
+    pub fn recover_dimension_sets_via_sec5(&self) -> Vec<VdfDimensionSet> {
+        section5_dims::recover_dimension_sets_via_sec5(self)
     }
 
     /// Build contiguous OT ranges from in-range record start indices (field[11]).
