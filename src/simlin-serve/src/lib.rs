@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 pub mod cli;
+pub mod discovery;
 pub mod registry;
 
 use axum::Router;
