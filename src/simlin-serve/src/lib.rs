@@ -8,6 +8,7 @@ pub mod cli;
 pub mod discovery;
 pub mod git;
 pub mod registry;
+pub mod scan;
 
 use axum::Router;
 use axum::http::StatusCode;
