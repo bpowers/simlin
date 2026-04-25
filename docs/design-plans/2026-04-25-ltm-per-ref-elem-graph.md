@@ -413,15 +413,20 @@ below use that scope.
 - **ltm-per-ref-elem-graph.AC3.2 FixedIndex naming convention:**
   FixedIndex link scores use the existing per-element naming
   `$⁚ltm⁚link_score⁚{from}[{elem}]→{to}` (already used by
-  `try_cross_dimensional_link_scores`). No name-format changes are
-  introduced; the discovery parser handles the new entries without
-  modification.
-- **ltm-per-ref-elem-graph.AC3.3 Bare and Wildcard share existing names:**
-  Bare-shape and Wildcard-shape link scores use the existing
-  un-subscripted-from naming. When both shapes appear for the same
-  `(from, to)` pair, only one variable is needed if the partial
-  equations are consolidatable; if they are not, two distinct names
-  must coexist (decision documented in implementation plan).
+  `try_cross_dimensional_link_scores`). The discovery parser handles
+  these names through its existing `from_str.contains('[')` branch.
+- **ltm-per-ref-elem-graph.AC3.3 Wildcard and DynamicIndex carry stable shape suffixes:**
+  Wildcard-shape link scores use a `⁚wildcard` suffix on the `to` side:
+  `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard`. DynamicIndex uses
+  `⁚dynamic`. The suffix is **unconditional** — it appears regardless
+  of whether Bare also exists for the same `(from, to)` pair — so each
+  shape's name is a stable function of `(from, to, shape)`. The discovery
+  parser strips the suffix during `parse_link_offsets`. This is a
+  deliberate name-format change versus the pre-refactor convention
+  (where Wildcard-only models named the link score `{from}→{to}` with
+  no suffix); the discovery parser is updated correspondingly. No
+  on-disk artifact carries these names persistently — they exist only
+  within a single simulation run's results.
 
 ### ltm-per-ref-elem-graph.AC4: Loop detection consumes the new edge set
 

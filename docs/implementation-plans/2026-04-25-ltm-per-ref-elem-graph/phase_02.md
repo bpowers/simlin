@@ -107,21 +107,23 @@ fn collect_reference_sites(
 ```
 
 Recursion rules (per Expr2 variant):
-- `Const(..)`: no-op.
-- `Var(ident, array_bounds, ..)`: if `ident == source_ident`, push `ReferenceSite { source, shape: RefShape::Bare }`. (Whether the source is arrayed or scalar is encoded by the caller's downstream edge-emission, not by the shape itself — Bare carries both same-element and scalar-dep semantics, which we resolve at edge-emission time.)
-- `Subscript(ident, indices, ..)`:
+- `Const(_, _, _)`: no-op (3 non-recursive fields: const text, value, location).
+- `Var(ident, array_bounds, _)`: if `ident == source_ident`, push `ReferenceSite { source, shape: RefShape::Bare }`. (`array_bounds` is `Option<ArrayBounds>`, ignored here. Whether the source is arrayed or scalar is encoded by the caller's downstream edge-emission, not by the shape itself — Bare carries both same-element and scalar-dep semantics, which we resolve at edge-emission time.)
+- `Subscript(ident, indices, _, _)`:
   - If `ident == source_ident`: classify shape from indices. Apply rules:
     - any `IndexExpr2::Wildcard(_)` → `Wildcard`
     - all indices are `IndexExpr2::Expr(Expr2::Const(...))` where the const is a literal element name (lookup against the source's dimensions) or an integer literal → `FixedIndex(vec![name1, name2, ...])`
     - any other index pattern (`StarRange`, `DimPosition`, `Range`, non-const `Expr`) → `DynamicIndex`
   - Push the appropriate `ReferenceSite`. **Also recurse into each index expression** to handle nested references like `source_outer[source_inner[*]]`.
-  - If `ident != source_ident`: still recurse into each `IndexExpr2::Expr(e)` and `IndexExpr2::Range(l, r, _)` for nested refs.
-- `App(builtin, ..)`: walk via `walk_builtin_expr` with `BuiltinContents`:
+  - If `ident != source_ident`: still recurse into each `IndexExpr2::Expr(e)` and `IndexExpr2::Range(l, r, _)` for nested refs. (`array_bounds` and `loc` payload fields are ignored.)
+- `App(builtin, _, _)`: walk via `walk_builtin_expr` with `BuiltinContents` (the trailing `_, _` are `Option<ArrayBounds>` and `Loc`, not recursive):
   - `BuiltinContents::Ident(id, _)`: if `id == source_ident`, push `ReferenceSite { shape: Bare }`.
   - `BuiltinContents::Expr(sub_expr)`: recurse into sub_expr.
-- `Op1(_, operand, ..)`: recurse into operand.
-- `Op2(_, lhs, rhs, ..)`: recurse into both.
-- `If(cond, then, else, ..)`: recurse into all three.
+- `Op1(_, operand, _, _)`: recurse into `operand`. The leading `_` is `UnaryOp`, the trailing `_, _` are `Option<ArrayBounds>` and `Loc`.
+- `Op2(_, lhs, rhs, _, _)`: recurse into both. The leading `_` is `BinaryOp`, the trailing `_, _` are `Option<ArrayBounds>` and `Loc`.
+- `If(cond, then, else_, _, _)`: recurse into `cond`, `then`, `else_`. The trailing `_, _` are `Option<ArrayBounds>` and `Loc`.
+
+Confirmed Expr2 variant arity (`src/simlin-engine/src/ast/expr2.rs:139-147`): each variant carries a trailing `Option<ArrayBounds>` and `Loc` — these are non-recursive payload that pattern matches must include but does not need to inspect.
 
 Return order is the AST-walk order. Duplicate sites with identical `(source, shape)` are kept (caller can dedupe; the count may matter for downstream metrics).
 
@@ -235,15 +237,15 @@ Cases to handle (matching the truth table in the design plan):
 | `[]` | `[]` | `Bare` | `from -> to` |
 | `[]` | non-empty | `Bare` | `from -> to[d]` for each d in cartesian(`to_dims`) |
 | non-empty | `[]` | `Bare` | `from[d] -> to` for each d in cartesian(`from_dims`) |
-| non-empty | non-empty (same dims) | `Bare` | `from[d] -> to[d]` per shared element |
-| non-empty | non-empty (partial collapse) | `Bare` | `from[d1,d2] -> to[d1]` (delegate to existing `expand_same_element`) |
+| non-empty | non-empty (same dims) | `Bare` | `from[d] -> to[d]` per shared element — emit directly |
+| non-empty | non-empty (partial collapse) | `Bare` | `from[d1,d2] -> to[d1]` — **call `expand_same_element` directly** (existing helper, line 454 of `db_analysis.rs`) |
 | non-empty | any | `Wildcard` or `DynamicIndex` | full cross product (same as today's `CrossElement` branch) |
 | non-empty | `[]` | `FixedIndex(elem)` | `from[elem] -> to` (one edge) |
 | non-empty | non-empty | `FixedIndex(elem)` | `from[elem] -> to[d]` for each d in cartesian(`to_dims`) |
 
 For multi-dim FixedIndex with all indices resolved (`FixedIndex(vec!["NYC", "Adult"])`), emit `from[nyc,adult] -> to[d]` for each target d. For multi-dim partial fixed (handled as `DynamicIndex` per the conservative rule in Task 2), use the full cross product.
 
-Reuse `cartesian_element_names`, `format_element_name`, `format_multi_element_name`, and `expand_same_element` (still present in `db_analysis.rs`).
+Reuse `cartesian_element_names`, `format_element_name`, `format_multi_element_name`, and `expand_same_element` (still present in `db_analysis.rs`). Specifically: for the `Bare` partial-collapse branch (source_dims has more dimensions than target_dims, all target dims appear in source), the implementation MUST delegate to `expand_same_element` rather than re-implementing the cartesian projection. `expand_same_element` already handles the `[D1,D2] -> [D1]` reduction correctly.
 
 **Testing:**
 Direct unit tests are not strictly necessary — the function is exercised by the integration through `model_element_causal_edges` (Tasks 4 and 5). However, a small private smoke test helps catch regressions in helper composition. Add 2–3 #[test] cases in `mod emit_edges_for_reference_tests`:
@@ -496,7 +498,7 @@ Trigger the pre-commit hook by attempting to commit a no-op (or by amending the 
 # Sanity: no uncommitted changes.
 git status
 # Trigger pre-commit by amending HEAD message (no content change).
-git commit --amend --no-edit
+bash scripts/pre-commit
 ```
 
 Watch the hook output for:
@@ -510,7 +512,7 @@ Watch the hook output for:
 If any stage fails, fix the root cause — do not skip with `--no-verify`.
 
 **Verification:**
-Run: `git commit --amend --no-edit`. Expected: pre-commit prints "All pre-commit checks passed!" and the amend completes.
+Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!" within budget.
 
 **Commit:** No new commit (this is a verification gate). If anything was fixed, a separate commit captures the fix.
 <!-- END_TASK_7 -->

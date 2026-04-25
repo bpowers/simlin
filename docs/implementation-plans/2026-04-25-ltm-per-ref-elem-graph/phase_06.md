@@ -197,11 +197,17 @@ Read the updated entry; confirm it reads coherently.
 - Modify: `docs/test-plans/2026-04-04-ltm-arrays.md:58`
 
 **Implementation:**
-The current AC8.5 likely says something like "verify the edge expansion table in the design doc matches the `ElementDependencyKind` enum." After Phase 2 the enum is gone. Replace with a reference to the per-reference walker:
+Phase 6 codebase-investigator confirmed the current AC8.5 text at `docs/test-plans/2026-04-04-ltm-arrays.md:58`. The relevant fragment in the existing AC8.5 is the "Spot-check: verify the edge expansion table in the design doc matches the `ElementDependencyKind` enum and expansion logic in `db_analysis.rs`." sentence at the end of the AC8.5 row. After Phase 2 the enum is gone; replace this fragment.
 
-> AC8.5: verify the edge expansion table in `docs/design/ltm--loops-that-matter.md` "Element-Level Causal Graph" matches the `RefShape` enum and the per-reference walker in `db_analysis.rs::collect_reference_sites`.
+**Specific edit**: locate the "Spot-check:" sentence near the end of the AC8.5 row in the "Human Verification Required" table. Replace:
 
-(Adjust to actual test plan wording.)
+> Spot-check: verify the edge expansion table in the design doc matches the `ElementDependencyKind` enum and expansion logic in `db_analysis.rs`.
+
+with:
+
+> Spot-check: verify the edge expansion table in the design doc matches the `RefShape` enum and the per-reference walker `collect_reference_sites` (and edge emitter `emit_edges_for_reference`) in `db_analysis.rs`.
+
+The rest of AC8.5 (parts 1, 2 on the doc/CLAUDE.md verification steps) is unaffected.
 
 **Verification:**
 Read the updated AC; confirm it points at the right symbols.

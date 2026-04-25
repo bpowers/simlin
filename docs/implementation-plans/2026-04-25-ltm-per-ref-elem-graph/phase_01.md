@@ -2,7 +2,7 @@
 
 **Goal:** Write tests that pin the desired post-refactor behavior of the LTM element-level causal graph and per-shape partial equations. Every test in this phase must be **red** today (fail or assert an unintended outcome) and must turn green after Phase 2 + Phase 3 land.
 
-**Architecture:** Add edge-set unit tests, a proptest invariant cross-validating variable-level vs. element-level edges, partial-equation unit tests in `ltm_augment.rs`, and pin existing integration tests with explicit baselines. No production code changes.
+**Architecture:** Add edge-set unit tests, a proptest invariant cross-validating variable-level vs. element-level edges, partial-equation unit tests in `ltm_augment.rs`, and pin existing integration tests with explicit baselines. Phase 1 introduces *minimal production scaffolding* — a `RefShape` enum stub and a `build_partial_equation_for_shape` stub function in `src/simlin-engine/src/ltm_augment.rs` — solely so the new tests compile. The stubs are gated behind `#[allow(dead_code)]` until Phase 2/3 populate their use-sites and remove the allow attribute.
 
 **Tech Stack:** Rust, salsa-tracked `model_element_causal_edges` and `model_causal_edges`, `TestProject` builder, `proptest` (existing dep), Expr0 AST for partial-equation tests.
 
@@ -34,13 +34,96 @@ This phase implements and tests:
 
 ## Implementation Tasks
 
-The strategy is: write the tests, run them, and confirm they fail in the expected ways. Failures may take several forms (assertion failure, panic from a not-yet-existing API, compile error if signatures must extend). Phase 1 only commits the test code; Phase 2 + Phase 3 will introduce APIs and logic that turn each test green.
+The strategy is: write the tests, run them, and confirm they fail in the expected ways. Failures may take several forms (assertion failure, panic from a not-yet-existing API, compile error if signatures must extend). Phase 1 commits the test code plus the minimal production stubs needed for tests to compile; Phase 2 + Phase 3 populate the APIs and logic that turn each test green.
 
 For tests that assert behavior of APIs that **do not yet exist** (e.g., a `RefShape`-aware `build_partial_equation`), put the test behind `#[ignore]` with a comment pointing to the phase that activates it. This keeps Phase 1 commits green under pre-commit while still pinning the contract.
 
 For tests that assert behavior of APIs that **exist today but produce the wrong result**, use `#[ignore]` with the same convention: they pass at Phase 2/3 boundary and have the `#[ignore]` removed.
 
 This convention preserves the pre-commit budget (under 180s) — ignored tests are skipped during normal `cargo test` and run on demand with `--ignored`.
+
+<!-- START_TASK_0 -->
+### Task 0: Production scaffolding — `RefShape` enum and `build_partial_equation_for_shape` stub
+
+**Verifies:** none directly (infrastructure for AC2.1, AC2.2, AC2.3 — required by Tasks 4–6 below)
+
+**Files:**
+- Modify: `src/simlin-engine/src/ltm_augment.rs` (add near the top of the file, before `wrap_deps_in_previous`)
+
+**Implementation:**
+Add the minimal production code that subsequent Phase 1 tests depend on. Without these stubs, Phase 1's Tasks 4–6 (which reference `RefShape` and a shape-aware partial-equation builder) cannot compile.
+
+```rust
+/// Access shape of a single AST reference site to a source variable.
+///
+/// Phase 1 introduces this as a stub for the test scaffolding; Phases 2
+/// and 3 fully populate the use-sites. The `Vec<String>` in `FixedIndex`
+/// holds canonical (lowercase) element names per dimension in source order.
+#[allow(dead_code)]  // populated in Phase 2/3
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RefShape {
+    Bare,
+    FixedIndex(Vec<String>),
+    Wildcard,
+    DynamicIndex,
+}
+
+/// Stub for the per-shape partial equation builder. Phase 3 replaces the
+/// body with the real implementation. Until then, calling this panics —
+/// Phase 1's tests that exercise it are `#[ignore]`-d so the panic doesn't
+/// fire during normal `cargo test`.
+#[allow(dead_code)]  // populated in Phase 3
+pub(crate) fn build_partial_equation_for_shape(
+    _equation_text: &str,
+    _deps: &HashSet<Ident<Canonical>>,
+    _live_source: &Ident<Canonical>,
+    _live_shape: &RefShape,
+    _source_dim_elements: &[Vec<String>],
+) -> String {
+    unimplemented!("populated in Phase 3")
+}
+```
+
+**Verification:**
+Run: `cargo build -p simlin-engine`. Expected: clean build (the `#[allow(dead_code)]` attribute quiets clippy until Phase 2/3 use the new symbols).
+
+Run: `cargo clippy -p simlin-engine --all-targets -- -D warnings`. Expected: no warnings.
+
+**Commit:** `engine: scaffold RefShape and build_partial_equation_for_shape stubs`
+<!-- END_TASK_0 -->
+
+<!-- START_TASK_PRINTEQN_VERIFY -->
+### Task 0.5: Capture canonicalized output of `print_eqn` for expected-string locking
+
+**Verifies:** prerequisite for AC2.1, AC2.2, AC2.3 (test reliability — without this step Phase 1's red tests may fail for the wrong reason and give misleading diagnostics)
+
+**Files:**
+- None modified (one-shot reconnaissance; the temporary test added during this task is deleted before commit)
+
+**Implementation:**
+The expected partial-equation strings in Tasks 5 and 6 below depend on `print_eqn`'s exact canonicalization (capitalization of identifiers, function names like `SUM` vs `sum`, element names like `NYC` vs `nyc`, whitespace, parenthesization). Today's `print_eqn` output is undocumented in the design plan. Run a one-shot exploration before locking in the expected strings:
+
+1. In `src/simlin-engine/src/ltm_augment.rs::tests`, add a temporary `#[test] #[ignore]` function that:
+   - Parses `"population / SUM(population[*])"` into an `Expr0` AST via `Expr0::new(text, LexerType::Equation)`.
+   - Builds a `HashSet<Ident<Canonical>>` containing `Ident::new("population")`.
+   - Calls today's existing `wrap_deps_in_previous` (lines 25–75 of `ltm_augment.rs`) on the AST with that dep set — this wraps every `population` reference uniformly. (The result is NOT what AC2.1 wants, but it tells us how `print_eqn` formats its output.)
+   - `dbg!`-prints `print_eqn(&transformed)`. Expected output is one of (lock in whichever is actually produced):
+     - `PREVIOUS(population) / SUM(PREVIOUS(population[*]))` (original case preserved)
+     - `previous(population) / sum(previous(population[*]))` (full lowercase)
+     - some variant.
+   - Repeat for `"(population[NYC] - population[Boston]) * 0.01"` with `population[Boston]` excluded from the wrap set; capture the resulting form for `[NYC]`/`[Boston]` element-name canonicalization.
+
+2. Run: `cargo test -p simlin-engine --lib explore_print_eqn -- --ignored --nocapture`. Capture the `dbg!` output.
+
+3. Document the captured forms inline in this phase document as a "Captured `print_eqn` output" subsection so Tasks 5 and 6 can reference them. Lock in the literal expected strings in Tasks 5/6 to match the captured form. If `print_eqn` lowercases function names (e.g., `SUM` → `sum`), Tasks 5/6's expected strings reflect that exactly.
+
+4. Delete the temporary `explore_print_eqn` test before committing Phase 1.
+
+**Verification:**
+The captured strings reflect real `print_eqn` output. Tasks 5 and 6's assertions match those strings exactly. The Phase 1 red tests then fail for one reason ("the API is missing" or "the API returned the wrong shape"), not for "the canonicalization differs from what the plan guessed."
+
+**Commit:** No commit (the temporary test is deleted; Phase 1 Tasks 4–6 commits include the verified strings).
+<!-- END_TASK_PRINTEQN_VERIFY -->
 
 <!-- START_SUBCOMPONENT_A (tasks 1-3) -->
 
@@ -164,9 +247,9 @@ Use `proptest` `with_cases(32)` (compilation per case is non-trivial; see `docs/
 Single proptest assertion: the projection equals the variable-level edge set. Failure mode today: cross-element wildcard refs already match correctly (they emit per-source-per-target edges), so the **set equality** projection should hold for today's behavior on most patterns. The pattern this test catches is **edge omission** in the new walker — Phase 2 might forget to emit a class of edges. The fixed-index pattern in particular is interesting: today's NxN over-emission still projects to a single variable-level edge, so this proptest doesn't directly catch the AC1.1 over-expansion bug; that's covered by Tasks 1 and 2. This proptest is an **anti-regression** for Phase 2.
 
 **Verification:**
-Run: `cargo test -p simlin-engine --lib db_element_graph_proptest -- --ignored --nocapture`. Expected: passes today on all 32 cases (the projection invariant is currently satisfied). The ignore is removed in Phase 2 to lock it in as a regression guard.
+Run: `cargo test -p simlin-engine --lib db_element_graph_proptest --nocapture`. Expected: passes today on all 32 cases (the projection invariant is currently satisfied). **Do not** mark this test `#[ignore]`. Run it as a regression guard from Day 1 — this catches accidental edge omission introduced by Phase 2's refactor.
 
-If the test fails today, that's a genuine bug in the existing code that must be filed — investigate and surface to user before proceeding.
+If the test fails today, that's a genuine bug in the existing code that must be filed — investigate and surface to user before proceeding. (The codebase-investigator's analysis suggests the invariant currently holds, but verifying it as a precondition of Phase 2 is part of the value.)
 
 **Commit:** `engine: proptest pinning element-graph projection invariant`
 <!-- END_TASK_3 -->
@@ -184,9 +267,9 @@ If the test fails today, that's a genuine bug in the existing code that must be 
 - Modify: `src/simlin-engine/src/ltm_augment.rs` `#[cfg(test)] mod tests` block (starting at ~line 872)
 
 **Implementation:**
-Today's `build_partial_equation` (lines 92–113) takes `(equation_text: &str, deps: &HashSet<Ident<Canonical>>, exclude: &Ident<Canonical>)`. Phase 3 will introduce a new entry point that takes an additional `RefShape` parameter (or a `(source, RefShape)` tuple) and produces a per-shape partial. Phase 1's job is to **document the desired contract** via tests — the Phase 3 implementation will adjust signatures so these tests compile and pass.
+Task 0 already added `RefShape` and `build_partial_equation_for_shape` stubs to `ltm_augment.rs`. Task 0.5 captured `print_eqn`'s canonicalization. Tasks 5 and 6 below call `build_partial_equation_for_shape`; Task 4 just adds the per-test helper.
 
-Add a small test fixture helper:
+Add a small test fixture helper inside the existing `#[cfg(test)] mod tests`:
 
 ```rust
 fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
@@ -194,9 +277,9 @@ fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
 }
 ```
 
-(Adapt to existing imports — `use crate::common::Ident;` already in scope.)
+(`use crate::common::Ident;` and `use std::collections::HashSet;` are already in scope from the existing test module.)
 
-Then add three test functions (Tasks 5 and 6 below) that call a not-yet-existing `build_partial_equation_for_shape(equation_text, deps, source, ref_shape)` function. Mark each test `#[ignore = "Phase 3: per-shape partial equations"]` and add a `#[allow(dead_code)]` to any helper that becomes unused if the new API isn't built yet.
+The Phase 1 tests in Tasks 5 and 6 call `build_partial_equation_for_shape` from Task 0's stub. The stub panics with `unimplemented!()`, so the tests are `#[ignore = "Phase 3: per-shape partial equations"]` until Phase 3 replaces the body.
 
 **Testing:**
 This task does not run tests directly; it sets up the helpers and module imports. Verify the file still compiles:
@@ -223,10 +306,10 @@ Two #[test] functions, both `#[ignore = "Phase 3: per-shape partial equations"]`
 
 Both tests stay `#[ignore]` until Phase 3.
 
-**Testing:**
-The expected output strings depend on `print_eqn`'s formatting. To validate the expected strings before committing, the test author may temporarily add a `dbg!(partial)` call and run with `--ignored --nocapture` to see what the new builder produces. Once verified, lock in the expected string.
+> **Locking expected strings:** Use the canonicalization captured in Task 0.5 to lock in the exact expected strings. If `print_eqn` lowercases function names (e.g., `SUM` → `sum`), use the lowercase form. The strings shown above assume original-case preservation — adjust if Task 0.5's reconnaissance shows otherwise.
 
-These tests both must call a `RefShape` enum that doesn't exist yet. Phase 1's commit therefore introduces a public-or-internal `RefShape` enum stub in `ltm_augment.rs` (or in a new `crate::ltm::ref_shape` module) just sufficient for the tests to compile. The variants needed: `Bare`, `Wildcard`, `FixedIndex(Vec<String>)`, `DynamicIndex`. Phase 3 will populate the use-sites that produce values of this type.
+**Testing:**
+`build_partial_equation_for_shape` exists from Task 0 (as a stub). The tests run by calling it directly; today's stub panics with `unimplemented!()`, so each test fails with a clear panic message that documents the desired post-Phase-3 contract.
 
 **Verification:**
 Run: `cargo test -p simlin-engine --lib build_partial_equation -- --ignored`. Expected: both tests fail (the `build_partial_equation_for_shape` API is a stub that returns the empty string, or panics with `unimplemented!()`).
@@ -251,7 +334,7 @@ Two #[test] functions, both `#[ignore = "Phase 3: per-shape partial equations"]`
 
 2. `test_partial_equation_migration_pressure_fixed_boston`: same equation, source `population`, shape `RefShape::FixedIndex(vec!["Boston".to_string()])`. Expected partial: `(PREVIOUS(population[NYC]) - population[Boston]) * 0.01`.
 
-Element-name canonicalization may apply — verify with `dbg!` whether the live string uses original-case `NYC` or canonical `nyc`. Today's `print_eqn` typically preserves the original form. Lock in whichever the new builder produces.
+> **Element-name canonicalization:** Task 0.5 captured the actual `print_eqn` output for `(population[NYC] - PREVIOUS(population[Boston])) * 0.01`. Lock in the captured form (preserves original case OR lowercases — whichever Task 0.5 documented). Match the FixedIndex variant's `Vec<String>` to the captured form too: if `print_eqn` lowercases element names, use `RefShape::FixedIndex(vec!["nyc".to_string()])` not `"NYC"`.
 
 Both tests stay `#[ignore]` until Phase 3.
 
@@ -275,18 +358,16 @@ Run: `cargo test -p simlin-engine --lib partial_equation_migration -- --ignored`
 - None modified
 
 **Implementation:**
-After Tasks 1–6 are committed, run the pre-commit hook end-to-end and verify:
+After Tasks 0–6 are committed, run the pre-commit hook end-to-end and verify:
 1. All ignored tests are properly ignored (none accidentally run during `cargo test`).
 2. The workspace test cap (180s) is not exceeded.
-3. Clippy lints stay clean — particularly `dead_code` if the new RefShape enum has unused variants today.
-
-Use `#[allow(dead_code)]` sparingly — only on the RefShape variants that genuinely have no compile-time use yet. Phase 3 removes the allow.
+3. Clippy lints stay clean — `dead_code` warnings on the new `RefShape` variants and `build_partial_equation_for_shape` stub are expected to be silenced by Task 0's `#[allow(dead_code)]` attributes; remove the attribute in Phase 2/3 when the symbols become reachable.
 
 **Verification:**
 
-Run: `cargo test -p simlin-engine 2>&1 | tail -20`. Expected: shows `N ignored` at the end with the count matching the number of `#[ignore]` annotations added in Tasks 1–6 (about 7–8 ignored tests).
+Run: `cargo test -p simlin-engine 2>&1 | tail -20`. Expected: shows `N ignored` at the end with the count matching the number of `#[ignore]` annotations added in Tasks 4–6 (about 6–7 ignored tests; Task 3's proptest is NOT ignored).
 
-Run: `git commit --allow-empty -m "engine: phase 1 hygiene check"` (then immediately delete or amend if all is well). Verify the pre-commit hook passes within budget.
+Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!" within budget. (Run the hook script directly rather than synthesizing an empty commit.)
 
 **Commit:** No commit (this task is a verification gate).
 <!-- END_TASK_7 -->
@@ -295,9 +376,10 @@ Run: `git commit --allow-empty -m "engine: phase 1 hygiene check"` (then immedia
 
 ## Phase Done When
 
-- All 6 implementation tasks (Tasks 1–6) committed.
-- Each test added is either passing (locking in current correct behavior, e.g., AC1.2 wildcard reducer) or `#[ignore]`-marked with a comment pointing to the phase that activates it.
+- All 8 implementation tasks (Task 0, Task 0.5, Tasks 1–6) committed; Task 7 verification gate passes.
+- Each test added is either passing (locking in current correct behavior, e.g., AC1.2 wildcard reducer; AC1.4 projection invariant) or `#[ignore]`-marked with a comment pointing to the phase that activates it.
 - `cargo test -p simlin-engine` passes within the 180s budget.
 - Running `cargo test -p simlin-engine -- --ignored` shows the expected red tests, each with a clear failure message that documents the desired post-refactor behavior.
-- No production code (outside test scaffolding like the `RefShape` enum stub) is modified.
+- The only production code added is the `RefShape` enum stub and `build_partial_equation_for_shape` stub from Task 0, both gated with `#[allow(dead_code)]`.
+- `print_eqn` canonicalization captured by Task 0.5 is documented inline; Tasks 5/6 expected strings match the captured form exactly.
 - Pre-commit hook passes.

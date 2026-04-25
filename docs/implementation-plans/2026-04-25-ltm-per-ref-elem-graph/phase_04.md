@@ -26,32 +26,37 @@ This phase implements and verifies:
 <!-- START_SUBCOMPONENT_A (tasks 1-3) -->
 
 <!-- START_TASK_1 -->
-### Task 1: Add `shape: Option<RefShape>` to `Link` and update existing constructors
+### Task 1: Verify `Link.shape` field exists from Phase 3, audit constructors
 
 **Verifies:** infrastructure for AC4.1, AC4.2
 
 **Files:**
-- Modify: `src/simlin-engine/src/ltm.rs:66-72` (`Link` struct)
-- Modify: `src/simlin-engine/src/ltm.rs:1416-1420` (`circuit_to_links`)
-- Modify: `src/simlin-engine/src/ltm.rs:1430-1437` (`path_to_links`)
-- Modify: `src/simlin-engine/src/ltm.rs:1170-1175` (`find_loops_with_limit` direct push)
-- Modify: `src/simlin-engine/src/db_ltm.rs:2047-2051` (mixed/scalar branch)
+- Read: `src/simlin-engine/src/ltm.rs:66-72` (`Link` struct — should now have `shape: Option<RefShape>` from Phase 3 Task 6)
+- Read: `src/simlin-engine/src/ltm.rs:1416-1420` (`circuit_to_links`)
+- Read: `src/simlin-engine/src/ltm.rs:1430-1437` (`path_to_links`)
+- Read: `src/simlin-engine/src/ltm.rs:1170-1175` (`find_loops_with_limit` direct push)
+- Read: `src/simlin-engine/src/db_ltm.rs:2047-2051` (mixed/scalar branch)
 
 **Implementation:**
-This task may have already been done in Phase 3 Task 6 (the same edit was specified there). If Phase 3 added `shape: Option<RefShape>` to `Link`, skip the struct edit and proceed to constructor updates. Otherwise:
+Phase 3 Task 6 added `shape: Option<RefShape>` to `Link` and updated all constructors to default `shape: None`. This task verifies that's true and the build is clean before Phase 4 Task 3 starts annotating real shape values.
 
-1. Add `pub shape: Option<RefShape>` to `Link` (after `polarity`).
-2. Update all `Link` constructors in `ltm.rs` and `db_ltm.rs` to include `shape: None`.
-3. Verify `Link` is `Clone`, `Debug`, `PartialEq`, `Eq`, and `Hash` (or equivalent derives) — `RefShape` is already those after Phase 2.
+If for any reason Phase 3 Task 6 did NOT complete the constructor migration (e.g., a constructor was added during Phase 3 development and missed):
+
+1. List all `Link` constructors via `rg -n 'Link \{' src/simlin-engine/src/`.
+2. For each, ensure `shape: None` is present (or `shape: Some(...)` if the call site has a real value).
+3. Add the field to any missing constructor.
+
+The struct definition itself MUST already exist from Phase 3 Task 6 — if it does not, return to Phase 3 and complete that work before proceeding here. Phase 4 does not add the struct field; it only annotates real shape values in `build_element_level_loops` (Task 3 below).
 
 **Testing:**
 None directly. Verify the workspace compiles:
 
 **Verification:**
 Run: `cargo build -p simlin-engine`. Expected: clean build.
-Run: `cargo test -p simlin-engine`. Expected: existing tests pass; `Link.shape` is always `None`, so behavior is unchanged.
+Run: `cargo test -p simlin-engine`. Expected: existing tests pass; `Link.shape` is mostly `None` until Task 3 populates real values for loops.
+Run: `rg -n 'Link \{' src/simlin-engine/src/`. Expected: every match has `shape:` listed.
 
-**Commit:** `engine: add Link.shape field, default None at all constructor sites`
+**Commit:** No commit unless missing constructors found. (Likely no-op verification gate.)
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
@@ -135,6 +140,9 @@ Run: `cargo test -p simlin-engine --lib infer_link_shape`. Expected: all pass.
 - Modify: `src/simlin-engine/src/db_ltm.rs:1821-2078`
 
 **Implementation:**
+
+> **Design decision: heuristic vs. shape-threaded approach.** The cleanest principled design would thread per-edge `RefShape` from the walker through `ElementCausalEdgesResult` so loop construction reads it directly. We use a node-name parsing heuristic instead because the shape-threaded approach has an unresolved deeper issue: the same element-edge string can be contributed by multiple distinct AST references with different shapes (e.g., target `share[R] = pop + pop[NYC]` produces `pop[nyc] -> share[nyc]` from BOTH the Bare ref AND the FixedIndex(NYC) broadcast at d=NYC; both contribute to the same edge string). Per-edge shape threading would emit a `Vec<RefShape>` per edge, and loop-link selection would still need a tie-breaker. The heuristic gives an unambiguous shape from the node-name surface, is easier to test, and produces the right link-score names in the cases the design plan's truth table covers without ambiguity. The known limitation (edge aliasing) is documented below; Task 3.5 adds explicit test coverage for the aliased-edge case so future shape-threading refinements have something to validate against.
+
 For each branch of `build_element_level_loops`, post-process the constructed links to populate `shape`:
 
 **A2A branch** (lines 1932-1975): the loop's links use variable-level (stripped) names. Each link represents same-element access. Set `shape: Some(RefShape::Bare)` on every link in the loop.
@@ -205,6 +213,44 @@ Run: `cargo test -p simlin-engine`. Expected: all tests pass; new shape-annotati
 
 **Commit:** `engine: annotate Link.shape in build_element_level_loops`
 <!-- END_TASK_3 -->
+
+<!-- START_TASK_3.5 -->
+### Task 3.5: Edge-aliasing test — both Bare and FixedIndex contribute to one edge
+
+**Verifies:** AC4.2 (heuristic shape-resolution behavior is documented and tested)
+
+**Files:**
+- Modify: `src/simlin-engine/src/db_ltm_unified_tests.rs` (or a new `db_ltm_edge_alias_tests.rs`)
+
+**Implementation:**
+Document the edge-aliasing limitation by exercising it explicitly. Build a test that creates a target whose equation has BOTH Bare and FixedIndex(NYC) refs to the same source, then verify:
+
+1. The element graph contains the diagonal `pop[nyc] -> share[nyc]` edge once (deduped).
+2. The model_ltm_variables emits BOTH link score variables: `$⁚ltm⁚link_score⁚pop→share` (Bare) and `$⁚ltm⁚link_score⁚pop[nyc]→share` (FixedIndex).
+3. If a loop traverses this edge, the loop-score equation references the heuristic's chosen shape (FixedIndex when source-subscript is non-empty, Bare otherwise per Task 3's logic).
+4. The loop-score value is non-zero at simulation time even if it under-counts (one of two possible link scores is multiplied, not both).
+
+```rust
+#[test]
+fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
+    let project = TestProject::new("aliasing")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("pop[Region]", "100")
+        .array_aux("share[Region]", "pop + pop[NYC]");
+    // Both Bare and FixedIndex(NYC) contribute to pop[nyc] -> share[nyc].
+    // Verify both link scores are emitted, and the heuristic picks
+    // FixedIndex on this aliased edge if a loop traverses it.
+    // ... (build LTM-augmented project, inspect link score var names and shapes) ...
+}
+```
+
+This test is a **documented limitation regression test**. If a future iteration threads per-edge shape through ElementCausalEdgesResult and changes the link-score selection to emit both contributions (or pick differently), this test's expectations will need updating. That is the right time to revisit; this phase's heuristic is the documented current behavior.
+
+**Verification:**
+Run: `cargo test -p simlin-engine --lib edge_aliasing`. Expected: passes with the heuristic's documented behavior.
+
+**Commit:** `engine: edge-aliasing regression test for shape-resolution heuristic`
+<!-- END_TASK_3.5 -->
 
 <!-- END_SUBCOMPONENT_A -->
 
@@ -343,7 +389,7 @@ Run: `cargo test -p simlin-engine --test simulate_ltm`. Expected: all pass with 
 Trigger the pre-commit hook by amending HEAD. Confirm pass within budget.
 
 **Verification:**
-Run: `git commit --amend --no-edit`. Expected: pre-commit prints "All pre-commit checks passed!".
+Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!" within budget.
 
 **Commit:** No new commit.
 <!-- END_TASK_7 -->

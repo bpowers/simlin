@@ -104,24 +104,28 @@ Expected: completes; output includes element_edges and largest_scc stats.
 - None modified yet (measurement only)
 
 **Implementation:**
-Run the bench on each fixture both **before** Phases 2/3 changes (to be done now if branched directly off main, OR by stashing the in-flight Phase 2/3 changes and stash-popping them) AND **after** Phases 2/3 changes:
+By the time Phase 5 runs, Phases 2/3 commits are landed on the branch. Capture **after** numbers first (current HEAD), then check out the pre-Phase-2 commit to capture **before** numbers, then return to the branch HEAD.
+
+Step 1 — capture "after" numbers on current HEAD:
 
 ```bash
+cargo run --release --example ltm_full_bench -- test/cross_element_ltm/cross_element.stmx | tee /tmp/scc-cross-after.log
+cargo run --release --example ltm_full_bench -- test/arrayed_population_ltm/arrayed_population.stmx | tee /tmp/scc-arrpop-after.log
+cargo run --release --example ltm_full_bench -- test/metasd/WRLD3-03/wrld3-03.mdl | tee /tmp/scc-wrld3-after.log
+```
+
+Step 2 — identify the pre-Phase-2 commit SHA. Run `git log --oneline | head -20` and pick the last commit before Phase 2's first task ("engine: AST walker collect_reference_sites with shape classification" or whatever the first Phase 2 commit is named). Record this SHA in the postscript table for traceability.
+
+Step 3 — checkout that SHA detached and run the bench:
+
+```bash
+git checkout <pre-phase-2-sha>
 cargo run --release --example ltm_full_bench -- test/cross_element_ltm/cross_element.stmx | tee /tmp/scc-cross-before.log
-cargo run --release --example ltm_full_bench -- test/arrayed_population_ltm/arrayed_population.stmx | tee /tmp/scc-arrpop-before.log
-cargo run --release --example ltm_full_bench -- test/metasd/WRLD3-03/wrld3-03.mdl | tee /tmp/scc-wrld3-before.log
-```
-
-If the bench is already on the post-Phase-3 branch when we get here, **before** measurements need to come from a checkout at the pre-Phase-2 commit:
-```bash
-git stash
-git checkout <pre-phase-2-commit-sha>
-cargo run --release --example ltm_full_bench -- ... | tee /tmp/scc-X-before.log
+# ... repeat for the other fixtures ...
 git checkout ltm-per-ref-elem-graph
-git stash pop  # if anything was stashed
 ```
 
-Capture for each fixture:
+Step 4 — capture for each fixture (from the log pairs):
 - Variable-level edge count (from `causal_edges` stage note)
 - Variable-level largest SCC (from `loop_circuits` stage if reported, else compute manually)
 - Element-level node count (from `element_edges` stage note)
@@ -216,10 +220,10 @@ Run: `cargo build -p simlin-engine`. Expected: clean build (comment changes only
 - None modified
 
 **Implementation:**
-Trigger the pre-commit hook and observe `cargo test --workspace` wall-clock time. Confirm <180s.
+Run the pre-commit hook script and observe `cargo test --workspace` wall-clock time. Confirm <180s.
 
 **Verification:**
-Run: `git commit --amend --no-edit` (or any new commit). Expected: pre-commit prints "All pre-commit checks passed!" within budget.
+Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!" within budget.
 
 If `cargo test` is close to the cap, identify the slowest tests via `cargo test -p simlin-engine -- --report-time` and consider gating any expensive new test under `#[ignore]` for on-demand runs.
 

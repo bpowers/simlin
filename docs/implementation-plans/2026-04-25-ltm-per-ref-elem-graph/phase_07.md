@@ -108,10 +108,10 @@ Run: `cargo test -p simlin-engine -- --ignored 2>&1 | grep 'test result'`. Expec
 - None modified
 
 **Implementation:**
-Trigger the pre-commit hook on a fresh commit (or via `git commit --amend --no-edit`). Watch all stages:
+Run the pre-commit hook script directly. Watch all stages:
 
 ```bash
-git commit --amend --no-edit
+bash scripts/pre-commit
 ```
 
 Expected hook output:

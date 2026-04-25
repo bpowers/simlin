@@ -281,12 +281,16 @@ Run: `cargo test -p simlin-engine --lib partial_equation`. Expected: all 6 tests
 - Document the decision in `docs/design/ltm--loops-that-matter.md` Phase 6 (deferred — only the helper is added in this phase)
 
 **Implementation:**
-Add a helper function in `ltm_augment.rs` that, given `(from, to, RefShape)`, produces the link score variable name. The decision rule:
+Add a helper function in `ltm_augment.rs` that, given `(from, to, RefShape)`, produces the link score variable name. The decision rule (revised after code review):
 
-- **Bare**: canonical name, no suffix. `$⁚ltm⁚link_score⁚{from}→{to}`. This is today's name; if the target's only reference to `from` is Bare, no behavior change.
-- **FixedIndex(elems)**: per-element prefixed-from naming. `$⁚ltm⁚link_score⁚{from}[{elem_joined}]→{to}` where `elem_joined` is comma-separated. Already-existing convention.
-- **Wildcard**: when this shape coexists with `Bare` in the same `(from, to)`, suffix: `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard`. When `Wildcard` is the only shape, use the canonical name.
-- **DynamicIndex**: same pattern as `Wildcard`. Suffix `⁚dynamic` when coexisting with `Bare`; canonical name otherwise.
+- **Bare**: canonical name, no suffix. `$⁚ltm⁚link_score⁚{from}→{to}`. This is today's name format for A2A and scalar links.
+- **FixedIndex(elems)**: per-element prefixed-from naming. `$⁚ltm⁚link_score⁚{from}[{elem_joined}]→{to}` where `elem_joined` is comma-separated. Already-existing convention from `try_cross_dimensional_link_scores`.
+- **Wildcard**: ALWAYS suffix. `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard`. The suffix is unconditional, regardless of whether Bare also exists for the same `(from, to)`. This is a deliberate name-format change for Wildcard refs (see "Backwards-compat note" below).
+- **DynamicIndex**: ALWAYS suffix `$⁚ltm⁚link_score⁚{from}→{to}⁚dynamic`.
+
+> **Backwards-compat note (resolves code-review I2 + I6):** The earlier collision-aware approach made Wildcard's name unstable across models — a `(pop, total)` Wildcard score with no Bare coexistence was named `pop→total`, but with coexisting Bare it became `pop→total⁚wildcard`. That instability would force the discovery parser to do per-model collision analysis. Always-suffixing makes the name a function of `(from, to, shape)` alone. The cost is renaming the link score for Wildcard-only models like `total = SUM(pop[*])` from `pop→total` to `pop→total⁚wildcard`. This affects the discovery parser (Phase 3 Task 7), but no on-disk artifact carries these names persistently — they only flow through simulation results within a single run, so the rename is internal and contained.
+>
+> **Design plan AC3.2 update:** This decision overrides the design plan's "no name-format changes" claim for Wildcard/DynamicIndex shapes. Phase 6 must update the design plan to reflect the new naming convention. AC3.2's "no name-format changes" remains accurate for FixedIndex (which already used the per-element prefixed-from naming).
 
 Helper:
 ```rust
@@ -294,22 +298,21 @@ pub(crate) fn link_score_var_name(
     from: &str,
     to: &str,
     shape: &RefShape,
-    has_collision: bool,
 ) -> String {
     let from_part = match shape {
         RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),
         _ => from.to_string(),
     };
-    let to_part = match (shape, has_collision) {
-        (RefShape::Wildcard, true) => format!("{}\u{205A}wildcard", to),
-        (RefShape::DynamicIndex, true) => format!("{}\u{205A}dynamic", to),
+    let to_part = match shape {
+        RefShape::Wildcard => format!("{}\u{205A}wildcard", to),
+        RefShape::DynamicIndex => format!("{}\u{205A}dynamic", to),
         _ => to.to_string(),
     };
     format!("$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}", from_part, to_part)
 }
 ```
 
-The `has_collision` parameter is computed by the caller in Task 5: it's true iff the same `(from, to)` pair has more than one distinct shape AND `Bare` is among them. The Bare variant always claims the canonical name; the others get suffixed.
+The function takes only `(from, to, shape)` — no `has_collision` parameter. Names are stable across models.
 
 **Testing:**
 Add a few unit tests in `mod tests`:
@@ -317,7 +320,7 @@ Add a few unit tests in `mod tests`:
 #[test]
 fn link_score_name_bare_canonical() {
     assert_eq!(
-        link_score_var_name("pop", "births", &RefShape::Bare, false),
+        link_score_var_name("pop", "births", &RefShape::Bare),
         "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births"
     );
 }
@@ -326,24 +329,29 @@ fn link_score_name_bare_canonical() {
 fn link_score_name_fixed_index() {
     let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
     assert_eq!(
-        link_score_var_name("pop", "rel_pop", &shape, false),
+        link_score_var_name("pop", "rel_pop", &shape),
         "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop"
     );
 }
 
 #[test]
-fn link_score_name_wildcard_with_collision() {
+fn link_score_name_wildcard_always_suffixed() {
+    // Suffix is unconditional - same name regardless of whether Bare coexists.
     assert_eq!(
-        link_score_var_name("pop", "share", &RefShape::Wildcard, true),
+        link_score_var_name("pop", "total", &RefShape::Wildcard),
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}total\u{205A}wildcard"
+    );
+    assert_eq!(
+        link_score_var_name("pop", "share", &RefShape::Wildcard),
         "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
     );
 }
 
 #[test]
-fn link_score_name_wildcard_without_collision_canonical() {
+fn link_score_name_dynamic_index_always_suffixed() {
     assert_eq!(
-        link_score_var_name("pop", "total", &RefShape::Wildcard, false),
-        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}total"
+        link_score_var_name("pop", "tgt", &RefShape::DynamicIndex),
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}tgt\u{205A}dynamic"
     );
 }
 ```
@@ -366,11 +374,23 @@ Run: `cargo test -p simlin-engine --lib link_score_var_name`. Expected: all 4 te
 
 **Implementation:**
 
-**5a. Salsa input for shape:** `LtmLinkId` (in `db.rs`, search for the salsa-tracked struct definition) currently holds `(link_from: String, link_to: String)`. To make `link_score_equation_text` differentiate per shape, either:
-- (preferred) Add `shape: RefShape` to `LtmLinkId` so each `(from, to, shape)` is a distinct salsa key.
-- (alternative) Add a new salsa-tracked function `link_score_equation_text_shaped(db, link_id, shape, ...)` that takes shape as an explicit argument.
+**5a. Salsa input for shape:** `LtmLinkId` (defined at `src/simlin-engine/src/db.rs:138`) currently holds `(link_from: String, link_to: String)` as a salsa-interned struct. The two viable approaches:
 
-The preferred approach makes salsa caching automatic. `RefShape` already derives `Clone`, `PartialEq`, `Eq`, `Hash` (Phase 2 requirement); add `salsa::Update` if salsa requires it.
+- **(preferred)** Add `shape: RefShape` to `LtmLinkId` so each `(from, to, shape)` is a distinct salsa key. This requires:
+  1. `RefShape` deriving `salsa::Update`. `RefShape::FixedIndex(Vec<String>)` requires the inner `Vec<String>` to be `salsa::Update` — which it is (salsa supports `Vec<T>` where `T: Update` automatically). Add `#[derive(salsa::Update)]` alongside the existing derives.
+  2. **All call sites of `LtmLinkId::new` must be updated to the 4-arg form** `LtmLinkId::new(db, from, to, shape)`. Verified call sites (codebase grep at 2026-04-25):
+     - `src/simlin-engine/src/db_ltm.rs:2432` (production: discovery/sub-model link emission loop)
+     - `src/simlin-engine/src/db_ltm.rs:2459` (production: exhaustive loop-iteration emission)
+     - `src/simlin-engine/src/db.rs:4987` (helper inside another tracked function)
+     - `src/simlin-engine/src/db_ltm_tests.rs:348` (unit test)
+     - `src/simlin-engine/src/db_tests.rs:2017, 2021, 2037, 2038` (multiple unit-test sites)
+  3. Each updated call site must determine the shape value to pass. For production sites, the shape comes from the per-(from, to) reference-sites enumeration in step 5d below. For test sites, default to `RefShape::Bare` to preserve existing test semantics; tests asserting per-shape behavior get new/extended tests.
+
+- **(alternative)** Keep `LtmLinkId` unchanged and add a new salsa-tracked function `link_score_equation_text_shaped(db, link_id, shape, model, project) -> Option<LtmSyntheticVar>` that wraps the existing one. Existing test sites continue to work; new code uses the shaped variant. The downside: salsa caching is keyed on `(link_id, shape)` as separate function arguments, which works but means the cache invalidation matrix is slightly different from interning shape into the key. Functionally equivalent for our use case.
+
+**Decision: use the alternative.** It minimizes churn at the existing call sites (8 sites untouched) and the salsa-caching difference is immaterial here (RefShape values are bounded and the cache hit rate stays high). Phase 3 introduces `link_score_equation_text_shaped` and uses it from `model_ltm_variables`; the existing `link_score_equation_text` (3-arg `LtmLinkId`) stays for backward compatibility OR is removed if no other consumer remains. After completing 5b–5d, audit whether the original is dead and remove it then.
+
+> Sub-step 5a verification: run `rg -n 'LtmLinkId::new' src/simlin-engine/src/` and confirm the listed sites match. If new sites appear, add them to the migration list.
 
 **5b. Update `generate_link_score_equation_for_link`** to accept `shape: &RefShape` and `source_dim_elements: &[Vec<String>]`:
 
@@ -400,9 +420,8 @@ For each `(from, to)` pair the existing logic processes:
 2. Otherwise, **collect all `RefShape`s** for which the target's AST references `from`. This requires reusing `collect_reference_sites` from Phase 2 (or introducing a sibling that returns just unique shapes).
 3. For each unique shape:
    - Skip `Bare` if the source is scalar and target is also scalar (no edge expansion needed; falls into legacy logic).
-   - Compute `has_collision = shapes.contains(&RefShape::Bare) && shapes.iter().any(|s| !matches!(s, RefShape::Bare | RefShape::FixedIndex(_)))`.
-   - Call `link_score_equation_text` with the shape-aware `LtmLinkId`. Wrap the resulting `LtmSyntheticVar`:
-     - `lsv.name = link_score_var_name(from, to, shape, has_collision)`
+   - Call `link_score_equation_text_shaped` (Task 5a's alternative API) with the shape. Wrap the resulting `LtmSyntheticVar`:
+     - `lsv.name = link_score_var_name(from, to, shape)` (no collision parameter; names are stable per Task 4)
      - `lsv.dimensions = link_score_dimensions(...)` for Bare and Wildcard; for FixedIndex, use the target's dimensions if target is arrayed (the link score is A2A over the target dim) or empty if target is scalar (each FixedIndex(elem) emits a single scalar `LtmSyntheticVar`).
 
 For the exhaustive path's loop iteration: `loop_item.links` doesn't carry shape today. Phase 3 must add `shape: Option<RefShape>` to `Link` or pass shape through a sidecar map. The simplest is to add `shape: Option<RefShape>` to `Link`; existing code that constructs `Link` without shape (`Link { from, to, polarity }`) becomes `Link { from, to, polarity, shape: None }`. Phase 4 fills in Some(shape) at loop-construction time. For Phase 3, the discovery/sub-model path (which iterates `edges_result.edges`) computes shapes per `(from, to)` directly and the loop-iteration path uses `link.shape.unwrap_or(RefShape::Bare)` as a fallback (Phase 4 fills in real values).
@@ -508,18 +527,35 @@ Run: `cargo test -p simlin-engine --lib generate_loop_score_equation`. Expected:
 - Modify: `src/simlin-engine/src/ltm_finding.rs` (`parse_link_offsets` at lines 274–332)
 
 **Implementation:**
-Today's `parse_link_offsets` treats any name with `[` in `from_str` or `to_str` as a single scalar element-level entry. After Phase 3, FixedIndex link scores can be A2A over the *target* dimension. For example, `$⁚ltm⁚link_score⁚pop[nyc]→rel_pop` is one variable with N slots (one per element of the target's `Region` dimension); each slot represents the link score for `(pop[nyc], rel_pop[d])` at element d.
+Today's `parse_link_offsets` treats any name with `[` in `from_str` or `to_str` as a single scalar element-level entry. After Phase 3, two new naming patterns appear:
 
-The current parser emits a single `LinkOffset` for this name with `from = "pop[nyc]"` and `to = "rel_pop"`, ignoring the dimensions. Phase 3 must extend it to detect: if `from_str` contains `[` (FixedIndex marker) AND the `LtmSyntheticVar.dimensions` is non-empty (meaning A2A), emit one `LinkOffset` per element of the target dim, with `to = "{to_str}[{elem}]"`.
+1. **FixedIndex A2A**: `$⁚ltm⁚link_score⁚pop[nyc]→rel_pop` — `from_str` contains `[`, A2A over the *target* dimension. The variable has N slots (one per target element). Each slot represents the link score for `(pop[nyc], rel_pop[d])` at element d.
+2. **Wildcard suffix**: `$⁚ltm⁚link_score⁚pop→share⁚wildcard` — `to_str` ends with `⁚wildcard`. The suffix marks the shape; for parser purposes, treat the link score as if `to_str` were `share` (strip the suffix when looking up dimensions and emitting `LinkOffset` keys).
+3. **DynamicIndex suffix**: `$⁚ltm⁚link_score⁚pop→tgt⁚dynamic` — analogous to wildcard.
 
-This piggybacks on the existing A2A expansion code that handles bare-source A2A link scores. Look at `parse_link_offsets` for the `dim_elements` expansion logic.
+Phase 3 must extend `parse_link_offsets` to:
+
+(a) **Strip the trailing shape suffix** from `to_str` before further parsing. After splitting on `→`, check if `to_str` ends with `⁚wildcard` or `⁚dynamic`. If so, strip the suffix, remember the shape, and proceed. The shape may matter for downstream consumers but for `LinkOffset` registration the canonical `to` name is the suffix-stripped form.
+
+(b) **Detect FixedIndex A2A** and expand: if `from_str` contains `[` AND `ltm_var.dimensions` is non-empty, expand `to` into N element entries with `to = "{to_str}[{elem}]"`.
 
 Implementation sketch:
 ```rust
-// After existing if-branch on `from_str.contains('[') || to_str.contains('[')`:
+// 1. Split name on LTM_LINK_SEP (→).
+let (from_str, mut to_str) = ...; // existing split logic
+
+// 2. Strip the shape suffix from to_str.
+let mut shape_suffix: Option<&str> = None;
+for suffix in &["\u{205A}wildcard", "\u{205A}dynamic"] {
+    if to_str.ends_with(suffix) {
+        to_str = &to_str[..to_str.len() - suffix.len()];
+        shape_suffix = Some(suffix);
+        break;
+    }
+}
+
+// 3. Expand FixedIndex A2A names (from carries [elem], target is A2A).
 if from_str.contains('[') && !ltm_var.dimensions.is_empty() {
-    // Subscripted-from A2A link score: expand `to` into N element entries.
-    // The `from` already carries its element subscript (e.g., "pop[nyc]").
     let dim_elements = expand_dimensions_to_elements(&ltm_var.dimensions, dims);
     for (slot_idx, elem) in dim_elements.iter().enumerate() {
         let from = Ident::new(from_str);
@@ -528,12 +564,23 @@ if from_str.contains('[') && !ltm_var.dimensions.is_empty() {
     }
     continue;
 }
+
+// 4. Existing path for Bare A2A and other forms (suffix-stripped to_str
+//    flows through unchanged).
 ```
 
-(Adapt to existing helper names. `expand_dimensions_to_elements` may already exist or may be inlinable from existing logic.)
+(Adapt to existing helper names; `expand_dimensions_to_elements` may already exist or may be inlinable from existing logic.)
 
 **Testing:**
-Add a test in `ltm_finding.rs::tests` (or wherever `parse_link_offsets` is tested). Construct a synthetic `Vec<LtmSyntheticVar>` with one Bare A2A entry, one FixedIndex A2A entry, and one cross-dim per-element entry. Assert the resulting `LinkOffset` list has the right per-element expansion for each.
+Add tests in `ltm_finding.rs::tests` (or wherever `parse_link_offsets` is tested). Cover:
+
+1. Bare A2A name: `pop→births` with non-empty dimensions → expands to per-element entries (existing behavior).
+2. Wildcard-suffixed scalar name: `pop→share⁚wildcard` with empty dimensions → single `LinkOffset` with `to = "share"`, suffix stripped.
+3. Wildcard-suffixed A2A name: `pop→share⁚wildcard` with non-empty dimensions → expands per-element with suffix-stripped to.
+4. FixedIndex A2A: `pop[nyc]→rel_pop` with non-empty dimensions → N entries, `to = "rel_pop[d]"` per element.
+5. FixedIndex scalar: `pop[nyc]→total` with empty dimensions → single entry, no expansion.
+
+Construct a synthetic `Vec<LtmSyntheticVar>` for each case and assert the resulting `LinkOffset` list.
 
 **Verification:**
 Run: `cargo test -p simlin-engine --lib parse_link_offsets`. Expected: pass.
@@ -561,7 +608,7 @@ Trigger the pre-commit hook by amending HEAD (no-op). Confirm:
 If `wrap_deps_in_previous` (the pre-Phase-3 builder) is now unused, delete it and `build_partial_equation` along with it. Address any orphaned imports.
 
 **Verification:**
-Run: `git commit --amend --no-edit`. Expected: pre-commit prints "All pre-commit checks passed!".
+Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!" within budget.
 
 **Commit:** No new commit (this is a verification gate). If cleanup of legacy builder happens, a separate `engine: remove obsolete build_partial_equation` commit captures it.
 <!-- END_TASK_8 -->
