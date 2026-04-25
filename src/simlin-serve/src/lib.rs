@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod discovery;
+pub mod git;
 pub mod registry;
 
 use axum::Router;
