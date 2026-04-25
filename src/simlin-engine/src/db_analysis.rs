@@ -704,6 +704,133 @@ fn expand_edge_to_elements(
     }
 }
 
+/// Emit element edges for a single AST reference site.
+///
+/// This is the per-reference replacement for `expand_edge_to_elements`:
+/// the new walker classifies each reference site into a `RefShape` and
+/// hands `(from_name, to_name, from_dims, to_dims, shape)` to this
+/// helper, which translates the shape into the appropriate element-level
+/// edges and unions them into `element_edges`.
+///
+/// Truth table (matches design plan):
+/// | `from_dims` | `to_dims`  | `shape`                       | Edges emitted                                 |
+/// |-------------|------------|-------------------------------|-----------------------------------------------|
+/// | []          | []         | Bare                          | `from -> to`                                  |
+/// | []          | non-empty  | Bare                          | `from -> to[d]` for each cartesian d          |
+/// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
+/// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
+/// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
+/// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
+/// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
+/// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
+///
+/// `FixedIndex` carries the resolved per-dimension element names in
+/// source order; multi-dim fixed yields `from[e1,e2]`. Mixed
+/// fixed+wildcard subscripts classify upstream as `Wildcard` (or
+/// `DynamicIndex`), so this helper does not need to handle a
+/// "partial fixed" branch -- it only sees fully-resolved
+/// `FixedIndex(elems)` payloads or the conservative full-cross shapes.
+#[allow(dead_code)] // wired into model_element_causal_edges in Task 4
+fn emit_edges_for_reference(
+    from_name: &str,
+    to_name: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    shape: &RefShape,
+    element_edges: &mut HashMap<String, BTreeSet<String>>,
+) {
+    let from_is_scalar = from_dims.is_empty();
+    let to_is_scalar = to_dims.is_empty();
+
+    // Scalar source short-circuits: shape doesn't matter (a scalar source
+    // has no subscript form). Either pass-through or broadcast.
+    if from_is_scalar {
+        if to_is_scalar {
+            element_edges
+                .entry(from_name.to_string())
+                .or_default()
+                .insert(to_name.to_string());
+        } else {
+            for to_elem in cartesian_element_names(to_name, to_dims) {
+                element_edges
+                    .entry(from_name.to_string())
+                    .or_default()
+                    .insert(to_elem);
+            }
+        }
+        return;
+    }
+
+    // Arrayed source. The shape determines which source elements appear
+    // and how they connect to the target.
+    match shape {
+        RefShape::Bare => {
+            // Same-element semantics. With a scalar target this is a
+            // reduction (every from element feeds the single to). With
+            // an arrayed target (matching dims), this is the diagonal;
+            // with partial-collapse dims, expand_same_element handles
+            // the projection.
+            if to_is_scalar {
+                for from_elem in cartesian_element_names(from_name, from_dims) {
+                    element_edges
+                        .entry(from_elem)
+                        .or_default()
+                        .insert(to_name.to_string());
+                }
+            } else {
+                expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
+            }
+        }
+        RefShape::FixedIndex(elems) => {
+            // The source is pinned to a single element tuple. Build
+            // exactly one source key; if the target is scalar, that
+            // key feeds `to_name`, otherwise it feeds every cartesian
+            // element of the target.
+            let from_node = if elems.len() == 1 {
+                format_element_name(from_name, &elems[0])
+            } else {
+                let elem_refs: Vec<&str> = elems.iter().map(String::as_str).collect();
+                format_multi_element_name(from_name, &elem_refs)
+            };
+
+            if to_is_scalar {
+                element_edges
+                    .entry(from_node)
+                    .or_default()
+                    .insert(to_name.to_string());
+            } else {
+                let to_elements = cartesian_element_names(to_name, to_dims);
+                let entry = element_edges.entry(from_node).or_default();
+                for to_elem in to_elements {
+                    entry.insert(to_elem);
+                }
+            }
+        }
+        RefShape::Wildcard | RefShape::DynamicIndex => {
+            // Conservative full cross product. Every source element
+            // connects to every target element (or the single scalar
+            // target).
+            let from_elements = cartesian_element_names(from_name, from_dims);
+            if to_is_scalar {
+                for from_elem in from_elements {
+                    element_edges
+                        .entry(from_elem)
+                        .or_default()
+                        .insert(to_name.to_string());
+                }
+            } else {
+                let to_elements = cartesian_element_names(to_name, to_dims);
+                for from_elem in &from_elements {
+                    let entry = element_edges.entry(from_elem.clone()).or_default();
+                    for to_elem in &to_elements {
+                        entry.insert(to_elem.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Generate element-level node names for the cartesian product of all dimensions.
 ///
 /// For a variable `x` with dimensions `[D1, D2]` where D1 = {a, b} and D2 = {1, 2},
@@ -1955,6 +2082,101 @@ mod collect_reference_sites_tests {
             shapes.contains(&&RefShape::Wildcard),
             "expected Wildcard in {shapes:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod emit_edges_for_reference_tests {
+    use super::*;
+    use crate::common::{CanonicalDimensionName, CanonicalElementName};
+    use crate::dimensions::{Dimension, NamedDimension};
+    use std::collections::HashMap as StdHashMap;
+
+    /// Build a single-dim `Named` dimension from raw element names.
+    /// Mirrors `make_named_dimension` in `ltm_augment.rs::tests` -- inlined
+    /// here because that helper is private to the other test module.
+    fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
+        let canonical_elements: Vec<CanonicalElementName> = elements
+            .iter()
+            .map(|e| CanonicalElementName::from_raw(e))
+            .collect();
+        let indexed: StdHashMap<CanonicalElementName, usize> = canonical_elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.clone(), i + 1))
+            .collect();
+        Dimension::Named(
+            CanonicalDimensionName::from_raw(name),
+            NamedDimension {
+                elements: canonical_elements,
+                indexed_elements: indexed,
+                maps_to: None,
+                mappings: vec![],
+            },
+        )
+    }
+
+    /// Scalar source -> scalar target with `Bare` shape: a single
+    /// from -> to edge, no expansion.
+    #[test]
+    fn scalar_to_scalar_bare_passthrough() {
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+        emit_edges_for_reference("a", "b", &[], &[], &RefShape::Bare, &mut edges);
+
+        let from = edges.get("a").expect("expected 'a' as a source key");
+        assert_eq!(from.len(), 1);
+        assert!(from.contains("b"));
+    }
+
+    /// Arrayed source -> arrayed target with `FixedIndex(["nyc"])`: only
+    /// `pop[nyc]` should appear as a source key, and it must connect to
+    /// every target element. `pop[boston]` must NOT appear as a source.
+    #[test]
+    fn fixed_index_to_arrayed_target() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            &mut edges,
+        );
+
+        let from = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
+        assert!(from.contains("rel[nyc]"), "missing rel[nyc] in {from:?}");
+        assert!(
+            from.contains("rel[boston]"),
+            "missing rel[boston] in {from:?}"
+        );
+        assert_eq!(from.len(), 2, "expected exactly 2 outgoing edges");
+        assert!(
+            !edges.contains_key("pop[boston]"),
+            "pop[boston] must not appear as a source for FixedIndex(nyc)"
+        );
+    }
+
+    /// Arrayed source -> arrayed target with `Bare` shape on identical
+    /// dimensions: per-element diagonal `pop[d] -> rel[d]`. No off-diagonal
+    /// edges.
+    #[test]
+    fn bare_same_dim_diagonal() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference("pop", "rel", dims, dims, &RefShape::Bare, &mut edges);
+
+        let nyc = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
+        assert_eq!(nyc.len(), 1, "diagonal: one outgoing edge");
+        assert!(nyc.contains("rel[nyc]"));
+
+        let boston = edges.get("pop[boston]").expect("from key 'pop[boston]'");
+        assert_eq!(boston.len(), 1, "diagonal: one outgoing edge");
+        assert!(boston.contains("rel[boston]"));
     }
 }
 
