@@ -1,0 +1,153 @@
+#!/usr/bin/env node
+// Entry point for the @simlin/serve npm package.
+//
+// Detects the current platform, resolves the platform-specific native binary
+// from the matching optional dependency, and spawns it with stdio forwarding.
+
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+
+// Map from (platform, arch) to npm package name and Rust target triple.
+const PLATFORM_MAP = {
+  "darwin-arm64": {
+    package: "@simlin/serve-darwin-arm64",
+    triple: "aarch64-apple-darwin",
+  },
+  "linux-arm64": {
+    package: "@simlin/serve-linux-arm64",
+    triple: "aarch64-unknown-linux-musl",
+  },
+  "linux-x64": {
+    package: "@simlin/serve-linux-x64",
+    triple: "x86_64-unknown-linux-musl",
+  },
+  "win32-x64": {
+    package: "@simlin/serve-win32-x64",
+    triple: "x86_64-pc-windows-gnu",
+  },
+};
+
+const platformKey = `${process.platform}-${process.arch}`;
+const platformInfo = PLATFORM_MAP[platformKey];
+
+if (!platformInfo) {
+  console.error(
+    `simlin-serve: unsupported platform: ${process.platform} (${process.arch})`,
+  );
+  console.error(
+    "Supported platforms: darwin-arm64, linux-arm64, linux-x64, win32-x64",
+  );
+  process.exit(1);
+}
+
+const binaryName =
+  process.platform === "win32" ? "simlin-serve.exe" : "simlin-serve";
+
+// When installed from npm, the binary lives inside the platform package.
+// In development (cargo build), it lives in vendor/<triple>/.
+const vendorBinaryPath = path.join(
+  __dirname,
+  "..",
+  "vendor",
+  platformInfo.triple,
+  binaryName,
+);
+
+// On Windows, `cargo build` defaults to the MSVC toolchain, but the npm
+// package ships the GNU-targeted binary.  Try the MSVC triple as a dev
+// fallback so developers don't need to cross-compile to GNU locally.
+const DEV_FALLBACK_TRIPLES = {
+  "x86_64-pc-windows-gnu": "x86_64-pc-windows-msvc",
+};
+const devFallbackTriple = DEV_FALLBACK_TRIPLES[platformInfo.triple];
+const devFallbackPath = devFallbackTriple
+  ? path.join(__dirname, "..", "vendor", devFallbackTriple, binaryName)
+  : null;
+
+let binaryPath = null;
+
+try {
+  const pkgJsonPath = require.resolve(
+    `${platformInfo.package}/package.json`,
+  );
+  const pkgDir = path.dirname(pkgJsonPath);
+  const candidate = path.join(pkgDir, "bin", binaryName);
+  if (existsSync(candidate)) {
+    binaryPath = candidate;
+  }
+} catch {
+  // Optional dependency not installed -- fall through to dev vendor path.
+}
+
+if (!binaryPath) {
+  if (existsSync(vendorBinaryPath)) {
+    binaryPath = vendorBinaryPath;
+  } else if (devFallbackPath && existsSync(devFallbackPath)) {
+    binaryPath = devFallbackPath;
+  } else {
+    console.error(
+      `simlin-serve: could not find native binary for ${platformKey}`,
+    );
+    console.error(
+      `Install the platform package: npm install ${platformInfo.package}`,
+    );
+    // For Windows, suggest the MSVC vendor path since cargo defaults to MSVC
+    const hintTriple = devFallbackTriple ?? platformInfo.triple;
+    console.error(
+      `Or for development, build with: cargo build -p simlin-serve && ` +
+        `mkdir -p vendor/${hintTriple} && ` +
+        `cp target/debug/${binaryName} vendor/${hintTriple}/${binaryName}`,
+    );
+    process.exit(1);
+  }
+}
+
+const child = spawn(binaryPath, process.argv.slice(2), {
+  stdio: "inherit",
+});
+
+child.on("error", (err) => {
+  console.error(`simlin-serve: failed to start binary: ${err.message}`);
+  process.exit(1);
+});
+
+const forwardSignal = (signal) => {
+  if (child.killed) {
+    return;
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // ignore errors forwarding signals
+  }
+};
+
+["SIGINT", "SIGTERM", "SIGHUP"].forEach((sig) => {
+  process.on(sig, () => forwardSignal(sig));
+});
+
+// Mirror child exit status so that callers observe the correct exit code
+// or signal-based termination.
+const childResult = await new Promise((resolve) => {
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      resolve({ type: "signal", signal });
+    } else {
+      resolve({ type: "code", exitCode: code ?? 1 });
+    }
+  });
+});
+
+if (childResult.type === "signal") {
+  ["SIGINT", "SIGTERM", "SIGHUP"].forEach((sig) => process.removeAllListeners(sig));
+  process.kill(process.pid, childResult.signal);
+} else {
+  process.exit(childResult.exitCode);
+}
