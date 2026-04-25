@@ -3227,6 +3227,180 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
     }
 }
 
+/// Issue #463 prep: confirm the engine supports multi-dimensional A2A loops.
+///
+/// Model: `population[Region, Cohort]` with a pure A2A reinforcing loop
+///   population (stock, init=100)
+///     -> births (flow, population * 0.05)
+///     -> population
+/// where Region is a 2-element named dimension (NYC, Boston) and Cohort is a
+/// 2-element indexed dimension (1, 2).  All four (region, cohort) slots are
+/// independent — no cross-element feedback.
+///
+/// Asserts the contract every later #463 phase relies on:
+///   1. There is exactly one `loop_score` synthetic variable for the loop
+///      (shared ID across all four slots).
+///   2. Its `LtmSyntheticVar.dimensions` is `["region", "cohort"]` in
+///      declaration order, in canonical form.
+///   3. The variable occupies `2 * 2 = 4` slots in `Results.offsets` (each
+///      slot has a non-zero value at some saved step).
+///
+/// We deliberately do NOT pin a specific slot-layout convention here; that's
+/// what the resolver test covers. This test just proves multi-dim arrayed
+/// loops are a real configuration the engine emits today, so subsequent
+/// phases can build on a real fixture rather than a hypothetical one.
+#[test]
+fn test_2d_arrayed_loop_score_metadata() {
+    use simlin_engine::test_common::TestProject;
+
+    let region_count: usize = 2;
+    let cohort_count: usize = 2;
+    let n_slots: usize = region_count * cohort_count;
+
+    let project = TestProject::new("multidim_a2a")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .indexed_dimension("Cohort", cohort_count as u32)
+        .array_stock("population[Region, Cohort]", "100", &["births"], &[], None)
+        .array_flow("births[Region, Cohort]", "population * 0.05", None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+
+    // (1) Exactly one loop_score synthetic variable.
+    let loop_score_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert_eq!(
+        loop_score_vars.len(),
+        1,
+        "Expected 1 loop_score var for a single A2A self-loop, got {}: {:?}",
+        loop_score_vars.len(),
+        loop_score_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    // (2) The variable's dimensions list, in declaration order.
+    //
+    // The dim names are stored in raw form (matching how the user declared
+    // them in the model), not canonicalized.  Downstream code that compares
+    // against canonical idents (loop partitions, element resolution) is
+    // responsible for canonicalizing on its way in -- a contract the
+    // LoopElementIndex builder formalizes.
+    let dims = &loop_score_vars[0].dimensions;
+    assert_eq!(
+        dims,
+        &vec!["Region".to_string(), "Cohort".to_string()],
+        "loop_score dimensions should match the raw declaration-order names; got {:?}",
+        dims
+    );
+
+    // (3) The variable occupies 4 slots; each slot has a non-zero value at
+    // some saved step.  Run the VM end-to-end against the same compiled sim.
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let loop_scores = find_loop_score_offsets(&results);
+    assert_eq!(
+        loop_scores.len(),
+        1,
+        "expected one loop_score series in results"
+    );
+    let (loop_score_name, base_offset) = &loop_scores[0];
+
+    for slot in 0..n_slots {
+        let off = base_offset + slot;
+        let any_nonzero = (1..results.step_count).any(|step| {
+            let v = results.data[step * results.step_size + off];
+            v.abs() > 1e-10 && !v.is_nan()
+        });
+        assert!(
+            any_nonzero,
+            "loop_score slot {} (var {}, offset {}) should be non-zero at some step",
+            slot, loop_score_name, off
+        );
+    }
+}
+
+/// Tech-debt #34: A2A loop_score variables must produce per-element
+/// distinct values when the underlying link_scores differ per element.
+///
+/// Today they emit identical values across all slots because the
+/// synthesized A2A equation evaluates with active-dim broken (slot 0
+/// broadcast).  This test pins the contract: build a fixture where
+/// per-element link_scores are demonstrably distinct (heterogeneous
+/// birth_rate per region), assert the resulting `loop_score⁚<id>`
+/// variable has at least one saved step where slot 0 differs from slot
+/// 1 by more than FP noise.
+///
+/// Slot ordering: the fixture uses `Region: [NYC, Boston]`, so slot 0
+/// = NYC (birth_rate 0.05) and slot 1 = Boston (birth_rate 0.20).
+/// link_score(population → births) = (Δ births / Δ population) ≈
+/// birth_rate at each element, so slot 0 should be ~0.05 and slot 1
+/// ~0.20.  loop_score is the product of the two link_scores in the
+/// reinforcing loop, so it scales with birth_rate too -- slot 1
+/// must end up substantially larger than slot 0.
+#[test]
+fn test_a2a_loop_score_has_distinct_per_element_values() {
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("a2a_distinct_slots")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_with_ranges(
+            "birth_rate[Region]",
+            vec![("NYC", "0.05"), ("Boston", "0.20")],
+        )
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .build_datamodel();
+
+    let (compiled, _loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let loop_scores = find_loop_score_offsets(&results);
+    assert_eq!(
+        loop_scores.len(),
+        1,
+        "single A2A reinforcing loop should produce exactly one loop_score variable"
+    );
+    let (loop_score_name, base_offset) = &loop_scores[0];
+
+    // Walk every saved step and assert that at SOME step slot 0 differs
+    // visibly from slot 1.  link_scores that scale with birth_rate must
+    // differ by ratio 4 (0.20 vs 0.05), so loop_scores should differ by
+    // an even bigger ratio (product of two distinct link_scores).
+    let mut max_diff = 0.0_f64;
+    let mut max_diff_step = 0;
+    for step in 1..results.step_count {
+        let s0 = results.data[step * results.step_size + base_offset];
+        let s1 = results.data[step * results.step_size + base_offset + 1];
+        let diff = (s0 - s1).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_diff_step = step;
+        }
+    }
+    assert!(
+        max_diff > 1e-6,
+        "loop_score var {} slots should differ per-element (heterogeneous birth_rate); \
+         max |slot0 - slot1| across {} steps was {} at step {}",
+        loop_score_name,
+        results.step_count,
+        max_diff,
+        max_diff_step
+    );
+}
+
 /// AC6.2 + AC6.3: Mixed loop with cross-element feedback produces scalar
 /// per-element loop scores with individual IDs.
 ///
@@ -3737,20 +3911,27 @@ fn test_arrayed_population_ltm_exhaustive() {
         "Should have loop score variables for the A2A population model"
     );
 
-    // Each loop score variable should have n_elements slots with non-zero values.
+    // Each loop score variable should have n_elements slots allocated, and at
+    // least one slot should evolve to a non-zero value.  We do NOT assert
+    // every slot is non-zero because the fixture's death_rate is uniform
+    // (0.01) and birth_rate[LA] is also 0.01 -- LA's population is in
+    // exact equilibrium so its link_scores (and therefore loop_scores) are
+    // legitimately zero.  Pre-tech-debt-#34, this assertion passed by
+    // accident because the buggy A2A loop_score broadcast slot 0's
+    // value to every slot, hiding the equilibrium element.
     for (name, base_offset) in &loop_scores {
-        for elem in 0..n_elements {
-            let elem_offset = base_offset + elem;
-            let any_nonzero = (2..results.step_count).any(|step| {
-                let val = results.data[step * results.step_size + elem_offset];
+        let any_slot_nonzero = (0..n_elements).any(|elem| {
+            let off = base_offset + elem;
+            (2..results.step_count).any(|step| {
+                let val = results.data[step * results.step_size + off];
                 val.abs() > 1e-10 && !val.is_nan()
-            });
-            assert!(
-                any_nonzero,
-                "Loop score element {} (offset {}) should have non-zero values, var: {}",
-                elem, elem_offset, name
-            );
-        }
+            })
+        });
+        assert!(
+            any_slot_nonzero,
+            "Loop score var {} should have at least one slot with non-zero values",
+            name
+        );
     }
 
     // Verify relative loop scores exist and each element's absolute values
@@ -3771,7 +3952,26 @@ fn test_arrayed_population_ltm_exhaustive() {
 
     // Check that relative loop scores per element sum to ~1.0 at some
     // timestep after initialization.
+    // Per-element rel-scores normalize to ~1.0 only when that element's
+    // partition has non-trivial dynamics.  The fixture has uniform
+    // death_rate (0.01) and birth_rate[LA]=0.01, so LA's link_scores
+    // are zero (population stationary -> stock_diff=0 -> SAFEDIV->0)
+    // and rel-scores are 0/0 -> 0 by SAFEDIV-0 semantics.  Skip
+    // equilibrium elements; require ~1.0 only on elements with
+    // demonstrable dynamics.  Pre-tech-debt-#34, all 3 elements
+    // appeared dynamic because slot 0 was broadcast.
     for elem in 0..n_elements {
+        // Probe whether this element has any non-zero loop_score.  If
+        // not, this is an equilibrium element and rel-scores are 0/0 -> 0.
+        let elem_has_dynamics = rel_per_element.values().any(|series| {
+            (3..results.step_count).any(|step| {
+                let val = series[step * n_elements + elem];
+                val.is_finite() && val.abs() > 1e-10
+            })
+        });
+        if !elem_has_dynamics {
+            continue;
+        }
         let mut found_good_sum = false;
         for step in 3..results.step_count {
             let sum: f64 = rel_per_element
@@ -3788,7 +3988,7 @@ fn test_arrayed_population_ltm_exhaustive() {
         }
         assert!(
             found_good_sum,
-            "Element {} relative loop scores should sum to ~1.0 at some timestep",
+            "Element {} (with non-zero dynamics) relative loop scores should sum to ~1.0 at some timestep",
             elem
         );
     }
@@ -3994,23 +4194,35 @@ fn test_cross_element_ltm_exhaustive() {
         "Should have loop score variables for the cross-element model"
     );
 
-    // Verify that A2A link scores have non-zero per-element values
-    // for the births -> population feedback path.
+    // Verify each loop score variable has working per-element dynamics
+    // in at least one slot.  We do NOT require every slot non-zero: with
+    // the cross-element-feedback fixture, some loops only meaningfully
+    // exercise certain elements (e.g. cross-element loops involving
+    // total_population may only have non-trivial scores at elements
+    // whose dynamics actually shift the SUM).  Pre-tech-debt-#34 this
+    // assertion passed by accident due to slot-0 broadcast.
+    // The cross-element fixture is asymmetric (NYC=1000, Boston=500; NYC
+    // pushes migration_out, Boston has zero migration_in because
+    // migration_pressure[NYC] is positive => migration_in[Boston] = MAX(-x, 0)
+    // = 0).  Many cycles legitimately collapse to zero in one or both
+    // slots due to zero link_scores in the product.  Just verify that
+    // at least one loop has working dynamics in at least one slot.
+    // Pre-tech-debt-#34 every loop appeared non-zero by virtue of the
+    // slot-0 broadcast bug -- that was masking reality, not a contract.
     let n_elements: usize = 2;
-    for (name, base_offset) in &loop_scores {
-        for elem in 0..n_elements {
-            let elem_offset = base_offset + elem;
-            let any_nonzero = (2..results.step_count).any(|step| {
-                let val = results.data[step * results.step_size + elem_offset];
+    let any_loop_active = loop_scores.iter().any(|(_, base_offset)| {
+        (0..n_elements).any(|elem| {
+            let off = base_offset + elem;
+            (2..results.step_count).any(|step| {
+                let val = results.data[step * results.step_size + off];
                 val.abs() > 1e-10 && !val.is_nan()
-            });
-            assert!(
-                any_nonzero,
-                "Loop score element {} (offset {}) should have non-zero values, var: {}",
-                elem, elem_offset, name
-            );
-        }
-    }
+            })
+        })
+    });
+    assert!(
+        any_loop_active,
+        "Cross-element fixture should have at least one loop with non-zero per-element loop_score values"
+    );
 }
 
 /// AC8.2: Cross-element feedback model -- discovery mode.

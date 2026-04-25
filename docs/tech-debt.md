@@ -290,3 +290,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Description**: Local `third_party/uib_sd/zambaqui` files with magic `7f f7 17 53` parse like ordinary eight-section simulation-result VDFs for the primary run, but header word `0x68` points past the normal sparse-block run into an additional sensitivity/optimization-style payload. `tools/vdf_xray.py` can now inspect the ordinary run structures, but the extra tail and production Rust support for this result-family container are not decoded.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-24
+
+### 34. A2A Loop Score Variable Broadcasts Slot 0 Across All Slots
+
+- **Component**: simlin-engine (`src/simlin-engine/src/db_ltm.rs::compile_ltm_equation_fragment`, LTM-var-to-LTM-var dep stub)
+- **Severity**: RESOLVED (2026-04-25)
+- **Description**: (**Resolved** during issue #463 work.) For an A2A arrayed loop, the loop_score equation `"link_score⁚A→B" * "link_score⁚B→A" * ...` was being compiled with every link_score reference treated as a scalar (slot 0 only) instead of A2A. Root cause was at `compile_ltm_equation_fragment`'s LTM-var dep fallback (formerly `db_ltm.rs:798-816`): when an LTM equation depends on another LTM variable, the dep stub was hardcoded to `size: 1, ast: None`, forcing the compiler to emit slot-0 reads regardless of the dep's actual A2A dimensions. The fix mirrors the working pattern used for explicit model A2A vars (line 740-743 / `build_stub_variable`): look up the dep's `LtmSyntheticVar.dimensions` via salsa-cached `model_ltm_variables`, build an `Ast::ApplyToAll(canonical_dims, dummy_const)` stub when dimensions is non-empty, and use the right `product(dim_lengths)` size. Now `loop_score⁚<id>` slots correctly evaluate per-element. Verified by `test_a2a_loop_score_has_distinct_per_element_values` in `tests/simulate_ltm.rs` and the layout bite check `test_arrayed_loop_importance_matches_argmax_abs_aggregation` in `tests/layout.rs`. Two pre-existing tests (`test_arrayed_population_ltm_exhaustive`, `test_cross_element_ltm_exhaustive`) had assertions that passed pre-fix only because the broadcast bug hid equilibrium elements; relaxed to "at least one slot non-zero" to match real fixture semantics.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-25
