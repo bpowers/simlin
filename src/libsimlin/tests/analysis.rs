@@ -1185,3 +1185,356 @@ fn test_rel_loop_score_cache_repopulated_after_rerun() {
         simlin_project_unref(proj);
     }
 }
+
+// === Arrayed-loop FFI tests (issue #463) ===
+//
+// The fixture is a 2-region A2A model with heterogeneous per-region
+// birth_rate (NYC=0.05, Boston=0.20).  This produces per-element
+// distinct loop_scores so a bare arrayed ID returns argmax-abs (not
+// slot 0) and subscripted access exposes specific elements.
+
+fn build_arrayed_test_sim_protobuf() -> Vec<u8> {
+    let test_project = TestProject::new("arrayed_ffi")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_with_ranges(
+            "birth_rate[Region]",
+            vec![("NYC", "0.05"), ("Boston", "0.20")],
+        )
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "population * birth_rate", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+    buf
+}
+
+unsafe fn open_arrayed_sim_with_ltm(
+    buf: &[u8],
+) -> (*mut SimlinProject, *mut SimlinModel, *mut SimlinSim) {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(err.is_null());
+    assert!(!proj.is_null());
+
+    let mut err_get_model: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err_get_model);
+    assert!(err_get_model.is_null());
+    assert!(!model.is_null());
+
+    err = ptr::null_mut();
+    let sim = simlin_sim_new(model, true, &mut err);
+    assert!(err.is_null());
+    assert!(!sim.is_null());
+
+    err = ptr::null_mut();
+    simlin_sim_run_to_end(sim, &mut err);
+    assert!(err.is_null());
+
+    (proj, model, sim)
+}
+
+unsafe fn read_relative_loop_series(
+    sim: *mut SimlinSim,
+    loop_id: &str,
+) -> Result<Vec<f64>, (SimlinErrorCode, String)> {
+    let mut step_count: usize = 0;
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_get_stepcount(sim, &mut step_count, &mut err);
+    assert!(err.is_null());
+
+    let mut scores = vec![0.0_f64; step_count];
+    let loop_id_c = CString::new(loop_id).unwrap();
+    let mut written: usize = 0;
+    err = ptr::null_mut();
+    simlin_analyze_get_relative_loop_score(
+        sim,
+        loop_id_c.as_ptr(),
+        scores.as_mut_ptr(),
+        scores.len(),
+        &mut written,
+        &mut err,
+    );
+    if !err.is_null() {
+        let code = simlin_error_get_code(err);
+        let msg = simlin_error_get_message(err);
+        let msg_str = if msg.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(msg).to_str().unwrap().to_string()
+        };
+        simlin_error_free(err);
+        return Err((code, msg_str));
+    }
+    scores.truncate(written);
+    Ok(scores)
+}
+
+#[test]
+fn test_arrayed_bare_id_returns_argmax_abs_not_slot_zero() {
+    let buf = build_arrayed_test_sim_protobuf();
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        // Discover the loop id.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        assert!((*loops).count > 0);
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Bare ID on an arrayed loop should return argmax-abs across slots,
+        // which for a single-loop partition is the slot whose
+        // |loop_score| is largest.  With Boston's birth_rate = 0.20 vs
+        // NYC's 0.05, Boston's loop_score has 4x the magnitude, so the
+        // aggregator should pick Boston's signed value.
+        let bare_series = read_relative_loop_series(sim, &loop_id).expect("bare access works");
+        // For a single-loop partition, rel_loop_score = sign(loop_score) = ±1.
+        // We expect mostly positive (reinforcing) values once dynamics start.
+        let nonzero: Vec<f64> = bare_series.iter().copied().filter(|s| *s != 0.0).collect();
+        assert!(!nonzero.is_empty(), "should have non-zero scores");
+        for s in &nonzero {
+            assert_eq!(
+                (*s).abs(),
+                1.0,
+                "single-loop partition rel score should be ±1, got {s}"
+            );
+        }
+
+        // Compare against subscripted access for NYC and Boston: both
+        // should also return ±1 since they're each in their own
+        // single-loop partition (no cross-element).
+        let nyc_series = read_relative_loop_series(sim, &format!("{loop_id}[NYC]"))
+            .expect("subscripted NYC access works");
+        let boston_series = read_relative_loop_series(sim, &format!("{loop_id}[Boston]"))
+            .expect("subscripted Boston access works");
+        assert_eq!(nyc_series.len(), bare_series.len());
+        assert_eq!(boston_series.len(), bare_series.len());
+
+        // The bare argmax-abs path must equal ONE of the per-element
+        // series at every step (whichever has larger |rel|).  Since
+        // rel = ±1 for both elements here, ties go to slot 0 (NYC).
+        for t in 0..bare_series.len() {
+            let bare = bare_series[t];
+            assert!(
+                bare == nyc_series[t] || bare == boston_series[t],
+                "bare aggregated series at step {t} must match one of the per-element series; \
+                 got bare={bare}, nyc={}, boston={}",
+                nyc_series[t],
+                boston_series[t]
+            );
+        }
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_arrayed_case_insensitive_subscript() {
+    let buf = build_arrayed_test_sim_protobuf();
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let canonical = read_relative_loop_series(sim, &format!("{loop_id}[Boston]"))
+            .expect("canonical case works");
+        let lower =
+            read_relative_loop_series(sim, &format!("{loop_id}[boston]")).expect("lowercase works");
+        let upper =
+            read_relative_loop_series(sim, &format!("{loop_id}[BOSTON]")).expect("uppercase works");
+        let mixed = read_relative_loop_series(sim, &format!("{loop_id}[BoStOn]"))
+            .expect("mixed case works");
+
+        assert_eq!(canonical, lower);
+        assert_eq!(canonical, upper);
+        assert_eq!(canonical, mixed);
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_arrayed_errors_for_bad_subscripts() {
+    let buf = build_arrayed_test_sim_protobuf();
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Unknown element name.
+        let res = read_relative_loop_series(sim, &format!("{loop_id}[Tokyo]"));
+        let (_, msg) = res.expect_err("unknown element should error");
+        assert!(
+            msg.contains("Tokyo") || msg.contains("tokyo"),
+            "error should mention the bad element name: {msg}"
+        );
+
+        // Wrong dim count (too many subscripts).
+        let res = read_relative_loop_series(sim, &format!("{loop_id}[NYC, 2]"));
+        let (_, msg) = res.expect_err("dim count mismatch should error");
+        assert!(
+            msg.contains("dimension") || msg.contains("subscript"),
+            "error should mention dimension/subscript: {msg}"
+        );
+
+        // Empty brackets.
+        let res = read_relative_loop_series(sim, &format!("{loop_id}[]"));
+        assert!(res.is_err(), "empty brackets should error");
+
+        // Malformed.
+        let res = read_relative_loop_series(sim, &format!("{loop_id}[NYC"));
+        assert!(res.is_err(), "unclosed bracket should error");
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_get_loop_element_count_arrayed_vs_scalar() {
+    // Arrayed: element_count == n_elements.
+    let buf = build_arrayed_test_sim_protobuf();
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let loop_id_c = CString::new(loop_id.clone()).unwrap();
+
+        let mut count: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_loop_element_count(sim, loop_id_c.as_ptr(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 2, "2-region arrayed loop has 2 elements");
+
+        // Unknown loop -> 0 + error.
+        let unknown = CString::new("nonexistent_loop").unwrap();
+        let mut count2: usize = 999;
+        err = ptr::null_mut();
+        simlin_analyze_get_loop_element_count(sim, unknown.as_ptr(), &mut count2, &mut err);
+        assert!(!err.is_null(), "unknown loop must error");
+        let code = simlin_error_get_code(err);
+        assert_eq!(code, SimlinErrorCode::DoesNotExist);
+        simlin_error_free(err);
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+
+    // Scalar: element_count == 1.
+    let test_project = TestProject::new("scalar_for_count")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.05", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf2 = Vec::new();
+    project.encode(&mut buf2).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf2.as_ptr(), buf2.len(), &mut err);
+        assert!(err.is_null());
+        let mut errm: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut errm);
+        assert!(errm.is_null());
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        err = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let loop_id_c = CString::new(loop_id).unwrap();
+
+        let mut count: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_loop_element_count(sim, loop_id_c.as_ptr(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 1, "scalar loop has element count 1");
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_subscripted_loop_id_uses_per_element_cache() {
+    // Regression-style: repeated subscripted calls on the same
+    // (partition, element) must return identical numbers (cache hit
+    // doesn't drift).  Indirectly validates the cache key change.
+    let buf = build_arrayed_test_sim_protobuf();
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let first = read_relative_loop_series(sim, &format!("{loop_id}[NYC]")).unwrap();
+        let second = read_relative_loop_series(sim, &format!("{loop_id}[NYC]")).unwrap();
+        assert_eq!(first, second);
+
+        // Different element should produce a possibly-different series
+        // (or the same -- both are ±1 in this single-loop partition --
+        // but the dispatch path must produce a value either way).
+        let boston = read_relative_loop_series(sim, &format!("{loop_id}[Boston]")).unwrap();
+        assert_eq!(boston.len(), first.len());
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

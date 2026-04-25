@@ -308,17 +308,28 @@ pub(crate) struct SimState {
     /// `loop_partitions` intentionally), or when compilation
     /// itself failed.
     pub(crate) loop_partitions: HashMap<String, Option<usize>>,
-    /// Per-cycle-partition denominators cached across FFI calls to
+    /// Snapshot of per-loop dimension metadata taken at
+    /// `simlin_sim_new` time.  Used by the FFI subscript resolver to
+    /// turn a user-supplied loop ID like `r1[Boston]` into a slot
+    /// offset within the loop_score's `n_slots`.  Empty when LTM was
+    /// not enabled or compilation failed; loop_score variables that
+    /// weren't generated (e.g. discovery mode) are simply absent
+    /// from the map and the resolver naturally falls back to the
+    /// "loop unknown" error.
+    pub(crate) loop_element_index: HashMap<String, engine::ltm_post::LoopElementIndex>,
+    /// Per-element partition denominators cached across FFI calls to
     /// `simlin_analyze_get_relative_loop_score`.  The rel-loop-score
     /// definition is `loop_score / Σ|loop_score|` *within a cycle
-    /// partition*, so the numerator is per-loop but the denominator
-    /// is per-partition; keying the cache on partition turns repeated
-    /// FFI queries (e.g. pysimlin's `_populate_loop_behavior` loop over
-    /// every loop in the project) from O(L² × T) to O(L × T) amortized.
-    /// Invalidated in lockstep with `results`: cleared on
-    /// `simlin_sim_run_to_end`, `simlin_sim_reset`, and
+    /// partition*, evaluated at a specific element slot for arrayed
+    /// loops.  Keying on `(partition, element_index)` lets repeated
+    /// FFI queries against the same partition+element reuse the
+    /// expensive sum.  pysimlin's `_populate_loop_behavior` walks
+    /// every loop in a project; with this cache the per-partition
+    /// sum is computed once per element and reused across all
+    /// member loops.  Invalidated in lockstep with `results`:
+    /// cleared on `simlin_sim_run_to_end`, `simlin_sim_reset`, and
     /// `simlin_sim_set_value_by_offset`.
-    pub(crate) cached_partition_denominators: HashMap<Option<usize>, Vec<f64>>,
+    pub(crate) cached_partition_denominators: HashMap<(Option<usize>, usize), Vec<f64>>,
 }
 
 /// Opaque simulation structure

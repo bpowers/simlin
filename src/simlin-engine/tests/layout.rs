@@ -767,6 +767,157 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
     );
 }
 
+/// Issue #463 contract test: for arrayed loops, the layout's
+/// `importance_series` is computed by aggregating per-element relative
+/// loop scores via signed argmax-abs across slots.
+///
+/// Verifies two properties:
+///   1. Contract: importance_series equals the manually-computed
+///      argmax-abs aggregation of the per-element rel scores.
+///   2. Bite: at least one arrayed loop's importance_series differs
+///      from a hypothetical slot-0-only collapse at some step.  This
+///      proves the layout actually picks the dominant element rather
+///      than reading slot 0 -- if the implementation regressed to
+///      slot-0-only, this would fail because slot 0 ≠ argmax-abs for
+///      the heterogeneous-rate fixture.
+#[test]
+fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
+    use simlin_engine::Vm;
+    use simlin_engine::db::{
+        compile_project_incremental, model_ltm_variables, project_datamodel_dims,
+        set_project_ltm_enabled,
+    };
+    use simlin_engine::layout::compute_metadata;
+    use simlin_engine::ltm_post;
+    use std::collections::HashMap;
+
+    let project = load_project("test/arrayed_population_ltm/arrayed_population.stmx");
+
+    let metadata = compute_metadata(&project, MAIN_MODEL, None)
+        .expect("compute_metadata should return Some for a valid project");
+    assert!(
+        !metadata.feedback_loops.is_empty(),
+        "fixture should yield detected feedback loops"
+    );
+
+    // Parallel pipeline: compute the per-element rel scores ourselves and
+    // aggregate via the same argmax-abs rule the layout is contracted to use.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, MAIN_MODEL).unwrap();
+    let source_model = sync.models[MAIN_MODEL].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let loop_partitions = ltm_vars.loop_partitions.clone();
+
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    let dim_size: HashMap<String, usize> = dm_dims
+        .iter()
+        .map(|d| (d.name().to_string(), d.len()))
+        .collect();
+    let prefix = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
+    let n_slots_by_loop: HashMap<String, usize> = ltm_vars
+        .vars
+        .iter()
+        .filter_map(|v| {
+            let id = v.name.strip_prefix(prefix)?;
+            let n = if v.dimensions.is_empty() {
+                1
+            } else {
+                v.dimensions
+                    .iter()
+                    .map(|d| dim_size.get(d).copied().unwrap_or(1))
+                    .product()
+            };
+            Some((id.to_string(), n))
+        })
+        .collect();
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let per_elem =
+        ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+    let slot0_only = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+
+    // (1) Contract: for every detected loop, importance_series must equal
+    //     the argmax-abs aggregation of the per-element series.
+    for fl in &metadata.feedback_loops {
+        let n = n_slots_by_loop.get(&fl.name).copied().unwrap_or(1).max(1);
+        let series = per_elem.get(&fl.name).cloned().unwrap_or_default();
+        if series.is_empty() {
+            assert!(
+                fl.importance_series.is_empty(),
+                "loop {} has no per-element series but importance_series is non-empty",
+                fl.name
+            );
+            continue;
+        }
+        let n_steps = series.len() / n;
+        let expected: Vec<f64> = (0..n_steps)
+            .map(|t| {
+                let mut best = 0.0_f64;
+                let mut best_abs = -1.0_f64;
+                for k in 0..n {
+                    let v = series[t * n + k];
+                    if v.abs() > best_abs {
+                        best_abs = v.abs();
+                        best = v;
+                    }
+                }
+                if best.is_finite() { best } else { 0.0 }
+            })
+            .collect();
+
+        assert_eq!(
+            fl.importance_series.len(),
+            expected.len(),
+            "loop {} importance_series length mismatch",
+            fl.name
+        );
+        for (t, (actual, exp)) in fl.importance_series.iter().zip(&expected).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-9 || (actual.is_nan() && exp.is_nan()),
+                "loop {} step {}: importance_series {} != argmax-abs {}",
+                fl.name,
+                t,
+                actual,
+                exp
+            );
+        }
+    }
+
+    // (2) Bite: at least one arrayed loop's importance_series must differ
+    //     from a slot-0-only collapse at some step.  If the layout still
+    //     read slot 0, this would fail because slot 0 and argmax-abs would
+    //     be identical for every loop -- which is precisely what the
+    //     pre-tech-debt-#34 engine bug used to make true accidentally.
+    let any_arrayed = metadata
+        .feedback_loops
+        .iter()
+        .any(|fl| n_slots_by_loop.get(&fl.name).copied().unwrap_or(1) > 1);
+    assert!(
+        any_arrayed,
+        "fixture must produce at least one arrayed feedback loop"
+    );
+    let any_diff = metadata.feedback_loops.iter().any(|fl| {
+        if n_slots_by_loop.get(&fl.name).copied().unwrap_or(1) <= 1 {
+            return false;
+        }
+        let slot0 = slot0_only.get(&fl.name).cloned().unwrap_or_default();
+        fl.importance_series
+            .iter()
+            .zip(&slot0)
+            .any(|(a, s)| (a - s).abs() > 1e-9)
+    });
+    assert!(
+        any_diff,
+        "expected at least one arrayed loop's importance_series to differ from its slot-0 collapse, \
+         which proves the layout uses argmax-abs aggregation rather than reading slot 0"
+    );
+}
+
 #[test]
 fn test_from_existing_view_sir_round_trip() {
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");

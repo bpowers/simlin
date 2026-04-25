@@ -227,6 +227,30 @@ void simlin_analyze_get_rel_loop_score(SimlinSim *sim,
                                        uintptr_t *out_written,
                                        SimlinError **out_error);
 
+// Get the number of element slots a loop's `loop_score` series occupies.
+//
+// For scalar loops this is 1; for arrayed (A2A) loops it equals the
+// product of the loop's dimension lengths.  Used by callers (pysimlin,
+// the TS engine) to detect whether a loop supports subscripted access
+// (`r1[Boston]`) or only bare ID access.
+//
+// Errors with `DoesNotExist` if the loop_id is not present in the
+// snapshot captured at `simlin_sim_new` time -- typically because the
+// sim was created with `enable_ltm = false`, the loop was added in a
+// later patch (the snapshot is bound to compilation-era loops), or
+// the LTM pipeline auto-flipped to discovery mode (which doesn't
+// emit loop_score variables).
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+// - `loop_id` must be a valid null-terminated C string
+// - `out_element_count` must be a valid pointer to a usize
+// - `out_error` may be null or a valid pointer to a SimlinError pointer
+void simlin_analyze_get_loop_element_count(SimlinSim *sim,
+                                           const char *loop_id,
+                                           uintptr_t *out_element_count,
+                                           SimlinError **out_error);
+
 // simlin_error_str returns a string representation of an error code.
 // The returned string must not be freed or modified.
 //

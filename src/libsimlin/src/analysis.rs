@@ -8,6 +8,7 @@
 //! and relative loop scores from a simulation.
 
 use simlin_engine::{self as engine, canonicalize};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::ptr;
@@ -393,7 +394,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     }
 
     let sim_ref = ffi_try!(out_error, require_sim(sim));
-    let loop_id = match CStr::from_ptr(loop_id).to_str() {
+    let raw_loop_id = match CStr::from_ptr(loop_id).to_str() {
         Ok(s) => s,
         Err(_) => {
             store_error(
@@ -405,32 +406,133 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
+    // Parse the loop ID -- callers may pass a bare ID (`r1`) or a
+    // subscripted form (`r1[Boston]`, `r1[Boston, 2]`) to address a
+    // specific element of an arrayed loop.  Issue #463.
+    let parsed = match parse_subscripted_loop_id(raw_loop_id) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = match e {
+                LoopIdParseError::Malformed => format!(
+                    "loop_id '{raw_loop_id}' is malformed: expected `id` or `id[subscript, ...]`"
+                ),
+                LoopIdParseError::EmptyBrackets => format!(
+                    "loop_id '{raw_loop_id}' has empty brackets; specify at least one subscript"
+                ),
+                LoopIdParseError::UnsupportedSyntax => {
+                    format!("loop_id '{raw_loop_id}' uses unsupported subscript syntax")
+                }
+                LoopIdParseError::EmptySubscript => {
+                    format!("loop_id '{raw_loop_id}' has an empty subscript inside brackets")
+                }
+            };
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
+            );
+            return;
+        }
+    };
+
     // `rel_loop_score` is no longer materialized as a VM-computed
     // variable (it caused O(P²) compile-time text blowup on dense
     // models; see
     // docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  We
     // derive it post-hoc from the `loop_score` series the VM wrote,
-    // using the cycle-partition snapshot captured on SimState at
-    // sim_new time.  Reading from the snapshot (rather than
-    // re-querying `model_ltm_variables` against the current project
-    // DB) keeps score lookups consistent with the VM's results even
-    // when the project has been patched since the simulation was
-    // created -- model renames, variable deletions, or loop-structure
-    // changes in later patches cannot invalidate a query whose
-    // results already exist.
+    // using the cycle-partition snapshot and per-loop slot metadata
+    // captured on SimState at sim_new time.  Reading from snapshots
+    // (rather than re-querying `model_ltm_variables` against the
+    // current project DB) keeps score lookups consistent with the
+    // VM's results even when the project has been patched since the
+    // simulation was created -- model renames, variable deletions,
+    // or loop-structure changes in later patches cannot invalidate
+    // a query whose results already exist.
     let mut state_guard = sim_ref.state.lock().unwrap();
-    // Borrow-split so we can read snapshot + results while we
-    // mutate the cache in the same scope.
     let state = &mut *state_guard;
 
-    let Some(&partition_key) = state.loop_partitions.get(loop_id) else {
+    let Some(&partition_key) = state.loop_partitions.get(parsed.base) else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                "loop '{loop_id}' does not have relative score data"
+                "loop '{}' does not have relative score data",
+                parsed.base
             )),
         );
         return;
+    };
+
+    // Look up the loop's dim metadata.  Loops without an entry are
+    // treated as scalar (n_slots=1) via the `unwrap_or` fallback below
+    // so legacy bare-ID callers on scalar models continue to work
+    // even if the snapshot wasn't populated for some reason.
+    let element_meta = state.loop_element_index.get(parsed.base).cloned();
+    let n_slots = element_meta.as_ref().map(|m| m.n_slots).unwrap_or(1).max(1);
+
+    // Resolve the requested element_index based on the parsed
+    // subscripts and the loop's actual dimensionality.  Three cases:
+    //   1. No subscripts on a scalar loop -> element 0.
+    //   2. No subscripts on an arrayed loop -> aggregate via argmax-abs
+    //      across all slots.  Encoded as `None` here; the dispatch
+    //      below recognizes it.
+    //   3. Subscripts -> resolve to a specific slot via LoopElementIndex.
+    let element_index: Option<usize> = if parsed.subscripts.is_empty() {
+        if n_slots <= 1 {
+            Some(0)
+        } else {
+            None // arrayed bare ID: aggregator
+        }
+    } else {
+        let Some(meta) = element_meta.as_ref() else {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+                    "loop '{}' is not arrayed; subscripts are not allowed",
+                    parsed.base
+                )),
+            );
+            return;
+        };
+        match meta.resolve(&parsed.subscripts) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                let msg = match e {
+                    engine::ltm_post::ResolveError::DimCountMismatch { expected, got } => {
+                        if expected == 0 {
+                            format!(
+                                "loop '{}' is not arrayed; subscripts are not allowed",
+                                parsed.base
+                            )
+                        } else {
+                            format!(
+                                "loop '{}' has {} dimension(s) but {} subscript(s) were provided",
+                                parsed.base, expected, got
+                            )
+                        }
+                    }
+                    engine::ltm_post::ResolveError::ElementNotFound { dim, value } => format!(
+                        "loop '{}' dimension '{}' has no element '{}'",
+                        parsed.base, dim, value
+                    ),
+                    engine::ltm_post::ResolveError::IndexOutOfRange { dim, value, max } => {
+                        format!(
+                            "loop '{}' dimension '{}' index '{}' is out of range (1..={})",
+                            parsed.base, dim, value, max
+                        )
+                    }
+                    engine::ltm_post::ResolveError::InvalidIntegerSubscript { dim, value } => {
+                        format!(
+                            "loop '{}' dimension '{}' expects a 1-based integer subscript, got '{}'",
+                            parsed.base, dim, value
+                        )
+                    }
+                };
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
+                );
+                return;
+            }
+        }
     };
 
     let Some(ref results) = state.results else {
@@ -442,35 +544,114 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     };
 
-    // Populate the per-partition denominator lazily: the first FFI
-    // call touching partition P pays O(loops_in_P × step_count); all
-    // subsequent calls for any loop in P (common pattern: pysimlin's
-    // `_populate_loop_behavior` iterates every loop) reuse the
-    // cached vector and cost only the numerator pass.
-    let partitions_snapshot = &state.loop_partitions;
-    let denom = state
-        .cached_partition_denominators
-        .entry(partition_key)
-        .or_insert_with(|| {
-            let loop_ids_in_partition = partitions_snapshot.iter().filter_map(|(id, pk)| {
+    // Compute the per-partition denominator at element_k, lazily
+    // populating the cache.  Each cache entry is the partition sum at
+    // a specific element slot, evaluated against `results`.  Member
+    // loops contribute their own slot k for k < their n_slots, or
+    // their last slot when the partition's max is larger (this matches
+    // the broadcast convention `compute_rel_loop_scores_per_element`
+    // uses).
+    fn ensure_denom_for_element(
+        cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
+        results: &engine::Results,
+        loop_partitions: &HashMap<String, Option<usize>>,
+        element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
+        partition_key: Option<usize>,
+        element_k: usize,
+    ) -> Vec<f64> {
+        if let Some(cached) = cache.get(&(partition_key, element_k)) {
+            return cached.clone();
+        }
+        let members: Vec<(&str, usize)> = loop_partitions
+            .iter()
+            .filter_map(|(id, pk)| {
                 if *pk == partition_key {
-                    Some(id.as_str())
+                    let n = element_index_map
+                        .get(id)
+                        .map(|m| m.n_slots)
+                        .unwrap_or(1)
+                        .max(1);
+                    Some((id.as_str(), n))
                 } else {
                     None
                 }
-            });
-            engine::ltm_post::compute_partition_denominator(results, loop_ids_in_partition)
-        });
-
-    let Some(series) = engine::ltm_post::compute_rel_loop_score_for_id(results, loop_id, denom)
-    else {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                "loop '{loop_id}' does not have relative score data"
-            )),
+            })
+            .collect();
+        let denom = engine::ltm_post::compute_partition_denominator_for_element(
+            results,
+            members.iter().copied(),
+            element_k,
         );
-        return;
+        cache.insert((partition_key, element_k), denom.clone());
+        denom
+    }
+
+    // Borrow-split so cache mutation doesn't conflict with the
+    // results / partition / element-index reads.
+    let series = match element_index {
+        Some(k) => {
+            let denom = ensure_denom_for_element(
+                &mut state.cached_partition_denominators,
+                results,
+                &state.loop_partitions,
+                &state.loop_element_index,
+                partition_key,
+                k,
+            );
+            match engine::ltm_post::compute_rel_loop_score_for_element(
+                results,
+                parsed.base,
+                n_slots,
+                k,
+                &denom,
+            ) {
+                Some(s) => s,
+                None => {
+                    store_error(
+                        out_error,
+                        SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                            "loop '{}' does not have relative score data",
+                            parsed.base
+                        )),
+                    );
+                    return;
+                }
+            }
+        }
+        None => {
+            // Argmax-abs aggregator over all slots.
+            let mut denoms: Vec<Vec<f64>> = Vec::with_capacity(n_slots);
+            for k in 0..n_slots {
+                let denom = ensure_denom_for_element(
+                    &mut state.cached_partition_denominators,
+                    results,
+                    &state.loop_partitions,
+                    &state.loop_element_index,
+                    partition_key,
+                    k,
+                );
+                denoms.push(denom);
+            }
+            let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+            match engine::ltm_post::compute_rel_loop_score_argmax_abs(
+                results,
+                parsed.base,
+                n_slots,
+                &denom_refs,
+            ) {
+                Some(s) => s,
+                None => {
+                    store_error(
+                        out_error,
+                        SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                            "loop '{}' does not have relative score data",
+                            parsed.base
+                        )),
+                    );
+                    return;
+                }
+            }
+        }
     };
 
     let count = std::cmp::min(series.len(), len);
@@ -497,4 +678,272 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
     out_error: *mut *mut SimlinError,
 ) {
     simlin_analyze_get_relative_loop_score(sim, loop_id, results_ptr, len, out_written, out_error);
+}
+
+/// Get the number of element slots a loop's `loop_score` series occupies.
+///
+/// For scalar loops this is 1; for arrayed (A2A) loops it equals the
+/// product of the loop's dimension lengths.  Used by callers (pysimlin,
+/// the TS engine) to detect whether a loop supports subscripted access
+/// (`r1[Boston]`) or only bare ID access.
+///
+/// Errors with `DoesNotExist` if the loop_id is not present in the
+/// snapshot captured at `simlin_sim_new` time -- typically because the
+/// sim was created with `enable_ltm = false`, the loop was added in a
+/// later patch (the snapshot is bound to compilation-era loops), or
+/// the LTM pipeline auto-flipped to discovery mode (which doesn't
+/// emit loop_score variables).
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+/// - `loop_id` must be a valid null-terminated C string
+/// - `out_element_count` must be a valid pointer to a usize
+/// - `out_error` may be null or a valid pointer to a SimlinError pointer
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_loop_element_count(
+    sim: *mut SimlinSim,
+    loop_id: *const c_char,
+    out_element_count: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_element_count.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_element_count pointer must not be NULL"),
+        );
+        return;
+    }
+    if loop_id.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("loop_id pointer must not be NULL"),
+        );
+        return;
+    }
+    let sim_ref = ffi_try!(out_error, require_sim(sim));
+    let loop_id_str = match CStr::from_ptr(loop_id).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("loop_id is not valid UTF-8"),
+            );
+            return;
+        }
+    };
+    let state = sim_ref.state.lock().unwrap();
+    match state.loop_element_index.get(loop_id_str) {
+        Some(meta) => *out_element_count = meta.n_slots,
+        None => {
+            *out_element_count = 0;
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "loop '{loop_id_str}' is not present in the LTM snapshot"
+                )),
+            );
+        }
+    }
+}
+
+/// Result of parsing a subscripted loop ID like `r1[Boston, 2]` -> (`"r1"`, `["Boston", "2"]`).
+///
+/// The returned slices borrow from `input`; subscripts are trimmed of
+/// surrounding whitespace but preserved in their original case.  Element-name
+/// canonicalization happens later in the resolver step.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ParsedLoopId<'a> {
+    pub base: &'a str,
+    pub subscripts: Vec<&'a str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LoopIdParseError {
+    /// Trailing or unmatched brackets, like `r1[` or `r1]`.
+    Malformed,
+    /// `r1[]` -- empty subscript lists are not allowed.
+    EmptyBrackets,
+    /// `r1[a][b]` or `[r1]` -- nesting / leading bracket rejected.
+    UnsupportedSyntax,
+    /// `r1[a,]` or `r1[a,,b]` -- empty subscripts inside the bracket.
+    EmptySubscript,
+}
+
+/// Parse a loop ID with optional bracketed subscripts.
+///
+/// - `"r1"` -> ParsedLoopId { base: "r1", subscripts: [] }
+/// - `"r1[Boston]"` -> { base: "r1", subscripts: ["Boston"] }
+/// - `"r1[Boston, 2]"` -> { base: "r1", subscripts: ["Boston", "2"] }
+/// - whitespace inside brackets is trimmed
+/// - returns Err for malformed input (unclosed brackets, nested, empty)
+///
+/// The base ID and the subscripts are returned as borrowed slices into
+/// `input`; canonicalization happens at the resolver step.
+pub(crate) fn parse_subscripted_loop_id(input: &str) -> Result<ParsedLoopId<'_>, LoopIdParseError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(LoopIdParseError::Malformed);
+    }
+    if trimmed.starts_with('[') {
+        return Err(LoopIdParseError::UnsupportedSyntax);
+    }
+    let Some(open_pos) = trimmed.find('[') else {
+        // No brackets at all.  Reject lingering `]` on a bare ID.
+        if trimmed.contains(']') {
+            return Err(LoopIdParseError::Malformed);
+        }
+        return Ok(ParsedLoopId {
+            base: trimmed,
+            subscripts: Vec::new(),
+        });
+    };
+    let base = &trimmed[..open_pos];
+    let after_open = &trimmed[open_pos + 1..];
+    let Some(close_pos) = after_open.rfind(']') else {
+        return Err(LoopIdParseError::Malformed);
+    };
+    // Reject anything past the closing bracket -- e.g. `r1[a]b` or `r1[a][b]`.
+    if !after_open[close_pos + 1..].trim().is_empty() {
+        return Err(LoopIdParseError::UnsupportedSyntax);
+    }
+    let inner = &after_open[..close_pos];
+    // Reject nested brackets inside the subscript list.
+    if inner.contains('[') {
+        return Err(LoopIdParseError::UnsupportedSyntax);
+    }
+    if inner.trim().is_empty() {
+        return Err(LoopIdParseError::EmptyBrackets);
+    }
+    let mut subscripts: Vec<&str> = Vec::new();
+    for part in inner.split(',') {
+        let trimmed_part = part.trim();
+        if trimmed_part.is_empty() {
+            return Err(LoopIdParseError::EmptySubscript);
+        }
+        subscripts.push(trimmed_part);
+    }
+    Ok(ParsedLoopId { base, subscripts })
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn parses_bare_id() {
+        let parsed = parse_subscripted_loop_id("r1").unwrap();
+        assert_eq!(parsed.base, "r1");
+        assert!(parsed.subscripts.is_empty());
+    }
+
+    #[test]
+    fn parses_single_subscript() {
+        let parsed = parse_subscripted_loop_id("r1[Boston]").unwrap();
+        assert_eq!(parsed.base, "r1");
+        assert_eq!(parsed.subscripts, vec!["Boston"]);
+    }
+
+    #[test]
+    fn parses_multi_subscript() {
+        let parsed = parse_subscripted_loop_id("r1[Boston, 2]").unwrap();
+        assert_eq!(parsed.base, "r1");
+        assert_eq!(parsed.subscripts, vec!["Boston", "2"]);
+    }
+
+    #[test]
+    fn trims_internal_whitespace() {
+        let parsed = parse_subscripted_loop_id("r1[  Boston  ,   2  ]").unwrap();
+        assert_eq!(parsed.subscripts, vec!["Boston", "2"]);
+    }
+
+    #[test]
+    fn trims_outer_whitespace() {
+        let parsed = parse_subscripted_loop_id("  r1[Boston]  ").unwrap();
+        assert_eq!(parsed.base, "r1");
+        assert_eq!(parsed.subscripts, vec!["Boston"]);
+    }
+
+    #[test]
+    fn rejects_empty_input() {
+        assert_eq!(
+            parse_subscripted_loop_id(""),
+            Err(LoopIdParseError::Malformed)
+        );
+        assert_eq!(
+            parse_subscripted_loop_id("   "),
+            Err(LoopIdParseError::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_unclosed_bracket() {
+        assert_eq!(
+            parse_subscripted_loop_id("r1[Boston"),
+            Err(LoopIdParseError::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_stray_close_bracket() {
+        assert_eq!(
+            parse_subscripted_loop_id("r1]"),
+            Err(LoopIdParseError::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_leading_bracket() {
+        assert_eq!(
+            parse_subscripted_loop_id("[Boston]"),
+            Err(LoopIdParseError::UnsupportedSyntax)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_brackets() {
+        assert_eq!(
+            parse_subscripted_loop_id("r1[]"),
+            Err(LoopIdParseError::EmptyBrackets)
+        );
+        assert_eq!(
+            parse_subscripted_loop_id("r1[   ]"),
+            Err(LoopIdParseError::EmptyBrackets)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_subscript() {
+        assert_eq!(
+            parse_subscripted_loop_id("r1[Boston,]"),
+            Err(LoopIdParseError::EmptySubscript)
+        );
+        assert_eq!(
+            parse_subscripted_loop_id("r1[,Boston]"),
+            Err(LoopIdParseError::EmptySubscript)
+        );
+        assert_eq!(
+            parse_subscripted_loop_id("r1[a,,b]"),
+            Err(LoopIdParseError::EmptySubscript)
+        );
+    }
+
+    #[test]
+    fn rejects_nested_brackets() {
+        assert_eq!(
+            parse_subscripted_loop_id("r1[a[b]]"),
+            Err(LoopIdParseError::UnsupportedSyntax)
+        );
+    }
+
+    #[test]
+    fn rejects_trailing_after_close() {
+        assert_eq!(
+            parse_subscripted_loop_id("r1[a]b"),
+            Err(LoopIdParseError::UnsupportedSyntax)
+        );
+    }
 }
