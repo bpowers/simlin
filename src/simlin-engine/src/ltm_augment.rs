@@ -1452,4 +1452,53 @@ mod tests {
             build_partial_equation_for_shape(equation, &deps, &source, &RefShape::Wildcard, &[]);
         assert_eq!(partial, "PREVIOUS(population) / sum(population[*])");
     }
+
+    #[test]
+    #[ignore = "Phase 3: per-shape partial equations"]
+    fn test_partial_equation_migration_pressure_fixed_nyc() {
+        // migration_pressure[NYC] = (population[NYC] - population[Boston]) * 0.01
+        // For the FixedIndex(nyc) shape, the `population[nyc]` reference stays
+        // live and `population[boston]` is wrapped in PREVIOUS(). Element names
+        // in the FixedIndex variant are lowercase canonical form -- they must
+        // match the AST subscript text, which `print_ident` lowercases via
+        // `canonicalize`.
+        let equation = "(population[NYC] - population[Boston]) * 0.01";
+        let deps = deps_set(&["population"]);
+        let source = Ident::<Canonical>::new("population");
+        let partial = build_partial_equation_for_shape(
+            equation,
+            &deps,
+            &source,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            &[],
+        );
+        assert_eq!(
+            partial,
+            "(population[nyc] - PREVIOUS(population[boston])) * 0.01"
+        );
+    }
+
+    #[test]
+    #[ignore = "Phase 3: per-shape partial equations"]
+    fn test_partial_equation_migration_pressure_fixed_boston() {
+        // Same equation text as the NYC case -- the per-shape builder works
+        // per (reference-site, shape) pair, so the input equation is the
+        // host expression and the `live_shape` selects which subscripted
+        // population ref survives. Here `FixedIndex(boston)` keeps
+        // `population[boston]` live and wraps `population[nyc]`.
+        let equation = "(population[NYC] - population[Boston]) * 0.01";
+        let deps = deps_set(&["population"]);
+        let source = Ident::<Canonical>::new("population");
+        let partial = build_partial_equation_for_shape(
+            equation,
+            &deps,
+            &source,
+            &RefShape::FixedIndex(vec!["boston".to_string()]),
+            &[],
+        );
+        assert_eq!(
+            partial,
+            "(PREVIOUS(population[nyc]) - population[boston]) * 0.01"
+        );
+    }
 }
