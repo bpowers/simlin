@@ -930,6 +930,19 @@ mod tests {
         Dimension::Indexed(CanonicalDimensionName::from_raw(name), size)
     }
 
+    /// Build a `HashSet<Ident<Canonical>>` from string slices for use in
+    /// per-shape partial-equation tests. Each input string is canonicalized
+    /// via `Ident::new`, matching the wrapping path that
+    /// `build_partial_equation_for_shape` exercises in Phase 3.
+    ///
+    /// Marked `#[allow(dead_code)]` because the only callers are the
+    /// `#[ignore]`-d Phase 3 tests added in Tasks 5 and 6; the attribute
+    /// is removed once Phase 3 activates those tests.
+    #[allow(dead_code)]
+    fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
+        idents.iter().map(|s| Ident::new(s)).collect()
+    }
+
     // -- dimension_element_names tests --
 
     #[test]
