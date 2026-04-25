@@ -343,6 +343,130 @@ Acceptance: docs reflect the new design; tech-debt index is current.
 Acceptance: clean commit; pre-commit passes; `cargo test --workspace`
 passes within the 3-minute cap.
 
+## Acceptance Criteria
+
+The slug for this work is `ltm-per-ref-elem-graph`. All AC identifiers
+below use that scope.
+
+### ltm-per-ref-elem-graph.AC1: Element-edge structure is per-AST-reference
+
+- **ltm-per-ref-elem-graph.AC1.1 Fixed-index broadcast not over-expanded:**
+  For `relative_pop[R] = population / population[NYC]` over a dimension
+  R of size N, the element-graph must contain exactly the diagonal
+  same-element edges (`population[d] -> relative_pop[d]` for each d in
+  R) plus the broadcast-from-NYC edges (`population[NYC] -> relative_pop[d]`
+  for each d in R, deduplicated). Total unique edges: 2N − 1, not N².
+- **ltm-per-ref-elem-graph.AC1.2 Wildcard reducer remains all-pairs:**
+  For `share[R] = population / SUM(population[*])`, the wildcard
+  reducer continues to emit all-pairs edges from every source element
+  to every target element (`population[d] -> share[e]` for all d, e),
+  *in addition to* the diagonal SameElement edges. The bare-Var
+  numerator's diagonal edges must not be lost.
+- **ltm-per-ref-elem-graph.AC1.3 Cross-element fixture edge set:**
+  For `test/cross_element_ltm/cross_element.stmx`, the element graph
+  must contain the truthful broadcast edges for every fixed-index
+  reference (`population[NYC] -> migration_pressure[d]`,
+  `migration_pressure[Boston] -> migration_in[NYC]`, etc.) and must NOT
+  contain the spurious all-pairs edges that today's code produces.
+- **ltm-per-ref-elem-graph.AC1.4 Variable-level projection invariant:**
+  For every project, the set of variable-level edges produced by
+  stripping subscripts and deduplicating from
+  `model_element_causal_edges` equals the set produced by
+  `model_causal_edges`. Verified with property tests over randomly
+  generated arrayed models.
+- **ltm-per-ref-elem-graph.AC1.5 Multidim partial-fixed conservative:**
+  For multidimensional sources where some indices are literal and
+  others are wildcards (e.g., `source[NYC, *]`), the conservative
+  initial behavior is to treat as Wildcard shape. Documented with a
+  TODO; not a regression vs today.
+
+### ltm-per-ref-elem-graph.AC2: Per-shape partial equations are correct
+
+- **ltm-per-ref-elem-graph.AC2.1 Bare-shape partial holds wildcard at PREVIOUS:**
+  For `share[R] = population / SUM(population[*])` and the link score
+  keyed by `(population, share, Bare)`, the partial equation must
+  leave the bare `population` reference live and wrap the
+  `population[*]` inside the SUM in `PREVIOUS()`. The resulting
+  link-score magnitude is partition-aware and not pinned at 1.
+- **ltm-per-ref-elem-graph.AC2.2 Wildcard-shape partial holds bare at PREVIOUS:**
+  For the same equation, the link score keyed by
+  `(population, share, Wildcard)` must wrap the bare `population` in
+  `PREVIOUS()` and leave the wildcard reducer live.
+- **ltm-per-ref-elem-graph.AC2.3 FixedIndex per-element partials:**
+  For `migration_pressure[NYC] = (pop[NYC] - pop[Boston]) * 0.01`, the
+  link score keyed by `(pop, migration_pressure, FixedIndex(NYC))`
+  must yield partial `(pop[NYC] - PREVIOUS(pop[Boston])) * 0.01`. The
+  link score keyed by `(pop, migration_pressure, FixedIndex(Boston))`
+  must yield partial `(PREVIOUS(pop[NYC]) - pop[Boston]) * 0.01`.
+- **ltm-per-ref-elem-graph.AC2.4 Other-source refs still wrapped:**
+  Every reference to a variable other than the link's `from` must
+  continue to be wrapped in `PREVIOUS()` regardless of `RefShape`,
+  preserving the ceteris-paribus invariant.
+
+### ltm-per-ref-elem-graph.AC3: Link score variables track shapes
+
+- **ltm-per-ref-elem-graph.AC3.1 Per-shape link score emission:**
+  When a target equation references a source under multiple distinct
+  `RefShape`s, `model_ltm_variables` must emit one `LtmSyntheticVar`
+  per `(from, to, RefShape)` tuple, with the appropriate naming
+  convention.
+- **ltm-per-ref-elem-graph.AC3.2 FixedIndex naming convention:**
+  FixedIndex link scores use the existing per-element naming
+  `$⁚ltm⁚link_score⁚{from}[{elem}]→{to}` (already used by
+  `try_cross_dimensional_link_scores`). No name-format changes are
+  introduced; the discovery parser handles the new entries without
+  modification.
+- **ltm-per-ref-elem-graph.AC3.3 Bare and Wildcard share existing names:**
+  Bare-shape and Wildcard-shape link scores use the existing
+  un-subscripted-from naming. When both shapes appear for the same
+  `(from, to)` pair, only one variable is needed if the partial
+  equations are consolidatable; if they are not, two distinct names
+  must coexist (decision documented in implementation plan).
+
+### ltm-per-ref-elem-graph.AC4: Loop detection consumes the new edge set
+
+- **ltm-per-ref-elem-graph.AC4.1 A2A loops still detected:**
+  Pure-A2A loops (e.g., `population[d] -> births[d] -> population[d]`)
+  continue to be detected and classified as A2A loops with shared IDs
+  in `build_element_level_loops`.
+- **ltm-per-ref-elem-graph.AC4.2 Legitimate cross-element loops detected:**
+  The cross-element fixture's intended cross-element loops (going
+  through `migration_pressure[*]` and `migration_in[*]` with literal
+  index references) are detected and classified as scalar mixed loops.
+  The spurious cross-element loops induced by today's all-pairs
+  expansion disappear from the output.
+- **ltm-per-ref-elem-graph.AC4.3 Existing simulate_ltm tests pass:**
+  All tests in `src/simlin-engine/tests/simulate_ltm.rs` pass without
+  modification. Any deliberate loop-count or score-magnitude changes
+  in fixtures are explicitly documented per-test with reasoning.
+
+### ltm-per-ref-elem-graph.AC5: Performance does not regress
+
+- **ltm-per-ref-elem-graph.AC5.1 SCC sizes shrink or stay equal:**
+  On the fixtures `test/cross_element_ltm`, `test/arrayed_population_ltm`,
+  `test/hero_culture_ltm`, and `test/metasd/WRLD3-03/wrld3-03.mdl`, the
+  largest element-graph SCC after the fix is less-than-or-equal-to the
+  size before, measured by a small benchmark. (This phase is
+  measurement-only; no threshold change is required as a gate.)
+- **ltm-per-ref-elem-graph.AC5.2 Pre-commit budget honored:**
+  The pre-commit hook completes successfully and `cargo test --workspace`
+  remains under the 3-minute wall-clock cap.
+
+### ltm-per-ref-elem-graph.AC6: Documentation reflects the new design
+
+- **ltm-per-ref-elem-graph.AC6.1 Design doc updated:**
+  `docs/design/ltm--loops-that-matter.md` "Element-Level Causal Graph"
+  section is rewritten to describe the per-reference walker. The
+  classification table is replaced with the per-reference table from
+  this design plan.
+- **ltm-per-ref-elem-graph.AC6.2 Engine CLAUDE.md updated:**
+  References to `ElementDependencyKind` in `src/simlin-engine/CLAUDE.md`
+  are removed or updated to reflect the new internal naming.
+- **ltm-per-ref-elem-graph.AC6.3 Tech-debt items closed:**
+  `docs/tech-debt.md` items **#20** and **#26** are marked RESOLVED
+  with the resolving commit hash. Item **#25** is updated to reflect
+  the SCC-pressure measurement.
+
 ## Success Criteria
 
 - `test_cross_element_ltm_exhaustive` and `test_cross_element_ltm_discovery`
