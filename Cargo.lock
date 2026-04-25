@@ -2603,6 +2603,7 @@ dependencies = [
  "ignore",
  "serde",
  "serde_json",
+ "simlin-engine",
  "tempfile",
  "tokio",
  "tower",
