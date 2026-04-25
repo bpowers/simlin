@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 pub mod cli;
+pub mod registry;
 
 use axum::Router;
 use axum::http::StatusCode;
