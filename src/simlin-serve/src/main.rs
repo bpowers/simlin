@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -12,6 +13,10 @@ use tracing_subscriber::fmt;
 
 use simlin_serve::build_router;
 use simlin_serve::cli::Args;
+use simlin_serve::git::GitProbe;
+use simlin_serve::handlers::AppState;
+use simlin_serve::registry::ProjectRegistry;
+use simlin_serve::scan::scan_into_registry;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,8 +29,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fmt().with_env_filter(env_filter).init();
 
     // Resolve the root early so a missing/inaccessible cwd surfaces before we
-    // bind a port. Subsequent phases plumb this into ProjectRegistry.
-    let _root = args.root_or_cwd()?;
+    // bind a port. Canonicalize so registry keys and traversal checks share
+    // the same absolute anchor.
+    let resolved_root = args.root_or_cwd()?;
+    let canonical_root = resolved_root.canonicalize()?;
+
+    let registry = Arc::new(ProjectRegistry::new(canonical_root.clone()));
+    let git = Arc::new(GitProbe::detect());
+    if let Err(err) = scan_into_registry(&canonical_root, &registry, &git) {
+        tracing::warn!(error = %err, "initial scan failed; registry starts empty");
+    }
+
+    let state = AppState {
+        registry,
+        git,
+        root: Arc::new(canonical_root),
+    };
 
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], args.port))).await?;
     let bound = listener.local_addr()?;
@@ -37,6 +56,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // semantics from day one.
     }
 
-    axum::serve(listener, build_router()).await?;
+    axum::serve(listener, build_router(state)).await?;
     Ok(())
 }

@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod discovery;
 pub mod git;
+pub mod handlers;
 pub mod registry;
 pub mod scan;
 
@@ -15,13 +16,17 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use tower_http::trace::TraceLayer;
 
-/// Build the HTTP router. Exposed as a library function so integration tests
-/// and future callers can exercise the router without spawning a process or
-/// binding a TCP port.
-pub fn build_router() -> Router {
+use crate::handlers::{AppState, list_projects};
+
+/// Build the HTTP router with the `AppState` shared across all handlers.
+/// Exposed as a library function so integration tests and future callers can
+/// exercise the router without spawning a process or binding a TCP port.
+pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/projects", get(list_projects))
         .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 async fn healthz() -> (StatusCode, &'static str) {
