@@ -4225,6 +4225,104 @@ fn test_cross_element_ltm_exhaustive() {
     );
 }
 
+/// AC1.3 (Phase 1 red test): truthful per-reference element edge set
+/// for the cross-element fixture.
+///
+/// Today's element-graph builder collapses every reference to a source
+/// variable to one `ElementDependencyKind` per (source, target) pair. A
+/// fixed-index reference like `migration_pressure[Boston]` upgrades the
+/// entire edge to `CrossElement`, which then expands to all N x N edges
+/// from every `migration_pressure[*]` to every `migration_in[*]`. Two of
+/// those edges are spurious: `migration_in[NYC]` references only
+/// `migration_pressure[Boston]`, never `migration_pressure[NYC]`.
+///
+/// After Phase 2's AST-walking refactor, the truthful per-reference edges
+/// asserted below become the actual output. The two `assert_no_edge` calls
+/// are the "red" part of this test: they fail today and start passing
+/// when the refactor lands.
+#[test]
+#[ignore = "Phase 2: post AST-walking refactor"]
+fn test_cross_element_ltm_edge_set_truthful() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model = sync
+        .project
+        .models(&db)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist");
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+
+    // Helper closures for readable assertions. Each takes &str instead of
+    // String because the edge-key strings are short and stable; cloning
+    // through `to_string` once per assertion is negligible.
+    let has_edge = |from: &str, to: &str| -> bool {
+        element_edges
+            .edges
+            .get(from)
+            .is_some_and(|targets| targets.contains(to))
+    };
+    let assert_edge = |from: &str, to: &str| {
+        assert!(
+            has_edge(from, to),
+            "expected edge {from} -> {to}, but it was missing.\nedges from '{from}': {:?}",
+            element_edges.edges.get(from)
+        );
+    };
+    let assert_no_edge = |from: &str, to: &str| {
+        assert!(
+            !has_edge(from, to),
+            "expected NO edge {from} -> {to}, but it was present"
+        );
+    };
+
+    // population -> migration_pressure: every element of population is
+    // referenced by at least one migration_pressure equation, so all four
+    // (population[d] -> migration_pressure[e]) edges exist by literal
+    // FixedIndex reference.
+    assert_edge("population[nyc]", "migration_pressure[nyc]");
+    assert_edge("population[boston]", "migration_pressure[nyc]");
+    assert_edge("population[boston]", "migration_pressure[boston]");
+    assert_edge("population[nyc]", "migration_pressure[boston]");
+
+    // migration_pressure -> migration_in: each migration_in equation
+    // references the OTHER region's migration_pressure only. The truthful
+    // edge set is the swap-pair (boston -> nyc, nyc -> boston); the same-
+    // element edges (nyc -> nyc, boston -> boston) are spurious today and
+    // must disappear after the refactor.
+    assert_edge("migration_pressure[boston]", "migration_in[nyc]");
+    assert_edge("migration_pressure[nyc]", "migration_in[boston]");
+    assert_no_edge("migration_pressure[nyc]", "migration_in[nyc]");
+    assert_no_edge("migration_pressure[boston]", "migration_in[boston]");
+
+    // migration_pressure -> migration_out: A2A bare ref `MAX(migration_pressure, 0)`
+    // is a SameElement reference; only the diagonal edges should exist.
+    assert_edge("migration_pressure[nyc]", "migration_out[nyc]");
+    assert_edge("migration_pressure[boston]", "migration_out[boston]");
+
+    // population -> births: A2A bare ref `population * 0.02` is SameElement.
+    assert_edge("population[nyc]", "births[nyc]");
+    assert_edge("population[boston]", "births[boston]");
+
+    // population -> total_population: SUM(population[*]) is a wildcard
+    // reducer feeding a scalar, so every element of population edges to it.
+    assert_edge("population[nyc]", "total_population");
+    assert_edge("population[boston]", "total_population");
+
+    // Structural flow -> stock edges from the population stock's
+    // inflow/outflow declarations. Each flow's element feeds the matching
+    // stock element (SameElement at the structural-edge level).
+    assert_edge("births[nyc]", "population[nyc]");
+    assert_edge("births[boston]", "population[boston]");
+    assert_edge("migration_in[nyc]", "population[nyc]");
+    assert_edge("migration_in[boston]", "population[boston]");
+    assert_edge("migration_out[nyc]", "population[nyc]");
+    assert_edge("migration_out[boston]", "population[boston]");
+}
+
 /// AC8.2: Cross-element feedback model -- discovery mode.
 ///
 /// Same model as test_cross_element_ltm_exhaustive but with discovery mode.
