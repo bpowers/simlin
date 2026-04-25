@@ -793,14 +793,54 @@ pub(super) fn compile_ltm_equation_fragment(
                 ));
             }
         }
-        // Dep could also be another LTM var (e.g., loop score refs link scores)
-        // These are scalar auxes with 1 slot.
+        // Dep could also be another LTM var (e.g., loop score refs link
+        // scores; composite refs paths).  These cases need dimension-
+        // aware stubs: an A2A loop_score that references an A2A
+        // link_score must see that dep as A2A so the compiler emits
+        // per-element fetches; otherwise references collapse to slot 0
+        // and every output slot reads the same numerator (tech-debt #34).
+        //
+        // model_ltm_variables is salsa-cached, so this lookup is cheap
+        // and safe to call from within compile_ltm_equation_fragment --
+        // the same pattern is used by the implicit-module branch above.
         else {
+            let ltm_dep = model_ltm_variables(db, model, project)
+                .vars
+                .iter()
+                .find(|v| v.name == effective)
+                .cloned();
+            let (dep_size, dep_ast) = match ltm_dep {
+                Some(lsv) if !lsv.dimensions.is_empty() => {
+                    let canonical_dims: Vec<crate::dimensions::Dimension> = lsv
+                        .dimensions
+                        .iter()
+                        .filter_map(|name| {
+                            let canonical = crate::common::CanonicalDimensionName::from_raw(name);
+                            dim_context.get(&canonical).cloned()
+                        })
+                        .collect();
+                    let size: usize = canonical_dims.iter().map(|d| d.len()).product();
+                    let ast = if canonical_dims.is_empty() {
+                        None
+                    } else {
+                        Some(crate::ast::Ast::ApplyToAll(
+                            canonical_dims,
+                            crate::ast::Expr2::Const(
+                                "0".to_string(),
+                                0.0,
+                                crate::ast::Loc::default(),
+                            ),
+                        ))
+                    };
+                    (size.max(1), ast)
+                }
+                _ => (1, None),
+            };
             dep_variables.push((
                 dep_ident.clone(),
                 crate::variable::Variable::Var {
                     ident: dep_ident,
-                    ast: None,
+                    ast: dep_ast,
                     init_ast: None,
                     eqn: None,
                     units: None,
@@ -811,7 +851,7 @@ pub(super) fn compile_ltm_equation_fragment(
                     errors: vec![],
                     unit_errors: vec![],
                 },
-                1,
+                dep_size,
             ));
         }
     }

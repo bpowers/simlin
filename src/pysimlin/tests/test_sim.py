@@ -219,6 +219,91 @@ class TestSimAnalysis:
             # Loop might not exist
             pass
 
+    def test_format_subscripted_loop_id_static(self) -> None:
+        """The pure static formatter handles all element-arg shapes."""
+        f = Sim._format_subscripted_loop_id  # type: ignore[attr-defined]
+        assert f("r1", None) == "r1"
+        assert f("r1", "Boston") == "r1[Boston]"
+        assert f("r1", 2) == "r1[2]"
+        assert f("r1", ("Boston", 2)) == "r1[Boston, 2]"
+        assert f("r1", ("Boston", "Adult", 3)) == "r1[Boston, Adult, 3]"
+
+    def test_get_loop_element_count_scalar(self, test_sim_with_ltm: Sim) -> None:
+        """Scalar loops report element_count == 1."""
+        test_sim_with_ltm.run_to_end()
+        # Pick a loop from the model's loop list, verify count == 1.
+        # eval_order.stmx is scalar so any detected loop should be scalar.
+        loops = test_sim_with_ltm._model.get_loops()  # type: ignore[attr-defined]
+        if not loops:
+            pytest.skip("model has no detected loops")
+        for loop in loops:
+            count = test_sim_with_ltm.get_loop_element_count(loop.id)
+            assert count == 1, f"scalar loop {loop.id} should have element_count == 1, got {count}"
+
+    def test_arrayed_loop_element_access(self) -> None:
+        """End-to-end arrayed-loop access via the element kwarg.
+
+        Uses the engine's arrayed_population.stmx fixture (3 regions,
+        heterogeneous birth rates).  Verifies:
+          - bare ID returns argmax-abs aggregation.
+          - subscripted access returns per-element series.
+          - element_count reports n_regions.
+          - case-insensitive subscripts work.
+          - bad subscripts raise SimlinRuntimeError with informative messages.
+        """
+        import os
+        from pathlib import Path
+
+        # Walk up to the repo root (4 levels: tests/test_sim.py ->
+        # tests -> pysimlin -> src -> repo root).  Honor SIMLIN_REPO_ROOT
+        # for CI consistency with conftest.get_repo_root.
+        repo_root = (
+            Path(os.environ["SIMLIN_REPO_ROOT"])
+            if "SIMLIN_REPO_ROOT" in os.environ
+            else Path(__file__).parent.parent.parent.parent
+        )
+        fixture_path = repo_root / "test" / "arrayed_population_ltm" / "arrayed_population.stmx"
+        if not fixture_path.exists():
+            pytest.skip(f"arrayed fixture missing at {fixture_path}")
+
+        model = simlin.load(fixture_path)
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            loops = model.get_loops()
+            assert loops, "arrayed_population should have detected loops"
+
+            arrayed_loop_id = None
+            for loop in loops:
+                count = sim.get_loop_element_count(loop.id)
+                if count > 1:
+                    arrayed_loop_id = loop.id
+                    assert count == 3, (
+                        f"3-region fixture should report element_count=3, got {count}"
+                    )
+                    break
+            assert arrayed_loop_id is not None, "expected at least one arrayed loop"
+
+            # Bare access: argmax-abs across slots.
+            bare = sim.get_relative_loop_score(arrayed_loop_id)
+            assert isinstance(bare, np.ndarray)
+            assert bare.shape == (sim.get_step_count(),)
+
+            # Subscripted access by named element.
+            nyc = sim.get_relative_loop_score(arrayed_loop_id, element="NYC")
+            assert nyc.shape == (sim.get_step_count(),)
+
+            # Case-insensitive (pysimlin passes raw, FFI canonicalizes).
+            nyc_upper = sim.get_relative_loop_score(arrayed_loop_id, element="nyc")
+            np.testing.assert_array_equal(nyc, nyc_upper)
+
+            # Unknown element -> error mentioning the bad name.
+            with pytest.raises(SimlinRuntimeError, match="Tokyo|tokyo"):
+                sim.get_relative_loop_score(arrayed_loop_id, element="Tokyo")
+
+            # Wrong dim count via tuple -> error.
+            with pytest.raises(SimlinRuntimeError):
+                sim.get_relative_loop_score(arrayed_loop_id, element=("NYC", 2))
+
     def test_link_methods(self, test_sim_with_ltm: Sim) -> None:
         """Test Link helper methods."""
         test_sim_with_ltm.run_to_end()

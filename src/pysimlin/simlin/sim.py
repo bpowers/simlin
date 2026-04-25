@@ -307,19 +307,35 @@ class Sim:
         finally:
             lib.simlin_free_links(links_ptr)
 
-    def get_relative_loop_score(self, loop_id: str) -> NDArray[np.float64]:
+    def get_relative_loop_score(
+        self,
+        loop_id: str,
+        element: str | int | tuple[str | int, ...] | None = None,
+    ) -> NDArray[np.float64]:
         """Get the relative loop score time series for a specific loop.
 
         This requires the simulation to have been run with enable_ltm=True.
 
         Args:
-            loop_id: The identifier of the loop
+            loop_id: The identifier of the loop (e.g. ``"r1"``).
+            element: For arrayed (Apply-to-All) loops, the specific
+                element slot to read.  Pass a string for named-dim
+                element names (``"Boston"``), an integer for indexed
+                dims (1-based, ``2``), or a tuple for multi-dim
+                loops (``("Boston", 2)``).  When ``None`` (default):
+                scalar loops return their single series; arrayed
+                loops return a signed argmax-abs aggregate across
+                slots (the dominant element's contribution at each
+                step, with sign preserved).
 
         Returns:
-            NumPy array of relative loop scores over time
+            NumPy array of relative loop scores over time.
 
         Raises:
-            SimlinRuntimeError: If LTM wasn't enabled or loop doesn't exist
+            SimlinRuntimeError: If LTM wasn't enabled, the loop
+                doesn't exist, the element name isn't found in the
+                loop's dimension, or the dimension count of
+                ``element`` doesn't match the loop's arity.
         """
         with self._lock:
             self._check_alive()
@@ -327,7 +343,8 @@ class Sim:
             if step_count <= 0:
                 return np.array([], dtype=np.float64)
 
-            c_loop_id = string_to_c(loop_id)
+            qualified_id = self._format_subscripted_loop_id(loop_id, element)
+            c_loop_id = string_to_c(qualified_id)
             results = np.zeros(step_count, dtype=np.float64)
             out_written_ptr = ffi.new("uintptr_t *")
             err_ptr = ffi.new("SimlinError **")
@@ -340,9 +357,54 @@ class Sim:
                 out_written_ptr,
                 err_ptr,
             )
-            check_out_error(err_ptr, f"Get relative loop score for '{loop_id}'")
+            check_out_error(err_ptr, f"Get relative loop score for '{qualified_id}'")
 
             return results
+
+    def get_loop_element_count(self, loop_id: str) -> int:
+        """Return the number of element slots a loop's score series occupies.
+
+        Scalar loops return ``1``; arrayed (Apply-to-All) loops return
+        the product of their dimension lengths.  Useful when callers
+        want to detect whether a loop supports subscripted access via
+        :meth:`get_relative_loop_score` before passing an ``element``
+        argument.
+
+        Raises:
+            SimlinRuntimeError: If the loop is not present in the LTM
+                snapshot (e.g. the sim was created with
+                ``enable_ltm=False``, or the loop was added in a
+                later patch).
+        """
+        with self._lock:
+            self._check_alive()
+            c_loop_id = string_to_c(loop_id)
+            out_count_ptr = ffi.new("uintptr_t *")
+            err_ptr = ffi.new("SimlinError **")
+            lib.simlin_analyze_get_loop_element_count(
+                self._ptr,
+                c_loop_id,
+                out_count_ptr,
+                err_ptr,
+            )
+            check_out_error(err_ptr, f"Get element count for loop '{loop_id}'")
+            return int(out_count_ptr[0])
+
+    @staticmethod
+    def _format_subscripted_loop_id(
+        loop_id: str,
+        element: str | int | tuple[str | int, ...] | None,
+    ) -> str:
+        """Format ``loop_id[e1, e2, ...]`` from a Python element argument."""
+        if element is None:
+            return loop_id
+        parts: list[str | int]
+        if isinstance(element, tuple):
+            parts = list(element)
+        else:
+            parts = [element]
+        formatted = ", ".join(str(p) for p in parts)
+        return f"{loop_id}[{formatted}]"
 
     def get_run(self) -> Run:
         """Get simulation results as a Run object.

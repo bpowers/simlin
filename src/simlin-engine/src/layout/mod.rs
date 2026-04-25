@@ -3842,16 +3842,35 @@ fn try_detect_ltm_loops_incremental(
             Some(vm)
         });
 
-    // Capture the loop_partitions mapping while LTM is still enabled so the
-    // cached `model_ltm_variables` query sees the same flag value the VM ran
-    // under.  The rel_loop_score computation below consumes the mapping
-    // directly; it is not re-read from the db after the LTM flag flips back.
-    let loop_partitions = if vm_result.is_some() {
-        crate::db::model_ltm_variables(db, source_model, source_project)
-            .loop_partitions
-            .clone()
+    // Capture the loop_partitions mapping AND per-loop slot counts while
+    // LTM is still enabled so the cached `model_ltm_variables` query sees
+    // the same flag value the VM ran under.  Per-element rel scores need
+    // both the partition map (which loops normalize together) and the
+    // per-loop slot count (how many elements each A2A loop occupies).
+    let (loop_partitions, n_slots_by_loop) = if vm_result.is_some() {
+        let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
+        let dm_dims = crate::db::project_datamodel_dims(db, source_project);
+        let dim_size: HashMap<&str, usize> = dm_dims.iter().map(|d| (d.name(), d.len())).collect();
+        let prefix = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
+        let n_slots: HashMap<String, usize> = ltm_vars
+            .vars
+            .iter()
+            .filter_map(|v| {
+                let id = v.name.strip_prefix(prefix)?;
+                let n = if v.dimensions.is_empty() {
+                    1
+                } else {
+                    v.dimensions
+                        .iter()
+                        .map(|d| dim_size.get(d.as_str()).copied().unwrap_or(1))
+                        .product()
+                };
+                Some((id.to_string(), n))
+            })
+            .collect();
+        (ltm_vars.loop_partitions.clone(), n_slots)
     } else {
-        HashMap::new()
+        (HashMap::new(), HashMap::new())
     };
 
     source_project.set_ltm_enabled(db).to(false);
@@ -3863,7 +3882,24 @@ fn try_detect_ltm_loops_incremental(
     // the `loop_score` series the VM does emit, using the partition mapping
     // cached on `model_ltm_variables`.  See
     // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
-    let rel_scores = crate::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    //
+    // For arrayed (A2A) loops we compute per-element rel scores then
+    // aggregate to a single signed series via argmax-abs across slots --
+    // i.e. each step's importance is the dominant element's contribution,
+    // with sign preserved.  For scalar loops this reduces to identity.
+    // The aggregation is delegated to `ltm_post::aggregate_per_element_argmax_abs`
+    // so the partition-stride handling (mixed partitions where stride >
+    // per-loop n_slots) is centralized and unit-testable.  See issue #463.
+    let per_element_rel_scores = crate::ltm_post::compute_rel_loop_scores_per_element(
+        &results,
+        &loop_partitions,
+        &n_slots_by_loop,
+    );
+    let importance_by_loop = crate::ltm_post::aggregate_per_element_argmax_abs(
+        &per_element_rel_scores,
+        &n_slots_by_loop,
+        results.step_count,
+    );
 
     // Phase 3: Build feedback loop structs from VM results.
     let mut feedback_loops = Vec::new();
@@ -3882,13 +3918,7 @@ fn try_detect_ltm_loops_incremental(
             vars
         };
 
-        let importance_series: Vec<f64> = rel_scores
-            .get(&dl.id)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|v| if v.is_finite() { v } else { 0.0 })
-            .collect();
+        let importance_series = importance_by_loop.get(&dl.id).cloned().unwrap_or_default();
 
         feedback_loops.push(metadata::FeedbackLoop {
             name: dl.id.clone(),

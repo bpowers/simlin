@@ -153,9 +153,19 @@ pub fn compute_rel_loop_scores(
 ///
 /// `n_slots_by_loop` maps each loop id to its element count.  Missing
 /// entries or a count of 1 are treated as scalar.  The denominator at
-/// element `k` is `Σ_j |loop_score_j[k_j]|` where `k_j = k` for
-/// arrayed loops and `k_j = 0` for scalar ones.  SAFEDIV-0 and NaN
-/// propagation match [`compute_rel_loop_scores`].
+/// element `k` is `Σ_j |loop_score_j[k_j]|`, with each member loop
+/// contributing per the following gating:
+///   - Scalar loops (`n_slots == 1`): always contribute `row[off]` --
+///     slot 0 broadcasts across every partition element.
+///   - Arrayed loops with `k < n_slots`: contribute `row[off + k]`.
+///   - Arrayed loops with `k >= n_slots`: do NOT contribute (this
+///     loop has no element at this partition index).  Their per-loop
+///     series at position k is zero-filled rather than reading past
+///     their own slot range.  Without this gating, mixed-arrayed
+///     partitions (two loops with different dimensionalities sharing
+///     a partition) would OOB-read into the next variable's slots.
+///
+/// SAFEDIV-0 and NaN propagation match [`compute_rel_loop_scores`].
 ///
 /// `BTreeMap` on partition groups keeps the float summation order
 /// deterministic across runs, the same rationale
@@ -213,6 +223,29 @@ pub fn compute_rel_loop_scores_per_element(
         })
         .collect();
 
+    // Resolve `(loop, partition_index_k)` to either the loop's own slot
+    // offset (for arrayed loops with their own element at k, or scalar
+    // loops broadcasting their single slot) or `None` when the loop has
+    // no element at that partition index (arrayed loops with
+    // n_slots < partition max_slots).  This gating prevents an OOB read
+    // past `row[off + n_slots[i] - 1]` into the next variable's data
+    // when partitions mix arrayed loops of different dimensionalities.
+    let slot_for = |i: usize, k: usize| -> Option<usize> {
+        let n = slot_counts[i];
+        if n <= 1 {
+            // Scalar loop: broadcast slot 0 across every partition element.
+            Some(0)
+        } else if k < n {
+            // Arrayed loop with its own element at k.
+            Some(k)
+        } else {
+            // Arrayed loop with n < partition max: this loop has no
+            // element at partition index k.  Don't contribute to the
+            // denom and zero-fill the per-loop series.
+            None
+        }
+    };
+
     for (step, row) in results.iter().enumerate() {
         for (part_key, indices) in &partition_groups {
             let max_slots = group_max_slots.get(part_key).copied().unwrap_or(1);
@@ -220,17 +253,23 @@ pub fn compute_rel_loop_scores_per_element(
                 let denom: f64 = indices
                     .iter()
                     .filter_map(|&i| {
-                        offsets[i].map(|off| {
-                            let elem = if slot_counts[i] > 1 { k } else { 0 };
-                            row[off + elem].abs()
-                        })
+                        let off = offsets[i]?;
+                        let elem = slot_for(i, k)?;
+                        Some(row[off + elem].abs())
                     })
                     .sum();
                 for &i in indices {
                     let Some(off) = offsets[i] else { continue };
-                    let elem = if slot_counts[i] > 1 { k } else { 0 };
-                    let num = row[off + elem];
-                    let val = if denom == 0.0 { 0.0 } else { num / denom };
+                    let val = match slot_for(i, k) {
+                        Some(elem) => {
+                            let num = row[off + elem];
+                            if denom == 0.0 { 0.0 } else { num / denom }
+                        }
+                        // Loop has no element at partition index k -- zero-fill
+                        // (matches the "this loop doesn't contribute" semantic
+                        // already applied to the partition denom above).
+                        None => 0.0,
+                    };
                     series[i][step * max_slots + k] = val;
                 }
             }
@@ -316,6 +355,458 @@ pub fn compute_rel_loop_score_for_id(
         let num = row[off];
         let denom = denominator[t];
         out.push(if denom == 0.0 { 0.0 } else { num / denom });
+    }
+    Some(out)
+}
+
+/// Resolve the slot offset to read for a loop with `n_slots` slots when
+/// the partition is being queried at `element_index`.
+///
+/// - Scalar loops (`n_slots <= 1`) → `Some(0)` -- slot 0 broadcasts
+///   across every partition element.
+/// - Arrayed loops with `element_index < n_slots` → `Some(element_index)`.
+/// - Arrayed loops with `element_index >= n_slots` → `None` -- the loop
+///   has no own element at this partition index and must not contribute
+///   (matches the gating that [`compute_rel_loop_scores_per_element`]
+///   applies in the full-sweep path).
+///
+/// Returning `None` rather than clamping to `n_slots - 1` matters for
+/// mixed-stride partitions where two arrayed loops have different
+/// dimensionalities: the loop that runs out of slots first does NOT
+/// stand in for the larger loop's later elements.  Callers (the
+/// streaming partition denominator and per-loop helpers) skip
+/// `None`-returning members so the FFI's amortised path stays
+/// bit-for-bit consistent with the full-sweep helper.
+fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
+    if n_slots <= 1 {
+        Some(0)
+    } else if element_index < n_slots {
+        Some(element_index)
+    } else {
+        None
+    }
+}
+
+/// Per-element streaming variant of [`compute_partition_denominator`].
+///
+/// For each `(loop_id, n_slots)` in the iterator whose `loop_score`
+/// variable is present in `results`, contributes
+/// `|row[off + slot]|` to the partition sum at every step, where
+/// `slot` is determined by [`effective_slot`]:
+///   - Scalar loops (`n_slots <= 1`) contribute slot 0 (broadcast).
+///   - Arrayed loops with `element_index < n_slots` contribute their
+///     own slot at `element_index`.
+///   - Arrayed loops with `element_index >= n_slots` do NOT contribute
+///     -- the loop has no own element at this partition index.
+///
+/// This skip-vs-clamp distinction matters for mixed-stride partitions
+/// (two arrayed loops with different dimensionalities sharing a
+/// partition).  Producing the same partition sums as the full-sweep
+/// [`compute_rel_loop_scores_per_element`] is the contract the
+/// libsimlin FFI per-partition cache relies on; the streaming pair
+/// must be a strictly cheaper path to the same numbers, not an
+/// approximation.
+///
+/// Exposed alongside [`compute_partition_denominator`] so the libsimlin
+/// FFI per-partition cache can amortize across element-aware queries
+/// (cache key `(partition, element_index)`) without falling back to the
+/// non-streaming [`compute_rel_loop_scores_per_element`].
+pub fn compute_partition_denominator_for_element<'a, I>(
+    results: &Results,
+    loop_id_slots: I,
+    element_index: usize,
+) -> Vec<f64>
+where
+    I: IntoIterator<Item = (&'a str, usize)>,
+{
+    let entries: Vec<(usize, usize)> = loop_id_slots
+        .into_iter()
+        .filter_map(|(id, n_slots)| {
+            let off = results.offsets.get(&loop_score_ident(id)).copied()?;
+            let slot = effective_slot(n_slots, element_index)?;
+            Some((off, slot))
+        })
+        .collect();
+
+    let mut denom = vec![0.0_f64; results.step_count];
+    for (t, row) in results.iter().enumerate() {
+        denom[t] = entries
+            .iter()
+            .map(|&(off, slot)| row[off + slot].abs())
+            .sum();
+    }
+    denom
+}
+
+/// Per-element streaming variant of [`compute_rel_loop_score_for_id`].
+///
+/// Reads `row[off + slot]` as the numerator at each step, where `slot`
+/// is determined by [`effective_slot`]:
+///   - Scalar loops (`n_slots <= 1`) read slot 0 (broadcast).
+///   - Arrayed loops with `element_index < n_slots` read their own slot.
+///   - Arrayed loops with `element_index >= n_slots` return all zeros
+///     -- the loop has no own element at this partition index, matching
+///     the zero-fill that [`compute_rel_loop_scores_per_element`]
+///     applies in the full-sweep path.
+///
+/// Paired with [`compute_partition_denominator_for_element`] for SAFEDIV
+/// normalisation.  Returns `None` only when the loop's `loop_score`
+/// variable is entirely absent from `results` (matching the scalar
+/// streaming helper's "absent loop" contract); a present-but-no-element
+/// query yields all-zeros, not `None`.
+pub fn compute_rel_loop_score_for_element(
+    results: &Results,
+    loop_id: &str,
+    n_slots: usize,
+    element_index: usize,
+    denominator: &[f64],
+) -> Option<Vec<f64>> {
+    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
+    let Some(slot) = effective_slot(n_slots, element_index) else {
+        // This loop has no own element at the queried partition index.
+        // Return zero-fill rather than reading another loop's slot.
+        return Some(vec![0.0; results.step_count]);
+    };
+    let mut out = Vec::with_capacity(results.step_count);
+    for (t, row) in results.iter().enumerate() {
+        let num = row[off + slot];
+        let denom = denominator[t];
+        out.push(if denom == 0.0 { 0.0 } else { num / denom });
+    }
+    Some(out)
+}
+
+/// Per-loop dimension metadata used by the FFI subscript resolver to
+/// turn `r1[Boston]` (or `r1[Boston, 2]`) into a concrete slot offset.
+///
+/// All names are stored in canonical (lowercased, separator-normalized)
+/// form so the resolver can compare them directly against canonicalized
+/// user input -- no per-call canonicalize allocations.  Indexed
+/// dimensions store an empty `dim_elements` entry; the resolver parses
+/// their subscripts as 1-based integers and validates against
+/// `dim_sizes` instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopElementIndex {
+    /// Canonical dimension names in declaration order (matches the
+    /// equation-language subscript order: `r1[d0, d1, ...]`).
+    pub dimensions: Vec<String>,
+    /// Canonical element names per dimension.  Empty for indexed dims.
+    pub dim_elements: Vec<Vec<String>>,
+    /// True at index `i` if `dimensions[i]` is an indexed dimension
+    /// (1..=size integer subscripts), false if named.
+    pub is_indexed: Vec<bool>,
+    /// Cached size of each dimension; product equals `n_slots`.
+    pub dim_sizes: Vec<usize>,
+    /// Total slot count occupied by this loop's `loop_score` series.
+    /// Scalar loops have `n_slots = 1` and empty `dimensions`.
+    pub n_slots: usize,
+}
+
+/// Subscript-resolution failures for [`LoopElementIndex::resolve`].
+///
+/// All error variants carry enough context for a human-readable FFI
+/// error message (e.g. "loop r1 dimension 'region' has no element
+/// 'tokyo'").  Names and values are returned in canonical (lowercased)
+/// form, matching the index's storage convention.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResolveError {
+    DimCountMismatch {
+        expected: usize,
+        got: usize,
+    },
+    ElementNotFound {
+        dim: String,
+        value: String,
+    },
+    IndexOutOfRange {
+        dim: String,
+        value: String,
+        max: usize,
+    },
+    InvalidIntegerSubscript {
+        dim: String,
+        value: String,
+    },
+}
+
+impl LoopElementIndex {
+    /// Resolve an N-tuple of subscripts to a linear slot offset within
+    /// this loop's `loop_score` series.
+    ///
+    /// Layout convention is row-major (last-dim-fastest): for a 2D
+    /// `[d_0, d_1]` loop with sizes `[s_0, s_1]`, the slot for element
+    /// `[i_0, i_1]` lives at offset `i_0 * s_1 + i_1`.
+    ///
+    /// Subscripts are accepted in raw form; canonicalization happens
+    /// internally so callers don't need to pre-lowercase.  For named
+    /// dimensions the subscript matches against the canonical element
+    /// name; for indexed dimensions it is parsed as a 1..=size integer.
+    ///
+    /// A scalar loop (`n_slots == 1`, `dimensions` empty) accepts an
+    /// empty subscript list and returns offset 0.  Any subscripted
+    /// access on a scalar loop yields `DimCountMismatch`.
+    pub fn resolve(&self, subscripts: &[&str]) -> Result<usize, ResolveError> {
+        use crate::canonicalize;
+
+        if subscripts.len() != self.dimensions.len() {
+            return Err(ResolveError::DimCountMismatch {
+                expected: self.dimensions.len(),
+                got: subscripts.len(),
+            });
+        }
+        if subscripts.is_empty() {
+            return Ok(0);
+        }
+        let mut linear: usize = 0;
+        for (i, raw) in subscripts.iter().enumerate() {
+            let canon = canonicalize(raw).into_owned();
+            let dim_name = &self.dimensions[i];
+            let size = self.dim_sizes[i];
+            let per_dim_offset = if self.is_indexed[i] {
+                // Indexed dimension: subscript is a 1..=size integer.
+                let parsed: u32 =
+                    canon
+                        .parse()
+                        .map_err(|_| ResolveError::InvalidIntegerSubscript {
+                            dim: dim_name.clone(),
+                            value: canon.clone(),
+                        })?;
+                if parsed < 1 || (parsed as usize) > size {
+                    return Err(ResolveError::IndexOutOfRange {
+                        dim: dim_name.clone(),
+                        value: canon,
+                        max: size,
+                    });
+                }
+                (parsed - 1) as usize
+            } else {
+                // Named dimension: linear search canonical element list.
+                self.dim_elements[i]
+                    .iter()
+                    .position(|name| name == &canon)
+                    .ok_or_else(|| ResolveError::ElementNotFound {
+                        dim: dim_name.clone(),
+                        value: canon,
+                    })?
+            };
+            linear = linear * size + per_dim_offset;
+        }
+        Ok(linear)
+    }
+}
+
+const LOOP_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}loop_score\u{205A}";
+
+/// Build a per-loop-id index of dimension metadata from the LTM
+/// variable list emitted by `model_ltm_variables` and the project's
+/// declared dimensions.
+///
+/// Only entries whose name starts with `$⁚ltm⁚loop_score⁚` are
+/// indexed; link_score, path, and composite variables are filtered
+/// out (they're not exposed as loop IDs to FFI consumers).
+///
+/// Dimensions and element names are canonicalized via
+/// [`crate::canonicalize`] so the FFI resolver can do direct string
+/// comparisons against user input that's also been canonicalized.
+/// Dimensions referenced by an LTM var that aren't present in
+/// `project_dims` are silently skipped: in practice this only
+/// happens for malformed inputs, and the resolver naturally fails
+/// (n_slots reflects only the resolved dims).
+pub fn build_loop_element_index(
+    ltm_vars: &[crate::db::LtmSyntheticVar],
+    project_dims: &[crate::datamodel::Dimension],
+) -> HashMap<String, LoopElementIndex> {
+    use crate::canonicalize;
+
+    // Pre-canonicalize project dimension names + elements once so each
+    // LTM var's lookup is O(d) instead of re-canonicalizing per dim per
+    // entry.
+    let dim_lookup: HashMap<String, &crate::datamodel::Dimension> = project_dims
+        .iter()
+        .map(|d| (canonicalize(d.name()).into_owned(), d))
+        .collect();
+
+    let mut out: HashMap<String, LoopElementIndex> = HashMap::new();
+    for var in ltm_vars {
+        let Some(loop_id) = var.name.strip_prefix(LOOP_SCORE_PREFIX) else {
+            continue;
+        };
+        let mut dimensions = Vec::with_capacity(var.dimensions.len());
+        let mut dim_elements = Vec::with_capacity(var.dimensions.len());
+        let mut is_indexed = Vec::with_capacity(var.dimensions.len());
+        let mut dim_sizes = Vec::with_capacity(var.dimensions.len());
+        for raw_dim_name in &var.dimensions {
+            let canonical_dim = canonicalize(raw_dim_name).into_owned();
+            let Some(dim) = dim_lookup.get(&canonical_dim).copied() else {
+                continue;
+            };
+            let elements: Vec<String> = if dim.is_indexed() {
+                Vec::new()
+            } else {
+                use crate::datamodel::DimensionElements;
+                match &dim.elements {
+                    DimensionElements::Named(names) => {
+                        names.iter().map(|n| canonicalize(n).into_owned()).collect()
+                    }
+                    DimensionElements::Indexed(_) => Vec::new(),
+                }
+            };
+            dimensions.push(canonical_dim);
+            dim_elements.push(elements);
+            is_indexed.push(dim.is_indexed());
+            dim_sizes.push(dim.len());
+        }
+        let n_slots: usize = if dim_sizes.is_empty() {
+            1
+        } else {
+            dim_sizes.iter().product::<usize>().max(1)
+        };
+        out.insert(
+            loop_id.to_string(),
+            LoopElementIndex {
+                dimensions,
+                dim_elements,
+                is_indexed,
+                dim_sizes,
+                n_slots,
+            },
+        );
+    }
+    out
+}
+
+/// Aggregate the per-element rel-score map produced by
+/// [`compute_rel_loop_scores_per_element`] into a single signed series
+/// per loop, via signed argmax-abs across each loop's own slots.
+///
+/// Used by the layout's `compute_metadata` to populate
+/// `FeedbackLoop::importance_series` with one value per saved step.
+///
+/// ## Stride handling
+///
+/// Each per-loop input series has length `step_count *
+/// max_slots_in_partition`, where `max_slots_in_partition` is the
+/// largest `n_slots` among the loops sharing that partition (see
+/// [`compute_rel_loop_scores_per_element`]).  This helper recovers the
+/// actual stride from `series.len() / step_count` so consumers don't
+/// need to track partition stride independently.
+///
+/// The inner argmax-abs iterates only the loop's *own* `n_slots`
+/// (`n_slots_by_loop[loop_id]`, default 1).  For a scalar loop in a
+/// mixed partition that means slot 0 only -- the canonical scalar
+/// view, matching the pre-PR `compute_rel_loop_scores` behaviour.  For
+/// an arrayed loop with `n < stride` (rare; arises only when
+/// partitions mix arrayed loops of different dimensionalities), only
+/// the loop's own elements are considered; positions `n..stride`
+/// (zero-filled by the helper after the OOB fix) are not eligible
+/// candidates.
+///
+/// ## Output
+///
+/// Per loop: a `Vec<f64>` of length `step_count` (or empty if the
+/// input series is empty).  Non-finite picks are mapped to `0.0`,
+/// matching the existing layout filter.
+///
+/// Loops present in `per_element_rel_scores` but absent from
+/// `n_slots_by_loop` default to `n_slots = 1` (scalar) -- legacy
+/// callers that haven't snapshotted dim metadata still get a
+/// well-formed result.
+pub fn aggregate_per_element_argmax_abs(
+    per_element_rel_scores: &HashMap<String, Vec<f64>>,
+    n_slots_by_loop: &HashMap<String, usize>,
+    step_count: usize,
+) -> HashMap<String, Vec<f64>> {
+    let mut out = HashMap::with_capacity(per_element_rel_scores.len());
+    for (loop_id, series) in per_element_rel_scores {
+        if series.is_empty() {
+            out.insert(loop_id.clone(), Vec::new());
+            continue;
+        }
+        let n = n_slots_by_loop.get(loop_id).copied().unwrap_or(1).max(1);
+        // Recover the helper's actual stride from the input length.
+        // For mixed partitions stride > n; for scalar-only partitions
+        // and same-shape arrayed partitions stride == n.
+        let stride = (series.len() / step_count.max(1)).max(1);
+        let mut agg = Vec::with_capacity(step_count);
+        for t in 0..step_count {
+            let mut best = 0.0_f64;
+            let mut best_abs = -1.0_f64;
+            // Iterate this loop's own slots only.  `n <= stride` always
+            // by construction (stride is the partition's max), so the
+            // index never exceeds the series bounds.
+            for k in 0..n {
+                let v = series[t * stride + k];
+                // `>` (not `>=`) keeps lowest-index slot on ties; NaN
+                // comparisons are always false so a NaN never displaces
+                // a finite candidate.
+                if v.abs() > best_abs {
+                    best_abs = v.abs();
+                    best = v;
+                }
+            }
+            agg.push(if best.is_finite() { best } else { 0.0 });
+        }
+        out.insert(loop_id.clone(), agg);
+    }
+    out
+}
+
+/// Aggregate a multi-slot loop's relative-score series down to a single
+/// signed series by picking the element with the largest `|rel[k, t]|`
+/// at each step and emitting that element's *signed* value.
+///
+/// Sign is preserved across steps even when the dominant element flips
+/// (e.g. argmax may be slot 0 at one step and slot 1 at the next).
+/// Ties on `|rel|` are broken by lowest slot index, matching the
+/// stable-first-wins convention `max_by_key` provides.
+///
+/// `denominators_per_element` must have length `n_slots`, with each
+/// entry's length equal to `results.step_count`.  The element-`k`
+/// denominator is the partition sum at element `k` (e.g. produced by
+/// [`compute_partition_denominator_for_element`] called with the
+/// member loops and `element_index = k`).
+///
+/// Scalar (`n_slots == 1`) reduces to identity: the aggregator returns
+/// the same series as [`compute_rel_loop_score_for_id`] would.  Used
+/// by both the layout single-line importance metric and the FFI
+/// dispatch when callers pass a bare arrayed loop ID without a
+/// subscript.
+pub fn compute_rel_loop_score_argmax_abs(
+    results: &Results,
+    loop_id: &str,
+    n_slots: usize,
+    denominators_per_element: &[&[f64]],
+) -> Option<Vec<f64>> {
+    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
+    let slots = n_slots.max(1);
+    debug_assert_eq!(
+        denominators_per_element.len(),
+        slots,
+        "argmax-abs needs one denominator series per element slot"
+    );
+    let mut out = Vec::with_capacity(results.step_count);
+    for (t, row) in results.iter().enumerate() {
+        let mut best: f64 = 0.0;
+        let mut best_abs: f64 = -1.0;
+        for (k, denom_series) in denominators_per_element.iter().take(slots).enumerate() {
+            // `k` is iterated 0..slots and slots == max(n_slots, 1), so
+            // `effective_slot` always returns `Some`.  We pass it through
+            // anyway for consistency with the streaming helpers and to
+            // catch any future caller that constructs `denominators_per_element`
+            // longer than the loop's own `n_slots`.
+            let Some(slot) = effective_slot(n_slots, k) else {
+                continue;
+            };
+            let num = row[off + slot];
+            let denom = denom_series[t];
+            let rel = if denom == 0.0 { 0.0 } else { num / denom };
+            // `>` (not `>=`) keeps the lowest-index slot when ties occur.
+            if rel.abs() > best_abs {
+                best_abs = rel.abs();
+                best = rel;
+            }
+        }
+        out.push(best);
     }
     Some(out)
 }
@@ -739,6 +1230,920 @@ mod tests {
         assert!((b[at(0, 1)] - (6.0 / 8.0)).abs() < 1e-12);
         assert!((a[at(1, 1)] - (1.0 / 5.0)).abs() < 1e-12);
         assert!((b[at(1, 1)] - (4.0 / 5.0)).abs() < 1e-12);
+    }
+
+    /// `aggregate_per_element_argmax_abs`: pure-arrayed sanity check.
+    /// Single arrayed loop with 3 elements, stride==n; output should
+    /// be argmax-abs across the 3 elements at each step.
+    #[test]
+    fn aggregate_pure_arrayed_argmax_abs() {
+        let mut per_elem = HashMap::new();
+        // 2 steps × 3 elements: layout step*3 + k.
+        //   step 0: [0.1,  0.5, -0.2]  -> argmax-abs picks 0.5
+        //   step 1: [0.3, -0.4, 0.0]   -> argmax-abs picks -0.4
+        per_elem.insert("L".to_string(), vec![0.1, 0.5, -0.2, 0.3, -0.4, 0.0]);
+        let mut n_slots = HashMap::new();
+        n_slots.insert("L".to_string(), 3);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let agg = out.get("L").expect("L must have aggregate");
+        assert_eq!(agg, &vec![0.5, -0.4]);
+    }
+
+    /// `aggregate_per_element_argmax_abs`: scalar in mixed partition.
+    /// The helper input has stride=3 (partition max) but n=1 for the
+    /// scalar loop.  Output should have length step_count, with each
+    /// value taken from the loop's own slot 0 (canonical scalar view).
+    /// Pre-fix the layout used the wrong stride and produced a series
+    /// of length step_count*3 with misaligned values.
+    #[test]
+    fn aggregate_scalar_in_mixed_partition_returns_step_count_values() {
+        let mut per_elem = HashMap::new();
+        // Scalar A in mixed partition (stride=3); 4 steps × 3 elements.
+        // Each step has the same value at index 0 (slot 0 broadcast),
+        // but indices 1,2 carry the per-element rel-scores from
+        // distinct partition denominators.
+        //   step 0: [0.10, 0.20, 0.30]
+        //   step 1: [0.15, 0.25, 0.35]
+        //   step 2: [0.12, 0.22, 0.32]
+        //   step 3: [0.18, 0.28, 0.38]
+        per_elem.insert(
+            "A".to_string(),
+            vec![
+                0.10, 0.20, 0.30, // step 0
+                0.15, 0.25, 0.35, // step 1
+                0.12, 0.22, 0.32, // step 2
+                0.18, 0.28, 0.38, // step 3
+            ],
+        );
+        let mut n_slots = HashMap::new();
+        n_slots.insert("A".to_string(), 1);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 4);
+        let agg = out.get("A").expect("A must have aggregate");
+        // Length must match step_count, NOT step_count*stride.  Each
+        // value is the scalar's own slot 0 at that step.
+        assert_eq!(agg.len(), 4);
+        assert_eq!(agg, &vec![0.10, 0.15, 0.12, 0.18]);
+    }
+
+    /// `aggregate_per_element_argmax_abs`: arrayed loop in mixed-stride
+    /// partition.  The helper input has stride=5 (partition max) but the
+    /// loop only has n=2 of its own.  Output iterates only the loop's
+    /// own 2 slots when picking argmax-abs; positions 2..5 are ignored
+    /// (they're zero-filled by `compute_rel_loop_scores_per_element`
+    /// after the OOB fix).
+    #[test]
+    fn aggregate_arrayed_in_mixed_partition_iterates_own_slots_only() {
+        let mut per_elem = HashMap::new();
+        // 2 steps × 5-stride.  Loop has n=2 (real elements).
+        // Position 2..5 carry zero-fill (post OOB-fix); we DO NOT want
+        // them included in argmax-abs.  To prove the iterator stops at
+        // n=2, place a trap value (1e6) at position 4 -- if the helper
+        // ever iterates 0..stride it would pick this and we'd notice.
+        per_elem.insert(
+            "B".to_string(),
+            vec![
+                0.1, -0.3, 0.0, 0.0, 1.0e6, // step 0; trap at index 4
+                0.4, 0.2, 0.0, 0.0, 1.0e6, // step 1; trap at index 4
+            ],
+        );
+        let mut n_slots = HashMap::new();
+        n_slots.insert("B".to_string(), 2);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let agg = out.get("B").expect("B must have aggregate");
+        assert_eq!(agg.len(), 2);
+        // step 0: argmax-abs over [0.1, -0.3] = -0.3 (sign preserved).
+        // step 1: argmax-abs over [0.4,  0.2] = 0.4.
+        assert_eq!(agg, &vec![-0.3, 0.4]);
+    }
+
+    /// Non-finite values (NaN, ±Inf) get mapped to 0.0 in the output,
+    /// matching the existing layout filter behavior.
+    #[test]
+    fn aggregate_filters_non_finite() {
+        let mut per_elem = HashMap::new();
+        per_elem.insert(
+            "L".to_string(),
+            vec![f64::NAN, 0.5, f64::INFINITY, -f64::INFINITY],
+        );
+        let mut n_slots = HashMap::new();
+        n_slots.insert("L".to_string(), 2);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let agg = out.get("L").expect("L must have aggregate");
+        // step 0: [NaN, 0.5].  argmax-abs comparison with NaN is false,
+        //   so 0.5 wins.  Output is finite (0.5).
+        // step 1: [Inf, -Inf].  Both non-finite; output 0.0.
+        assert_eq!(agg.len(), 2);
+        assert_eq!(agg[0], 0.5);
+        assert_eq!(agg[1], 0.0);
+    }
+
+    /// An empty per-loop series yields an empty aggregate (matches
+    /// the existing layout's "no series" branch).
+    #[test]
+    fn aggregate_empty_series_yields_empty_output() {
+        let mut per_elem = HashMap::new();
+        per_elem.insert("L".to_string(), Vec::new());
+        let mut n_slots = HashMap::new();
+        n_slots.insert("L".to_string(), 1);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 5);
+        let agg = out.get("L").expect("L must have aggregate (even if empty)");
+        assert!(agg.is_empty());
+    }
+
+    /// Mismatched-dim arrayed partition: loop A has n=2 and loop B has
+    /// n=3 in the same partition.  At partition element k=2, A has no
+    /// own element; the helper must NOT OOB-read past A's allocated
+    /// slots into B's data, and A's series at k=2 must be 0.0 ("this
+    /// loop has no element here") rather than a bogus rel-score.
+    ///
+    /// We pick B's slot 0 as a sentinel (999.0) so that an OOB read of
+    /// `row[off_A + 2]` (which equals `row[off_B + 0]` in our layout)
+    /// pulls this clearly-wrong value -- the test fails loudly rather
+    /// than passing by accident on whatever uninitialised data the
+    /// allocator happens to return.
+    #[test]
+    fn per_element_helper_handles_arrayed_with_smaller_n() {
+        // Layout: time | A slots 0..2 | B slots 0..3
+        // step 0:        | 1.0  2.0   | 999.0  20.0  30.0
+        let loop_data = vec![vec![vec![1.0, 2.0]], vec![vec![999.0, 20.0, 30.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[2, 3], &loop_data);
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), 2);
+        slots.insert("B".to_string(), 3);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let a = rel.get("A").expect("A must have a series");
+        let b = rel.get("B").expect("B must have a series");
+        // Stride is the partition's max_slots = 3.
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 3);
+
+        // k=0,1: both loops contribute their own slot value to the partition denom.
+        //   denom_0 = |1| + |999| = 1000;  a[0] = 1/1000, b[0] = 999/1000.
+        //   denom_1 = |2| + |20|  = 22;    a[1] = 2/22,   b[1] = 20/22.
+        assert!((a[0] - 1.0 / 1000.0).abs() < 1e-12);
+        assert!((b[0] - 999.0 / 1000.0).abs() < 1e-12);
+        assert!((a[1] - 2.0 / 22.0).abs() < 1e-12);
+        assert!((b[1] - 20.0 / 22.0).abs() < 1e-12);
+
+        // k=2: A has no element here.  Principled semantics:
+        //   - A contributes nothing to denom_2 -> denom_2 = |B[2]| = 30.
+        //   - A's series at k=2 is zero-filled (no element here).
+        //   - B's slot 2 normalises against itself only -> b[2] = 30/30 = 1.0.
+        // Pre-fix the helper OOB-reads `row[off_A + 2]` which is B's slot 0
+        // (999.0) and incorporates that into both A's and B's rel-scores.
+        assert_eq!(
+            a[2], 0.0,
+            "A has no element at partition index 2; series must be zero-filled, got {}",
+            a[2]
+        );
+        assert!(
+            (b[2] - 1.0).abs() < 1e-12,
+            "B's slot 2 should normalise against itself only (A doesn't contribute past its own n=2); got {}",
+            b[2]
+        );
+    }
+
+    /// Build a `Results` with each loop occupying a configurable number of
+    /// slots.  Layout: `time | loop0 slot 0..n0 | loop1 slot 0..n1 | ...`.
+    /// `loop_data[i][step][slot]` is the value at (step, slot) for loop i.
+    fn make_arrayed_results(
+        loop_ids: &[&str],
+        slots_per_loop: &[usize],
+        loop_data: &[Vec<Vec<f64>>],
+    ) -> Results {
+        assert_eq!(loop_ids.len(), slots_per_loop.len());
+        assert_eq!(loop_ids.len(), loop_data.len());
+        let step_count = loop_data[0].len();
+        for d in loop_data.iter() {
+            assert_eq!(d.len(), step_count);
+        }
+        let total_slots: usize = slots_per_loop.iter().sum();
+        let step_size = 1 + total_slots;
+        let mut data = vec![0.0_f64; step_count * step_size];
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        let mut cursor = 1;
+        let mut loop_offsets = Vec::with_capacity(loop_ids.len());
+        for (i, id) in loop_ids.iter().enumerate() {
+            offsets.insert(loop_score_ident(id), cursor);
+            loop_offsets.push(cursor);
+            cursor += slots_per_loop[i];
+        }
+        for step in 0..step_count {
+            let row = &mut data[step * step_size..(step + 1) * step_size];
+            row[0] = step as f64;
+            for (i, &off) in loop_offsets.iter().enumerate() {
+                let slots = &loop_data[i][step];
+                assert_eq!(slots.len(), slots_per_loop[i]);
+                for (slot, &v) in slots.iter().enumerate() {
+                    row[off + slot] = v;
+                }
+            }
+        }
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: (step_count.saturating_sub(1)) as f64,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs::from(&sim_specs),
+            is_vensim: false,
+        }
+    }
+
+    /// Per-element streaming partition denominator must read the queried
+    /// element from each member loop, NOT slot 0.  Two A2A loops with
+    /// distinct per-slot values: the denominator at element 1 must equal
+    /// `|loop0[t, 1]| + |loop1[t, 1]|`, which differs from element 0's.
+    #[test]
+    fn per_element_partition_denominator_reads_queried_slot() {
+        // 2 loops, 3 slots each, 2 timesteps.
+        // loop0[step][slot] and loop1[step][slot] chosen so element-1 values
+        // differ visibly from element-0 values.
+        let loop_data = vec![
+            // loop0: [step][slot]
+            vec![
+                vec![1.0, 7.0, 2.0], // step 0: slots 0,1,2
+                vec![2.0, 9.0, 3.0], // step 1
+            ],
+            // loop1
+            vec![vec![4.0, 5.0, 6.0], vec![8.0, 11.0, 12.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[3, 3], &loop_data);
+
+        let denom_e0 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 3_usize)],
+            0,
+        );
+        let denom_e1 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 3_usize)],
+            1,
+        );
+
+        // Element 0: |1|+|4|=5, |2|+|8|=10.
+        assert_eq!(denom_e0, vec![5.0, 10.0]);
+        // Element 1: |7|+|5|=12, |9|+|11|=20.
+        assert_eq!(denom_e1, vec![12.0, 20.0]);
+        // Sanity: element 1 is genuinely different from element 0.
+        assert_ne!(denom_e0, denom_e1);
+    }
+
+    /// Scalar loops in mixed partitions must broadcast slot 0 regardless
+    /// of the queried element_index.  This matches the pre-PR compile-time
+    /// emitter that expanded a scalar loop_score reference across an
+    /// arrayed rel_loop_score target.
+    #[test]
+    fn per_element_partition_denominator_broadcasts_scalar() {
+        // Loop A is scalar (1 slot); loop B is A2A (3 slots).
+        let loop_data = vec![
+            vec![vec![3.0], vec![5.0]],                     // A scalar
+            vec![vec![1.0, 7.0, 2.0], vec![2.0, 9.0, 3.0]], // B arrayed
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[1, 3], &loop_data);
+
+        // Element 0 query: A contributes |3|=3 (its only slot), B contributes |1|=1.
+        let denom_e0 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 1_usize), ("B", 3_usize)],
+            0,
+        );
+        assert_eq!(denom_e0, vec![3.0 + 1.0, 5.0 + 2.0]);
+
+        // Element 1 query: A still contributes |3|=3 (broadcast), B contributes |7|=7.
+        let denom_e1 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 1_usize), ("B", 3_usize)],
+            1,
+        );
+        assert_eq!(denom_e1, vec![3.0 + 7.0, 5.0 + 9.0]);
+    }
+
+    /// `compute_rel_loop_score_for_element` paired with
+    /// `compute_partition_denominator_for_element` must reproduce the
+    /// per-element view that the full-sweep
+    /// `compute_rel_loop_scores_per_element` produces.  Bit-for-bit
+    /// agreement is the contract the libsimlin per-partition cache
+    /// relies on -- the streaming pair is meant to be a strictly cheaper
+    /// path to the same numbers, not an approximation.
+    #[test]
+    fn per_element_streaming_matches_full_sweep() {
+        let n_slots: usize = 3;
+        let step_count: usize = 4;
+        // Reuse the fixture from `per_element_helper_normalizes_within_each_slot`:
+        //   A: row[a_off + k] = (step+1) * (k+1)
+        //   B: row[b_off + k] = (step+1) * (k+2)
+        let mut a_data = Vec::with_capacity(step_count);
+        let mut b_data = Vec::with_capacity(step_count);
+        for step in 0..step_count {
+            let a_row: Vec<f64> = (0..n_slots)
+                .map(|k| ((step + 1) * (k + 1)) as f64)
+                .collect();
+            let b_row: Vec<f64> = (0..n_slots)
+                .map(|k| ((step + 1) * (k + 2)) as f64)
+                .collect();
+            a_data.push(a_row);
+            b_data.push(b_row);
+        }
+        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &[a_data, b_data]);
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), n_slots);
+        slots.insert("B".to_string(), n_slots);
+
+        let full = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+
+        for k in 0..n_slots {
+            let denom = compute_partition_denominator_for_element(
+                &results,
+                [("A", n_slots), ("B", n_slots)],
+                k,
+            );
+            let rel_a = compute_rel_loop_score_for_element(&results, "A", n_slots, k, &denom)
+                .expect("A must have a series");
+            let rel_b = compute_rel_loop_score_for_element(&results, "B", n_slots, k, &denom)
+                .expect("B must have a series");
+
+            for step in 0..step_count {
+                let full_idx = step * n_slots + k;
+                let full_a = full.get("A").unwrap()[full_idx];
+                let full_b = full.get("B").unwrap()[full_idx];
+                // Bit-for-bit: same arithmetic order, same rounding.
+                assert_eq!(
+                    rel_a[step], full_a,
+                    "loop A step {step} elem {k}: streaming {} vs full {}",
+                    rel_a[step], full_a
+                );
+                assert_eq!(
+                    rel_b[step], full_b,
+                    "loop B step {step} elem {k}: streaming {} vs full {}",
+                    rel_b[step], full_b
+                );
+            }
+        }
+    }
+
+    /// Mixed-stride parity: for any partition where two arrayed loops
+    /// have different `n_slots`, the streaming pair
+    /// (`compute_partition_denominator_for_element` +
+    /// `compute_rel_loop_score_for_element`) must produce the same
+    /// per-element rel-scores as the full-sweep
+    /// `compute_rel_loop_scores_per_element`.  This is the contract the
+    /// libsimlin FFI per-partition cache relies on -- the streaming
+    /// pair must be a strictly cheaper path to the same numbers.
+    ///
+    /// The existing `per_element_streaming_matches_full_sweep` test
+    /// only covers same-shape partitions.  This test extends coverage
+    /// to mixed-stride so any future drift between the two paths is
+    /// caught structurally rather than waiting for a reviewer to
+    /// notice the divergence.
+    #[test]
+    fn streaming_helpers_match_full_sweep_in_mixed_stride_partition() {
+        // A has n=3, B has n=2, sharing a partition.  Multi-step so
+        // we exercise more than one row.  Distinct-per-step values
+        // so any wrong-stride bug shows up loudly.
+        //   step 0: A = [1.0, 2.0, 5.0],   B = [10.0, 7.0]
+        //   step 1: A = [1.5, 2.5, 6.0],   B = [11.0, 8.0]
+        //   step 2: A = [2.0, 3.0, 7.0],   B = [12.0, 9.0]
+        let loop_data = vec![
+            vec![
+                vec![1.0, 2.0, 5.0],
+                vec![1.5, 2.5, 6.0],
+                vec![2.0, 3.0, 7.0],
+            ],
+            vec![vec![10.0, 7.0], vec![11.0, 8.0], vec![12.0, 9.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), 3_usize);
+        slots.insert("B".to_string(), 2_usize);
+
+        let full = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+
+        // The full-sweep helper writes each loop's series at the
+        // partition's max_slots stride (= 3 here for both A and B).
+        let max_slots = 3_usize;
+        for k in 0..max_slots {
+            let denom = compute_partition_denominator_for_element(
+                &results,
+                [("A", 3_usize), ("B", 2_usize)],
+                k,
+            );
+            let rel_a = compute_rel_loop_score_for_element(&results, "A", 3, k, &denom)
+                .expect("A must have a series");
+            let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
+                .expect("B must have a series");
+
+            for step in 0..results.step_count {
+                let full_idx = step * max_slots + k;
+                let full_a = full.get("A").unwrap()[full_idx];
+                let full_b = full.get("B").unwrap()[full_idx];
+                assert_eq!(
+                    rel_a[step], full_a,
+                    "loop A step {step} elem {k}: streaming {} vs full {}",
+                    rel_a[step], full_a
+                );
+                assert_eq!(
+                    rel_b[step], full_b,
+                    "loop B step {step} elem {k}: streaming {} vs full {}",
+                    rel_b[step], full_b
+                );
+            }
+        }
+    }
+
+    /// Streaming `compute_partition_denominator_for_element` must skip
+    /// arrayed members at partition indices past their own n_slots,
+    /// matching the gating now applied by the full-sweep
+    /// `compute_rel_loop_scores_per_element`.  Pre-fix the streaming
+    /// helper clamped to the loop's last slot via `effective_slot`,
+    /// which silently disagreed with the full-sweep helper for any
+    /// mixed-stride partition (one arrayed loop with `n_a` slots
+    /// sharing a partition with another arrayed loop with `n_b < n_a`).
+    /// We plant a sentinel at B's last slot so a clamp would pull
+    /// it loudly into the denom; the principled "skip" semantic
+    /// excludes B entirely at element 2.
+    #[test]
+    fn streaming_partition_denominator_skips_arrayed_loops_past_own_slots() {
+        // step_count = 1.  A has n=3 with values [1, 2, 5]; B has n=2
+        // with values [10, 999.0] (sentinel at slot 1).  At partition
+        // element k=2, B has no slot -- the principled denom is
+        // |A[2]| = 5, NOT |A[2]| + |B[1]| = 5 + 999 = 1004.
+        let loop_data = vec![vec![vec![1.0, 2.0, 5.0]], vec![vec![10.0, 999.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
+
+        let denom_at_2 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 2_usize)],
+            2,
+        );
+        assert_eq!(
+            denom_at_2,
+            vec![5.0],
+            "B has no slot at partition index 2; its sentinel must NOT \
+             pollute the denominator (skip, not clamp)"
+        );
+
+        // For sanity, k=0 and k=1 should include both members.
+        let denom_at_0 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 2_usize)],
+            0,
+        );
+        assert_eq!(denom_at_0, vec![1.0 + 10.0]);
+        let denom_at_1 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 2_usize)],
+            1,
+        );
+        assert_eq!(denom_at_1, vec![2.0 + 999.0]);
+    }
+
+    /// `compute_rel_loop_score_for_element` queried at an element this
+    /// loop doesn't have (n=2, queried at k=2) must return all-zeros
+    /// rather than clamping to the loop's last slot.  This matches the
+    /// full-sweep helper's "zero-fill at positions n..max_slots" rule
+    /// so any future caller that directly queries past a loop's range
+    /// gets the right answer.
+    #[test]
+    fn streaming_rel_score_returns_zeros_when_loop_has_no_own_element() {
+        // B is arrayed with n=2 and a sentinel value at slot 1.  When
+        // queried at element_index=2 it has no own element; the
+        // result must be all-zeros, not the slot-1 sentinel rel-score.
+        let loop_data = vec![vec![vec![10.0, 999.0]]];
+        let results = make_arrayed_results(&["B"], &[2], &loop_data);
+
+        // Use a denom that would produce a clearly-wrong rel-score if
+        // the helper clamped: |sentinel|/|denom| would be ~999, but
+        // the principled answer is 0.0.
+        let denom = vec![1.0_f64];
+        let rel = compute_rel_loop_score_for_element(&results, "B", 2, 2, &denom)
+            .expect("B has a series");
+        assert_eq!(
+            rel,
+            vec![0.0],
+            "queried at index 2 (past B's n=2), result must be 0 not clamped"
+        );
+    }
+
+    /// SAFEDIV-0 semantics propagate per element: a partition where every
+    /// member's queried slot is identically zero must yield 0 (not NaN)
+    /// for the rel-score, matching the scalar-helper contract.
+    #[test]
+    fn per_element_streaming_safediv_zero() {
+        // Both loops have slot 0 = 0 across all steps but slot 1 != 0;
+        // querying element 0 must yield 0 (no panic, no NaN).
+        let loop_data = vec![
+            vec![vec![0.0, 5.0], vec![0.0, 4.0]],
+            vec![vec![0.0, 3.0], vec![0.0, 2.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[2, 2], &loop_data);
+
+        let denom = compute_partition_denominator_for_element(
+            &results,
+            [("A", 2_usize), ("B", 2_usize)],
+            0,
+        );
+        assert_eq!(denom, vec![0.0, 0.0]);
+
+        let rel = compute_rel_loop_score_for_element(&results, "A", 2, 0, &denom).unwrap();
+        for v in rel {
+            assert_eq!(v, 0.0, "SAFEDIV-0 must yield 0, got {v}");
+        }
+    }
+
+    /// An absent loop_score variable returns `None`, matching the
+    /// `compute_rel_loop_score_for_id` contract.
+    #[test]
+    fn per_element_streaming_absent_loop_returns_none() {
+        let results = make_arrayed_results(&["A"], &[2], &[vec![vec![1.0, 2.0], vec![3.0, 4.0]]]);
+        let denom = compute_partition_denominator_for_element(&results, [("A", 2_usize)], 0);
+        assert!(compute_rel_loop_score_for_element(&results, "missing", 2, 0, &denom).is_none());
+    }
+
+    /// Signed argmax-abs aggregator: at each step, return the signed
+    /// rel-score of the element with the largest `|rel[k, t]|`.  The
+    /// dominant element can switch between steps; the sign is preserved
+    /// from whichever element won that step.
+    #[test]
+    fn argmax_abs_picks_dominant_element_with_sign() {
+        // 2 elements, 2 steps.  loop_score chosen so element 0 dominates
+        // at step 0 and element 1 dominates at step 1, with opposite signs.
+        //   step 0: slot 0 =  5,  slot 1 = -1   -> rel = 0.5, -0.1
+        //   step 1: slot 0 =  1,  slot 1 = -8   -> rel = 0.1, -0.8
+        let loop_data = vec![vec![vec![5.0, -1.0], vec![1.0, -8.0]]];
+        let results = make_arrayed_results(&["L"], &[2], &loop_data);
+
+        // Constant denom of 10 per step per element.
+        let denoms = vec![vec![10.0_f64; 2]; 2];
+        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+
+        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 2, &denom_refs)
+            .expect("L must have a series");
+
+        // step 0: argmax-abs is slot 0 (|0.5| > |-0.1|), signed value = +0.5.
+        // step 1: argmax-abs is slot 1 (|-0.8| > |0.1|), signed value = -0.8.
+        assert_eq!(agg, vec![0.5, -0.8]);
+    }
+
+    /// Scalar (n_slots == 1) reduces to identity: the aggregator returns
+    /// the same series as `compute_rel_loop_score_for_id` would.
+    #[test]
+    fn argmax_abs_scalar_reduces_to_identity() {
+        let loop_data = vec![vec![vec![3.0], vec![-7.0]]];
+        let results = make_arrayed_results(&["L"], &[1], &loop_data);
+        let denoms = [vec![10.0_f64, 10.0]];
+        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+
+        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 1, &denom_refs)
+            .expect("L must have a series");
+        assert_eq!(agg, vec![0.3, -0.7]);
+    }
+
+    /// Ties (two elements with equal |rel|) are broken deterministically:
+    /// the lowest slot index wins.  This matches Rust's stable
+    /// `Ord`/`max_by_key` convention for "first hit on equal".
+    #[test]
+    fn argmax_abs_ties_broken_by_lowest_index() {
+        // Both slots have equal magnitude at step 0; slot 0 has positive
+        // sign and slot 1 has negative sign.  The output must be slot 0's
+        // value (+0.4), not slot 1's.
+        let loop_data = vec![vec![vec![4.0, -4.0]]];
+        let results = make_arrayed_results(&["L"], &[2], &loop_data);
+        let denoms = [vec![10.0_f64], vec![10.0_f64]];
+        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+
+        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 2, &denom_refs)
+            .expect("L must have a series");
+        assert_eq!(agg, vec![0.4]);
+    }
+
+    /// Absent loop returns `None`, matching the streaming-helper contract.
+    #[test]
+    fn argmax_abs_absent_loop_returns_none() {
+        let results = make_arrayed_results(&["L"], &[2], &[vec![vec![1.0, 2.0]]]);
+        let denoms = [vec![10.0_f64], vec![10.0]];
+        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+        assert!(compute_rel_loop_score_argmax_abs(&results, "missing", 2, &denom_refs).is_none());
+    }
+
+    /// `LoopElementIndex` for a scalar loop reports empty dimensions
+    /// and `n_slots = 1`.  Used by the libsimlin FFI dispatch to detect
+    /// "this loop is not arrayed, reject subscripted IDs."
+    #[test]
+    fn loop_element_index_scalar_loop() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec![],
+        }];
+        let project_dims: Vec<crate::datamodel::Dimension> = vec![];
+
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let entry = index.get("r1").expect("r1 should be indexed");
+        assert!(entry.dimensions.is_empty());
+        assert!(entry.dim_elements.is_empty());
+        assert!(entry.is_indexed.is_empty());
+        assert!(entry.dim_sizes.is_empty());
+        assert_eq!(entry.n_slots, 1);
+    }
+
+    /// 1D named-dim loop indexes one dimension.  Element names are stored
+    /// in canonical form (lowercased) so the FFI subscript resolver can
+    /// compare against canonicalized user input directly.
+    #[test]
+    fn loop_element_index_named_1d() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Region".to_string()],
+        }];
+        let project_dims = vec![crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )];
+
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let entry = index.get("r1").expect("r1 should be indexed");
+        assert_eq!(entry.dimensions, vec!["region".to_string()]);
+        assert_eq!(entry.is_indexed, vec![false]);
+        assert_eq!(entry.dim_sizes, vec![3]);
+        assert_eq!(entry.n_slots, 3);
+        assert_eq!(entry.dim_elements.len(), 1);
+        assert_eq!(
+            entry.dim_elements[0],
+            vec!["nyc".to_string(), "boston".to_string(), "la".to_string()]
+        );
+    }
+
+    /// 2D mixed (named × indexed) loop preserves declaration order in
+    /// `dimensions`, `is_indexed`, and `dim_sizes`.  For indexed dims,
+    /// `dim_elements` is empty -- the resolver parses the subscript as
+    /// a 1-based integer rather than matching against names.
+    #[test]
+    fn loop_element_index_mixed_2d() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Region".to_string(), "Cohort".to_string()],
+        }];
+        let project_dims = vec![
+            crate::datamodel::Dimension::named(
+                "Region".to_string(),
+                vec!["NYC".to_string(), "Boston".to_string()],
+            ),
+            crate::datamodel::Dimension::indexed("Cohort".to_string(), 4),
+        ];
+
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let entry = index.get("r1").expect("r1 should be indexed");
+        assert_eq!(
+            entry.dimensions,
+            vec!["region".to_string(), "cohort".to_string()]
+        );
+        assert_eq!(entry.is_indexed, vec![false, true]);
+        assert_eq!(entry.dim_sizes, vec![2, 4]);
+        assert_eq!(entry.n_slots, 8);
+        assert_eq!(
+            entry.dim_elements[0],
+            vec!["nyc".to_string(), "boston".to_string()]
+        );
+        // Indexed dims have no element-name list; the resolver parses the
+        // subscript as a 1..=size integer instead.
+        assert!(entry.dim_elements[1].is_empty());
+    }
+
+    /// Resolver: 1D named dim with canonical-element matching.  Element
+    /// names are case-insensitive thanks to internal canonicalize.
+    #[test]
+    fn resolve_1d_named() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Region".to_string()],
+        }];
+        let project_dims = vec![crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let r1 = index.get("r1").unwrap();
+        assert_eq!(r1.resolve(&["NYC"]).unwrap(), 0);
+        assert_eq!(r1.resolve(&["Boston"]).unwrap(), 1);
+        assert_eq!(r1.resolve(&["LA"]).unwrap(), 2);
+        // Case-insensitive: canonicalize lowercases.
+        assert_eq!(r1.resolve(&["BOSTON"]).unwrap(), 1);
+        assert_eq!(r1.resolve(&["boston"]).unwrap(), 1);
+    }
+
+    /// Resolver: 2D mixed (named × indexed) with row-major linear offset.
+    /// Strides are [s_1, 1] for [d_0, d_1], so linear = i_0*s_1 + i_1.
+    #[test]
+    fn resolve_2d_named_indexed_row_major() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Region".to_string(), "Cohort".to_string()],
+        }];
+        let project_dims = vec![
+            crate::datamodel::Dimension::named(
+                "Region".to_string(),
+                vec!["NYC".to_string(), "Boston".to_string()],
+            ),
+            crate::datamodel::Dimension::indexed("Cohort".to_string(), 4),
+        ];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let r1 = index.get("r1").unwrap();
+        // [NYC=0, Cohort=1] -> 0*4 + 0 = 0
+        assert_eq!(r1.resolve(&["NYC", "1"]).unwrap(), 0);
+        // [NYC=0, Cohort=4] -> 0*4 + 3 = 3
+        assert_eq!(r1.resolve(&["NYC", "4"]).unwrap(), 3);
+        // [Boston=1, Cohort=1] -> 1*4 + 0 = 4
+        assert_eq!(r1.resolve(&["Boston", "1"]).unwrap(), 4);
+        // [Boston=1, Cohort=3] -> 1*4 + 2 = 6
+        assert_eq!(r1.resolve(&["Boston", "3"]).unwrap(), 6);
+        // [Boston=1, Cohort=4] -> 1*4 + 3 = 7 (last slot)
+        assert_eq!(r1.resolve(&["Boston", "4"]).unwrap(), 7);
+    }
+
+    /// Resolver: scalar loop with no subscripts returns offset 0.  Scalar
+    /// loops with explicit subscripts error -- they can't be subscripted.
+    #[test]
+    fn resolve_scalar_loop() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec![],
+        }];
+        let project_dims: Vec<crate::datamodel::Dimension> = vec![];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let r1 = index.get("r1").unwrap();
+        // Bare access on scalar loop: offset 0.
+        assert_eq!(r1.resolve(&[]).unwrap(), 0);
+        // Subscripts on scalar loop: error.
+        assert!(matches!(
+            r1.resolve(&["Boston"]),
+            Err(ResolveError::DimCountMismatch {
+                expected: 0,
+                got: 1
+            })
+        ));
+    }
+
+    /// Resolver error: dim count mismatch.
+    #[test]
+    fn resolve_dim_count_mismatch() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Region".to_string()],
+        }];
+        let project_dims = vec![crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let r1 = index.get("r1").unwrap();
+        // Empty subscripts on a 1D loop is an error.
+        assert!(matches!(
+            r1.resolve(&[]),
+            Err(ResolveError::DimCountMismatch {
+                expected: 1,
+                got: 0
+            })
+        ));
+        // Two subscripts on a 1D loop is an error.
+        assert!(matches!(
+            r1.resolve(&["NYC", "extra"]),
+            Err(ResolveError::DimCountMismatch {
+                expected: 1,
+                got: 2
+            })
+        ));
+    }
+
+    /// Resolver error: unknown named element.
+    #[test]
+    fn resolve_unknown_element() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Region".to_string()],
+        }];
+        let project_dims = vec![crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let r1 = index.get("r1").unwrap();
+        match r1.resolve(&["Tokyo"]) {
+            Err(ResolveError::ElementNotFound { dim, value }) => {
+                assert_eq!(dim, "region");
+                assert_eq!(value, "tokyo");
+            }
+            other => panic!("expected ElementNotFound, got {:?}", other),
+        }
+    }
+
+    /// Resolver error: indexed-dim subscript out of range or non-numeric.
+    #[test]
+    fn resolve_indexed_errors() {
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+            equation: "1.0".to_string(),
+            dimensions: vec!["Cohort".to_string()],
+        }];
+        let project_dims = vec![crate::datamodel::Dimension::indexed(
+            "Cohort".to_string(),
+            3,
+        )];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        let r1 = index.get("r1").unwrap();
+        // Out of range: indexed dim is 1..=3.
+        assert!(matches!(
+            r1.resolve(&["0"]),
+            Err(ResolveError::IndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            r1.resolve(&["4"]),
+            Err(ResolveError::IndexOutOfRange { .. })
+        ));
+        // Non-integer subscript on indexed dim.
+        assert!(matches!(
+            r1.resolve(&["foo"]),
+            Err(ResolveError::InvalidIntegerSubscript { .. })
+        ));
+    }
+
+    /// Non-loop_score LTM vars (link_score, path, composite) are filtered
+    /// out -- the index is keyed only by detected loop IDs.
+    #[test]
+    fn loop_element_index_filters_non_loop_score_vars() {
+        let ltm_vars = vec![
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}a\u{2192}b".to_string(),
+                equation: "1.0".to_string(),
+                dimensions: vec![],
+            },
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
+                equation: "1.0".to_string(),
+                dimensions: vec![],
+            },
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}path\u{205A}foo\u{205A}0".to_string(),
+                equation: "1.0".to_string(),
+                dimensions: vec![],
+            },
+        ];
+        let project_dims: Vec<crate::datamodel::Dimension> = vec![];
+        let index = build_loop_element_index(&ltm_vars, &project_dims);
+        assert_eq!(index.len(), 1);
+        assert!(index.contains_key("r1"));
+    }
+
+    /// SAFEDIV-0 propagates per element: an element with zero denom at a
+    /// given step contributes a 0 rel-score for that element at that step.
+    /// If every element's denom is zero, the aggregator returns 0.
+    #[test]
+    fn argmax_abs_safediv_zero_per_element() {
+        // step 0: both elements have denom 0 -> both rel = 0 -> agg = 0.
+        // step 1: element 0 has denom 0 (rel=0); element 1 has denom 10
+        //         and slot value -7 -> rel = -0.7, dominant.
+        let loop_data = vec![vec![vec![5.0, 5.0], vec![5.0, -7.0]]];
+        let results = make_arrayed_results(&["L"], &[2], &loop_data);
+        let denoms = [
+            vec![0.0_f64, 0.0],  // element 0
+            vec![0.0_f64, 10.0], // element 1
+        ];
+        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+
+        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 2, &denom_refs)
+            .expect("L must have a series");
+        assert_eq!(agg.len(), 2);
+        // step 0: all elements safe-div to 0 -> agg = 0.
+        assert_eq!(agg[0], 0.0);
+        // step 1: only element 1 is non-zero, signed value -0.7.
+        assert!((agg[1] - (-0.7)).abs() < 1e-12, "got {}", agg[1]);
     }
 
     proptest! {

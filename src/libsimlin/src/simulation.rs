@@ -56,10 +56,12 @@ pub unsafe extern "C" fn simlin_sim_new(
     // on the SourceProject input. The DB is kept in sync by apply_patch
     // and project constructors, so this is typically a cache hit when
     // nothing changed since the last patch.
-    let (incremental_result, captured_loop_partitions): (
+    type CompileSnapshot = (
         std::result::Result<engine::CompiledSimulation, engine::Error>,
         HashMap<String, Option<usize>>,
-    ) = {
+        HashMap<String, engine::ltm_post::LoopElementIndex>,
+    );
+    let (incremental_result, captured_loop_partitions, captured_loop_element_index): CompileSnapshot = {
         let mut db = project_ref.db.lock().unwrap();
         let sync_state = project_ref.sync_state.lock().unwrap();
         if let Some(ref state) = *sync_state {
@@ -68,25 +70,29 @@ pub unsafe extern "C" fn simlin_sim_new(
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
             let result =
                 engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
-            // Snapshot the LTM loop-partition mapping *while* the
-            // ltm_enabled flag is still set and the db is still
-            // locked.  Post-sim relative-loop-score queries look up
-            // this snapshot instead of re-querying the db, so a
-            // subsequent `apply_patch` (rename/delete/restructure)
-            // does not invalidate scores against results that are
-            // still valid for the compilation-era loop structure.
-            let loop_partitions = if enable_ltm && result.is_ok() {
+            // Snapshot the LTM loop-partition mapping AND per-loop slot
+            // metadata *while* the ltm_enabled flag is still set and the
+            // db is still locked.  Post-sim relative-loop-score queries
+            // look up these snapshots instead of re-querying the db, so a
+            // subsequent `apply_patch` (rename/delete/restructure) does
+            // not invalidate scores against results that are still valid
+            // for the compilation-era loop structure.  The element index
+            // also lets the FFI accept subscripted IDs like `r1[Boston]`
+            // and resolve them against the loop_score's actual slot
+            // layout (issue #463).
+            let (loop_partitions, loop_element_index) = if enable_ltm && result.is_ok() {
                 let canonical = engine::canonicalize(&model_ref.model_name);
-                sync.models
-                    .get(canonical.as_ref())
-                    .map(|sm| {
-                        engine::db::model_ltm_variables(&*db, sm.source, source_project)
-                            .loop_partitions
-                            .clone()
-                    })
-                    .unwrap_or_default()
+                if let Some(sm) = sync.models.get(canonical.as_ref()) {
+                    let ltm_vars = engine::db::model_ltm_variables(&*db, sm.source, source_project);
+                    let project_dims = engine::db::project_datamodel_dims(&*db, source_project);
+                    let element_index =
+                        engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
+                    (ltm_vars.loop_partitions.clone(), element_index)
+                } else {
+                    (HashMap::new(), HashMap::new())
+                }
             } else {
-                HashMap::new()
+                (HashMap::new(), HashMap::new())
             };
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
@@ -94,7 +100,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             if enable_ltm {
                 engine::db::set_project_ltm_enabled(&mut db, source_project, false);
             }
-            (result, loop_partitions)
+            (result, loop_partitions, loop_element_index)
         } else {
             (
                 Err(engine::Error {
@@ -102,6 +108,7 @@ pub unsafe extern "C" fn simlin_sim_new(
                     code: engine::ErrorCode::NotSimulatable,
                     details: Some("incremental compilation: no sync state available".to_string()),
                 }),
+                HashMap::new(),
                 HashMap::new(),
             )
         }
@@ -126,6 +133,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             results: None,
             overrides: HashMap::new(),
             loop_partitions: captured_loop_partitions,
+            loop_element_index: captured_loop_element_index,
             cached_partition_denominators: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),
