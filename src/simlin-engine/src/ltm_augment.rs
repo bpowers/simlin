@@ -19,19 +19,7 @@ use crate::ltm::{CyclePartitions, Loop, normalize_module_ref};
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
-/// Access shape of a single AST reference site to a source variable.
-///
-/// Phase 1 introduces this as a stub for the test scaffolding; Phases 2
-/// and 3 fully populate the use-sites. The `Vec<String>` in `FixedIndex`
-/// holds canonical (lowercase) element names per dimension in source order.
-#[allow(dead_code)] // populated in Phase 2/3
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum RefShape {
-    Bare,
-    FixedIndex(Vec<String>),
-    Wildcard,
-    DynamicIndex,
-}
+use crate::db::RefShape;
 
 /// Stub for the per-shape partial equation builder. Phase 3 replaces the
 /// body with the real implementation. Until then, calling this panics --

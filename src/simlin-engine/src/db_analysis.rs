@@ -66,6 +66,42 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
     format!("{}[{}]", var_name, elements.join(","))
 }
 
+/// How a source variable is accessed at a single AST reference site.
+///
+/// Distinguishes bare references (in scalar or A2A context), wildcard
+/// reducers (e.g., inside `SUM(x[*])`), fixed-index references
+/// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
+/// `i` is a position iterator). The shape determines element-edge
+/// emission and per-reference partial-equation construction.
+#[allow(dead_code)] // populated when Task 2's collect_reference_sites lands
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RefShape {
+    /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
+    /// context with an arrayed source, this is same-element. In a scalar
+    /// context with a scalar source, this is a plain scalar dep.
+    Bare,
+    /// `Expr2::Subscript(source, [literal_elem_or_int_lit, ...])` —
+    /// every index is a literal element name or integer literal. The
+    /// `Vec<String>` carries the resolved element names per dimension
+    /// in source order (canonical lowercase).
+    FixedIndex(Vec<String>),
+    /// `Expr2::Subscript(source, indices)` where at least one index is
+    /// `IndexExpr2::Wildcard`. Conservative full cross-product.
+    Wildcard,
+    /// `Expr2::Subscript(source, indices)` where at least one index is
+    /// a non-literal expression (`@N`, `Range`, `StarRange`, or
+    /// arbitrary `Expr`). Conservative full cross-product.
+    DynamicIndex,
+}
+
+/// One occurrence of a source variable in a target's AST.
+#[allow(dead_code)] // populated when Task 2's collect_reference_sites lands
+#[derive(Debug, Clone)]
+pub(crate) struct ReferenceSite {
+    pub source: String,
+    pub shape: RefShape,
+}
+
 /// How a source variable is referenced in a target's equation.
 ///
 /// When expanding variable-level causal edges to element-level edges,

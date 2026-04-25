@@ -30,6 +30,8 @@ pub use db_analysis::{
     model_causal_edges, model_cycle_partitions, model_detected_loops, model_element_causal_edges,
     model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
 };
+#[allow(unused_imports)] // ReferenceSite is consumed by Task 2's walker
+pub(crate) use db_analysis::{RefShape, ReferenceSite};
 
 #[path = "db_implicit_deps.rs"]
 mod db_implicit_deps;
