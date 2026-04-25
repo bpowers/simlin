@@ -21,8 +21,12 @@
 
 - [tech-debt.md](tech-debt.md) -- Known technical debt items with measurement commands
 - [design-plans/](design-plans/) -- Design plans (architecture and phasing for major efforts)
+  - [design-plans/2026-04-05-server-rewrite.md](design-plans/2026-04-05-server-rewrite.md) -- Local-first `simlin-serve` binary: filesystem-backed editor + in-process MCP
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
+- [implementation-plans/](implementation-plans/) -- Detailed phase-by-phase implementation plans
+  - [implementation-plans/2026-04-05-server-rewrite/](implementation-plans/2026-04-05-server-rewrite/) -- 8-phase plan to build `simlin-serve` and refactor `simlin-mcp` into a shared core library
+    - [test-requirements.md](implementation-plans/2026-04-05-server-rewrite/test-requirements.md) -- AC-to-test mapping for execution validation
 
 ## Domain Knowledge
 
