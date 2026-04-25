@@ -6,7 +6,12 @@ import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { App } from './App';
+import { captureLaunchToken } from './launch-token';
 import './styles.css';
+
+// Run before mounting React so the first network request — App's
+// componentDidMount fetch of /api/projects — already carries the bearer.
+captureLaunchToken();
 
 const element = document.getElementById('root');
 if (element) {

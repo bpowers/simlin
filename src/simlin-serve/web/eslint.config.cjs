@@ -18,6 +18,7 @@ if (baseConfig) {
       HTMLElement: 'readonly',
       HTMLInputElement: 'readonly',
       Response: 'readonly',
+      RequestInit: 'readonly',
     },
   };
 }
