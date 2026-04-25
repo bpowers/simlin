@@ -362,23 +362,28 @@ pub fn compute_rel_loop_score_for_id(
 /// Resolve the slot offset to read for a loop with `n_slots` slots when
 /// the partition is being queried at `element_index`.
 ///
-/// - Scalar loops (`n_slots <= 1`) always read slot 0 (broadcast).
-/// - Arrayed loops read slot `element_index`, saturating at `n_slots - 1`
-///   if the queried element is past the loop's slot count.
+/// - Scalar loops (`n_slots <= 1`) → `Some(0)` -- slot 0 broadcasts
+///   across every partition element.
+/// - Arrayed loops with `element_index < n_slots` → `Some(element_index)`.
+/// - Arrayed loops with `element_index >= n_slots` → `None` -- the loop
+///   has no own element at this partition index and must not contribute
+///   (matches the gating that [`compute_rel_loop_scores_per_element`]
+///   applies in the full-sweep path).
 ///
-/// Saturation matches the partition-wide max-slots stride convention used
-/// by [`compute_rel_loop_scores_per_element`]: when partitions mix loops
-/// with different per-loop slot counts, the smaller-N loops are read at
-/// their last slot rather than producing UB through out-of-range access.
-/// Callers that have already validated `element_index < n_slots` (e.g.
-/// the FFI subscript resolver) pay no runtime cost from this clamp.
-fn effective_slot(n_slots: usize, element_index: usize) -> usize {
+/// Returning `None` rather than clamping to `n_slots - 1` matters for
+/// mixed-stride partitions where two arrayed loops have different
+/// dimensionalities: the loop that runs out of slots first does NOT
+/// stand in for the larger loop's later elements.  Callers (the
+/// streaming partition denominator and per-loop helpers) skip
+/// `None`-returning members so the FFI's amortised path stays
+/// bit-for-bit consistent with the full-sweep helper.
+fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
     if n_slots <= 1 {
-        0
-    } else if element_index >= n_slots {
-        n_slots - 1
+        Some(0)
+    } else if element_index < n_slots {
+        Some(element_index)
     } else {
-        element_index
+        None
     }
 }
 
@@ -386,10 +391,21 @@ fn effective_slot(n_slots: usize, element_index: usize) -> usize {
 ///
 /// For each `(loop_id, n_slots)` in the iterator whose `loop_score`
 /// variable is present in `results`, contributes
-/// `|row[off + effective_slot(n_slots, element_index)]|` to the partition
-/// sum at every step.  Scalar loops (`n_slots <= 1`) broadcast slot 0;
-/// arrayed loops with fewer slots than the queried element clamp to the
-/// last slot.
+/// `|row[off + slot]|` to the partition sum at every step, where
+/// `slot` is determined by [`effective_slot`]:
+///   - Scalar loops (`n_slots <= 1`) contribute slot 0 (broadcast).
+///   - Arrayed loops with `element_index < n_slots` contribute their
+///     own slot at `element_index`.
+///   - Arrayed loops with `element_index >= n_slots` do NOT contribute
+///     -- the loop has no own element at this partition index.
+///
+/// This skip-vs-clamp distinction matters for mixed-stride partitions
+/// (two arrayed loops with different dimensionalities sharing a
+/// partition).  Producing the same partition sums as the full-sweep
+/// [`compute_rel_loop_scores_per_element`] is the contract the
+/// libsimlin FFI per-partition cache relies on; the streaming pair
+/// must be a strictly cheaper path to the same numbers, not an
+/// approximation.
 ///
 /// Exposed alongside [`compute_partition_denominator`] so the libsimlin
 /// FFI per-partition cache can amortize across element-aware queries
@@ -406,11 +422,9 @@ where
     let entries: Vec<(usize, usize)> = loop_id_slots
         .into_iter()
         .filter_map(|(id, n_slots)| {
-            results
-                .offsets
-                .get(&loop_score_ident(id))
-                .copied()
-                .map(|off| (off, effective_slot(n_slots, element_index)))
+            let off = results.offsets.get(&loop_score_ident(id)).copied()?;
+            let slot = effective_slot(n_slots, element_index)?;
+            Some((off, slot))
         })
         .collect();
 
@@ -426,11 +440,20 @@ where
 
 /// Per-element streaming variant of [`compute_rel_loop_score_for_id`].
 ///
-/// Reads `row[off + effective_slot(n_slots, element_index)]` as the
-/// numerator at each step, paired with the per-element partition
-/// denominator from [`compute_partition_denominator_for_element`].
-/// SAFEDIV-0, NaN-propagation, and "absent loop returns `None`"
-/// semantics match the scalar streaming helper.
+/// Reads `row[off + slot]` as the numerator at each step, where `slot`
+/// is determined by [`effective_slot`]:
+///   - Scalar loops (`n_slots <= 1`) read slot 0 (broadcast).
+///   - Arrayed loops with `element_index < n_slots` read their own slot.
+///   - Arrayed loops with `element_index >= n_slots` return all zeros
+///     -- the loop has no own element at this partition index, matching
+///     the zero-fill that [`compute_rel_loop_scores_per_element`]
+///     applies in the full-sweep path.
+///
+/// Paired with [`compute_partition_denominator_for_element`] for SAFEDIV
+/// normalisation.  Returns `None` only when the loop's `loop_score`
+/// variable is entirely absent from `results` (matching the scalar
+/// streaming helper's "absent loop" contract); a present-but-no-element
+/// query yields all-zeros, not `None`.
 pub fn compute_rel_loop_score_for_element(
     results: &Results,
     loop_id: &str,
@@ -439,7 +462,11 @@ pub fn compute_rel_loop_score_for_element(
     denominator: &[f64],
 ) -> Option<Vec<f64>> {
     let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
-    let slot = effective_slot(n_slots, element_index);
+    let Some(slot) = effective_slot(n_slots, element_index) else {
+        // This loop has no own element at the queried partition index.
+        // Return zero-fill rather than reading another loop's slot.
+        return Some(vec![0.0; results.step_count]);
+    };
     let mut out = Vec::with_capacity(results.step_count);
     for (t, row) in results.iter().enumerate() {
         let num = row[off + slot];
@@ -762,7 +789,14 @@ pub fn compute_rel_loop_score_argmax_abs(
         let mut best: f64 = 0.0;
         let mut best_abs: f64 = -1.0;
         for (k, denom_series) in denominators_per_element.iter().take(slots).enumerate() {
-            let slot = effective_slot(n_slots, k);
+            // `k` is iterated 0..slots and slots == max(n_slots, 1), so
+            // `effective_slot` always returns `Some`.  We pass it through
+            // anyway for consistency with the streaming helpers and to
+            // catch any future caller that constructs `denominators_per_element`
+            // longer than the loop's own `n_slots`.
+            let Some(slot) = effective_slot(n_slots, k) else {
+                continue;
+            };
             let num = row[off + slot];
             let denom = denom_series[t];
             let rel = if denom == 0.0 { 0.0 } else { num / denom };
@@ -1564,6 +1598,151 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Mixed-stride parity: for any partition where two arrayed loops
+    /// have different `n_slots`, the streaming pair
+    /// (`compute_partition_denominator_for_element` +
+    /// `compute_rel_loop_score_for_element`) must produce the same
+    /// per-element rel-scores as the full-sweep
+    /// `compute_rel_loop_scores_per_element`.  This is the contract the
+    /// libsimlin FFI per-partition cache relies on -- the streaming
+    /// pair must be a strictly cheaper path to the same numbers.
+    ///
+    /// The existing `per_element_streaming_matches_full_sweep` test
+    /// only covers same-shape partitions.  This test extends coverage
+    /// to mixed-stride so any future drift between the two paths is
+    /// caught structurally rather than waiting for a reviewer to
+    /// notice the divergence.
+    #[test]
+    fn streaming_helpers_match_full_sweep_in_mixed_stride_partition() {
+        // A has n=3, B has n=2, sharing a partition.  Multi-step so
+        // we exercise more than one row.  Distinct-per-step values
+        // so any wrong-stride bug shows up loudly.
+        //   step 0: A = [1.0, 2.0, 5.0],   B = [10.0, 7.0]
+        //   step 1: A = [1.5, 2.5, 6.0],   B = [11.0, 8.0]
+        //   step 2: A = [2.0, 3.0, 7.0],   B = [12.0, 9.0]
+        let loop_data = vec![
+            vec![
+                vec![1.0, 2.0, 5.0],
+                vec![1.5, 2.5, 6.0],
+                vec![2.0, 3.0, 7.0],
+            ],
+            vec![vec![10.0, 7.0], vec![11.0, 8.0], vec![12.0, 9.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), 3_usize);
+        slots.insert("B".to_string(), 2_usize);
+
+        let full = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+
+        // The full-sweep helper writes each loop's series at the
+        // partition's max_slots stride (= 3 here for both A and B).
+        let max_slots = 3_usize;
+        for k in 0..max_slots {
+            let denom = compute_partition_denominator_for_element(
+                &results,
+                [("A", 3_usize), ("B", 2_usize)],
+                k,
+            );
+            let rel_a = compute_rel_loop_score_for_element(&results, "A", 3, k, &denom)
+                .expect("A must have a series");
+            let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
+                .expect("B must have a series");
+
+            for step in 0..results.step_count {
+                let full_idx = step * max_slots + k;
+                let full_a = full.get("A").unwrap()[full_idx];
+                let full_b = full.get("B").unwrap()[full_idx];
+                assert_eq!(
+                    rel_a[step], full_a,
+                    "loop A step {step} elem {k}: streaming {} vs full {}",
+                    rel_a[step], full_a
+                );
+                assert_eq!(
+                    rel_b[step], full_b,
+                    "loop B step {step} elem {k}: streaming {} vs full {}",
+                    rel_b[step], full_b
+                );
+            }
+        }
+    }
+
+    /// Streaming `compute_partition_denominator_for_element` must skip
+    /// arrayed members at partition indices past their own n_slots,
+    /// matching the gating now applied by the full-sweep
+    /// `compute_rel_loop_scores_per_element`.  Pre-fix the streaming
+    /// helper clamped to the loop's last slot via `effective_slot`,
+    /// which silently disagreed with the full-sweep helper for any
+    /// mixed-stride partition (one arrayed loop with `n_a` slots
+    /// sharing a partition with another arrayed loop with `n_b < n_a`).
+    /// We plant a sentinel at B's last slot so a clamp would pull
+    /// it loudly into the denom; the principled "skip" semantic
+    /// excludes B entirely at element 2.
+    #[test]
+    fn streaming_partition_denominator_skips_arrayed_loops_past_own_slots() {
+        // step_count = 1.  A has n=3 with values [1, 2, 5]; B has n=2
+        // with values [10, 999.0] (sentinel at slot 1).  At partition
+        // element k=2, B has no slot -- the principled denom is
+        // |A[2]| = 5, NOT |A[2]| + |B[1]| = 5 + 999 = 1004.
+        let loop_data = vec![vec![vec![1.0, 2.0, 5.0]], vec![vec![10.0, 999.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
+
+        let denom_at_2 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 2_usize)],
+            2,
+        );
+        assert_eq!(
+            denom_at_2,
+            vec![5.0],
+            "B has no slot at partition index 2; its sentinel must NOT \
+             pollute the denominator (skip, not clamp)"
+        );
+
+        // For sanity, k=0 and k=1 should include both members.
+        let denom_at_0 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 2_usize)],
+            0,
+        );
+        assert_eq!(denom_at_0, vec![1.0 + 10.0]);
+        let denom_at_1 = compute_partition_denominator_for_element(
+            &results,
+            [("A", 3_usize), ("B", 2_usize)],
+            1,
+        );
+        assert_eq!(denom_at_1, vec![2.0 + 999.0]);
+    }
+
+    /// `compute_rel_loop_score_for_element` queried at an element this
+    /// loop doesn't have (n=2, queried at k=2) must return all-zeros
+    /// rather than clamping to the loop's last slot.  This matches the
+    /// full-sweep helper's "zero-fill at positions n..max_slots" rule
+    /// so any future caller that directly queries past a loop's range
+    /// gets the right answer.
+    #[test]
+    fn streaming_rel_score_returns_zeros_when_loop_has_no_own_element() {
+        // B is arrayed with n=2 and a sentinel value at slot 1.  When
+        // queried at element_index=2 it has no own element; the
+        // result must be all-zeros, not the slot-1 sentinel rel-score.
+        let loop_data = vec![vec![vec![10.0, 999.0]]];
+        let results = make_arrayed_results(&["B"], &[2], &loop_data);
+
+        // Use a denom that would produce a clearly-wrong rel-score if
+        // the helper clamped: |sentinel|/|denom| would be ~999, but
+        // the principled answer is 0.0.
+        let denom = vec![1.0_f64];
+        let rel = compute_rel_loop_score_for_element(&results, "B", 2, 2, &denom)
+            .expect("B has a series");
+        assert_eq!(
+            rel,
+            vec![0.0],
+            "queried at index 2 (past B's n=2), result must be 0 not clamped"
+        );
     }
 
     /// SAFEDIV-0 semantics propagate per element: a partition where every
