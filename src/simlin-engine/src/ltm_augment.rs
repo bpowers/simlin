@@ -19,6 +19,35 @@ use crate::ltm::{CyclePartitions, Loop, normalize_module_ref};
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
+/// Access shape of a single AST reference site to a source variable.
+///
+/// Phase 1 introduces this as a stub for the test scaffolding; Phases 2
+/// and 3 fully populate the use-sites. The `Vec<String>` in `FixedIndex`
+/// holds canonical (lowercase) element names per dimension in source order.
+#[allow(dead_code)] // populated in Phase 2/3
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RefShape {
+    Bare,
+    FixedIndex(Vec<String>),
+    Wildcard,
+    DynamicIndex,
+}
+
+/// Stub for the per-shape partial equation builder. Phase 3 replaces the
+/// body with the real implementation. Until then, calling this panics --
+/// Phase 1's tests that exercise it are `#[ignore]`-d so the panic doesn't
+/// fire during normal `cargo test`.
+#[allow(dead_code)] // populated in Phase 3
+pub(crate) fn build_partial_equation_for_shape(
+    _equation_text: &str,
+    _deps: &HashSet<Ident<Canonical>>,
+    _live_source: &Ident<Canonical>,
+    _live_shape: &RefShape,
+    _source_dim_elements: &[Vec<String>],
+) -> String {
+    unimplemented!("populated in Phase 3")
+}
+
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
 /// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
 /// so a variable named `max` won't corrupt `MAX(max, s)`.
