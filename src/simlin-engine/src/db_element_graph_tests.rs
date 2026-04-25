@@ -670,7 +670,6 @@ fn scalar_model_loops_and_partitions_identical() {
 /// (FixedIndex). After deduplication this is 2N - 1 = 5 edges for N=3,
 /// not the N^2 = 9 edges today's classifier emits.
 #[test]
-#[ignore = "Phase 2: AST-walking element graph builder; today emits N² edges for fixed-index refs"]
 fn element_graph_fixed_index_broadcast_truthful() {
     let project = TestProject::new("fixed_index_broadcast")
         .named_dimension("Region", &["NYC", "Boston", "LA"])
@@ -711,7 +710,6 @@ fn element_graph_fixed_index_broadcast_truthful() {
 /// expansion, but the post-refactor builder emits them per-reference and
 /// the union must still cover all 9.
 #[test]
-#[ignore = "Phase 2: AST-walking element graph builder; today emits N² edges for fixed-index refs"]
 fn element_graph_wildcard_reducer_plus_bare_truthful() {
     let project = TestProject::new("wildcard_plus_bare")
         .named_dimension("Region", &["NYC", "Boston", "LA"])
@@ -756,7 +754,6 @@ fn element_graph_wildcard_reducer_plus_bare_truthful() {
 /// "not a regression vs today" -- the test should pass today AND after
 /// the refactor lands, pinning the conservative semantics in place.
 #[test]
-#[ignore = "Phase 2: AST-walking element graph builder; today emits N² edges for fixed-index refs"]
 fn element_graph_multidim_partial_fixed_conservative() {
     let project = TestProject::new("multidim_partial_fixed")
         .named_dimension("Region", &["NYC", "Boston"])

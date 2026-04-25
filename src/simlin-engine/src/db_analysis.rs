@@ -94,14 +94,25 @@ pub(crate) enum RefShape {
 }
 
 /// One occurrence of a source variable in a target's AST.
+///
+/// Production code only consumes `shape` and `target_element` (the source
+/// ident is already known by the caller, which iterates the variable-level
+/// edge map). `source` is preserved because per-reference test fixtures
+/// and any future per-reference partial-equation generator (Phase 4) need
+/// to distinguish the source ident from the surrounding context.
+///
+/// `target_element` is set only when the reference appears inside an
+/// `Ast::Arrayed` per-element expression: the value is the canonical
+/// element name (single-dim) or comma-separated tuple (multi-dim) of the
+/// target element being defined. For `Ast::Scalar` and `Ast::ApplyToAll`
+/// it stays `None` (the reference contributes to every target element
+/// according to the shape's normal broadcast/diagonal rules).
 #[derive(Debug, Clone)]
 pub(crate) struct ReferenceSite {
-    // Fields are read by Task 2's tests but not by production code yet;
-    // Task 4's pivot will consume them in `model_element_causal_edges`.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read by collect_reference_sites_tests; reserved for Phase 4
     pub source: String,
-    #[allow(dead_code)]
     pub shape: RefShape,
+    pub target_element: Option<String>,
 }
 
 /// How a source variable is referenced in a target's equation.
@@ -112,6 +123,11 @@ pub(crate) struct ReferenceSite {
 /// - `SameElement`: A2A same-element reference (bare `Var` node with array bounds)
 /// - `CrossElement`: reducer over all elements (e.g., `SUM(population[*])`)
 ///   or fixed-index reference to a specific element (e.g., `population[Boston]`)
+//
+// TODO: removed in Phase 2 Task 6 once the simulate_ltm re-validation lands.
+// Kept temporarily so the Task 4 pivot lands in a buildable state with
+// the existing classify_element_dependency_tests still referencing it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ElementDependencyKind {
     /// Scalar reference: source appears as a bare variable with no subscripts
@@ -152,6 +168,9 @@ enum ElementDependencyKind {
 /// wins: CrossElement > SameElement > Scalar.
 ///
 /// Returns `Scalar` as default if the source is not found (defensive).
+//
+// TODO: removed in Phase 2 Task 6 along with `ElementDependencyKind`.
+#[allow(dead_code)]
 fn classify_element_dependency(
     target_var: &crate::variable::Variable,
     source_ident: &str,
@@ -218,6 +237,9 @@ fn classify_element_dependency(
 /// the compiler (Expr3 phase). We detect SameElement by checking whether the
 /// `Var` node carries `ArrayBounds` (meaning it's arrayed and will be subscript-
 /// expanded element-wise at compile time).
+//
+// TODO: removed in Phase 2 Task 6 along with `classify_element_dependency`.
+#[allow(dead_code)]
 fn classify_in_expr(
     expr: &crate::ast::Expr2,
     source_ident: &str,
@@ -342,7 +364,6 @@ fn classify_in_expr(
 /// element registry contains the canonical name. Literal indices that
 /// don't match any known element classify defensively as `DynamicIndex`,
 /// so the worst case is over-conservative (full cross-product) edges.
-#[allow(dead_code)] // exercised by Task 2's tests and Task 4's pivot
 fn resolve_literal_index(
     idx: &crate::ast::IndexExpr2,
     source_dims: &[crate::dimensions::Dimension],
@@ -405,7 +426,6 @@ fn resolve_literal_index(
 /// `(source, shape)` are kept; downstream emission deduplicates edges
 /// implicitly via the `BTreeSet` value type, but the per-site count may
 /// matter for callers that use sites as a metric.
-#[allow(dead_code)] // wired into model_element_causal_edges in Task 4
 fn collect_reference_sites(
     target_var: &crate::variable::Variable,
     source_ident: &str,
@@ -419,30 +439,48 @@ fn collect_reference_sites(
     let mut sites = Vec::new();
     match ast {
         crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
+            // Scalar/A2A equations: every reference site contributes to
+            // every target element according to its shape's broadcast or
+            // diagonal rule. `target_element = None` lets the emitter
+            // apply the default rules.
             collect_in_expr(
                 expr,
                 source_ident,
                 source_is_arrayed,
                 source_dims,
+                None,
                 &mut sites,
             );
         }
         crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
-            for expr in subscript_map.values() {
+            // Per-element expressions: each reference site is pinned to the
+            // specific target element being defined. The emitter restricts
+            // edge emission to that element only.
+            for (target_elem, expr) in subscript_map.iter() {
+                let target_elem_name = target_elem.as_str().to_string();
                 collect_in_expr(
                     expr,
                     source_ident,
                     source_is_arrayed,
                     source_dims,
+                    Some(&target_elem_name),
                     &mut sites,
                 );
             }
+            // The EXCEPT default applies to elements not explicitly listed.
+            // We don't know the exact target element set here, but the
+            // default expression's references contribute to every other
+            // target element. Treating `target_element = None` makes the
+            // emitter broadcast across the full target dimension, which
+            // is a conservative superset that preserves the variable-level
+            // projection invariant.
             if let Some(default) = default_expr {
                 collect_in_expr(
                     default,
                     source_ident,
                     source_is_arrayed,
                     source_dims,
+                    None,
                     &mut sites,
                 );
             }
@@ -459,34 +497,37 @@ fn collect_reference_sites(
 /// during recursion-local rewriting (currently a no-op here -- shape
 /// classification is determined by the AST node and `source_dims`),
 /// matching the documented public signature.
-#[allow(dead_code, clippy::only_used_in_recursion)] // helper for collect_reference_sites
+#[allow(clippy::only_used_in_recursion)] // helper for collect_reference_sites
 fn collect_in_expr(
     expr: &crate::ast::Expr2,
     source_ident: &str,
     source_is_arrayed: bool,
     source_dims: &[crate::dimensions::Dimension],
+    target_element: Option<&String>,
     sites: &mut Vec<ReferenceSite>,
 ) {
     use crate::ast::{Expr2, IndexExpr2};
     use crate::builtins::{BuiltinContents, walk_builtin_expr};
 
+    let make_site = |shape: RefShape| -> ReferenceSite {
+        ReferenceSite {
+            source: source_ident.to_string(),
+            shape,
+            target_element: target_element.cloned(),
+        }
+    };
+
     match expr {
         Expr2::Const(..) => {}
         Expr2::Var(ident, _array_bounds, _) => {
             if ident.as_str() == source_ident {
-                sites.push(ReferenceSite {
-                    source: source_ident.to_string(),
-                    shape: RefShape::Bare,
-                });
+                sites.push(make_site(RefShape::Bare));
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
             if ident.as_str() == source_ident {
                 let shape = classify_subscript_shape(indices, source_dims);
-                sites.push(ReferenceSite {
-                    source: source_ident.to_string(),
-                    shape,
-                });
+                sites.push(make_site(shape));
             }
             // Always recurse into index expressions so nested references
             // like `source_outer[source_inner[*]]` (or arbitrary index
@@ -496,11 +537,32 @@ fn collect_in_expr(
             for idx in indices {
                 match idx {
                     IndexExpr2::Expr(e) => {
-                        collect_in_expr(e, source_ident, source_is_arrayed, source_dims, sites);
+                        collect_in_expr(
+                            e,
+                            source_ident,
+                            source_is_arrayed,
+                            source_dims,
+                            target_element,
+                            sites,
+                        );
                     }
                     IndexExpr2::Range(l, r, _) => {
-                        collect_in_expr(l, source_ident, source_is_arrayed, source_dims, sites);
-                        collect_in_expr(r, source_ident, source_is_arrayed, source_dims, sites);
+                        collect_in_expr(
+                            l,
+                            source_ident,
+                            source_is_arrayed,
+                            source_dims,
+                            target_element,
+                            sites,
+                        );
+                        collect_in_expr(
+                            r,
+                            source_ident,
+                            source_is_arrayed,
+                            source_dims,
+                            target_element,
+                            sites,
+                        );
                     }
                     IndexExpr2::Wildcard(_)
                     | IndexExpr2::StarRange(_, _)
@@ -512,10 +574,7 @@ fn collect_in_expr(
             walk_builtin_expr(builtin, |contents| match contents {
                 BuiltinContents::Ident(id, _) => {
                     if id == source_ident {
-                        sites.push(ReferenceSite {
-                            source: source_ident.to_string(),
-                            shape: RefShape::Bare,
-                        });
+                        sites.push(make_site(RefShape::Bare));
                     }
                 }
                 BuiltinContents::Expr(sub_expr) => {
@@ -524,25 +583,55 @@ fn collect_in_expr(
                         source_ident,
                         source_is_arrayed,
                         source_dims,
+                        target_element,
                         sites,
                     );
                 }
             });
         }
         Expr2::Op1(_, operand, _, _) => {
-            collect_in_expr(operand, source_ident, source_is_arrayed, source_dims, sites);
+            collect_in_expr(
+                operand,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
         }
         Expr2::Op2(_, left, right, _, _) => {
-            collect_in_expr(left, source_ident, source_is_arrayed, source_dims, sites);
-            collect_in_expr(right, source_ident, source_is_arrayed, source_dims, sites);
+            collect_in_expr(
+                left,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
+            collect_in_expr(
+                right,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
         }
         Expr2::If(cond, then_expr, else_expr, _, _) => {
-            collect_in_expr(cond, source_ident, source_is_arrayed, source_dims, sites);
+            collect_in_expr(
+                cond,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
             collect_in_expr(
                 then_expr,
                 source_ident,
                 source_is_arrayed,
                 source_dims,
+                target_element,
                 sites,
             );
             collect_in_expr(
@@ -550,6 +639,7 @@ fn collect_in_expr(
                 source_ident,
                 source_is_arrayed,
                 source_dims,
+                target_element,
                 sites,
             );
         }
@@ -563,7 +653,6 @@ fn collect_in_expr(
 /// Otherwise, every index must resolve via `resolve_literal_index` for
 /// the shape to be `FixedIndex`. Any other index pattern (or an
 /// unrecognized literal) falls back to `DynamicIndex`.
-#[allow(dead_code)] // helper for collect_in_expr
 fn classify_subscript_shape(
     indices: &[crate::ast::IndexExpr2],
     source_dims: &[crate::dimensions::Dimension],
@@ -609,6 +698,9 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// every source element connects to every target element (a SUM(x[*])
 /// inside an A2A equation means each source element contributes to the
 /// scalar reduction, which then feeds all target elements).
+//
+// TODO: removed in Phase 2 Task 6 along with `ElementDependencyKind`.
+#[allow(dead_code)]
 fn expand_edge_to_elements(
     from_name: &str,
     to_name: &str,
@@ -708,11 +800,20 @@ fn expand_edge_to_elements(
 ///
 /// This is the per-reference replacement for `expand_edge_to_elements`:
 /// the new walker classifies each reference site into a `RefShape` and
-/// hands `(from_name, to_name, from_dims, to_dims, shape)` to this
-/// helper, which translates the shape into the appropriate element-level
-/// edges and unions them into `element_edges`.
+/// hands `(from_name, to_name, from_dims, to_dims, shape, target_element)`
+/// to this helper, which translates the shape into the appropriate
+/// element-level edges and unions them into `element_edges`.
 ///
-/// Truth table (matches design plan):
+/// `target_element` is `Some(elem)` when the reference appears inside an
+/// `Ast::Arrayed` per-element expression: the target node set is then
+/// pinned to that single element tuple (parsed from `elem`'s comma-
+/// separated form for multi-dim arrays). When `None`, the reference
+/// applies to every target element according to its shape's normal
+/// broadcast/diagonal rule (Scalar/A2A semantics).
+///
+/// Truth table (matches design plan; rows below assume `target_element`
+/// is `None` -- the per-element narrowing only changes which target
+/// element names appear on the right-hand side):
 /// | `from_dims` | `to_dims`  | `shape`                       | Edges emitted                                 |
 /// |-------------|------------|-------------------------------|-----------------------------------------------|
 /// | []          | []         | Bare                          | `from -> to`                                  |
@@ -730,33 +831,42 @@ fn expand_edge_to_elements(
 /// `DynamicIndex`), so this helper does not need to handle a
 /// "partial fixed" branch -- it only sees fully-resolved
 /// `FixedIndex(elems)` payloads or the conservative full-cross shapes.
-#[allow(dead_code)] // wired into model_element_causal_edges in Task 4
 fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
     shape: &RefShape,
+    target_element: Option<&str>,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     let from_is_scalar = from_dims.is_empty();
     let to_is_scalar = to_dims.is_empty();
 
+    // Compute the per-site target node set. With `target_element` set we
+    // restrict to a single target; otherwise, we use the full cartesian
+    // product. The single-target case mirrors `format_multi_element_name`
+    // by accepting comma-separated multi-dim subscripts as-is (the
+    // canonical form of `Arrayed`'s element key already matches that).
+    let target_nodes: Vec<String> = if to_is_scalar {
+        vec![to_name.to_string()]
+    } else if let Some(elem) = target_element {
+        // The element key from `Ast::Arrayed` is a comma-separated tuple
+        // of canonical element names (e.g. "nyc" or "nyc,adult"). Format
+        // the target node directly without re-cartesian-producting.
+        vec![format!("{}[{}]", to_name, elem)]
+    } else {
+        cartesian_element_names(to_name, to_dims)
+    };
+
     // Scalar source short-circuits: shape doesn't matter (a scalar source
     // has no subscript form). Either pass-through or broadcast.
     if from_is_scalar {
-        if to_is_scalar {
+        for to_node in &target_nodes {
             element_edges
                 .entry(from_name.to_string())
                 .or_default()
-                .insert(to_name.to_string());
-        } else {
-            for to_elem in cartesian_element_names(to_name, to_dims) {
-                element_edges
-                    .entry(from_name.to_string())
-                    .or_default()
-                    .insert(to_elem);
-            }
+                .insert(to_node.clone());
         }
         return;
     }
@@ -770,6 +880,14 @@ fn emit_edges_for_reference(
             // an arrayed target (matching dims), this is the diagonal;
             // with partial-collapse dims, expand_same_element handles
             // the projection.
+            //
+            // When `target_element` is set (arrayed equation per-element
+            // expression), the bare reference still represents same-
+            // element semantics: only the source element matching the
+            // target element contributes. We delegate to
+            // `expand_same_element` and restrict the result to the
+            // pinned target node afterward by intersection with
+            // `target_nodes`.
             if to_is_scalar {
                 for from_elem in cartesian_element_names(from_name, from_dims) {
                     element_edges
@@ -777,15 +895,33 @@ fn emit_edges_for_reference(
                         .or_default()
                         .insert(to_name.to_string());
                 }
+            } else if target_element.is_some() {
+                // Per-element bare reference: the same-element diagonal
+                // applies to the single pinned target. We compute the
+                // full diagonal into a scratch map and then keep only
+                // edges whose target appears in `target_nodes`.
+                let mut scratch: HashMap<String, BTreeSet<String>> = HashMap::new();
+                expand_same_element(from_name, to_name, from_dims, to_dims, &mut scratch);
+                let target_set: BTreeSet<String> = target_nodes.iter().cloned().collect();
+                for (from_node, tos) in scratch {
+                    let filtered: BTreeSet<String> =
+                        tos.into_iter().filter(|t| target_set.contains(t)).collect();
+                    if !filtered.is_empty() {
+                        let entry = element_edges.entry(from_node).or_default();
+                        for t in filtered {
+                            entry.insert(t);
+                        }
+                    }
+                }
             } else {
                 expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
             }
         }
         RefShape::FixedIndex(elems) => {
             // The source is pinned to a single element tuple. Build
-            // exactly one source key; if the target is scalar, that
-            // key feeds `to_name`, otherwise it feeds every cartesian
-            // element of the target.
+            // exactly one source key and emit edges to every target
+            // node (which `target_nodes` already narrows when the
+            // reference is inside an arrayed per-element expression).
             let from_node = if elems.len() == 1 {
                 format_element_name(from_name, &elems[0])
             } else {
@@ -793,38 +929,20 @@ fn emit_edges_for_reference(
                 format_multi_element_name(from_name, &elem_refs)
             };
 
-            if to_is_scalar {
-                element_edges
-                    .entry(from_node)
-                    .or_default()
-                    .insert(to_name.to_string());
-            } else {
-                let to_elements = cartesian_element_names(to_name, to_dims);
-                let entry = element_edges.entry(from_node).or_default();
-                for to_elem in to_elements {
-                    entry.insert(to_elem);
-                }
+            let entry = element_edges.entry(from_node).or_default();
+            for to_node in &target_nodes {
+                entry.insert(to_node.clone());
             }
         }
         RefShape::Wildcard | RefShape::DynamicIndex => {
-            // Conservative full cross product. Every source element
-            // connects to every target element (or the single scalar
-            // target).
+            // Conservative full cross product over source elements.
+            // `target_nodes` already restricts the target side when
+            // inside an arrayed per-element expression.
             let from_elements = cartesian_element_names(from_name, from_dims);
-            if to_is_scalar {
-                for from_elem in from_elements {
-                    element_edges
-                        .entry(from_elem)
-                        .or_default()
-                        .insert(to_name.to_string());
-                }
-            } else {
-                let to_elements = cartesian_element_names(to_name, to_dims);
-                for from_elem in &from_elements {
-                    let entry = element_edges.entry(from_elem.clone()).or_default();
-                    for to_elem in &to_elements {
-                        entry.insert(to_elem.clone());
-                    }
+            for from_elem in &from_elements {
+                let entry = element_edges.entry(from_elem.clone()).or_default();
+                for to_node in &target_nodes {
+                    entry.insert(to_node.clone());
                 }
             }
         }
@@ -1411,13 +1529,18 @@ pub fn model_element_causal_edges(
         }
     }
 
-    // Expand each variable-level edge to element-level edges
+    // Expand each variable-level edge to element-level edges using the
+    // AST-walking per-reference walker. For each (source, target) pair we
+    // collect every reference site of `source` in `target`'s AST, classify
+    // each into a `RefShape`, and emit the per-shape element edges. This
+    // replaces the older single-classification-per-pair scheme that
+    // over-expanded fixed-index references to the full N x N cross product.
     for (from_name, to_set) in &variable_edges.edges {
         let from_dims = lookup_dims(from_name, &mut dim_cache);
         for to_name in to_set {
             let to_dims = lookup_dims(to_name, &mut dim_cache);
 
-            // Fast path: both scalar -> direct edge
+            // Fast path: both scalar -> direct edge.
             if from_dims.is_empty() && to_dims.is_empty() {
                 element_edges
                     .entry(from_name.clone())
@@ -1426,40 +1549,80 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // Structural flow->stock edges use SameElement when both are
-            // arrayed. The stock's equation is just the initial value, so
-            // the flow name never appears in the AST; AST-based
-            // classification would incorrectly default to Scalar.
-            let dep_kind = if structural_flow_to_stock
-                .contains(&(from_name.clone(), to_name.clone()))
+            // Structural flow->stock edges: the stock's equation is just the
+            // initial value, so the flow name never appears in the stock's
+            // AST. Without this bypass, the walker would find no reference
+            // sites and emit no edges. Both arrayed -> emit SameElement
+            // diagonal directly.
+            if structural_flow_to_stock.contains(&(from_name.clone(), to_name.clone()))
                 && !from_dims.is_empty()
                 && !to_dims.is_empty()
             {
-                ElementDependencyKind::SameElement
-            } else {
-                // Classify the dependency by inspecting the target's AST
-                // to determine how the source appears in the equation.
-                match reconstruct_single_variable(db, model, project, to_name) {
-                    Some(target_var) => {
-                        let source_is_arrayed = !from_dims.is_empty();
-                        classify_element_dependency(&target_var, from_name, source_is_arrayed)
-                    }
-                    None => {
-                        // If we can't reconstruct the variable (shouldn't happen
-                        // for well-formed models), default to Scalar
-                        ElementDependencyKind::Scalar
-                    }
+                emit_edges_for_reference(
+                    from_name,
+                    to_name,
+                    &from_dims,
+                    &to_dims,
+                    &RefShape::Bare,
+                    None,
+                    &mut element_edges,
+                );
+                continue;
+            }
+
+            // AST-based emission: collect reference sites and emit one set
+            // of element edges per site. Multiple sites of the same shape
+            // dedupe naturally because `element_edges` values are sets.
+            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
+                Some(v) => v,
+                None => {
+                    // Couldn't reconstruct (shouldn't happen for well-formed
+                    // models). Fall back to scalar broadcast emission so the
+                    // variable-level projection invariant still holds.
+                    emit_edges_for_reference(
+                        from_name,
+                        to_name,
+                        &from_dims,
+                        &to_dims,
+                        &RefShape::Bare,
+                        None,
+                        &mut element_edges,
+                    );
+                    continue;
                 }
             };
+            let source_is_arrayed = !from_dims.is_empty();
+            let sites =
+                collect_reference_sites(&target_var, from_name, source_is_arrayed, &from_dims);
 
-            expand_edge_to_elements(
-                from_name,
-                to_name,
-                &from_dims,
-                &to_dims,
-                dep_kind,
-                &mut element_edges,
-            );
+            if sites.is_empty() {
+                // Defensive: the variable-level edge exists but the AST has
+                // no reference. This can happen with structural edges or
+                // synthesized references. Fall back to scalar broadcast so
+                // the variable-level projection invariant still holds.
+                emit_edges_for_reference(
+                    from_name,
+                    to_name,
+                    &from_dims,
+                    &to_dims,
+                    &RefShape::Bare,
+                    None,
+                    &mut element_edges,
+                );
+                continue;
+            }
+
+            for site in sites {
+                emit_edges_for_reference(
+                    from_name,
+                    to_name,
+                    &from_dims,
+                    &to_dims,
+                    &site.shape,
+                    site.target_element.as_deref(),
+                    &mut element_edges,
+                );
+            }
         }
     }
 
@@ -2121,7 +2284,7 @@ mod emit_edges_for_reference_tests {
     #[test]
     fn scalar_to_scalar_bare_passthrough() {
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
-        emit_edges_for_reference("a", "b", &[], &[], &RefShape::Bare, &mut edges);
+        emit_edges_for_reference("a", "b", &[], &[], &RefShape::Bare, None, &mut edges);
 
         let from = edges.get("a").expect("expected 'a' as a source key");
         assert_eq!(from.len(), 1);
@@ -2143,6 +2306,7 @@ mod emit_edges_for_reference_tests {
             dims,
             dims,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            None,
             &mut edges,
         );
 
@@ -2168,7 +2332,7 @@ mod emit_edges_for_reference_tests {
         let dims = std::slice::from_ref(&region);
         let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
 
-        emit_edges_for_reference("pop", "rel", dims, dims, &RefShape::Bare, &mut edges);
+        emit_edges_for_reference("pop", "rel", dims, dims, &RefShape::Bare, None, &mut edges);
 
         let nyc = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
         assert_eq!(nyc.len(), 1, "diagonal: one outgoing edge");
@@ -2177,6 +2341,32 @@ mod emit_edges_for_reference_tests {
         let boston = edges.get("pop[boston]").expect("from key 'pop[boston]'");
         assert_eq!(boston.len(), 1, "diagonal: one outgoing edge");
         assert!(boston.contains("rel[boston]"));
+    }
+
+    /// `target_element` narrows the FixedIndex emission to the pinned target.
+    /// With `target_element = Some("boston")`, only `pop[nyc] -> rel[boston]`
+    /// is emitted; the NYC target broadcast is suppressed. This mirrors the
+    /// per-element `Ast::Arrayed` case used by the cross-element fixture.
+    #[test]
+    fn fixed_index_with_target_element_pins_to_one_target() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            Some("boston"),
+            &mut edges,
+        );
+
+        let from = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
+        assert_eq!(from.len(), 1, "expected exactly 1 outgoing edge");
+        assert!(from.contains("rel[boston]"));
+        assert!(!from.contains("rel[nyc]"));
     }
 }
 

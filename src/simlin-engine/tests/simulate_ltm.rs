@@ -4241,7 +4241,6 @@ fn test_cross_element_ltm_exhaustive() {
 /// are the "red" part of this test: they fail today and start passing
 /// when the refactor lands.
 #[test]
-#[ignore = "Phase 2: post AST-walking refactor"]
 fn test_cross_element_ltm_edge_set_truthful() {
     let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
 
