@@ -1,0 +1,15 @@
+[package]
+name = "simlin-serve"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Local HTTP server for browsing and editing system-dynamics models"
+
+[[bin]]
+name = "simlin-serve"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
