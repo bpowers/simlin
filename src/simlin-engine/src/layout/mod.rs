@@ -3887,11 +3887,18 @@ fn try_detect_ltm_loops_incremental(
     // aggregate to a single signed series via argmax-abs across slots --
     // i.e. each step's importance is the dominant element's contribution,
     // with sign preserved.  For scalar loops this reduces to identity.
-    // See issue #463 for context.
+    // The aggregation is delegated to `ltm_post::aggregate_per_element_argmax_abs`
+    // so the partition-stride handling (mixed partitions where stride >
+    // per-loop n_slots) is centralized and unit-testable.  See issue #463.
     let per_element_rel_scores = crate::ltm_post::compute_rel_loop_scores_per_element(
         &results,
         &loop_partitions,
         &n_slots_by_loop,
+    );
+    let importance_by_loop = crate::ltm_post::aggregate_per_element_argmax_abs(
+        &per_element_rel_scores,
+        &n_slots_by_loop,
+        results.step_count,
     );
 
     // Phase 3: Build feedback loop structs from VM results.
@@ -3911,36 +3918,7 @@ fn try_detect_ltm_loops_incremental(
             vars
         };
 
-        let importance_series: Vec<f64> = {
-            let n = n_slots_by_loop.get(&dl.id).copied().unwrap_or(1).max(1);
-            let series = per_element_rel_scores
-                .get(&dl.id)
-                .cloned()
-                .unwrap_or_default();
-            if series.is_empty() {
-                Vec::new()
-            } else {
-                let n_steps = series.len() / n;
-                (0..n_steps)
-                    .map(|t| {
-                        // Signed argmax-abs across the loop's slots: pick the
-                        // element with the largest |rel| at this step and emit
-                        // its signed value.  Ties broken by lowest-index slot
-                        // (the `>` keeps the first-hit when |rel| is equal).
-                        let mut best = 0.0_f64;
-                        let mut best_abs = -1.0_f64;
-                        for k in 0..n {
-                            let v = series[t * n + k];
-                            if v.abs() > best_abs {
-                                best_abs = v.abs();
-                                best = v;
-                            }
-                        }
-                        if best.is_finite() { best } else { 0.0 }
-                    })
-                    .collect()
-            }
-        };
+        let importance_series = importance_by_loop.get(&dl.id).cloned().unwrap_or_default();
 
         feedback_loops.push(metadata::FeedbackLoop {
             name: dl.id.clone(),

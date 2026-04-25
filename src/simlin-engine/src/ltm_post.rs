@@ -153,9 +153,19 @@ pub fn compute_rel_loop_scores(
 ///
 /// `n_slots_by_loop` maps each loop id to its element count.  Missing
 /// entries or a count of 1 are treated as scalar.  The denominator at
-/// element `k` is `Σ_j |loop_score_j[k_j]|` where `k_j = k` for
-/// arrayed loops and `k_j = 0` for scalar ones.  SAFEDIV-0 and NaN
-/// propagation match [`compute_rel_loop_scores`].
+/// element `k` is `Σ_j |loop_score_j[k_j]|`, with each member loop
+/// contributing per the following gating:
+///   - Scalar loops (`n_slots == 1`): always contribute `row[off]` --
+///     slot 0 broadcasts across every partition element.
+///   - Arrayed loops with `k < n_slots`: contribute `row[off + k]`.
+///   - Arrayed loops with `k >= n_slots`: do NOT contribute (this
+///     loop has no element at this partition index).  Their per-loop
+///     series at position k is zero-filled rather than reading past
+///     their own slot range.  Without this gating, mixed-arrayed
+///     partitions (two loops with different dimensionalities sharing
+///     a partition) would OOB-read into the next variable's slots.
+///
+/// SAFEDIV-0 and NaN propagation match [`compute_rel_loop_scores`].
 ///
 /// `BTreeMap` on partition groups keeps the float summation order
 /// deterministic across runs, the same rationale
@@ -213,6 +223,29 @@ pub fn compute_rel_loop_scores_per_element(
         })
         .collect();
 
+    // Resolve `(loop, partition_index_k)` to either the loop's own slot
+    // offset (for arrayed loops with their own element at k, or scalar
+    // loops broadcasting their single slot) or `None` when the loop has
+    // no element at that partition index (arrayed loops with
+    // n_slots < partition max_slots).  This gating prevents an OOB read
+    // past `row[off + n_slots[i] - 1]` into the next variable's data
+    // when partitions mix arrayed loops of different dimensionalities.
+    let slot_for = |i: usize, k: usize| -> Option<usize> {
+        let n = slot_counts[i];
+        if n <= 1 {
+            // Scalar loop: broadcast slot 0 across every partition element.
+            Some(0)
+        } else if k < n {
+            // Arrayed loop with its own element at k.
+            Some(k)
+        } else {
+            // Arrayed loop with n < partition max: this loop has no
+            // element at partition index k.  Don't contribute to the
+            // denom and zero-fill the per-loop series.
+            None
+        }
+    };
+
     for (step, row) in results.iter().enumerate() {
         for (part_key, indices) in &partition_groups {
             let max_slots = group_max_slots.get(part_key).copied().unwrap_or(1);
@@ -220,17 +253,23 @@ pub fn compute_rel_loop_scores_per_element(
                 let denom: f64 = indices
                     .iter()
                     .filter_map(|&i| {
-                        offsets[i].map(|off| {
-                            let elem = if slot_counts[i] > 1 { k } else { 0 };
-                            row[off + elem].abs()
-                        })
+                        let off = offsets[i]?;
+                        let elem = slot_for(i, k)?;
+                        Some(row[off + elem].abs())
                     })
                     .sum();
                 for &i in indices {
                     let Some(off) = offsets[i] else { continue };
-                    let elem = if slot_counts[i] > 1 { k } else { 0 };
-                    let num = row[off + elem];
-                    let val = if denom == 0.0 { 0.0 } else { num / denom };
+                    let val = match slot_for(i, k) {
+                        Some(elem) => {
+                            let num = row[off + elem];
+                            if denom == 0.0 { 0.0 } else { num / denom }
+                        }
+                        // Loop has no element at partition index k -- zero-fill
+                        // (matches the "this loop doesn't contribute" semantic
+                        // already applied to the partition denom above).
+                        None => 0.0,
+                    };
                     series[i][step * max_slots + k] = val;
                 }
             }
@@ -605,6 +644,82 @@ pub fn build_loop_element_index(
                 n_slots,
             },
         );
+    }
+    out
+}
+
+/// Aggregate the per-element rel-score map produced by
+/// [`compute_rel_loop_scores_per_element`] into a single signed series
+/// per loop, via signed argmax-abs across each loop's own slots.
+///
+/// Used by the layout's `compute_metadata` to populate
+/// `FeedbackLoop::importance_series` with one value per saved step.
+///
+/// ## Stride handling
+///
+/// Each per-loop input series has length `step_count *
+/// max_slots_in_partition`, where `max_slots_in_partition` is the
+/// largest `n_slots` among the loops sharing that partition (see
+/// [`compute_rel_loop_scores_per_element`]).  This helper recovers the
+/// actual stride from `series.len() / step_count` so consumers don't
+/// need to track partition stride independently.
+///
+/// The inner argmax-abs iterates only the loop's *own* `n_slots`
+/// (`n_slots_by_loop[loop_id]`, default 1).  For a scalar loop in a
+/// mixed partition that means slot 0 only -- the canonical scalar
+/// view, matching the pre-PR `compute_rel_loop_scores` behaviour.  For
+/// an arrayed loop with `n < stride` (rare; arises only when
+/// partitions mix arrayed loops of different dimensionalities), only
+/// the loop's own elements are considered; positions `n..stride`
+/// (zero-filled by the helper after the OOB fix) are not eligible
+/// candidates.
+///
+/// ## Output
+///
+/// Per loop: a `Vec<f64>` of length `step_count` (or empty if the
+/// input series is empty).  Non-finite picks are mapped to `0.0`,
+/// matching the existing layout filter.
+///
+/// Loops present in `per_element_rel_scores` but absent from
+/// `n_slots_by_loop` default to `n_slots = 1` (scalar) -- legacy
+/// callers that haven't snapshotted dim metadata still get a
+/// well-formed result.
+pub fn aggregate_per_element_argmax_abs(
+    per_element_rel_scores: &HashMap<String, Vec<f64>>,
+    n_slots_by_loop: &HashMap<String, usize>,
+    step_count: usize,
+) -> HashMap<String, Vec<f64>> {
+    let mut out = HashMap::with_capacity(per_element_rel_scores.len());
+    for (loop_id, series) in per_element_rel_scores {
+        if series.is_empty() {
+            out.insert(loop_id.clone(), Vec::new());
+            continue;
+        }
+        let n = n_slots_by_loop.get(loop_id).copied().unwrap_or(1).max(1);
+        // Recover the helper's actual stride from the input length.
+        // For mixed partitions stride > n; for scalar-only partitions
+        // and same-shape arrayed partitions stride == n.
+        let stride = (series.len() / step_count.max(1)).max(1);
+        let mut agg = Vec::with_capacity(step_count);
+        for t in 0..step_count {
+            let mut best = 0.0_f64;
+            let mut best_abs = -1.0_f64;
+            // Iterate this loop's own slots only.  `n <= stride` always
+            // by construction (stride is the partition's max), so the
+            // index never exceeds the series bounds.
+            for k in 0..n {
+                let v = series[t * stride + k];
+                // `>` (not `>=`) keeps lowest-index slot on ties; NaN
+                // comparisons are always false so a NaN never displaces
+                // a finite candidate.
+                if v.abs() > best_abs {
+                    best_abs = v.abs();
+                    best = v;
+                }
+            }
+            agg.push(if best.is_finite() { best } else { 0.0 });
+        }
+        out.insert(loop_id.clone(), agg);
     }
     out
 }
@@ -1081,6 +1196,185 @@ mod tests {
         assert!((b[at(0, 1)] - (6.0 / 8.0)).abs() < 1e-12);
         assert!((a[at(1, 1)] - (1.0 / 5.0)).abs() < 1e-12);
         assert!((b[at(1, 1)] - (4.0 / 5.0)).abs() < 1e-12);
+    }
+
+    /// `aggregate_per_element_argmax_abs`: pure-arrayed sanity check.
+    /// Single arrayed loop with 3 elements, stride==n; output should
+    /// be argmax-abs across the 3 elements at each step.
+    #[test]
+    fn aggregate_pure_arrayed_argmax_abs() {
+        let mut per_elem = HashMap::new();
+        // 2 steps × 3 elements: layout step*3 + k.
+        //   step 0: [0.1,  0.5, -0.2]  -> argmax-abs picks 0.5
+        //   step 1: [0.3, -0.4, 0.0]   -> argmax-abs picks -0.4
+        per_elem.insert("L".to_string(), vec![0.1, 0.5, -0.2, 0.3, -0.4, 0.0]);
+        let mut n_slots = HashMap::new();
+        n_slots.insert("L".to_string(), 3);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let agg = out.get("L").expect("L must have aggregate");
+        assert_eq!(agg, &vec![0.5, -0.4]);
+    }
+
+    /// `aggregate_per_element_argmax_abs`: scalar in mixed partition.
+    /// The helper input has stride=3 (partition max) but n=1 for the
+    /// scalar loop.  Output should have length step_count, with each
+    /// value taken from the loop's own slot 0 (canonical scalar view).
+    /// Pre-fix the layout used the wrong stride and produced a series
+    /// of length step_count*3 with misaligned values.
+    #[test]
+    fn aggregate_scalar_in_mixed_partition_returns_step_count_values() {
+        let mut per_elem = HashMap::new();
+        // Scalar A in mixed partition (stride=3); 4 steps × 3 elements.
+        // Each step has the same value at index 0 (slot 0 broadcast),
+        // but indices 1,2 carry the per-element rel-scores from
+        // distinct partition denominators.
+        //   step 0: [0.10, 0.20, 0.30]
+        //   step 1: [0.15, 0.25, 0.35]
+        //   step 2: [0.12, 0.22, 0.32]
+        //   step 3: [0.18, 0.28, 0.38]
+        per_elem.insert(
+            "A".to_string(),
+            vec![
+                0.10, 0.20, 0.30, // step 0
+                0.15, 0.25, 0.35, // step 1
+                0.12, 0.22, 0.32, // step 2
+                0.18, 0.28, 0.38, // step 3
+            ],
+        );
+        let mut n_slots = HashMap::new();
+        n_slots.insert("A".to_string(), 1);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 4);
+        let agg = out.get("A").expect("A must have aggregate");
+        // Length must match step_count, NOT step_count*stride.  Each
+        // value is the scalar's own slot 0 at that step.
+        assert_eq!(agg.len(), 4);
+        assert_eq!(agg, &vec![0.10, 0.15, 0.12, 0.18]);
+    }
+
+    /// `aggregate_per_element_argmax_abs`: arrayed loop in mixed-stride
+    /// partition.  The helper input has stride=5 (partition max) but the
+    /// loop only has n=2 of its own.  Output iterates only the loop's
+    /// own 2 slots when picking argmax-abs; positions 2..5 are ignored
+    /// (they're zero-filled by `compute_rel_loop_scores_per_element`
+    /// after the OOB fix).
+    #[test]
+    fn aggregate_arrayed_in_mixed_partition_iterates_own_slots_only() {
+        let mut per_elem = HashMap::new();
+        // 2 steps × 5-stride.  Loop has n=2 (real elements).
+        // Position 2..5 carry zero-fill (post OOB-fix); we DO NOT want
+        // them included in argmax-abs.  To prove the iterator stops at
+        // n=2, place a trap value (1e6) at position 4 -- if the helper
+        // ever iterates 0..stride it would pick this and we'd notice.
+        per_elem.insert(
+            "B".to_string(),
+            vec![
+                0.1, -0.3, 0.0, 0.0, 1.0e6, // step 0; trap at index 4
+                0.4, 0.2, 0.0, 0.0, 1.0e6, // step 1; trap at index 4
+            ],
+        );
+        let mut n_slots = HashMap::new();
+        n_slots.insert("B".to_string(), 2);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let agg = out.get("B").expect("B must have aggregate");
+        assert_eq!(agg.len(), 2);
+        // step 0: argmax-abs over [0.1, -0.3] = -0.3 (sign preserved).
+        // step 1: argmax-abs over [0.4,  0.2] = 0.4.
+        assert_eq!(agg, &vec![-0.3, 0.4]);
+    }
+
+    /// Non-finite values (NaN, ±Inf) get mapped to 0.0 in the output,
+    /// matching the existing layout filter behavior.
+    #[test]
+    fn aggregate_filters_non_finite() {
+        let mut per_elem = HashMap::new();
+        per_elem.insert(
+            "L".to_string(),
+            vec![f64::NAN, 0.5, f64::INFINITY, -f64::INFINITY],
+        );
+        let mut n_slots = HashMap::new();
+        n_slots.insert("L".to_string(), 2);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let agg = out.get("L").expect("L must have aggregate");
+        // step 0: [NaN, 0.5].  argmax-abs comparison with NaN is false,
+        //   so 0.5 wins.  Output is finite (0.5).
+        // step 1: [Inf, -Inf].  Both non-finite; output 0.0.
+        assert_eq!(agg.len(), 2);
+        assert_eq!(agg[0], 0.5);
+        assert_eq!(agg[1], 0.0);
+    }
+
+    /// An empty per-loop series yields an empty aggregate (matches
+    /// the existing layout's "no series" branch).
+    #[test]
+    fn aggregate_empty_series_yields_empty_output() {
+        let mut per_elem = HashMap::new();
+        per_elem.insert("L".to_string(), Vec::new());
+        let mut n_slots = HashMap::new();
+        n_slots.insert("L".to_string(), 1);
+
+        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 5);
+        let agg = out.get("L").expect("L must have aggregate (even if empty)");
+        assert!(agg.is_empty());
+    }
+
+    /// Mismatched-dim arrayed partition: loop A has n=2 and loop B has
+    /// n=3 in the same partition.  At partition element k=2, A has no
+    /// own element; the helper must NOT OOB-read past A's allocated
+    /// slots into B's data, and A's series at k=2 must be 0.0 ("this
+    /// loop has no element here") rather than a bogus rel-score.
+    ///
+    /// We pick B's slot 0 as a sentinel (999.0) so that an OOB read of
+    /// `row[off_A + 2]` (which equals `row[off_B + 0]` in our layout)
+    /// pulls this clearly-wrong value -- the test fails loudly rather
+    /// than passing by accident on whatever uninitialised data the
+    /// allocator happens to return.
+    #[test]
+    fn per_element_helper_handles_arrayed_with_smaller_n() {
+        // Layout: time | A slots 0..2 | B slots 0..3
+        // step 0:        | 1.0  2.0   | 999.0  20.0  30.0
+        let loop_data = vec![vec![vec![1.0, 2.0]], vec![vec![999.0, 20.0, 30.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[2, 3], &loop_data);
+
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+        let mut slots = HashMap::new();
+        slots.insert("A".to_string(), 2);
+        slots.insert("B".to_string(), 3);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let a = rel.get("A").expect("A must have a series");
+        let b = rel.get("B").expect("B must have a series");
+        // Stride is the partition's max_slots = 3.
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 3);
+
+        // k=0,1: both loops contribute their own slot value to the partition denom.
+        //   denom_0 = |1| + |999| = 1000;  a[0] = 1/1000, b[0] = 999/1000.
+        //   denom_1 = |2| + |20|  = 22;    a[1] = 2/22,   b[1] = 20/22.
+        assert!((a[0] - 1.0 / 1000.0).abs() < 1e-12);
+        assert!((b[0] - 999.0 / 1000.0).abs() < 1e-12);
+        assert!((a[1] - 2.0 / 22.0).abs() < 1e-12);
+        assert!((b[1] - 20.0 / 22.0).abs() < 1e-12);
+
+        // k=2: A has no element here.  Principled semantics:
+        //   - A contributes nothing to denom_2 -> denom_2 = |B[2]| = 30.
+        //   - A's series at k=2 is zero-filled (no element here).
+        //   - B's slot 2 normalises against itself only -> b[2] = 30/30 = 1.0.
+        // Pre-fix the helper OOB-reads `row[off_A + 2]` which is B's slot 0
+        // (999.0) and incorporates that into both A's and B's rel-scores.
+        assert_eq!(
+            a[2], 0.0,
+            "A has no element at partition index 2; series must be zero-filled, got {}",
+            a[2]
+        );
+        assert!(
+            (b[2] - 1.0).abs() < 1e-12,
+            "B's slot 2 should normalise against itself only (A doesn't contribute past its own n=2); got {}",
+            b[2]
+        );
     }
 
     /// Build a `Results` with each loop occupying a configurable number of

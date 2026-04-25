@@ -767,6 +767,102 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
     );
 }
 
+/// Codex review regression (PR #472): every detected loop's
+/// `importance_series` must have length exactly `results.step_count`,
+/// regardless of the partition stride that
+/// `compute_rel_loop_scores_per_element` happens to write its output
+/// at.  Pre-fix, the layout divided `series.len()` by the loop's own
+/// `n_slots` to derive `n_steps`, which silently produced
+/// `step_count * stride`-long importance_series whenever the
+/// helper's stride exceeded the loop's own slot count.
+///
+/// Note on coverage: at the time of writing, the engine's partition
+/// logic uses *element-level* stock SCCs in `model_element_cycle_partitions`
+/// while A2A loops carry *variable-level* stock names from
+/// `find_stocks_in_loop`, so `partition_for_loop` returns `None` for
+/// every A2A loop and they end up in the unkeyed partition by
+/// themselves.  As a result, no current engine pipeline configuration
+/// produces a mixed-stride partition (one with both `n=1` scalar and
+/// `n>1` arrayed loops); the bug only manifests if/when that engine
+/// quirk is fixed.  The aggregation helper's unit tests in
+/// `ltm_post::tests` cover the algorithm directly with hand-crafted
+/// inputs that DO simulate mixed-stride partitions, which is the
+/// authoritative regression coverage.
+///
+/// This test stands as forward-looking belt-and-suspenders: it
+/// verifies the layout's importance_series length contract end-to-end
+/// against a model whose SCC structure is the closest current-engine
+/// approximation to a mixed partition (arrayed and scalar loops
+/// connected through a scalar buffer stock).  If the engine partition
+/// logic is later unified, this fixture should immediately start
+/// producing mixed-stride partitions and the test will keep the
+/// layout aggregation honest.
+#[test]
+fn test_compute_metadata_importance_series_length_matches_step_count() {
+    use simlin_engine::Vm;
+    use simlin_engine::db::{compile_project_incremental, set_project_ltm_enabled};
+    use simlin_engine::layout::compute_metadata;
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("mixed_partition_proxy")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_with_ranges(
+            "birth_rate[Region]",
+            vec![("NYC", "0.05"), ("Boston", "0.20")],
+        )
+        .array_stock("population[Region]", "100", &["adjusted_births"], &[], None)
+        .array_aux("region_births[Region]", "population * birth_rate")
+        .scalar_aux("total_pop", "SUM(population[*])")
+        .scalar_aux("buffer_inflow", "total_pop * 0.001")
+        .stock("buffer", "0", &["buffer_inflow"], &["buffer_outflow"], None)
+        .scalar_aux("buffer_outflow", "buffer * 0.005")
+        .array_flow(
+            "adjusted_births[Region]",
+            "region_births - buffer * 0.0001",
+            None,
+        )
+        .build_datamodel();
+
+    // Independently determine step_count so the assertion below stays
+    // honest even if compute_metadata's own bookkeeping drifts.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, MAIN_MODEL).unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let step_count = vm.into_results().step_count;
+
+    let metadata = compute_metadata(&project, MAIN_MODEL, None)
+        .expect("compute_metadata should succeed for the proxy fixture");
+    assert!(
+        !metadata.feedback_loops.is_empty(),
+        "fixture should produce at least one detected loop"
+    );
+
+    for fl in &metadata.feedback_loops {
+        assert_eq!(
+            fl.importance_series.len(),
+            step_count,
+            "loop {} importance_series.len() = {} but step_count = {}; \
+             pre-fix mixed-stride partitions produced step_count * stride here",
+            fl.name,
+            fl.importance_series.len(),
+            step_count
+        );
+        for (t, v) in fl.importance_series.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "loop {} importance_series[{}] = {} is non-finite",
+                fl.name,
+                t,
+                v
+            );
+        }
+    }
+}
+
 /// Issue #463 contract test: for arrayed loops, the layout's
 /// `importance_series` is computed by aggregating per-element relative
 /// loop scores via signed argmax-abs across slots.
