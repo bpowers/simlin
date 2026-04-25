@@ -11,6 +11,7 @@ pub mod handlers;
 pub mod parse;
 pub mod registry;
 pub mod scan;
+pub mod static_assets;
 
 use axum::Router;
 use axum::http::StatusCode;
@@ -19,6 +20,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{AppState, get_project, list_projects};
+use crate::static_assets::static_handler;
 
 /// Maximum accepted request body size. Phase 1 is read-only so this is
 /// conservative; Phase 2 may bump this when the save path lands and large
@@ -33,10 +35,14 @@ const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// applied first so an oversized body is rejected before any tracing event
 /// records its size.
 pub fn build_router(state: AppState) -> Router {
+    // The `/api/...` and `/healthz` routes are registered with `.route(...)`
+    // so they take precedence over the SPA fallback, which catches everything
+    // else (including unknown SPA routes — see `static_handler`).
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/projects", get(list_projects))
         .route("/api/projects/{*rel_path}", get(get_project))
+        .fallback(static_handler)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
