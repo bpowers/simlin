@@ -934,11 +934,6 @@ mod tests {
     /// per-shape partial-equation tests. Each input string is canonicalized
     /// via `Ident::new`, matching the wrapping path that
     /// `build_partial_equation_for_shape` exercises in Phase 3.
-    ///
-    /// Marked `#[allow(dead_code)]` because the only callers are the
-    /// `#[ignore]`-d Phase 3 tests added in Tasks 5 and 6; the attribute
-    /// is removed once Phase 3 activates those tests.
-    #[allow(dead_code)]
     fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
         idents.iter().map(|s| Ident::new(s)).collect()
     }
@@ -1408,5 +1403,53 @@ mod tests {
         );
         // Source name with special chars should be quoted
         assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");
+    }
+
+    // -- build_partial_equation_for_shape: per-shape partial equation tests --
+    //
+    // Each test below pins the exact text that
+    // `build_partial_equation_for_shape` must return when handed a specific
+    // `RefShape`. The expected strings were captured from `print_eqn` during
+    // Task 0.5 reconnaissance and are already canonicalized: identifiers and
+    // element names are lowercase (`print_ident` routes through
+    // `canonicalize`), parsed function names are lowercase (the parser
+    // lowercases function tokens at parse time, so `SUM` round-trips as
+    // `sum`), synthesized `PREVIOUS` keeps uppercase (it's constructed as a
+    // literal `"PREVIOUS"` `UntypedBuiltinFn`), binary operators get a
+    // single space on each side, and parens are reintroduced for precedence.
+    // Whitespace canonicalization happens entirely inside `print_eqn`, so the
+    // assertions can use the literal expected string without any pre-trim.
+    //
+    // These tests stay `#[ignore]` until Phase 3 replaces the
+    // `unimplemented!()` body of `build_partial_equation_for_shape`; today
+    // they fail with the panic that documents the desired post-Phase-3
+    // contract.
+
+    #[test]
+    #[ignore = "Phase 3: per-shape partial equations"]
+    fn test_partial_equation_share_bare_shape() {
+        // share[R] = population / SUM(population[*])
+        // For the bare-Var reference (`population`), the bare ref stays live
+        // and the wildcard reducer's source ref is wrapped in PREVIOUS().
+        let equation = "population / SUM(population[*])";
+        let deps = deps_set(&["population"]);
+        let source = Ident::<Canonical>::new("population");
+        let partial =
+            build_partial_equation_for_shape(equation, &deps, &source, &RefShape::Bare, &[]);
+        assert_eq!(partial, "population / sum(PREVIOUS(population[*]))");
+    }
+
+    #[test]
+    #[ignore = "Phase 3: per-shape partial equations"]
+    fn test_partial_equation_share_wildcard_shape() {
+        // share[R] = population / SUM(population[*])
+        // For the wildcard reducer's source ref (`population[*]`), the
+        // wildcard stays live and the bare ref is wrapped in PREVIOUS().
+        let equation = "population / SUM(population[*])";
+        let deps = deps_set(&["population"]);
+        let source = Ident::<Canonical>::new("population");
+        let partial =
+            build_partial_equation_for_shape(equation, &deps, &source, &RefShape::Wildcard, &[]);
+        assert_eq!(partial, "PREVIOUS(population) / sum(population[*])");
     }
 }

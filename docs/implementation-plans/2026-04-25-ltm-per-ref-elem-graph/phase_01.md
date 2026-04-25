@@ -125,6 +125,51 @@ The captured strings reflect real `print_eqn` output. Tasks 5 and 6's assertions
 **Commit:** No commit (the temporary test is deleted; Phase 1 Tasks 4–6 commits include the verified strings).
 <!-- END_TASK_PRINTEQN_VERIFY -->
 
+### Captured `print_eqn` output (Task 0.5)
+
+Reconnaissance run on 2026-04-25 against the codebase at the head of `ltm-per-ref-elem-graph`. The temporary `explore_print_eqn` test parsed each input via `Expr0::new(text, LexerType::Equation)`, called the existing `wrap_deps_in_previous` with `{Ident::new("population")}` as the dep set (so every `population` reference is wrapped, including the wildcard subscript), then printed the result via `print_eqn`. The temp test was deleted after capturing output; only the strings below are kept.
+
+**Input 1:** `"population / SUM(population[*])"` — wrap set `{population}`
+
+Captured output:
+
+```
+PREVIOUS(population) / sum(PREVIOUS(population[*]))
+```
+
+**Input 2:** `"(population[NYC] - population[Boston]) * 0.01"` — wrap set `{population}`
+
+Captured output:
+
+```
+(PREVIOUS(population[nyc]) - PREVIOUS(population[boston])) * 0.01
+```
+
+**What this tells Tasks 5 and 6 about `print_eqn` canonicalization:**
+
+1. **Identifier and element names are lowercased.** `print_ident` (in `src/simlin-engine/src/ast/mod.rs`) routes every `Var` and `Subscript` identifier through `canonicalize`, so `population` stays `population`, `NYC` becomes `nyc`, and `Boston` becomes `boston`. Tasks 5 and 6 must therefore use lowercase element names in expected strings (`population[nyc]`, not `population[NYC]`) AND must construct `RefShape::FixedIndex(vec!["nyc".to_string()])`, not `vec!["NYC".to_string()]` — Phase 3's `build_partial_equation_for_shape` must canonicalize incoming shape element names before matching against AST subscript text. The canonical form is what travels through the AST.
+
+2. **Function names that are *parsed* are lowercased.** The parser at `src/simlin-engine/src/parser/mod.rs:456` calls `s.to_lowercase()` on the function token before stuffing it into `UntypedBuiltinFn(name, ...)`, so `SUM` in the source text comes out of `print_eqn` as `sum`.
+
+3. **Function names that are *synthesized* keep whatever case the synthesis used.** `wrap_deps_in_previous` constructs `UntypedBuiltinFn("PREVIOUS".to_string(), ...)` with literal uppercase `"PREVIOUS"`, and `print_eqn` echoes that verbatim. So the `PREVIOUS(...)` wrapper stays uppercase even though the surrounding parsed `SUM` is lowercased to `sum`. Phase 3's `build_partial_equation_for_shape` must follow the same convention: emit `"PREVIOUS"` in uppercase so the resulting strings match what the existing `build_partial_equation` produces (and so the engine's downstream parser of these synthetic equations sees the same shape regardless of case, since it lowercases at parse time anyway).
+
+4. **Whitespace and parens.** `print_eqn` always inserts a single space around binary operators (`a / b`, `a - b`, `a * 0.01`). It re-introduces parens when needed for precedence: `(PREVIOUS(...) - PREVIOUS(...)) * 0.01` keeps the parens around the subtraction because the parent is `*`. Constants like `0.01` are echoed verbatim from the source token.
+
+5. **Wildcard subscripts.** `[*]` survives wrapping unchanged; the `IndexExpr0::Wildcard` branch in `print_ident`-adjacent code prints `"*"`.
+
+**Locked expected strings for Tasks 5 and 6:**
+
+- AC2.1 (`Bare` shape over `population / SUM(population[*])` with `population` live, the wildcard wrapped):
+  - Expected partial: `population / sum(PREVIOUS(population[*]))`
+- AC2.2 (`Wildcard` shape over the same equation with the bare wrapped, the wildcard live):
+  - Expected partial: `PREVIOUS(population) / sum(population[*])`
+- AC2.3 NYC (`FixedIndex(vec!["nyc"])` over `(population[NYC] - population[Boston]) * 0.01` with `[NYC]` live, `[Boston]` wrapped):
+  - Expected partial: `(population[nyc] - PREVIOUS(population[boston])) * 0.01`
+- AC2.3 Boston (`FixedIndex(vec!["boston"])` with `[Boston]` live, `[NYC]` wrapped):
+  - Expected partial: `(PREVIOUS(population[nyc]) - population[boston]) * 0.01`
+
+Note that `SUM` becomes `sum` in the captured output. The plan's earlier hand-written expected strings in Tasks 5 and 6 (which assumed `SUM` would stay uppercase) must be updated to use `sum` when those tasks are implemented. The element names in the FixedIndex variants must also be lowercase (`nyc`, `boston`) to match the AST subscript text after canonicalization.
+
 <!-- START_SUBCOMPONENT_A (tasks 1-3) -->
 
 <!-- START_TASK_1 -->
