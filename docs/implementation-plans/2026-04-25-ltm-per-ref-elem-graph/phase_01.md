@@ -357,7 +357,7 @@ Both tests stay `#[ignore]` until Phase 3.
 `build_partial_equation_for_shape` exists from Task 0 (as a stub). The tests run by calling it directly; today's stub panics with `unimplemented!()`, so each test fails with a clear panic message that documents the desired post-Phase-3 contract.
 
 **Verification:**
-Run: `cargo test -p simlin-engine --lib build_partial_equation -- --ignored`. Expected: both tests fail (the `build_partial_equation_for_shape` API is a stub that returns the empty string, or panics with `unimplemented!()`).
+Run: `cargo test -p simlin-engine --lib partial_equation_share -- --ignored`. Expected: both tests fail (the `build_partial_equation_for_shape` API is a stub that returns the empty string, or panics with `unimplemented!()`).
 
 Run: `cargo test -p simlin-engine`. Expected: rest of suite passes; ignored tests skipped.
 
