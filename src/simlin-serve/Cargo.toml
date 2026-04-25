@@ -6,6 +6,10 @@ license = "Apache-2.0"
 edition = "2024"
 description = "Local HTTP server for browsing and editing system-dynamics models"
 
+[lib]
+name = "simlin_serve"
+path = "src/lib.rs"
+
 [[bin]]
 name = "simlin-serve"
 path = "src/main.rs"
@@ -13,3 +17,10 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tower = "0.5"
