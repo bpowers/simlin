@@ -4,6 +4,8 @@
 
 #![deny(unsafe_code)]
 
+pub mod cli;
+
 use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
