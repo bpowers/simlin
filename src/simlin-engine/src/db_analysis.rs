@@ -6,7 +6,7 @@
 //!
 //! Extracted from db.rs for file-size management. Contains:
 //! - CausalEdgesResult, LoopCircuitsResult, CyclePartitionsResult
-//! - ElementCausalEdgesResult, ElementDependencyKind (element-level graph)
+//! - ElementCausalEdgesResult, RefShape, ReferenceSite (element-level graph)
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
 //! - model_causal_edges, model_element_causal_edges, model_loop_circuits,
 //!   model_cycle_partitions
@@ -175,9 +175,8 @@ fn resolve_literal_index(
 }
 
 /// Walk a target variable's AST and emit one `ReferenceSite` per occurrence
-/// of `source_ident`. Mirrors the recursion pattern of `classify_in_expr`
-/// but accumulates per-site shapes instead of folding them into a single
-/// classification.
+/// of `source_ident`, accumulating per-site shapes for downstream edge
+/// emission.
 ///
 /// Subscript shape classification rules:
 /// - any `IndexExpr2::Wildcard(_)` index → `Wildcard`
@@ -231,13 +230,12 @@ fn collect_reference_sites(
             // specific target element being defined. The emitter restricts
             // edge emission to that element only.
             for (target_elem, expr) in subscript_map.iter() {
-                let target_elem_name = target_elem.as_str().to_string();
                 collect_in_expr(
                     expr,
                     source_ident,
                     source_is_arrayed,
                     source_dims,
-                    Some(&target_elem_name),
+                    Some(target_elem.as_str()),
                     &mut sites,
                 );
             }
@@ -277,7 +275,7 @@ fn collect_in_expr(
     source_ident: &str,
     source_is_arrayed: bool,
     source_dims: &[crate::dimensions::Dimension],
-    target_element: Option<&String>,
+    target_element: Option<&str>,
     sites: &mut Vec<ReferenceSite>,
 ) {
     use crate::ast::{Expr2, IndexExpr2};
@@ -287,7 +285,7 @@ fn collect_in_expr(
         ReferenceSite {
             source: source_ident.to_string(),
             shape,
-            target_element: target_element.cloned(),
+            target_element: target_element.map(|s| s.to_string()),
         }
     };
 
@@ -306,8 +304,7 @@ fn collect_in_expr(
             // Always recurse into index expressions so nested references
             // like `source_outer[source_inner[*]]` (or arbitrary index
             // arithmetic mentioning the source) still emit per-site
-            // entries. This matches the existing classify_in_expr
-            // behavior for non-matching subscript heads.
+            // entries for the inner reference.
             for idx in indices {
                 match idx {
                     IndexExpr2::Expr(e) => {
@@ -456,9 +453,8 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 
 /// Emit element edges for a single AST reference site.
 ///
-/// This is the per-reference replacement for `expand_edge_to_elements`:
-/// the new walker classifies each reference site into a `RefShape` and
-/// hands `(from_name, to_name, from_dims, to_dims, shape, target_element)`
+/// The AST walker classifies each reference site into a `RefShape` and
+/// passes `(from_name, to_name, from_dims, to_dims, shape, target_element)`
 /// to this helper, which translates the shape into the appropriate
 /// element-level edges and unions them into `element_edges`.
 ///
@@ -1870,6 +1866,55 @@ mod emit_edges_for_reference_tests {
         assert_eq!(from.len(), 1, "expected exactly 1 outgoing edge");
         assert!(from.contains("rel[boston]"));
         assert!(!from.contains("rel[nyc]"));
+    }
+
+    /// `RefShape::Bare` with `target_element = Some("boston")` on identical
+    /// dimensions: only the diagonal edge `pop[boston] -> rel[boston]` survives;
+    /// the other diagonal edge `pop[nyc] -> rel[nyc]` is excluded because it
+    /// does not reach the pinned target. This exercises the scratch-map +
+    /// intersection path in the `Bare` branch of `emit_edges_for_reference`.
+    #[test]
+    fn bare_with_target_element_keeps_only_pinned_diagonal_edge() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::Bare,
+            Some("boston"),
+            &mut edges,
+        );
+
+        // Only the boston diagonal edge should be present.
+        let from_boston = edges
+            .get("pop[boston]")
+            .expect("pop[boston] must be a source");
+        assert_eq!(
+            from_boston.len(),
+            1,
+            "expected exactly one outgoing edge from pop[boston]"
+        );
+        assert!(
+            from_boston.contains("rel[boston]"),
+            "expected pop[boston] -> rel[boston]"
+        );
+
+        // pop[nyc] should either be absent or have no edges into rel[boston];
+        // the diagonal for nyc is rel[nyc], which is not the pinned target.
+        if let Some(from_nyc) = edges.get("pop[nyc]") {
+            assert!(
+                !from_nyc.contains("rel[boston]"),
+                "pop[nyc] must not reach rel[boston] via Bare diagonal"
+            );
+            assert!(
+                !from_nyc.contains("rel[nyc]"),
+                "pop[nyc] -> rel[nyc] must be excluded when target_element = boston"
+            );
+        }
     }
 }
 
