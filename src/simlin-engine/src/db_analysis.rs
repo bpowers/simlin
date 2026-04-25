@@ -73,7 +73,6 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
 /// `i` is a position iterator). The shape determines element-edge
 /// emission and per-reference partial-equation construction.
-#[allow(dead_code)] // populated when Task 2's collect_reference_sites lands
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -95,10 +94,13 @@ pub(crate) enum RefShape {
 }
 
 /// One occurrence of a source variable in a target's AST.
-#[allow(dead_code)] // populated when Task 2's collect_reference_sites lands
 #[derive(Debug, Clone)]
 pub(crate) struct ReferenceSite {
+    // Fields are read by Task 2's tests but not by production code yet;
+    // Task 4's pivot will consume them in `model_element_causal_edges`.
+    #[allow(dead_code)]
     pub source: String,
+    #[allow(dead_code)]
     pub shape: RefShape,
 }
 
@@ -315,6 +317,271 @@ fn classify_in_expr(
             classify_in_expr(else_expr, source_ident, source_is_arrayed, result, found);
         }
     }
+}
+
+/// Resolve a single subscript index to a literal element name (canonical
+/// lowercase) if it matches one of the source's dimensions, or `None`
+/// for any other shape (wildcard, range, position, non-literal
+/// expression, or a literal that doesn't match a known element).
+///
+/// Used by `collect_reference_sites` to classify `Subscript` shapes:
+/// every index in a `FixedIndex` must resolve via this helper. If any
+/// index fails to resolve, the subscript falls back to `DynamicIndex` --
+/// or `Wildcard` if a wildcard is present (wildcards are checked first
+/// in the caller).
+///
+/// Element names parse as `Expr2::Var(ident, ...)` (the parser keeps the
+/// raw element identifier as a Var; dimension-resolution into a numeric
+/// offset happens later, in Expr3 lowering). Integer literals (used for
+/// indexed dimensions like `1`, `2`) parse as `Expr2::Const`. We accept
+/// both forms.
+///
+/// Note: `source_dims` is the source variable's *full* dimension list.
+/// In multidimensional subscripts the caller doesn't know which
+/// dimension a literal belongs to; we accept the first dimension whose
+/// element registry contains the canonical name. Literal indices that
+/// don't match any known element classify defensively as `DynamicIndex`,
+/// so the worst case is over-conservative (full cross-product) edges.
+#[allow(dead_code)] // exercised by Task 2's tests and Task 4's pivot
+fn resolve_literal_index(
+    idx: &crate::ast::IndexExpr2,
+    source_dims: &[crate::dimensions::Dimension],
+) -> Option<String> {
+    use crate::ast::{Expr2, IndexExpr2};
+
+    // Element names appear as `Var(ident, ...)`; integer literals appear
+    // as `Const(text, value, _)`. Anything else (wildcards, ranges, dim
+    // positions, or compound expressions) is not a literal element.
+    let canonical = match idx {
+        IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
+        IndexExpr2::Expr(Expr2::Const(text, _, _)) => canonicalize(text).into_owned(),
+        _ => return None,
+    };
+
+    for dim in source_dims {
+        match dim {
+            crate::dimensions::Dimension::Named(_, named) => {
+                if named.elements.iter().any(|e| e.as_str() == canonical) {
+                    return Some(canonical);
+                }
+            }
+            crate::dimensions::Dimension::Indexed(_, size) => {
+                // Indexed dimensions accept integer literals in the range [1, size].
+                if let Ok(n) = canonical.parse::<u32>()
+                    && n >= 1
+                    && n <= *size
+                {
+                    return Some(canonical);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Walk a target variable's AST and emit one `ReferenceSite` per occurrence
+/// of `source_ident`. Mirrors the recursion pattern of `classify_in_expr`
+/// but accumulates per-site shapes instead of folding them into a single
+/// classification.
+///
+/// Subscript shape classification rules:
+/// - any `IndexExpr2::Wildcard(_)` index → `Wildcard`
+/// - all indices resolve via `resolve_literal_index` → `FixedIndex(names)`
+/// - any other pattern (`StarRange`, `DimPosition`, `Range`, non-literal
+///   `Expr`, or a literal that doesn't match a known element name) →
+///   `DynamicIndex`
+///
+/// Bare `Var` references push `RefShape::Bare`. The shape is independent
+/// of whether the source is arrayed -- edge emission resolves
+/// scalar-vs-arrayed semantics from the source/target dimension lists.
+///
+/// `App` arguments are walked via `walk_builtin_expr`; `BuiltinContents::Ident`
+/// matches contribute a `Bare` site (the builtin doesn't subscript its
+/// ident argument). The walker also recurses into each `Subscript` index
+/// expression so nested references like `source_outer[source_inner[*]]`
+/// emit a site for the inner reference.
+///
+/// Return order is the AST-walk order. Duplicate sites with identical
+/// `(source, shape)` are kept; downstream emission deduplicates edges
+/// implicitly via the `BTreeSet` value type, but the per-site count may
+/// matter for callers that use sites as a metric.
+#[allow(dead_code)] // wired into model_element_causal_edges in Task 4
+fn collect_reference_sites(
+    target_var: &crate::variable::Variable,
+    source_ident: &str,
+    source_is_arrayed: bool,
+    source_dims: &[crate::dimensions::Dimension],
+) -> Vec<ReferenceSite> {
+    let Some(ast) = target_var.ast() else {
+        return Vec::new();
+    };
+
+    let mut sites = Vec::new();
+    match ast {
+        crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
+            collect_in_expr(
+                expr,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                &mut sites,
+            );
+        }
+        crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
+            for expr in subscript_map.values() {
+                collect_in_expr(
+                    expr,
+                    source_ident,
+                    source_is_arrayed,
+                    source_dims,
+                    &mut sites,
+                );
+            }
+            if let Some(default) = default_expr {
+                collect_in_expr(
+                    default,
+                    source_ident,
+                    source_is_arrayed,
+                    source_dims,
+                    &mut sites,
+                );
+            }
+        }
+    }
+    sites
+}
+
+/// Recursively walk an `Expr2` tree, pushing one `ReferenceSite` for each
+/// reference to `source_ident`. See `collect_reference_sites` for the
+/// shape-classification rules.
+///
+/// `source_is_arrayed` is threaded through for callers that need it
+/// during recursion-local rewriting (currently a no-op here -- shape
+/// classification is determined by the AST node and `source_dims`),
+/// matching the documented public signature.
+#[allow(dead_code, clippy::only_used_in_recursion)] // helper for collect_reference_sites
+fn collect_in_expr(
+    expr: &crate::ast::Expr2,
+    source_ident: &str,
+    source_is_arrayed: bool,
+    source_dims: &[crate::dimensions::Dimension],
+    sites: &mut Vec<ReferenceSite>,
+) {
+    use crate::ast::{Expr2, IndexExpr2};
+    use crate::builtins::{BuiltinContents, walk_builtin_expr};
+
+    match expr {
+        Expr2::Const(..) => {}
+        Expr2::Var(ident, _array_bounds, _) => {
+            if ident.as_str() == source_ident {
+                sites.push(ReferenceSite {
+                    source: source_ident.to_string(),
+                    shape: RefShape::Bare,
+                });
+            }
+        }
+        Expr2::Subscript(ident, indices, _, _) => {
+            if ident.as_str() == source_ident {
+                let shape = classify_subscript_shape(indices, source_dims);
+                sites.push(ReferenceSite {
+                    source: source_ident.to_string(),
+                    shape,
+                });
+            }
+            // Always recurse into index expressions so nested references
+            // like `source_outer[source_inner[*]]` (or arbitrary index
+            // arithmetic mentioning the source) still emit per-site
+            // entries. This matches the existing classify_in_expr
+            // behavior for non-matching subscript heads.
+            for idx in indices {
+                match idx {
+                    IndexExpr2::Expr(e) => {
+                        collect_in_expr(e, source_ident, source_is_arrayed, source_dims, sites);
+                    }
+                    IndexExpr2::Range(l, r, _) => {
+                        collect_in_expr(l, source_ident, source_is_arrayed, source_dims, sites);
+                        collect_in_expr(r, source_ident, source_is_arrayed, source_dims, sites);
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => {}
+                }
+            }
+        }
+        Expr2::App(builtin, _, _) => {
+            walk_builtin_expr(builtin, |contents| match contents {
+                BuiltinContents::Ident(id, _) => {
+                    if id == source_ident {
+                        sites.push(ReferenceSite {
+                            source: source_ident.to_string(),
+                            shape: RefShape::Bare,
+                        });
+                    }
+                }
+                BuiltinContents::Expr(sub_expr) => {
+                    collect_in_expr(
+                        sub_expr,
+                        source_ident,
+                        source_is_arrayed,
+                        source_dims,
+                        sites,
+                    );
+                }
+            });
+        }
+        Expr2::Op1(_, operand, _, _) => {
+            collect_in_expr(operand, source_ident, source_is_arrayed, source_dims, sites);
+        }
+        Expr2::Op2(_, left, right, _, _) => {
+            collect_in_expr(left, source_ident, source_is_arrayed, source_dims, sites);
+            collect_in_expr(right, source_ident, source_is_arrayed, source_dims, sites);
+        }
+        Expr2::If(cond, then_expr, else_expr, _, _) => {
+            collect_in_expr(cond, source_ident, source_is_arrayed, source_dims, sites);
+            collect_in_expr(
+                then_expr,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                sites,
+            );
+            collect_in_expr(
+                else_expr,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                sites,
+            );
+        }
+    }
+}
+
+/// Classify a subscript's indices into a `RefShape`.
+///
+/// Wildcard takes precedence: if any index is `IndexExpr2::Wildcard`,
+/// the shape is `Wildcard` (conservative full cross-product).
+/// Otherwise, every index must resolve via `resolve_literal_index` for
+/// the shape to be `FixedIndex`. Any other index pattern (or an
+/// unrecognized literal) falls back to `DynamicIndex`.
+#[allow(dead_code)] // helper for collect_in_expr
+fn classify_subscript_shape(
+    indices: &[crate::ast::IndexExpr2],
+    source_dims: &[crate::dimensions::Dimension],
+) -> RefShape {
+    use crate::ast::IndexExpr2;
+
+    if indices.iter().any(|i| matches!(i, IndexExpr2::Wildcard(_))) {
+        return RefShape::Wildcard;
+    }
+
+    let mut resolved: Vec<String> = Vec::with_capacity(indices.len());
+    for idx in indices {
+        match resolve_literal_index(idx, source_dims) {
+            Some(name) => resolved.push(name),
+            None => return RefShape::DynamicIndex,
+        }
+    }
+    RefShape::FixedIndex(resolved)
 }
 
 /// Collect element names from a dimension as owned strings.
@@ -1584,6 +1851,109 @@ mod classify_element_dependency_tests {
         assert_eq!(
             classify(&project, "relative_pop", "population"),
             ElementDependencyKind::CrossElement
+        );
+    }
+}
+
+#[cfg(test)]
+mod collect_reference_sites_tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    /// Helper: build a project, sync into salsa, and collect reference sites
+    /// for `source_name` as seen by `target_name`. Resolves the source's
+    /// `is_arrayed` flag and dimension list from the live salsa results so
+    /// the walker can validate literal subscripts against real elements.
+    fn collect(project: &TestProject, target_name: &str, source_name: &str) -> Vec<ReferenceSite> {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+        let source_vars = source_model.variables(&db);
+
+        let target_var =
+            reconstruct_single_variable(&db, source_model, source_project, target_name)
+                .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
+
+        let source_dims: Vec<crate::dimensions::Dimension> = source_vars
+            .get(source_name)
+            .map(|sv| super::super::variable_dimensions(&db, *sv, source_project).to_vec())
+            .unwrap_or_default();
+        let source_is_arrayed = !source_dims.is_empty();
+
+        collect_reference_sites(&target_var, source_name, source_is_arrayed, &source_dims)
+    }
+
+    #[test]
+    fn ref_site_bare_a2a() {
+        // A2A equation: births[Region] = population * 0.1
+        // The bare `population` reference is one occurrence with shape Bare.
+        let project = TestProject::new("bare_a2a")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("births[Region]", "population * 0.1");
+
+        let sites = collect(&project, "births", "population");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(sites[0].source, "population");
+        assert_eq!(sites[0].shape, RefShape::Bare);
+    }
+
+    #[test]
+    fn ref_site_fixed_index() {
+        // relative_pop[Region] = population / population[NYC]
+        // Two occurrences: a bare `population` (numerator) and a
+        // FixedIndex `population[NYC]` (denominator).
+        let project = TestProject::new("fixed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("relative_pop[Region]", "population / population[NYC]");
+
+        let sites = collect(&project, "relative_pop", "population");
+        assert_eq!(sites.len(), 2, "sites: {sites:?}");
+        // AST-walk order: numerator first (bare), denominator second (FixedIndex).
+        assert_eq!(sites[0].shape, RefShape::Bare);
+        assert_eq!(
+            sites[1].shape,
+            RefShape::FixedIndex(vec!["nyc".to_string()])
+        );
+    }
+
+    #[test]
+    fn ref_site_wildcard_reducer() {
+        // total = SUM(population[*])
+        // The wildcard subscript inside the reducer produces one Wildcard site.
+        let project = TestProject::new("wild")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .scalar_aux("total", "SUM(population[*])");
+
+        let sites = collect(&project, "total", "population");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(sites[0].shape, RefShape::Wildcard);
+    }
+
+    #[test]
+    fn ref_site_mixed_bare_and_wildcard() {
+        // share[Region] = population / SUM(population[*])
+        // Two occurrences: a bare numerator and a wildcard reducer denominator.
+        let project = TestProject::new("mixed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("share[Region]", "population / SUM(population[*])");
+
+        let sites = collect(&project, "share", "population");
+        assert_eq!(sites.len(), 2, "sites: {sites:?}");
+        let shapes: Vec<&RefShape> = sites.iter().map(|s| &s.shape).collect();
+        assert!(
+            shapes.contains(&&RefShape::Bare),
+            "expected Bare in {shapes:?}"
+        );
+        assert!(
+            shapes.contains(&&RefShape::Wildcard),
+            "expected Wildcard in {shapes:?}"
         );
     }
 }
