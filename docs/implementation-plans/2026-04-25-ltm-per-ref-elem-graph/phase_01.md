@@ -241,7 +241,7 @@ Build a small, hand-crafted strategy that generates compilable arrayed `TestProj
 
 The invariant: `{(strip_subscript(from), strip_subscript(to)) for (from, to) in element_edges} == variable_edges` (set equality after stripping and deduplicating).
 
-Use `proptest` `with_cases(32)` (compilation per case is non-trivial; see `docs/dev/rust.md` 2s-per-test budget). Mark the test `#[ignore = "Phase 2: requires AST-walking element graph"]` initially.
+Use `proptest` `with_cases(32)` (compilation per case is non-trivial; see `docs/dev/rust.md` 2s-per-test budget). The test runs unmarked from Day 1 — it serves as a regression guard for Phase 2's edge-emission refactor (see Verification below).
 
 **Testing:**
 Single proptest assertion: the projection equals the variable-level edge set. Failure mode today: cross-element wildcard refs already match correctly (they emit per-source-per-target edges), so the **set equality** projection should hold for today's behavior on most patterns. The pattern this test catches is **edge omission** in the new walker — Phase 2 might forget to emit a class of edges. The fixed-index pattern in particular is interesting: today's NxN over-emission still projects to a single variable-level edge, so this proptest doesn't directly catch the AC1.1 over-expansion bug; that's covered by Tasks 1 and 2. This proptest is an **anti-regression** for Phase 2.

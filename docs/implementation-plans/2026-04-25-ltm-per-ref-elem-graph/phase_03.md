@@ -23,7 +23,7 @@ This phase implements and verifies:
 ### ltm-per-ref-elem-graph.AC3: Link score variables track shapes
 - **ltm-per-ref-elem-graph.AC3.1 Per-shape link score emission:** When a target equation references a source under multiple distinct `RefShape`s, `model_ltm_variables` emits one `LtmSyntheticVar` per `(from, to, RefShape)` tuple.
 - **ltm-per-ref-elem-graph.AC3.2 FixedIndex naming convention:** FixedIndex link scores use the existing `$⁚ltm⁚link_score⁚{from}[{elem}]→{to}` naming.
-- **ltm-per-ref-elem-graph.AC3.3 Bare and Wildcard share existing names:** When only one shape is present, the canonical un-suffixed name is used. When both Bare and Wildcard appear for the same `(from, to)` pair, a deterministic disambiguation rule emits two distinct names. (See Task 5 for the decision.)
+- **ltm-per-ref-elem-graph.AC3.3 Wildcard and DynamicIndex carry stable shape suffixes:** Wildcard-shape link scores use the unconditional suffix `⁚wildcard`; DynamicIndex uses `⁚dynamic`. Names are a stable function of `(from, to, shape)` regardless of which other shapes coexist in the same model. The discovery parser strips the suffix during `parse_link_offsets`. See Task 4 for the helper and Task 7 for the parser update.
 
 ---
 
@@ -409,9 +409,7 @@ The internal dispatch to `generate_auxiliary_to_auxiliary_equation` / `generate_
 
 For Bare on a scalar source, `source_dim_elements` is empty (`vec![]`), and `wrap_non_matching_in_previous` falls back to identity behavior on Bare with no shape ambiguity.
 
-**5c. Update `link_score_equation_text` in `db.rs`** to read shape from the new `LtmLinkId` field, look up the source's dimensions via `variable_dimensions(db, source_var, project)`, build `source_dim_elements`, then call the updated generator. Continue to return `Option<LtmSyntheticVar>` — but the `LtmSyntheticVar.name` is now built via `link_score_var_name(from, to, shape, has_collision)`. The `has_collision` decision happens in `model_ltm_variables` (Task 5d) because it's the only place that sees the full set of shapes for a given `(from, to)`.
-
-To keep the salsa cache stable: pass `has_collision: bool` as a separate function arg if salsa-tracked, or compute the name in `model_ltm_variables` using the result's equation text from `link_score_equation_text`. The simplest is: `link_score_equation_text` returns `(equation, default_name_without_suffix)`; `model_ltm_variables` rewrites the name with `link_score_var_name(from, to, shape, has_collision)` after enumerating all shapes for the `(from, to)` pair.
+**5c. Implement `link_score_equation_text_shaped` in `db.rs`** as a sibling of the existing `link_score_equation_text`. The new function takes `(db, link_id, shape, model, project)` and returns `Option<LtmSyntheticVar>`. It looks up the source's dimensions via `variable_dimensions(db, source_var, project)`, builds `source_dim_elements`, then calls the updated generator. The `LtmSyntheticVar.name` is set via `link_score_var_name(from, to, shape)` — the 3-arg form from Task 4. With ALWAYS-suffix naming, the name is fully determined by `(from, to, shape)` and does not require any cross-shape collision lookup.
 
 **5d. Update `model_ltm_variables` link-emission loops** in both branches (discovery/sub-model at line 2422 and exhaustive at line 2441):
 
@@ -481,9 +479,7 @@ Run: `cargo test -p simlin-engine`. Expected: all tests pass; existing `simulate
 **Implementation:**
 Add `shape: Option<RefShape>` to `Link`. All existing constructors that build `Link` get default `shape: None`. Phase 4 will populate the shape at loop construction.
 
-Update `generate_loop_score_equation` to use `link.shape` (defaulting to `RefShape::Bare` when None) and call `link_score_var_name(link.from.as_str(), link.to.as_str(), &shape, has_collision_for_link)`. The `has_collision_for_link` is true iff there's another `Link` in the same loop with the same `(from, to)` but a different non-`FixedIndex` shape — generally false in practice (a loop edge has a single shape), but the function must not crash on edge cases.
-
-Practical rule: `has_collision_for_link` defaults to `false` for loop-score name resolution. The collision flag is only relevant when emitting two distinct `LtmSyntheticVar`s for the same `(from, to)`; from the loop's perspective, each edge corresponds to ONE shape, so there's no ambiguity in name lookup.
+Update `generate_loop_score_equation` to use `link.shape` (defaulting to `RefShape::Bare` when None) and call `link_score_var_name(link.from.as_str(), link.to.as_str(), &shape)`. With the ALWAYS-suffix naming convention from Task 4, the name is fully determined by `(from, to, shape)` — no collision flag is needed.
 
 **Testing:**
 Add a test in `ltm.rs::tests` or `ltm_augment.rs::tests` asserting that loop-score equations reference the correct link score names:
@@ -599,7 +595,7 @@ Run: `cargo test -p simlin-engine --test simulate_ltm test_cross_element_ltm_dis
 - None modified
 
 **Implementation:**
-Trigger the pre-commit hook by amending HEAD (no-op). Confirm:
+Run the pre-commit hook script directly. Confirm:
 - All Phase 3 tests pass
 - All Phase 1 partial-equation tests have `#[ignore]` removed and pass
 - `cargo test -p simlin-engine` runs under 180s
@@ -619,8 +615,8 @@ Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!"
 
 - All 7 implementation tasks (Tasks 1–7) committed; Task 8 verification gate passes.
 - `wrap_non_matching_in_previous` and `build_partial_equation_shaped` exist as `pub(crate)` in `ltm_augment.rs`.
-- `link_score_var_name` produces the correct names for Bare, FixedIndex, Wildcard (with and without collision), and DynamicIndex shapes.
-- `model_ltm_variables` emits one `LtmSyntheticVar` per `(from, to, RefShape)` tuple; collision-affected pairs produce two distinct names.
+- `link_score_var_name` produces the correct names for Bare (canonical), FixedIndex (per-element prefixed-from), Wildcard (always suffixed `⁚wildcard`), and DynamicIndex (always suffixed `⁚dynamic`) shapes; per-shape names are stable across models.
+- `model_ltm_variables` emits one `LtmSyntheticVar` per `(from, to, RefShape)` tuple, each with its stable per-shape name.
 - `Link` carries `shape: Option<RefShape>`; `generate_loop_score_equation` resolves the right link-score name per edge.
 - `parse_link_offsets` correctly expands subscripted-from A2A link scores into per-element entries.
 - Phase 1 partial-equation tests are all green (no `#[ignore]`).

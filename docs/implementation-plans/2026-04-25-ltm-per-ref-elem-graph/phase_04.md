@@ -165,7 +165,7 @@ let shape = match (from_subscript, to_subscript) {
 
 Add a `parse_subscript` helper (returns the inside of the brackets as `Option<String>`).
 
-After annotation, the per-edge name resolved by `link_score_var_name(link.from, link.to, &shape, has_collision=false)` correctly points at:
+After annotation, the per-edge name resolved by `link_score_var_name(link.from, link.to, &shape)` (3-arg form per Phase 3 Task 4's ALWAYS-suffix convention) correctly points at:
 - The canonical `$⁚ltm⁚link_score⁚{from}→{to}` for Bare edges (today's standard A2A link score).
 - The `$⁚ltm⁚link_score⁚{from}[{elem}]→{to}` for FixedIndex broadcast edges (new per-shape variant from Phase 3).
 
@@ -386,7 +386,7 @@ Run: `cargo test -p simlin-engine --test simulate_ltm`. Expected: all pass with 
 - None modified
 
 **Implementation:**
-Trigger the pre-commit hook by amending HEAD. Confirm pass within budget.
+Run the pre-commit hook script directly. Confirm pass within budget.
 
 **Verification:**
 Run: `bash scripts/pre-commit`. Expected: prints "All pre-commit checks passed!" within budget.
