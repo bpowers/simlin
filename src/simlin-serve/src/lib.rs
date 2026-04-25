@@ -12,6 +12,7 @@ pub mod parse;
 pub mod registry;
 pub mod scan;
 pub mod static_assets;
+pub mod token;
 
 use axum::Router;
 use axum::http::StatusCode;

@@ -27,6 +27,8 @@ ignore = "0.4"
 simlin-engine = { path = "../simlin-engine" }
 rust-embed = "8"
 mime_guess = "2"
+rand = "0.10"
+base64 = "0.22"
 
 [build-dependencies]
 anyhow = "1"
