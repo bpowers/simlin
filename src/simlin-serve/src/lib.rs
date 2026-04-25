@@ -8,6 +8,7 @@ pub mod cli;
 pub mod discovery;
 pub mod git;
 pub mod handlers;
+pub mod launcher;
 pub mod parse;
 pub mod registry;
 pub mod scan;

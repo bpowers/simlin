@@ -15,8 +15,10 @@ use simlin_serve::build_router;
 use simlin_serve::cli::Args;
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
+use simlin_serve::launcher::{build_launch_url, open_browser};
 use simlin_serve::registry::ProjectRegistry;
 use simlin_serve::scan::scan_into_registry;
+use simlin_serve::token::generate_launch_token;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,12 +50,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], args.port))).await?;
     let bound = listener.local_addr()?;
-    println!("simlin-serve listening on http://{bound}");
+
+    // Generate the one-time launch token after binding so we never log a
+    // token associated with a port we failed to acquire.
+    let token = generate_launch_token();
+    let launch_url = build_launch_url(bound.port(), &token);
+
+    // Always print the URL — users with --no-open or running headless still
+    // need to see and copy it. stdout (not tracing) so the URL is plain and
+    // pipe-friendly.
+    println!("simlin-serve listening on {launch_url}");
 
     if !args.no_open {
-        // Phase 1 leaves the actual browser-launch path for a later task; we
-        // honor --no-open by emitting nothing here so the flag has consistent
-        // semantics from day one.
+        open_browser(&launch_url);
     }
 
     axum::serve(listener, build_router(state)).await?;
