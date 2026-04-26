@@ -15,9 +15,11 @@
 pub mod access;
 pub mod errors;
 pub mod open;
+pub mod server;
 pub mod tools;
 pub mod types;
 
 pub use access::{OpenedProject, ProjectAccess};
 pub use errors::AccessError;
+pub use server::{ResourceContent, SimlinMcpServer};
 pub use types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, SourceFormat};

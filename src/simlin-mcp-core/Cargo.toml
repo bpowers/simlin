@@ -8,6 +8,7 @@ description = "Transport-agnostic core library for the Simlin MCP server"
 
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
+rmcp = { version = "1", features = ["server", "macros", "schemars"] }
 schemars = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
