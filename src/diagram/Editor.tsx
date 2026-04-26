@@ -231,6 +231,10 @@ interface EditorPropsBase {
   name: string; // used when saving
   embedded?: boolean;
   readOnlyMode?: boolean;
+  // Optional selection callback fired after each selection change. Hosts
+  // (e.g. simlin-serve's EditorHost) use this to forward selection state
+  // to backend listeners; HostedWebEditor in src/app does not subscribe.
+  onSelectionChanged?: (idents: string[]) => void;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -574,6 +578,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     if (selection.size === 0) {
       this.setState({ showDetails: undefined });
+    }
+    // Defer one tick so React commits the new selection before the host
+    // observes the callback. getSelectionIdents reads `this.state.selection`,
+    // which is asynchronous in React 19 — calling it inline here would
+    // return the prior selection. Reading inside the setTimeout closure
+    // guarantees the call happens after the setState commit.
+    const onSelectionChanged = this.props.onSelectionChanged;
+    if (onSelectionChanged) {
+      setTimeout(() => onSelectionChanged(this.getSelectionIdents()), 0);
     }
   };
 
