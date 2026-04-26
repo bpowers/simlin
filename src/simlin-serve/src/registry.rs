@@ -156,6 +156,53 @@ impl ProjectRegistry {
         guard.insert(absolute_path, meta);
     }
 
+    /// Insert or update the entry keyed by `absolute_path`, **preserving
+    /// the existing version if an entry already exists**.
+    ///
+    /// The invariant: version is only ever `0` on a brand-new insert;
+    /// re-discovering a file that has already been saved must not reset
+    /// the optimistic-lock counter back to zero.
+    ///
+    /// `meta.path` is overwritten with the relativized form (same as
+    /// `upsert`). Non-version fields (mtime, size, git) are always
+    /// updated to the caller's values.
+    pub fn upsert_preserve_version(&self, absolute_path: PathBuf, mut meta: ProjectMeta) {
+        meta.path = relativize(&self.root, &absolute_path);
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if let Some(existing) = guard.get(&absolute_path) {
+            meta.version = existing.version;
+        }
+        guard.insert(absolute_path, meta);
+    }
+
+    /// Get the entry for `absolute_path`, inserting a default if absent.
+    ///
+    /// The get-or-insert runs under a single write-lock acquisition so
+    /// concurrent callers cannot both observe absence and both insert.
+    /// The `make_default` closure is only called when no entry exists;
+    /// like `upsert`, the returned meta's `path` field is overwritten with
+    /// the relativized form.
+    ///
+    /// Returns the (possibly newly created) entry.
+    pub fn ensure_or_get<F>(&self, absolute_path: PathBuf, make_default: F) -> ProjectMeta
+    where
+        F: FnOnce() -> ProjectMeta,
+    {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if !guard.contains_key(&absolute_path) {
+            let mut meta = make_default();
+            meta.path = relativize(&self.root, &absolute_path);
+            guard.insert(absolute_path.clone(), meta);
+        }
+        guard[&absolute_path].clone()
+    }
+
     /// Remove an entry by absolute canonical path. No-op if the path is not
     /// in the registry.
     pub fn remove(&self, path: &Path) {
@@ -242,13 +289,20 @@ impl ProjectRegistry {
             .write()
             .expect("registry RwLock poisoned by panic in another thread");
         let prev = guard.remove(mdl_path).ok_or(RegistryError::NotFound)?;
+        // If the scanner already discovered a pre-existing sidecar and inserted
+        // an entry for it, take the higher version so no in-flight client ever
+        // sees a rollback.
+        let version = match guard.get(&sidecar_path) {
+            Some(existing) => prev.version.max(existing.version),
+            None => prev.version,
+        };
         let new_meta = ProjectMeta {
             path: relativize(&self.root, &sidecar_path),
             format: ProjectFormat::SdJson,
             mtime: prev.mtime,
             size: prev.size,
             git: prev.git,
-            version: prev.version,
+            version,
         };
         guard.insert(sidecar_path, new_meta);
         Ok(())
@@ -587,5 +641,72 @@ mod tests {
         );
         // Final state: version is exactly 6 (not 7).
         assert_eq!(reg.get(&abs).expect("entry").version, 6);
+    }
+
+    #[test]
+    fn upsert_preserve_version_keeps_existing_version_on_update() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 3;
+        reg.upsert(abs.clone(), meta);
+
+        // Rescan-like call: version in the meta is 0 (scanner always sets 0),
+        // but upsert_preserve_version must keep the existing 3.
+        let mut rescan_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        rescan_meta.size = 999;
+        rescan_meta.version = 0;
+        reg.upsert_preserve_version(abs.clone(), rescan_meta);
+
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.version, 3, "version must not be reset on rescan");
+        assert_eq!(entry.size, 999, "non-version fields must be updated");
+    }
+
+    #[test]
+    fn upsert_preserve_version_inserts_with_version_zero_when_new() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("new.stmx");
+
+        // Fresh entry: no existing record, so version from the meta is used.
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 0;
+        reg.upsert_preserve_version(abs.clone(), meta);
+
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.version, 0);
+    }
+
+    #[test]
+    fn redirect_to_sidecar_preserves_max_version_when_sidecar_already_exists() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl_abs = root.join("model.mdl");
+        let sidecar_abs = root.join("model.sd.json");
+
+        // Both entries exist with different versions (can happen when the
+        // scanner finds a pre-existing sidecar before the sidecar-redirect
+        // path runs). The new entry should take the higher version so
+        // in-flight clients never see a version rollback.
+        let mut mdl_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
+        mdl_meta.version = 4;
+        reg.upsert(mdl_abs.clone(), mdl_meta);
+
+        let mut sidecar_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        sidecar_meta.version = 7;
+        reg.upsert(sidecar_abs.clone(), sidecar_meta);
+
+        reg.redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
+            .expect("redirect succeeds");
+
+        // .mdl key dropped.
+        assert!(reg.get(&mdl_abs).is_none());
+        // Sidecar gets max(4, 7) = 7.
+        let entry = reg.get(&sidecar_abs).expect("sidecar entry");
+        assert_eq!(entry.version, 7);
+        assert_eq!(entry.format, ProjectFormat::SdJson);
     }
 }

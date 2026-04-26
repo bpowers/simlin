@@ -554,3 +554,62 @@ async fn second_save_after_sidecar_writes_only_to_sidecar() {
     assert_eq!(response["version"].as_u64(), Some(2));
     assert_eq!(response["path"].as_str(), Some("teacup.sd.json"));
 }
+
+/// Regression: GET /api/projects triggers scan_into_registry on every
+/// request. After a successful save (version 0->1), a listing refresh
+/// must NOT reset the version back to 0. A stale POST with version 0
+/// must still return 409 even after the listing was refreshed.
+#[tokio::test]
+async fn get_projects_list_does_not_reset_version_after_save() {
+    let dir = TempDir::new().unwrap();
+    let abs = copy_fixture("teacup.stmx", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let abs_canonical = abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+
+    // First POST: claims version 0 -> 1.
+    let body0 = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let (status0, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body0),
+    )
+    .await;
+    assert_eq!(status0, StatusCode::OK);
+
+    // Trigger a listing refresh (which calls scan_into_registry internally).
+    let (list_status, _) = fetch(state.clone(), "GET", "/api/projects", Body::empty()).await;
+    assert_eq!(list_status, StatusCode::OK);
+
+    // Stale POST with version 0 must still 409; the scan must not have
+    // reset the version back to 0.
+    let body_stale = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let (status_stale, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body_stale),
+    )
+    .await;
+    assert_eq!(
+        status_stale,
+        StatusCode::CONFLICT,
+        "version must not have been reset to 0 by the listing rescan; body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+
+    // A POST with the correct current version (1) must still succeed.
+    let body_current = serde_json::json!({"json": &json_body, "version": 1}).to_string();
+    let (status_current, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body_current),
+    )
+    .await;
+    assert_eq!(status_current, StatusCode::OK);
+}

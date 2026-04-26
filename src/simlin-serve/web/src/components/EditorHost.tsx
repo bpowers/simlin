@@ -15,6 +15,9 @@ type EditorHostProps = Readonly<{
   // its selectedPath state and refresh the project list. Optional because
   // not every host needs to track the redirect (e.g. tests that only
   // verify the wire format).
+  //
+  // Server-side counterpart: handlers.rs redirect_to_sidecar call, which
+  // moves the registry entry from the .mdl key to the new sidecar key.
   onPathRedirect?: (newPath: string) => void;
   // Invoked when a save returns 409 Conflict and EditorHost has refetched
   // the latest server state. Lets the parent reset any external editor

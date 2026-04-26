@@ -51,6 +51,12 @@ impl std::error::Error for ScanError {}
 /// `root` is canonicalized once up-front so registry keys are absolute and
 /// stable; canonicalize the same way at lookup time. If the canonicalize
 /// fails, we surface the error (vs. silently sharing keys that won't match).
+///
+/// After processing all discovered files, any registry entries whose
+/// canonical path was *not* visited during this scan are removed. This
+/// prevents stale "ghost" entries from accumulating when files are deleted
+/// between scans. Phase 4's file watcher will replace this removal pass
+/// with incremental add/remove events so listings never drift.
 pub fn scan_into_registry(
     root: &Path,
     registry: &ProjectRegistry,
@@ -62,6 +68,7 @@ pub fn scan_into_registry(
 
     let discovered = discover_models(&canonical_root).map_err(ScanError::Discovery)?;
 
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut inserted = 0usize;
     for file in discovered {
         // Canonicalize so symlink-shadowed files dedupe with their real
@@ -92,7 +99,7 @@ pub fn scan_into_registry(
         let git_state = git.status_for(&abs_path);
 
         let meta = ProjectMeta {
-            // The registry's `upsert` overwrites this with the relativized
+            // The registry's upsert overwrites this with the relativized
             // form; we set a placeholder here so the type-checker is happy.
             path: PathBuf::new(),
             format: file.format,
@@ -102,8 +109,28 @@ pub fn scan_into_registry(
             version: 0,
         };
 
-        registry.upsert(abs_path, meta);
+        visited.insert(abs_path.clone());
+        registry.upsert_preserve_version(abs_path, meta);
         inserted += 1;
+    }
+
+    // Drop any registry entries that were not discovered this scan. These
+    // are files that existed on a previous scan but have since been deleted.
+    let stale: Vec<PathBuf> = registry
+        .snapshot()
+        .into_iter()
+        .filter_map(|meta| {
+            // snapshot() returns relative paths; we need the absolute key.
+            let abs = canonical_root.join(&meta.path);
+            if !visited.contains(&abs) {
+                Some(abs)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for path in stale {
+        registry.remove(&path);
     }
 
     Ok(inserted)
@@ -215,5 +242,63 @@ mod tests {
         assert_eq!(registry.len(), 1, "rescan should not duplicate the entry");
         let second = registry.snapshot().pop().unwrap();
         assert_eq!(second.size, b"version-two-payload".len() as u64);
+    }
+
+    #[test]
+    fn rescan_preserves_version_after_check_and_increment() {
+        // Regression: scan_into_registry must not reset a non-zero version
+        // to 0. A client that saved (version 0 -> 1) and then triggers a
+        // listing rescan must still get a 409 when retrying with version 0.
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "model.stmx", b"<root/>");
+
+        let canonical = dir.path().canonicalize().unwrap();
+        let registry = ProjectRegistry::new(canonical.clone());
+        let git = GitProbe::unavailable_for_tests();
+
+        // Initial scan: version is 0.
+        scan_into_registry(dir.path(), &registry, &git).unwrap();
+        let abs = canonical.join("model.stmx");
+        assert_eq!(registry.get(&abs).unwrap().version, 0);
+
+        // Simulate a successful save: version 0 -> 1.
+        registry.check_and_increment(&abs, 0).unwrap();
+        assert_eq!(registry.get(&abs).unwrap().version, 1);
+
+        // Rescan (as triggered by GET /api/projects): version must stay 1.
+        scan_into_registry(dir.path(), &registry, &git).unwrap();
+        assert_eq!(
+            registry.get(&abs).unwrap().version,
+            1,
+            "rescan must not reset version to 0"
+        );
+    }
+
+    #[test]
+    fn rescan_removes_deleted_file_from_registry() {
+        // After a file is deleted between scans, the next scan must drop
+        // the stale registry entry so it doesn't appear in listings.
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "a.stmx", b"<root/>");
+        touch(dir.path(), "b.stmx", b"<root/>");
+
+        let canonical = dir.path().canonicalize().unwrap();
+        let registry = ProjectRegistry::new(canonical.clone());
+        let git = GitProbe::unavailable_for_tests();
+
+        scan_into_registry(dir.path(), &registry, &git).unwrap();
+        assert_eq!(registry.len(), 2);
+
+        // Delete file b; next scan must remove it from the registry.
+        fs::remove_file(canonical.join("b.stmx")).unwrap();
+        scan_into_registry(dir.path(), &registry, &git).unwrap();
+
+        assert_eq!(
+            registry.len(),
+            1,
+            "deleted file must be removed from registry"
+        );
+        let snap = registry.snapshot();
+        assert_eq!(snap[0].path, PathBuf::from("a.stmx"));
     }
 }

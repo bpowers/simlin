@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Imperative Shell
+
 //! HTTP handlers for the read-only viewer API.
 //!
 //! `AppState` is the per-process bundle of `(registry, git, root)`. It is
@@ -268,7 +270,7 @@ impl IntoResponse for SaveError {
                 (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
             }
             SaveError::Internal(err) => {
-                tracing::error!(error = %err, "internal server error in save handler");
+                tracing::error!(error = %err, "internal server error");
                 let body = serde_json::json!({ "error": "internal server error" });
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
             }
@@ -319,34 +321,34 @@ pub async fn save_project(
     .map_err(|e| SaveError::BadRequest(e.to_string()))?;
     let baseline: BaselineErrors = crate::validation::compute_baseline(&current_project);
 
-    // The registry must have an entry for the canonical path (it's
-    // populated by `scan_into_registry`, which `list_projects` calls on
-    // every request). If a client posts directly without first hitting
-    // GET /api/projects, the entry may not yet exist; auto-upsert with
-    // version 0 in that case so the version check below operates on a
-    // known starting point. (`Phase 4`'s file watcher will keep the
-    // registry pre-populated with no manual upsert needed.)
-    if state.registry.get(&resolved.canonical).is_none() {
-        let metadata = std::fs::metadata(&resolved.canonical).map_err(|e| {
-            SaveError::Internal(anyhow::anyhow!(
-                "stat {}: {e}",
-                resolved.canonical.display()
-            ))
-        })?;
-        let mtime = metadata
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        state.registry.upsert(
-            resolved.canonical.clone(),
+    // Ensure the registry has an entry for the canonical path. Populated
+    // by scan_into_registry on listing requests; if a client saves without
+    // first listing, the entry may not yet exist. ensure_or_get is
+    // atomic (single write-lock), so two concurrent first-saves cannot
+    // both observe absence and both insert with version 0.
+    // (Phase 4's file watcher will pre-populate the registry so this
+    // fallback is rarely exercised.)
+    {
+        let canonical = resolved.canonical.clone();
+        let format = resolved.initial_format;
+        state.registry.ensure_or_get(canonical, || {
+            let metadata = std::fs::metadata(&resolved.canonical);
+            let (mtime, size) = match metadata {
+                Ok(m) => (
+                    m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    m.len(),
+                ),
+                Err(_) => (std::time::SystemTime::UNIX_EPOCH, 0),
+            };
             ProjectMeta {
                 path: PathBuf::new(),
-                format: resolved.initial_format,
+                format,
                 mtime,
-                size: metadata.len(),
+                size,
                 git: GitState::Untracked,
                 version: 0,
-            },
-        );
+            }
+        });
     }
 
     // Optimistic version check. Holding the registry write lock across
@@ -398,27 +400,47 @@ pub async fn save_project(
     // sidecar key (carrying the just-incremented version forward) so
     // subsequent reads via either path see the sidecar content. For the
     // other arms the registry key is unchanged.
+    //
+    // The frontend counterpart is App.handlePathRedirect (called via
+    // EditorHost's onPathRedirect prop) which updates the active
+    // selectedPath so the sidebar list and URL reflect the new sidecar
+    // path after the first save of a .mdl-backed entry.
     let registry_key: PathBuf = match &target {
         SaveTarget::SidecarJson {
             mdl_path,
             sidecar_path,
         } => {
-            // Best-effort: a NotFound here means the entry was concurrently
-            // removed (we just held the write lock for the version check,
-            // so this is unlikely but possible if scan_into_registry ran
-            // between the lock release and here). Log and continue with
-            // the original key; the next list/scan will reconcile.
-            if let Err(e) = state
+            match state
                 .registry
                 .redirect_to_sidecar(mdl_path, sidecar_path.clone())
             {
-                tracing::warn!(
-                    error = %e,
-                    "registry redirect_to_sidecar failed; meta refresh may be stale"
-                );
-                resolved.canonical.clone()
-            } else {
-                sidecar_path.clone()
+                Ok(()) => sidecar_path.clone(),
+                Err(e) => {
+                    // The disk write succeeded but the registry entry for
+                    // the .mdl path was concurrently removed (e.g. by a
+                    // scan between the version-lock release and here).
+                    // Re-insert the sidecar entry directly so the registry
+                    // tracks the file we just created. Without this the
+                    // sidecar exists on disk but is invisible to the
+                    // registry until the next scan, and the client sees a
+                    // version number that no registry entry can satisfy.
+                    tracing::warn!(
+                        error = %e,
+                        "registry redirect_to_sidecar failed; re-inserting sidecar entry"
+                    );
+                    state.registry.upsert(
+                        sidecar_path.clone(),
+                        ProjectMeta {
+                            path: PathBuf::new(),
+                            format: crate::registry::ProjectFormat::SdJson,
+                            mtime: std::time::SystemTime::UNIX_EPOCH,
+                            size: 0,
+                            git: GitState::Untracked,
+                            version: new_version,
+                        },
+                    );
+                    sidecar_path.clone()
+                }
             }
         }
         SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => resolved.canonical.clone(),
@@ -440,14 +462,8 @@ pub async fn save_project(
     // redirect. For the other arms the path is unchanged.
     let response_path = match &target {
         SaveTarget::SidecarJson { sidecar_path, .. } => {
-            let root_canonical = state.root.canonicalize().map_err(|e| {
-                SaveError::Internal(anyhow::anyhow!(
-                    "canonicalize root {}: {e}",
-                    state.root.display()
-                ))
-            })?;
             let rel = sidecar_path
-                .strip_prefix(&root_canonical)
+                .strip_prefix(&resolved.root_canonical)
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|_| sidecar_path.clone());
             path_to_forward_slash(&rel)
@@ -472,6 +488,10 @@ pub async fn save_project(
 struct ResolvedPath {
     /// The canonicalized absolute path of the requested file.
     canonical: PathBuf,
+    /// The canonicalized scan root, computed once in `resolve_save_path`
+    /// so callers don't need to re-canonicalize `state.root` for path
+    /// relativization or descendant checks.
+    root_canonical: PathBuf,
     /// The relative path (relative to the scan root) the client should
     /// see in the response. May differ from the request when a sidecar
     /// redirect happens; Subcomponent B owns that case.
@@ -537,6 +557,7 @@ fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, S
 
     Ok(ResolvedPath {
         canonical,
+        root_canonical,
         relative_path,
         initial_format,
         effective_path,
