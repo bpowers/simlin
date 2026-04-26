@@ -283,23 +283,29 @@ impl SearchGraph {
 /// all link scores are treated as scalar (no expansion). Suffix
 /// stripping still applies because the suffix is encoded in the
 /// `results.offsets` key itself.
-/// Shape priority rank for collapsing duplicate `(from, to)` keys when
-/// both Bare and a shape-suffixed variant exist for the same edge. Lower
-/// rank wins, mirroring the priority used by
-/// `ltm_augment::resolve_link_score_name_for_loop`. The rank only
-/// matters when two emitted variants collapse onto the same key after
-/// suffix stripping (specifically Bare vs. Wildcard or Bare vs.
-/// DynamicIndex).
+/// Shape priority rank for collapsing duplicate `(from, to)` keys.
+/// Lower rank wins, mirroring the priority used by
+/// `ltm_augment::resolve_link_score_name_for_loop`.
 ///
-/// FixedIndex names like `pop[nyc]→share` produce element-level keys
-/// that don't collide with Bare's `(pop, share)` key, so they don't
-/// participate in dedup. They're tagged at the `Bare` rank for
-/// simplicity (the dedup is a no-op for them).
+/// Two collision cases this resolves:
+///
+///   1. Bare vs. shape-suffixed (Wildcard / DynamicIndex) at the
+///      `(from, to)` level: e.g., `pop→share` and `pop→share⁚wildcard`
+///      both produce `(pop, share)` after suffix stripping.
+///
+///   2. Bare A2A vs. FixedIndex A2A at the *expanded* per-element
+///      level: e.g., `pop→share` and `pop[nyc]→share` both expand
+///      to `(pop[nyc], share[nyc])`. The FixedIndex source carries
+///      its own bracketed element, but when the target is also A2A
+///      and the FixedIndex element matches the target element, the
+///      Bare A2A diagonal aliases with one FixedIndex broadcast
+///      slot. Bare wins.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ShapeRank {
     Bare = 0,
-    Wildcard = 1,
-    DynamicIndex = 2,
+    FixedIndex = 1,
+    Wildcard = 2,
+    DynamicIndex = 3,
 }
 
 fn parse_link_offsets(
@@ -332,9 +338,21 @@ fn parse_link_offsets(
         };
 
         // Strip the trailing shape suffix (`⁚wildcard` or `⁚dynamic`)
-        // from the to-name to recover the canonical to ident. Record
-        // which suffix was present so phase 2 can rank.
-        let (to_str, rank) = strip_to_shape_suffix_with_rank(to_raw);
+        // from the to-name to recover the canonical to ident, and
+        // classify the rank by suffix + element-level from. Suffix
+        // wins over `[`-in-from for ranking because Wildcard/Dynamic
+        // and FixedIndex are mutually exclusive in the design (see
+        // `ltm_augment::link_score_var_name`); the defensive precedence
+        // doesn't matter in practice but makes the rank deterministic
+        // even if a future emitter mixed them.
+        let (to_str, suffix_rank) = strip_to_shape_suffix_with_rank(to_raw);
+        let rank = if suffix_rank != ShapeRank::Bare {
+            suffix_rank
+        } else if from_str.contains('[') {
+            ShapeRank::FixedIndex
+        } else {
+            ShapeRank::Bare
+        };
 
         // Look up the LtmSyntheticVar for this link score to get its
         // dimensions. The lookup uses the full original name (including
@@ -379,28 +397,40 @@ fn parse_link_offsets(
     }
 
     // Phase 2: dedupe by (from, to) key. When two emitted variants
-    // collapse onto the same key (Bare vs Wildcard/DynamicIndex after
-    // suffix stripping), keep the lowest-rank entry. Without this,
-    // `SearchGraph::from_results` would register parallel edges and
-    // `discover_loops_with_graph::link_offset_map` would pick one
-    // nondeterministically (HashMap iteration order over
+    // collapse onto the same key, keep the lowest `(rank, offset)`
+    // entry. Two collision cases:
+    //
+    //   1. Bare vs. shape-suffixed (Wildcard / DynamicIndex) at the
+    //      `(from, to)` level after suffix stripping.
+    //
+    //   2. Bare A2A vs. FixedIndex A2A at the *expanded* per-element
+    //      level: `pop→share` and `pop[nyc]→share` both produce the
+    //      element key `(pop[nyc], share[nyc])`.
+    //
+    // Without this, `SearchGraph::from_results` would register parallel
+    // edges and `discover_loops_with_graph::link_offset_map` would pick
+    // one nondeterministically (HashMap iteration order over
     // `results.offsets` chooses the survivor). This matches the
     // shape-priority rule used by
     // `ltm_augment::resolve_link_score_name_for_loop` so loop_score,
     // pathway, and discovery all reference the same shape variant for
     // a given edge -- the documented edge-aliasing under-counting
     // limitation is consistent across consumers.
-    let mut by_key: HashMap<(Ident<Canonical>, Ident<Canonical>), (usize, ShapeRank)> =
+    //
+    // Same-rank ties (e.g., two Bare A2A entries that somehow produce
+    // the same expanded key, which shouldn't happen but defends
+    // against future emitter changes) are broken by smaller offset.
+    let mut by_key: HashMap<(Ident<Canonical>, Ident<Canonical>), (ShapeRank, usize)> =
         HashMap::with_capacity(tagged.len());
     for ((key, offset), rank) in tagged {
         by_key
             .entry(key)
             .and_modify(|existing| {
-                if rank < existing.1 {
-                    *existing = (offset, rank);
+                if (rank, offset) < *existing {
+                    *existing = (rank, offset);
                 }
             })
-            .or_insert((offset, rank));
+            .or_insert((rank, offset));
     }
 
     // Sort the result so the output is deterministic across runs (the
@@ -409,7 +439,7 @@ fn parse_link_offsets(
     // tie-breaking and reproducibility of intermediate diagnostics.
     let mut link_offsets: Vec<LinkOffset> = by_key
         .into_iter()
-        .map(|(key, (offset, _rank))| (key, offset))
+        .map(|(key, (_rank, offset))| (key, offset))
         .collect();
     link_offsets.sort_by(|a, b| {
         a.0.0
@@ -1747,6 +1777,85 @@ mod tests {
             .find(|((f, t), _)| f.as_str() == "pop[boston]" && t.as_str() == "births[boston]")
             .expect("expected pop[boston] -> births[boston]");
         assert_eq!(boston.1, 11, "must pick Bare A2A's offset (11) for Boston");
+    }
+
+    /// Regression test: when both a Bare A2A link score (`pop→share`)
+    /// and a FixedIndex A2A link score (`pop[nyc]→share`) exist for
+    /// the same edge -- e.g., `share[Region] = pop + pop[NYC]` -- both
+    /// expand to the per-element key `(pop[nyc], share[nyc])` at
+    /// different offsets. Earlier I tagged FixedIndex names with the
+    /// `Bare` rank for "simplicity", which left this collision tied
+    /// at Bare and resolved by HashMap insertion order over
+    /// `results.offsets` -- nondeterministic. Bare must win over
+    /// FixedIndex deterministically.
+    #[test]
+    fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
+            10usize,
+        );
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share"),
+            20usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 30);
+
+        let ltm_vars = vec![
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
+                equation: String::new(),
+                dimensions: vec!["Region".to_string()],
+            },
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string(),
+                equation: String::new(),
+                dimensions: vec!["Region".to_string()],
+            },
+        ];
+        let dims = vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+
+        // The aliased per-element key (pop[nyc], share[nyc]) appears
+        // in both Bare A2A and FixedIndex A2A expansions; dedup must
+        // pick Bare deterministically.
+        let nyc_aliased: Vec<&LinkOffset> = parsed
+            .iter()
+            .filter(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "share[nyc]")
+            .collect();
+        assert_eq!(
+            nyc_aliased.len(),
+            1,
+            "aliased per-element key (pop[nyc], share[nyc]) must dedupe to one entry; \
+             got {} entries: {parsed:?}",
+            nyc_aliased.len(),
+        );
+        assert_eq!(
+            nyc_aliased[0].1, 10,
+            "must pick Bare A2A's offset (10) over FixedIndex A2A's (20)",
+        );
+
+        // The non-aliased FixedIndex entry (pop[nyc], share[boston])
+        // -- which Bare A2A doesn't produce -- must survive at
+        // FixedIndex's offset.
+        let boston_only_fixed: Vec<&LinkOffset> = parsed
+            .iter()
+            .filter(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "share[boston]")
+            .collect();
+        assert_eq!(
+            boston_only_fixed.len(),
+            1,
+            "non-aliased FixedIndex entry (pop[nyc], share[boston]) must survive",
+        );
+        assert_eq!(
+            boston_only_fixed[0].1, 21,
+            "non-aliased FixedIndex entry must keep its offset (FixedIndex base 20 + boston index 1)",
+        );
     }
 
     #[test]
