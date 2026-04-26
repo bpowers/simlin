@@ -19,5 +19,5 @@ pub mod tools;
 pub mod types;
 
 pub use access::{OpenedProject, ProjectAccess};
-pub use errors::{AccessError, ValidationError};
-pub use types::SourceFormat;
+pub use errors::AccessError;
+pub use types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, SourceFormat};

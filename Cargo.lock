@@ -3445,6 +3445,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "simlin-engine",
+ "simlin-mcp-core",
  "tempfile",
  "tokio",
 ]

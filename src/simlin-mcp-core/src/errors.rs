@@ -2,20 +2,22 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Functional Core
+//
 //! Error types raised by [`crate::access::ProjectAccess`] and its callers.
 //!
 //! `AccessError` is the trait-level error: it covers everything that can
-//! go wrong while loading or persisting a project.  `Validation` is the
-//! one variant that surfaces engine-level diagnostics; its inner
-//! `ValidationError` mirrors the shape that `simlin-mcp` already exposes
-//! over the wire (see `simlin-mcp/src/tools/types.rs::ErrorOutput`),
-//! so the eventual rmcp tool layer can serialise validation failures
-//! without a translation step.
+//! go wrong while loading or persisting a project.  `Validation` carries
+//! engine-level diagnostics as [`ErrorOutput`] entries — the same wire
+//! shape `simlin-mcp` already exposes — so the rmcp tool layer can
+//! serialise validation failures without a translation step.
 
 use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+
+use crate::types::ErrorOutput;
 
 /// Failure modes for [`crate::access::ProjectAccess`].
 #[derive(Debug)]
@@ -36,8 +38,9 @@ pub enum AccessError {
     WriteError(io::Error),
     /// The post-edit project failed engine-level diagnostics.  These are
     /// surfaced verbatim to clients so an LLM can reason about what
-    /// went wrong.
-    Validation { errors: Vec<ValidationError> },
+    /// went wrong.  Carrying [`ErrorOutput`] keeps the wire shape
+    /// identical to ReadModel/EditModel's `errors` field.
+    Validation { errors: Vec<ErrorOutput> },
 }
 
 impl fmt::Display for AccessError {
@@ -66,21 +69,4 @@ impl Error for AccessError {
             _ => None,
         }
     }
-}
-
-/// Structured detail for a single engine-level validation failure.
-///
-/// Field names and the missing-field semantics of `model_name` /
-/// `variable_name` mirror `simlin-mcp`'s existing `ErrorOutput` so this
-/// type can be `#[serde(rename_all = "camelCase")]`-serialised into the
-/// same wire shape that current `@simlin/mcp` clients see.  Task 3 will
-/// add the `From<&simlin_engine::errors::FormattedError>` conversion
-/// when the rest of the output types move into this crate.
-#[derive(Debug, Clone)]
-pub struct ValidationError {
-    pub code: String,
-    pub message: String,
-    pub model_name: Option<String>,
-    pub variable_name: Option<String>,
-    pub kind: String,
 }
