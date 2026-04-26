@@ -2647,18 +2647,13 @@ pub fn model_ltm_variables(
             {
                 // Set the canonical name and dimensions per Phase 3 Task 4/5.
                 lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
-                lsv.dimensions = match &shape {
-                    // FixedIndex: each per-element link score takes the
-                    // target's dimensions if the target is arrayed, or
-                    // empty if the target is scalar (one scalar per element).
-                    // The existing link_score_dimensions logic returns
-                    // target dims for compatible cases and empty otherwise,
-                    // which already implements this rule.
-                    RefShape::FixedIndex(_) => target_dims.clone(),
-                    // Bare and Wildcard inherit target dims via the same
-                    // compatibility rule as before.
-                    _ => target_dims.clone(),
-                };
+                // All shapes (FixedIndex, Bare, Wildcard) take the target's
+                // dimensions: for FixedIndex each per-element link score is
+                // scalar when the target is scalar and arrayed when the target
+                // is arrayed; Bare and Wildcard inherit target dims via the
+                // same compatibility rule.  link_score_dimensions already
+                // implements this for every case, so one assignment suffices.
+                lsv.dimensions = target_dims.clone();
                 vars.push(lsv);
             }
         }
