@@ -2091,13 +2091,11 @@ pub(crate) fn build_element_level_loops(
                 .iter()
                 .map(|n| Ident::new(strip_subscript(n)))
                 .collect();
-            let mut links = var_graph.circuit_to_links(&var_level_nodes);
-            // A2A loop: every link is a same-element diagonal access, so
-            // the loop-score equation must reference the canonical
-            // {from}->{to} link-score variable (the Bare-shape name).
-            for link in &mut links {
-                link.shape = Some(RefShape::Bare);
-            }
+            // A2A loop: every link is a same-element diagonal access. The
+            // loop-score equation references the canonical
+            // `{from}->{to}` link score (the Bare-shape name) via the
+            // variable-level link names that `circuit_to_links` produces.
+            let links = var_graph.circuit_to_links(&var_level_nodes);
             let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
             let polarity = var_graph.calculate_polarity(&links);
 
@@ -2165,14 +2163,12 @@ pub(crate) fn build_element_level_loops(
             }
 
             if unique_cycle.len() >= 2 {
-                let mut links = var_graph.circuit_to_links(&unique_cycle);
                 // Cross-element circuits are scored as a scalar loop using
                 // the wildcard-reducer's already-aggregated A2A link-score
-                // values: every link reads the canonical {from}->{to} A2A
-                // link score (Bare shape).
-                for link in &mut links {
-                    link.shape = Some(RefShape::Bare);
-                }
+                // values: every link reads the canonical `{from}->{to}` A2A
+                // link score (Bare shape) via the variable-level link
+                // names produced by `circuit_to_links`.
+                let links = var_graph.circuit_to_links(&unique_cycle);
                 let stocks = var_graph.find_stocks_in_loop(&unique_cycle);
                 let polarity = var_graph.calculate_polarity(&links);
 
@@ -2252,7 +2248,6 @@ pub(crate) fn build_element_level_loops(
                         from: Ident::new(link_from),
                         to: Ident::new(link_to),
                         polarity: var_link_polarity,
-                        shape: Some(RefShape::Bare),
                     });
                 }
 
@@ -2697,9 +2692,9 @@ pub fn model_ltm_variables(
     /// boundaries.
     ///
     /// `fallback_shape` is the shape to use when shape enumeration is
-    /// not possible or yields no results (loop-iteration path before
-    /// Phase 4 fills in `Link.shape`). Pass `RefShape::Bare` for the
-    /// pre-Phase-4 default.
+    /// not possible or yields no results (e.g., implicit synthesized
+    /// references that don't appear in the target's AST). Callers pass
+    /// `RefShape::Bare` to preserve the legacy single-shape behavior.
     #[allow(clippy::too_many_arguments)] // helper threads through emission context
     fn emit_per_shape_link_scores(
         db: &dyn Db,
@@ -2764,13 +2759,23 @@ pub fn model_ltm_variables(
         let mut seen_links: HashSet<(String, String)> = HashSet::new();
         for loop_item in detected_loops {
             for link in &loop_item.links {
-                let key = (link.from.to_string(), link.to.to_string());
+                // For cross-dimensional edges in mixed/scalar loops, the
+                // loop builder preserves an element-level `link.from` like
+                // "pop[nyc]" so loop_score equations reference the right
+                // per-element link score. But `try_cross_dimensional_link_scores`
+                // and `source_vars` lookups want the variable-level name
+                // ("pop"). Strip the subscript for both the dedup key and
+                // the cross-dim helper. The helper emits all per-element
+                // link scores (one per source element), and the dedup
+                // ensures we only fire it once per (var_from, to) pair.
+                let from_var_level = strip_subscript(link.from.as_str());
+                let key = (from_var_level.to_string(), link.to.to_string());
                 if seen_links.insert(key) {
                     // Check for cross-dimensional (arrayed-to-scalar) edges.
                     if let Some(cross_vars) = try_cross_dimensional_link_scores(
                         db,
                         source_vars,
-                        link.from.as_str(),
+                        from_var_level,
                         link.to.as_str(),
                         model,
                         project,
@@ -2778,17 +2783,16 @@ pub fn model_ltm_variables(
                         vars.extend(cross_vars);
                         continue;
                     }
-                    // Loop-iteration path: link.shape is not populated
-                    // until Phase 4 plumbs it through; fall back to Bare
-                    // for now. Per-shape enumeration via the AST still
-                    // applies inside emit_per_shape_link_scores.
-                    let fallback_shape = link.shape.clone().unwrap_or(RefShape::Bare);
+                    // Per-shape enumeration via the target's AST happens
+                    // inside emit_per_shape_link_scores; the fallback shape
+                    // is only used when the AST walk yields no sites
+                    // (e.g., implicit synthesized references).
                     emit_per_shape_link_scores(
                         db,
                         source_vars,
-                        link.from.as_str(),
+                        from_var_level,
                         link.to.as_str(),
-                        fallback_shape,
+                        RefShape::Bare,
                         model,
                         project,
                         dm_dims,

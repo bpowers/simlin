@@ -51,9 +51,10 @@ const LTM_LINK_SEP: char = '→';
 /// score names a stable function of `(from, to, shape)` and prevent collisions
 /// when multiple references with different shapes coexist for the same edge.
 /// Discovery does not need the original shape, so we strip these suffixes
-/// before resolving the canonical `to` ident. Mirrors the constants in
-/// `ltm_augment::link_score_var_name`.
-const LTM_TO_SHAPE_SUFFIXES: &[&str] = &["\u{205A}wildcard", "\u{205A}dynamic"];
+/// before resolving the canonical `to` ident. The single source of truth for
+/// the suffix strings lives in `ltm_augment` so a new shape can be added in
+/// one place.
+use crate::ltm_augment::LINK_SCORE_SHAPE_SUFFIXES as LTM_TO_SHAPE_SUFFIXES;
 
 // --- Internal types ---
 
@@ -1582,14 +1583,12 @@ mod tests {
                             to: Ident::new("y"),
                             polarity: crate::ltm::LinkPolarity::Positive,
                             // Shape is populated in Phase 4 at loop construction.
-                            shape: None,
                         },
                         Link {
                             from: Ident::new("y"),
                             to: Ident::new("x"),
                             polarity: crate::ltm::LinkPolarity::Positive,
                             // Shape is populated in Phase 4 at loop construction.
-                            shape: None,
                         },
                     ],
                     stocks: vec![],
@@ -1608,14 +1607,12 @@ mod tests {
                             to: Ident::new("b"),
                             polarity: crate::ltm::LinkPolarity::Negative,
                             // Shape is populated in Phase 4 at loop construction.
-                            shape: None,
                         },
                         Link {
                             from: Ident::new("b"),
                             to: Ident::new("a"),
                             polarity: crate::ltm::LinkPolarity::Positive,
                             // Shape is populated in Phase 4 at loop construction.
-                            shape: None,
                         },
                     ],
                     stocks: vec![],
@@ -1684,7 +1681,6 @@ mod tests {
                 to: Ident::new(to),
                 polarity: crate::ltm::LinkPolarity::Positive,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             })
             .collect();
         FoundLoop {

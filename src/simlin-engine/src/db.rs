@@ -4989,8 +4989,9 @@ pub fn assemble_module(
                     let has_element_subscript = suffix
                         .get(..arrow_pos.unwrap_or(suffix.len()))
                         .is_some_and(|from_part| from_part.contains('['));
-                    let has_shape_suffix =
-                        suffix.ends_with("\u{205A}wildcard") || suffix.ends_with("\u{205A}dynamic");
+                    let has_shape_suffix = crate::ltm_augment::LINK_SCORE_SHAPE_SUFFIXES
+                        .iter()
+                        .any(|s| suffix.ends_with(s));
 
                     if has_element_subscript || has_shape_suffix {
                         // Per-shape link score (FixedIndex with [elem], or

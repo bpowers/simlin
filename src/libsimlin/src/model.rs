@@ -549,7 +549,6 @@ pub unsafe extern "C" fn simlin_model_get_links(
                 to: engine::common::Ident::new(to_name),
                 polarity: engine::ltm::LinkPolarity::Unknown,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             });
         }
     }

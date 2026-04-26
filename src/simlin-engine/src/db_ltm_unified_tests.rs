@@ -829,15 +829,14 @@ fn fixed_index_link_score_emits_per_element_name() {
     );
 }
 
-// -- Phase 4 (Link.shape annotation in build_element_level_loops) --
+// -- Loop-link naming in build_element_level_loops --
 //
-// AC4.1 / AC4.2: build_element_level_loops must populate Link.shape
-// so the loop-score equation generator picks the right per-shape
-// link-score variable name. For pure-A2A loops every link is Bare
-// and carries variable-level names.
+// AC4.1 / AC4.2: build_element_level_loops must produce link names that
+// match the link-score variables actually emitted, so the loop-score
+// equation references resolve.
 //
-// For mixed/scalar loops the shape is Bare and the link names are
-// normalized to match the link-score variables that are actually emitted:
+// Pure A2A loops use variable-level names on both ends. Mixed/scalar
+// loops normalize as follows:
 //  - Cross-dimensional edges (subscripted from, bare to): element-level
 //    from is preserved so the loop score references the per-element link
 //    score emitted by try_cross_dimensional_link_scores.
@@ -845,14 +844,17 @@ fn fixed_index_link_score_emits_per_element_name() {
 //    subscripts are stripped so the loop score references the variable-level
 //    A2A or scalar link score emitted by emit_per_shape_link_scores.
 //
-// Using FixedIndex (old heuristic) caused doubly-bracketed names like
-// "population[nyc][nyc]→total_pop" because link_score_var_name prepends
-// "[nyc]" to the already-subscripted from name.
+// An earlier version threaded a per-link `RefShape` through `Link` and
+// drove the per-element name from `link_score_var_name(FixedIndex)`. That
+// produced doubly-bracketed names like "population[nyc][nyc]→total_pop"
+// because the helper prepends "[nyc]" to a from name that was already
+// element-level. Encoding the per-element distinction in `link.from`
+// directly removes the structural mismatch.
 
 /// Build the element-level loops for a TestProject by replicating the
-/// same orchestration `model_ltm_variables` does internally. Phase 4
-/// added `pub(crate)` visibility on `build_element_level_loops` so
-/// tests can inspect the `Link.shape` annotations directly.
+/// same orchestration `model_ltm_variables` does internally.
+/// `build_element_level_loops` is `pub(crate)` so tests can inspect the
+/// link-name normalization rules directly.
 fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
     let datamodel = project.build_datamodel();
     let db = SimlinDb::default();
@@ -876,11 +878,12 @@ fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
 }
 
 #[test]
-fn a2a_loop_links_carry_bare_shape() {
-    // Pure A2A: pop[r] -> births[r] -> pop[r]. Every link in the
-    // resulting A2A loop must be annotated with Some(RefShape::Bare)
-    // so that loop-score generation references the canonical
-    // {from}->{to} link score (no per-element prefix).
+fn a2a_loop_links_use_variable_level_names() {
+    // Pure A2A: pop[r] -> births[r] -> pop[r]. The A2A branch of
+    // build_element_level_loops must produce links with variable-level
+    // (no-subscript) names so the loop-score generation references the
+    // canonical {from}->{to} link score that emit_per_shape_link_scores
+    // produces.
     let project = TestProject::new("a2a_shape")
         .named_dimension("Region", &["NYC", "Boston"])
         .array_stock("pop[Region]", "100", &["births"], &[], None)
@@ -890,13 +893,15 @@ fn a2a_loop_links_carry_bare_shape() {
     assert!(!loops.is_empty(), "expected at least one A2A loop");
     for l in &loops {
         for link in &l.links {
-            assert_eq!(
-                link.shape,
-                Some(RefShape::Bare),
-                "A2A loop link {:?}->{:?} should carry Bare shape, got {:?}",
+            assert!(
+                !link.from.as_str().contains('['),
+                "A2A loop link from should be variable-level, got {:?}",
                 link.from.as_str(),
+            );
+            assert!(
+                !link.to.as_str().contains('['),
+                "A2A loop link to should be variable-level, got {:?}",
                 link.to.as_str(),
-                link.shape,
             );
         }
     }
@@ -1019,9 +1024,9 @@ fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
 fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
     use salsa::Setter;
 
-    // Build a feedback-closed model so loop construction runs and
-    // populates Link.shape. The aliased edge appears inside the A2A
-    // loop pop[r] -> share[r] -> update[r] -> pop[r]:
+    // Build a feedback-closed model so loop construction runs. The
+    // aliased edge appears inside the A2A loop
+    // pop[r] -> share[r] -> update[r] -> pop[r]:
     //
     //   pop[Region]: stock with inflow update[Region]
     //   share[Region] = pop + pop[NYC]   <- BOTH Bare and FixedIndex(NYC)
@@ -1072,13 +1077,17 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
         "expected FixedIndex(nyc) link score {fixed_name:?}; got: {names:?}"
     );
 
-    // -- Item 3: heuristic's chosen shape on the aliased edge in a
-    // loop -- pop[nyc] -> share[nyc] is inside an A2A loop and the
-    // A2A branch sets Bare for every link (matched source/target
-    // subscripts). This pins the documented under-counting behavior.
+    // -- Item 3: link-name form for the aliased edge inside a loop --
+    // pop[nyc] -> share[nyc] is inside an A2A loop and the A2A branch
+    // strips subscripts on both ends, so the loop links use
+    // variable-level "pop" rather than per-element "pop[nyc]". The
+    // loop-score equation therefore multiplies against the canonical
+    // Bare-named link score and misses the FixedIndex(NYC) contribution
+    // that emit_per_shape_link_scores also produces. This pins the
+    // documented under-counting behavior.
     //
     // Switch back to exhaustive mode (same db and project, no rebuild)
-    // so build_element_level_loops runs and populates Link.shape.
+    // so build_element_level_loops runs.
     source_project.set_ltm_discovery_mode(&mut db).to(false);
     let circuits = model_element_loop_circuits(&db, model, source_project);
     let loops = if circuits.is_empty() {
@@ -1102,9 +1111,9 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
     );
 
     // Find the link in some loop whose stripped from is "pop" and
-    // stripped to is "share". The heuristic's choice on this aliased
-    // edge is the documented current behavior.
-    let mut chosen_shapes: Vec<Option<RefShape>> = Vec::new();
+    // stripped to is "share". The link's `from` form on this aliased
+    // edge encodes the documented current behavior.
+    let mut chosen_from_names: Vec<String> = Vec::new();
     for l in &loops {
         for link in &l.links {
             // Compare stripped variable names so we catch both A2A
@@ -1122,28 +1131,31 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
                 .next()
                 .unwrap_or(link.to.as_str());
             if from_stripped == "pop" && to_stripped == "share" {
-                chosen_shapes.push(link.shape.clone());
+                chosen_from_names.push(link.from.as_str().to_string());
             }
         }
     }
     assert!(
-        !chosen_shapes.is_empty(),
+        !chosen_from_names.is_empty(),
         "expected at least one pop->share link in the loops; got loops: {:?}",
         loops.iter().map(|l| l.id.clone()).collect::<Vec<_>>()
     );
 
-    // Pin the documented limitation: every pop->share loop link gets
-    // Bare under the current heuristic (A2A branch unconditionally
-    // sets Bare). A future shape-threading refinement that emits a
-    // FixedIndex variant for this edge would change the expectation
-    // here -- exactly the deliberate breakage we want.
-    for shape in &chosen_shapes {
-        assert_eq!(
-            shape,
-            &Some(RefShape::Bare),
-            "documented limitation: heuristic should pick Bare on the \
-             aliased edge inside the A2A loop, missing the FixedIndex \
-             contribution; got {shape:?}"
+    // Pin the documented limitation: every pop->share loop link uses
+    // a variable-level `from` ("pop"), not the per-element FixedIndex
+    // form ("pop[nyc]"). The A2A branch of build_element_level_loops
+    // strips subscripts uniformly, so the loop-score equation
+    // multiplies against the canonical Bare-named link score and
+    // misses the FixedIndex(NYC) contribution that emit_per_shape_link_scores
+    // also produces. A future shape-threading refinement that emits a
+    // FixedIndex variant inside the loop would surface here as a
+    // bracketed `from` -- exactly the deliberate breakage we want.
+    for from_name in &chosen_from_names {
+        assert!(
+            !from_name.contains('['),
+            "documented limitation: A2A loop link should use \
+             variable-level pop, missing the FixedIndex contribution; \
+             got {from_name:?}"
         );
     }
 }
@@ -1204,4 +1216,81 @@ fn mixed_scalar_loop_partitions_resolve_to_some() {
          Loop.stocks regression has recurred. loop_partitions: {:?}",
         ltm.loop_partitions
     );
+}
+
+#[test]
+fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
+    // Regression test for the silent correctness bug where exhaustive-mode
+    // loop iteration passed element-level `link.from` ("pop[nyc]") to
+    // `try_cross_dimensional_link_scores`, which looks up by variable name
+    // ("pop") in `source_vars`. The lookup failed, the cross-dim helper
+    // returned None, and the code fell through to the generic per-shape
+    // emitter -- which has no AST anchor for "pop[nyc]" in total_pop's
+    // equation, so it wrapped the bare `pop` in `SUM(pop[*])` in PREVIOUS,
+    // making the numerator `sum(PREVIOUS(pop[*])) - PREVIOUS(total_pop)`,
+    // which is identically zero. The emitted equation evaluated to 0 at
+    // every timestep, silently zeroing the loop contribution from
+    // cross-dimensional arrayed-to-scalar reducer edges.
+    //
+    // Discovery mode worked correctly because `edges_result.edges` is
+    // variable-level, so `from = "pop"` and the cross-dim helper succeeds.
+    //
+    // Both modes must produce the same per-element link score formulas
+    // for cross-dimensional edges.
+    let project = TestProject::new("crossdim_match")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .scalar_aux("total_pop", "SUM(pop[*])")
+        .array_flow("births[Region]", "total_pop * 0.005 + pop * 0.05", None);
+
+    let datamodel = project.build_datamodel();
+
+    let db_ex = SimlinDb::default();
+    let sync_ex = sync_from_datamodel(&db_ex, &datamodel);
+    let model_ex = sync_ex.models["main"].source;
+    let ltm_ex = model_ltm_variables(&db_ex, model_ex, sync_ex.project);
+
+    use salsa::Setter;
+    let mut db_disc = SimlinDb::default();
+    let model_disc;
+    let project_disc;
+    {
+        let sync_disc = sync_from_datamodel(&db_disc, &datamodel);
+        model_disc = sync_disc.models["main"].source;
+        project_disc = sync_disc.project;
+    }
+    project_disc.set_ltm_discovery_mode(&mut db_disc).to(true);
+    let ltm_disc = model_ltm_variables(&db_disc, model_disc, project_disc);
+
+    let by_name = |vars: &[LtmSyntheticVar]| -> std::collections::HashMap<String, String> {
+        vars.iter()
+            .map(|v| (v.name.clone(), v.equation.clone()))
+            .collect()
+    };
+    let ex_eqs = by_name(&ltm_ex.vars);
+    let disc_eqs = by_name(&ltm_disc.vars);
+
+    // The two cross-dimensional link scores that the bug zeroed out:
+    for elem in &["nyc", "boston"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[{elem}]\u{2192}total_pop");
+        let ex_eq = ex_eqs
+            .get(&name)
+            .unwrap_or_else(|| panic!("exhaustive mode missing cross-dim link score {name}"));
+        let disc_eq = disc_eqs
+            .get(&name)
+            .unwrap_or_else(|| panic!("discovery mode missing cross-dim link score {name}"));
+        assert_eq!(
+            ex_eq, disc_eq,
+            "exhaustive and discovery cross-dim link score equations differ for {name}\n\
+             exhaustive:  {ex_eq}\n\
+             discovery:   {disc_eq}",
+        );
+        // Defensive: the buggy form contained `sum(PREVIOUS(pop[*]))`
+        // which evaluates to PREVIOUS(total_pop), making the SAFEDIV
+        // numerator identically zero.
+        assert!(
+            !ex_eq.contains("sum(PREVIOUS(pop[*]))"),
+            "exhaustive equation still contains the zero-numerator form: {ex_eq}",
+        );
+    }
 }

@@ -64,17 +64,20 @@ pub enum LinkPolarity {
 
 /// Represents a causal link between two variables.
 ///
-/// `shape` carries the per-reference access shape (Bare, FixedIndex,
-/// Wildcard, DynamicIndex) and is populated by Phase 4 at loop
-/// construction. Phase 3 leaves it `None` for all callers; downstream
-/// emission falls back to `RefShape::Bare` until Phase 4 lands.
+/// The per-reference access shape distinction (Bare / FixedIndex / Wildcard
+/// / DynamicIndex) is encoded in the link's `from` / `to` strings, not as
+/// a separate field. Cross-dimensional edges in mixed/scalar loops carry
+/// element-level `from` like `"pop[nyc]"` so loop-score equations resolve
+/// to the per-element link score variable that
+/// `try_cross_dimensional_link_scores` emits. All other edges use
+/// variable-level names. See `db_ltm::build_element_level_loops` for the
+/// normalization rule.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Link {
     pub from: Ident<Canonical>,
     pub to: Ident<Canonical>,
     pub polarity: LinkPolarity,
-    pub shape: Option<crate::db::RefShape>,
 }
 
 /// Represents a feedback loop.
@@ -1441,7 +1444,6 @@ impl CausalGraph {
                 to: to.clone(),
                 polarity,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             });
         }
         links
@@ -1460,7 +1462,6 @@ impl CausalGraph {
                 to: to.clone(),
                 polarity,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             });
         }
         links
@@ -1718,7 +1719,6 @@ impl CausalGraph {
                     to: to.clone(),
                     polarity,
                     // Shape is populated in Phase 4 at loop construction.
-                    shape: None,
                 });
             }
         }
@@ -3298,14 +3298,12 @@ mod tests {
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Unknown,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
         ];
 
@@ -3334,14 +3332,12 @@ mod tests {
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
         ];
 
@@ -3359,21 +3355,18 @@ mod tests {
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Positive,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("c"),
                 polarity: LinkPolarity::Positive,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("c"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
         ];
 
@@ -3402,14 +3395,12 @@ mod tests {
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Positive,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Positive,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
         ];
 
@@ -3427,14 +3418,12 @@ mod tests {
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Positive,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
         ];
 
@@ -3452,14 +3441,12 @@ mod tests {
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Negative,
                 // Shape is populated in Phase 4 at loop construction.
-                shape: None,
             },
         ];
 
@@ -3490,14 +3477,12 @@ mod tests {
                         to: Ident::new("b"),
                         polarity: LinkPolarity::Unknown,
                         // Shape is populated in Phase 4 at loop construction.
-                        shape: None,
                     },
                     Link {
                         from: Ident::new("b"),
                         to: Ident::new("a"),
                         polarity: LinkPolarity::Unknown,
                         // Shape is populated in Phase 4 at loop construction.
-                        shape: None,
                     },
                 ],
                 stocks: vec![],
@@ -3512,14 +3497,12 @@ mod tests {
                         to: Ident::new("y"),
                         polarity: LinkPolarity::Positive,
                         // Shape is populated in Phase 4 at loop construction.
-                        shape: None,
                     },
                     Link {
                         from: Ident::new("y"),
                         to: Ident::new("x"),
                         polarity: LinkPolarity::Positive,
                         // Shape is populated in Phase 4 at loop construction.
-                        shape: None,
                     },
                 ],
                 stocks: vec![],

@@ -122,8 +122,28 @@ pub(crate) fn wrap_non_matching_in_previous(
             }
         }
         Expr0::Subscript(ident, indices, loc) => {
-            // Recurse into index expressions first so nested deps get
-            // wrapped regardless of the outer subscript's shape.
+            // Classify the subscript's shape using the ORIGINAL indices
+            // BEFORE recursing into them. If a user variable shares a
+            // name with a dimension element (e.g., a variable also named
+            // `NYC`), recursing first would rewrite `Var(NYC)` as
+            // `App(PREVIOUS, [Var(NYC)])`, and then classification would
+            // fall through to `DynamicIndex`, breaking a live FixedIndex
+            // shape match.
+            let canonical = Ident::new(ident.as_str());
+            let subscript_shape = classify_expr0_subscript_shape(&indices, source_dim_elements);
+            if &canonical == live_source && &subscript_shape == live_shape {
+                // Live reference: keep the subscript and its indices
+                // verbatim. The indices are dimension elements at runtime
+                // (per the classification above), not variable references,
+                // so we must not recurse into them -- doing so would treat
+                // a literal element name like `NYC` as an `other_deps`
+                // variable and wrap it in PREVIOUS.
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            // Non-live reference: recurse into indices so any nested
+            // user-variable references get wrapped, then build the new
+            // subscript. If the outer ident is itself a dep, wrap the
+            // whole thing.
             let indices: Vec<IndexExpr0> = indices
                 .into_iter()
                 .map(|idx| {
@@ -136,19 +156,8 @@ pub(crate) fn wrap_non_matching_in_previous(
                     )
                 })
                 .collect();
-            let canonical = Ident::new(ident.as_str());
-            let subscript_shape = classify_expr0_subscript_shape(&indices, source_dim_elements);
             let subscript = Expr0::Subscript(ident, indices, loc);
-            if &canonical == live_source {
-                if &subscript_shape == live_shape {
-                    subscript
-                } else {
-                    Expr0::App(
-                        UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
-                        loc,
-                    )
-                }
-            } else if other_deps.contains(&canonical) {
+            if &canonical == live_source || other_deps.contains(&canonical) {
                 Expr0::App(
                     UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
                     loc,
@@ -335,14 +344,28 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 /// identifier, so the generated names cannot be confused with user
 /// variables. The `parse_link_offsets` discovery parser strips the
 /// `⁚wildcard` / `⁚dynamic` suffix before resolving offsets.
+/// Suffix appended to the `to` name for `Wildcard`-shape link scores.
+/// Always appended, regardless of whether other shapes coexist.
+pub(crate) const LINK_SCORE_WILDCARD_SUFFIX: &str = "\u{205A}wildcard";
+
+/// Suffix appended to the `to` name for `DynamicIndex`-shape link scores.
+/// Always appended, regardless of whether other shapes coexist.
+pub(crate) const LINK_SCORE_DYNAMIC_SUFFIX: &str = "\u{205A}dynamic";
+
+/// All shape suffixes that `link_score_var_name` may append. The discovery
+/// parser strips one of these from the end of the `to` name before
+/// resolving offsets.
+pub(crate) const LINK_SCORE_SHAPE_SUFFIXES: &[&str] =
+    &[LINK_SCORE_WILDCARD_SUFFIX, LINK_SCORE_DYNAMIC_SUFFIX];
+
 pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> String {
     let from_part = match shape {
         RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),
         _ => from.to_string(),
     };
     let to_part = match shape {
-        RefShape::Wildcard => format!("{}\u{205A}wildcard", to),
-        RefShape::DynamicIndex => format!("{}\u{205A}dynamic", to),
+        RefShape::Wildcard => format!("{}{}", to, LINK_SCORE_WILDCARD_SUFFIX),
+        RefShape::DynamicIndex => format!("{}{}", to, LINK_SCORE_DYNAMIC_SUFFIX),
         _ => to.to_string(),
     };
     format!(
@@ -703,20 +726,19 @@ fn generate_stock_to_flow_equation(
 
 /// Generate the equation for a loop score variable.
 ///
-/// The loop score is the product of all per-shape link scores in the
-/// loop. Each link's `shape` field selects which `(from, to, shape)`
-/// tuple to reference -- the canonical name is computed via
-/// `link_score_var_name`. Phase 3 leaves `link.shape` as `None` for
-/// every link constructor (Phase 4 fills in real shapes); the unwrap to
-/// `RefShape::Bare` here preserves the legacy single-shape link-score
-/// references until then.
+/// The loop score is the product of all link scores in the loop. The
+/// per-element distinction for cross-dimensional edges (e.g.,
+/// `pop[nyc]→total_pop`) lives in `link.from` itself, not in a separate
+/// shape field; we always use `Bare` here so `link_score_var_name`
+/// emits the canonical `{from}→{to}` form, matching what
+/// `try_cross_dimensional_link_scores` and `emit_per_shape_link_scores`
+/// produce.
 fn generate_loop_score_equation(loop_item: &Loop) -> String {
     let link_score_names: Vec<String> = loop_item
         .links
         .iter()
         .map(|link| {
-            let shape = link.shape.clone().unwrap_or(RefShape::Bare);
-            let name = link_score_var_name(link.from.as_str(), link.to.as_str(), &shape);
+            let name = link_score_var_name(link.from.as_str(), link.to.as_str(), &RefShape::Bare);
             // Double-quote the variable name so it can be parsed
             format!("\"{name}\"")
         })
@@ -1826,30 +1848,30 @@ mod tests {
         );
     }
 
-    // -- generate_loop_score_equation: shape-resolved link score names --
+    // -- generate_loop_score_equation: per-element link names --
     //
-    // The loop-score equation references each link's per-shape link
-    // score. Phase 6 will fill in real `Link.shape` values; for now,
-    // each link can carry an explicit shape so the test can pin the
-    // FixedIndex naming convention.
+    // The per-element distinction lives in `link.from` itself (e.g.,
+    // `"pop[nyc]"` for cross-dimensional edges in mixed/scalar loops).
+    // generate_loop_score_equation uses Bare naming uniformly, so the
+    // bracketed `from` flows through verbatim and the resulting
+    // reference matches the per-element link score that
+    // try_cross_dimensional_link_scores emits.
     #[test]
-    fn loop_score_equation_references_fixed_index_link_score() {
+    fn loop_score_equation_uses_element_level_from_for_per_element_links() {
         use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
 
         let loop_item = Loop {
             id: "r1".to_string(),
             links: vec![
                 Link {
-                    from: Ident::<Canonical>::new("pop"),
+                    from: Ident::<Canonical>::new("pop[nyc]"),
                     to: Ident::<Canonical>::new("rel_pop"),
                     polarity: LinkPolarity::Positive,
-                    shape: Some(RefShape::FixedIndex(vec!["nyc".to_string()])),
                 },
                 Link {
                     from: Ident::<Canonical>::new("rel_pop"),
                     to: Ident::<Canonical>::new("pop"),
                     polarity: LinkPolarity::Positive,
-                    shape: None,
                 },
             ],
             stocks: vec![],
@@ -1859,17 +1881,49 @@ mod tests {
 
         let eq = generate_loop_score_equation(&loop_item);
 
-        // FixedIndex link score uses the bracketed prefixed-from form.
+        // Element-level from flows through Bare naming verbatim.
         assert!(
             eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop\""),
-            "expected FixedIndex link-score reference; got: {eq}"
+            "expected per-element link-score reference; got: {eq}"
         );
-        // The closing link has no shape -> Bare canonical name.
+        // The closing link uses canonical Bare naming.
         assert!(
             eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}rel_pop\u{2192}pop\""),
             "expected Bare link-score reference (closing link); got: {eq}"
         );
         // Loop score is the product of the two references.
         assert!(eq.contains(" * "), "expected product join; got: {eq}");
+    }
+
+    /// Regression test: a literal-element subscript like `pop[NYC]` must
+    /// classify as `FixedIndex(["nyc"])` even when a user variable named
+    /// `nyc` exists and is in `other_deps`. The buggy implementation
+    /// recursed into the indices first (wrapping `Var(NYC)` as
+    /// `App(PREVIOUS, [Var(NYC)])`) and then classified the transformed
+    /// indices, which fell through to `DynamicIndex` and broke the live
+    /// FixedIndex match -- so the live reference got wrapped too.
+    #[test]
+    fn partial_equation_dimension_element_collides_with_variable_name() {
+        let dims = region_dim_elements();
+        // Both `pop` (live source) and `nyc` (user variable) are deps.
+        // The literal subscript [NYC] must still classify as a dimension
+        // element, not a wrapped variable reference.
+        let deps = deps_set(&["pop", "nyc"]);
+        let live = Ident::new("pop");
+        let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+
+        let partial = build_partial_equation_shaped("pop[NYC]", &deps, &live, &shape, &dims);
+
+        // The live reference must remain unwrapped.
+        assert!(
+            !partial.contains("PREVIOUS(pop"),
+            "live FixedIndex reference unexpectedly wrapped; got: {partial}",
+        );
+        // The literal element subscript must remain unwrapped (NYC is a
+        // dimension element here, not a runtime variable reference).
+        assert!(
+            !partial.contains("PREVIOUS(nyc)"),
+            "literal element subscript wrongly treated as variable; got: {partial}",
+        );
     }
 }
