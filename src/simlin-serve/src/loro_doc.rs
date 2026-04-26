@@ -628,4 +628,103 @@ mod tests {
             serde_json::json!({ "name": "foo", "meta": { "author": "alice" } })
         );
     }
+
+    #[test]
+    fn apply_canonical_json_writes_scalar_list() {
+        let doc = ProjectDoc::new();
+        let input = serde_json::json!({ "tags": ["a", "b"] });
+        doc.apply_canonical_json(&input).expect("apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, input);
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_list_with_reordered_one() {
+        // Replace-semantics: the second apply truncates and repushes, so
+        // the export reflects the new order even though the elements are
+        // identical to the first apply (set-equality).
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "tags": ["a", "b"] }))
+            .expect("first");
+        let updated = serde_json::json!({ "tags": ["a", "c", "b"] });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
+
+    #[test]
+    fn apply_canonical_json_clears_list_to_empty() {
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "tags": ["a", "b", "c"] }))
+            .expect("first");
+        let cleared = serde_json::json!({ "tags": [] });
+        doc.apply_canonical_json(&cleared).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, cleared);
+    }
+
+    #[test]
+    fn apply_canonical_json_handles_list_of_objects() {
+        let doc = ProjectDoc::new();
+        let input = serde_json::json!({
+            "items": [{ "id": 1, "label": "first" }, { "id": 2, "label": "second" }],
+        });
+        doc.apply_canonical_json(&input).expect("apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, input);
+    }
+
+    #[test]
+    fn apply_canonical_json_handles_nested_lists() {
+        // A list of lists exercises the recursive merge_list -> merge_list
+        // path. Each push_container yields a fresh LoroList we recurse into.
+        let doc = ProjectDoc::new();
+        let input = serde_json::json!({
+            "matrix": [[1, 2, 3], [4, 5, 6]],
+        });
+        doc.apply_canonical_json(&input).expect("apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, input);
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_list_with_objects() {
+        // Mutating an object inside a list triggers a full list rewrite.
+        // The export should reflect the second apply exactly; the CRDT
+        // op-log eats the cost (documented as a Phase 3 trade-off).
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({
+            "items": [{ "id": 1 }, { "id": 2 }],
+        }))
+        .expect("first");
+        let updated = serde_json::json!({
+            "items": [{ "id": 1 }, { "id": 2, "label": "added" }],
+        });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_scalar_with_list() {
+        // Cross-type transition: previously-scalar key becomes a list.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "tags": "single" }))
+            .expect("first");
+        let updated = serde_json::json!({ "tags": ["a", "b"] });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_list_with_scalar() {
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "tags": ["a", "b"] }))
+            .expect("first");
+        let updated = serde_json::json!({ "tags": "single" });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
 }
