@@ -120,6 +120,28 @@ async fn await_removed_event(
     }
 }
 
+/// Wait for the next `ProjectRenamed` event under the same bounded-wait
+/// rules as `await_disk_event`.
+async fn await_renamed_event(
+    rx: &mut tokio::sync::broadcast::Receiver<WsMessage>,
+    timeout: Duration,
+) -> Option<WsMessage> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(msg @ WsMessage::ProjectRenamed { .. })) => return Some(msg),
+            Ok(Ok(_other)) => continue,
+            Ok(Err(RecvError::Lagged(_))) => continue,
+            Ok(Err(RecvError::Closed)) => return None,
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Minimal `.sd.json` content with a single named project. The disk-merge tests
 /// mutate `name` to force a merge and observe via the doc state.
 fn sd_json(name: &str) -> String {
@@ -638,6 +660,156 @@ async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
     // The version is 1 from the save; the watcher must not have pushed it to 2.
     let entry = state.registry.get(&abs_canonical).expect("entry");
     assert_eq!(entry.version, 1, "version must be exactly 1 after the save");
+
+    shutdown.notify_waiters();
+}
+
+/// Phase 8 Task 2: an external rename of a tracked model file re-keys the
+/// registry entry and broadcasts `ProjectRenamed`. The pre-rename version,
+/// echo-suppression hash, and `LoroDoc` are all preserved across the
+/// re-key, so the SPA's editor can stay mounted on the new path without
+/// re-fetching.
+#[tokio::test]
+async fn external_rename_re_keys_registry_and_emits_project_renamed() {
+    let dir = TempDir::new().expect("tempdir");
+    let from_abs = dir.path().join("a.sd.json");
+    let to_abs = dir.path().join("b.sd.json");
+    let initial = sd_json("baseline");
+    std::fs::write(&from_abs, &initial).expect("write initial");
+    let from_canonical = from_abs.canonicalize().expect("canonicalize from");
+
+    let state = build_state(dir.path());
+    let baseline_hash = content_hash(initial.as_bytes());
+    seed_registry(
+        &state,
+        &from_canonical,
+        ProjectFormat::SdJson,
+        baseline_hash,
+    );
+    // Apply a browser-style edit so the registry's version advances and
+    // we can confirm rename preserves it across the re-key.
+    let browser_edit: serde_json::Value =
+        serde_json::from_str(&sd_json("after-browser-edit")).expect("parse browser edit");
+    state
+        .registry
+        .check_increment_and_merge(&from_canonical, 0, &browser_edit)
+        .expect("browser merge succeeds");
+    let pre_rename_version = state
+        .registry
+        .get(&from_canonical)
+        .expect("from entry")
+        .version;
+    assert_eq!(pre_rename_version, 1, "browser edit bumped to 1");
+    let pre_doc_arc = state.registry.get(&from_canonical).expect("from entry").doc;
+
+    let mut rx = state.events.subscribe();
+
+    let shutdown: ShutdownSignal = Arc::new(Notify::new());
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+
+    // Give the OS-level watch a moment to register before the rename.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    tokio::fs::rename(&from_abs, &to_abs)
+        .await
+        .expect("external rename");
+
+    let event = await_renamed_event(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("watcher emits ProjectRenamed within 2s");
+    match event {
+        WsMessage::ProjectRenamed { from, to } => {
+            assert_eq!(from, "a.sd.json");
+            assert_eq!(to, "b.sd.json");
+        }
+        other => panic!("expected ProjectRenamed, got {other:?}"),
+    }
+
+    let to_canonical = to_abs.canonicalize().expect("canonicalize to");
+    assert!(
+        state.registry.get(&from_canonical).is_none(),
+        "old key dropped"
+    );
+    let entry = state
+        .registry
+        .get(&to_canonical)
+        .expect("registry has new key");
+    assert_eq!(
+        entry.version, pre_rename_version,
+        "version preserved across rename"
+    );
+    assert_eq!(
+        entry.last_disk_hash, baseline_hash,
+        "echo-suppression hash preserved"
+    );
+    assert!(
+        Arc::ptr_eq(&pre_doc_arc, &entry.doc),
+        "LoroDoc carried over verbatim"
+    );
+
+    shutdown.notify_waiters();
+}
+
+/// Edge case: a paired-rename event lands for a path the registry never
+/// knew about (e.g. the source extension was outside our denylist when we
+/// scanned, or the file was created and renamed before discovery caught
+/// up). In that case we treat the destination side as a fresh Created
+/// event so the registry hydrates the new entry.
+#[tokio::test]
+async fn rename_of_untracked_path_falls_through_to_created() {
+    let dir = TempDir::new().expect("tempdir");
+    let from_abs = dir.path().join("a.sd.json");
+    let to_abs = dir.path().join("b.sd.json");
+    std::fs::write(&from_abs, sd_json("initial")).expect("write initial");
+    // Do NOT seed the registry: the watcher should treat this as a
+    // fresh Created event for the destination after the rename.
+
+    let state = build_state(dir.path());
+    let mut rx = state.events.subscribe();
+
+    let shutdown: ShutdownSignal = Arc::new(Notify::new());
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    tokio::fs::rename(&from_abs, &to_abs)
+        .await
+        .expect("external rename");
+
+    // Allow either a ProjectChanged{Disk} (Created path) or a
+    // ProjectRenamed depending on which arm picks up. The contract is:
+    // the destination must end up registered. Wait for either.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut saw_event = false;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(WsMessage::ProjectChanged { source, path, .. })) => {
+                if source == ChangeSource::Disk && path == "b.sd.json" {
+                    saw_event = true;
+                    break;
+                }
+            }
+            Ok(Ok(WsMessage::ProjectRenamed { to, .. })) if to == "b.sd.json" => {
+                saw_event = true;
+                break;
+            }
+            Ok(Ok(_other)) => continue,
+            Ok(Err(RecvError::Lagged(_))) => continue,
+            Ok(Err(RecvError::Closed)) => break,
+            Err(_) => break,
+        }
+    }
+    assert!(saw_event, "watcher must broadcast for the renamed path");
+
+    let to_canonical = to_abs.canonicalize().expect("canonicalize to");
+    assert!(
+        state.registry.get(&to_canonical).is_some(),
+        "registry hydrates the destination as a fresh entry"
+    );
 
     shutdown.notify_waiters();
 }

@@ -494,6 +494,30 @@ impl ProjectRegistry {
         Ok(())
     }
 
+    /// Move the entry at `from` to `to` without re-hydrating its doc or
+    /// resetting any path-independent state. The optimistic-lock version,
+    /// echo-suppression hash, cached diagnostic keys, and `Arc<ProjectDoc>`
+    /// are all preserved verbatim across the re-key. Only the relativized
+    /// display path is recomputed against the registry root.
+    ///
+    /// Returns `RegistryError::NotFound` if no entry exists at `from`.
+    /// The whole transition runs under the write lock so it's atomic
+    /// w.r.t. concurrent saves and watcher events.
+    ///
+    /// The `format` field is also preserved as-is — a rename across
+    /// extensions does not re-classify; callers that intend to switch
+    /// formats should `upsert` the new meta directly.
+    pub fn rename_entry(&self, from: &Path, to: &Path) -> Result<(), RegistryError> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let mut entry = guard.remove(from).ok_or(RegistryError::NotFound)?;
+        entry.path = relativize(&self.root, to);
+        guard.insert(to.to_path_buf(), entry);
+        Ok(())
+    }
+
     /// Combined optimistic-lock version check, version increment, and
     /// `apply_canonical_json` merge against the entry's `ProjectDoc`.
     ///
@@ -1606,6 +1630,80 @@ mod tests {
         let cached = reg.get_or_init_doc(&abs).expect("cached doc");
         let exported = cached.export_canonical_json().expect("export");
         assert_eq!(exported["name"].as_str(), Some("new-from-disk"));
+    }
+
+    #[test]
+    fn rename_entry_returns_not_found_for_unknown_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let from = PathBuf::from("/tmp/root/missing.stmx");
+        let to = PathBuf::from("/tmp/root/elsewhere.stmx");
+        let err = reg.rename_entry(&from, &to).unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+    }
+
+    #[test]
+    fn rename_entry_re_keys_and_preserves_path_independent_state() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let from = root.join("a.stmx");
+        let to = root.join("subdir").join("b.stmx");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 7;
+        meta.last_disk_hash = 0xfeed_face_dead_beefu64;
+        let mut diag_keys = BTreeSet::new();
+        diag_keys.insert(("syntax".to_string(), Some("x".to_string())));
+        meta.last_diagnostic_keys = diag_keys.clone();
+        reg.upsert(from.clone(), meta);
+
+        let pre_doc_arc = reg.get(&from).expect("from exists").doc;
+
+        reg.rename_entry(&from, &to).expect("rename succeeds");
+
+        assert!(reg.get(&from).is_none(), "old key dropped");
+        let entry = reg.get(&to).expect("new key present");
+        assert_eq!(entry.version, 7, "version preserved");
+        assert_eq!(
+            entry.last_disk_hash, 0xfeed_face_dead_beefu64,
+            "echo-suppression hash preserved"
+        );
+        assert_eq!(
+            entry.last_diagnostic_keys, diag_keys,
+            "diagnostic-key cache preserved"
+        );
+        assert_eq!(
+            entry.path,
+            PathBuf::from("subdir").join("b.stmx"),
+            "display path is the new relative form"
+        );
+        assert!(
+            Arc::ptr_eq(&pre_doc_arc, &entry.doc),
+            "doc Arc carried over verbatim across re-key"
+        );
+    }
+
+    #[test]
+    fn rename_entry_keeps_format_from_pre_existing_meta() {
+        // The destination's extension may differ from the source's
+        // (.xmile -> .stmx). The registry stores the format the caller
+        // already knows about; re-keying does not re-classify by
+        // extension. (Callers that want to switch the format should
+        // upsert the new meta directly.)
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let from = root.join("model.xmile");
+        let to = root.join("model.stmx");
+
+        let meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Xmile);
+        reg.upsert(from.clone(), meta);
+
+        reg.rename_entry(&from, &to).expect("rename succeeds");
+        let entry = reg.get(&to).expect("new key present");
+        assert_eq!(
+            entry.format,
+            ProjectFormat::Xmile,
+            "rename_entry preserves the recorded format"
+        );
     }
 
     #[test]

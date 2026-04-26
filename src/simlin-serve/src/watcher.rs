@@ -694,20 +694,95 @@ impl WatcherActor {
     }
 
     /// Handle a paired-form rename event by re-keying the registry entry
-    /// from `from` to `to` and broadcasting `ProjectRenamed`. Implemented
-    /// in Task 2; this stub keeps the dispatch wiring building.
+    /// from `from` to `to` and broadcasting `ProjectRenamed`. The
+    /// `LoroDoc`, version, and echo-suppression hash are preserved across
+    /// the re-key so the SPA's editor can stay mounted on the new path
+    /// without refetching content (the doc state is identical, just at a
+    /// new key).
+    ///
+    /// Both paths are stripped against the registry root before the
+    /// re-key so the registry's absolute-path key matches the form
+    /// `handle_model_change` would have produced. If `from` was never in
+    /// the registry (the source side wasn't being tracked, perhaps because
+    /// it was created and renamed inside a single debounce window), fall
+    /// through to a `Created`-style merge against the destination so the
+    /// new path still gets hydrated.
     async fn handle_model_rename(
-        _state: &AppState,
+        state: &AppState,
         from: PathBuf,
         to: PathBuf,
         format: ProjectFormat,
     ) {
-        tracing::debug!(
-            from = %from.display(),
-            to = %to.display(),
-            ?format,
-            "watcher: rename event (handler stubbed)"
+        // The registry is keyed by absolute paths under `state.root`. The
+        // `from` path may not exist on disk anymore (the rename moved it),
+        // so canonicalize() would fail; for `to` the file should be in
+        // place but a racy filesystem can still surprise us. Fall back to
+        // strip_prefix-then-rejoin so the lookup keys are consistent.
+        let from_key = match from.strip_prefix(state.root.as_ref()) {
+            Ok(rel) => state.root.as_ref().join(rel),
+            Err(_) => {
+                tracing::debug!(
+                    from = %from.display(),
+                    "watcher: rename source outside watcher root; ignoring"
+                );
+                return;
+            }
+        };
+        let to_key = match to.canonicalize() {
+            Ok(c) => c,
+            Err(_) => match to.strip_prefix(state.root.as_ref()) {
+                Ok(rel) => state.root.as_ref().join(rel),
+                Err(_) => {
+                    tracing::debug!(
+                        to = %to.display(),
+                        "watcher: rename destination outside watcher root; ignoring"
+                    );
+                    return;
+                }
+            },
+        };
+
+        match state.registry.rename_entry(&from_key, &to_key) {
+            Ok(()) => {}
+            Err(RegistryError::NotFound) => {
+                tracing::debug!(
+                    from = %from.display(),
+                    to = %to.display(),
+                    "watcher: rename source not in registry; treating as Created at destination"
+                );
+                Self::handle_model_change(state, to, format, ChangeKind::Created).await;
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    from = %from.display(),
+                    to = %to.display(),
+                    error = %err,
+                    "watcher: rename re-key failed; preserving last-known-good"
+                );
+                return;
+            }
+        }
+
+        let from_display = match from.strip_prefix(state.root.as_ref()) {
+            Ok(rel) => path_to_forward_slash(rel),
+            Err(_) => path_to_forward_slash(&from),
+        };
+        let to_display = match to_key.strip_prefix(state.root.as_ref()) {
+            Ok(rel) => path_to_forward_slash(rel),
+            Err(_) => path_to_forward_slash(&to_key),
+        };
+
+        tracing::info!(
+            from = %from_display,
+            to = %to_display,
+            "watcher: re-keyed registry entry"
         );
+
+        state.events.publish(WsMessage::ProjectRenamed {
+            from: from_display,
+            to: to_display,
+        });
     }
 
     /// Drop the registry entry for `path` and broadcast `ProjectRemoved`
