@@ -237,6 +237,37 @@ describe('UpdatesSocket', () => {
     socket.close();
   });
 
+  test('resets backoff on successful open even when no message arrives', () => {
+    // A long-running connection that opens cleanly but receives no
+    // broadcast frames (the server is quiet, the user is just reading)
+    // and eventually drops (laptop sleep, network blip, server restart)
+    // must not be punished with the 5s reconnect cap. Without this
+    // reset, MAX_CONSECUTIVE_FAILURES (10) is reachable across a
+    // workday of quiet-then-drop cycles, after which the socket flips
+    // to permanent 'dead' with no recovery path.
+    jest.useFakeTimers();
+
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+
+    // Cycle: open → close, with NO message in between, repeatedly. If
+    // handleOpen does not reset the counter, each cycle bumps it by 1
+    // and after MAX_CONSECUTIVE_FAILURES cycles the socket is dead.
+    for (let cycle = 0; cycle < 12; cycle += 1) {
+      const ws = MockWebSocket.instances[cycle];
+      ws.open();
+      ws.emitClose();
+      jest.advanceTimersByTime(5000);
+    }
+
+    // With the fix, every cycle resets to 0 on open, so we never hit
+    // MAX_CONSECUTIVE_FAILURES and the next cycle still produces a
+    // fresh WebSocket instance.
+    expect(MockWebSocket.instances.length).toBeGreaterThanOrEqual(13);
+
+    socket.close();
+  });
+
   test('resets backoff after a successful message before the next close', () => {
     jest.useFakeTimers();
 

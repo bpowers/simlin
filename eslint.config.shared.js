@@ -30,6 +30,7 @@ const baseConfig = {
       Image: 'readonly',
       fetch: 'readonly',
       setTimeout: 'readonly',
+      clearTimeout: 'readonly',
       setImmediate: 'readonly',
       requestAnimationFrame: 'readonly',
       JSX: 'readonly',

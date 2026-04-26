@@ -246,6 +246,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   inSave = false;
   saveQueued = false;
+  // Pending setTimeout(0) handle for the deferred onSelectionChanged
+  // callback. Held so componentWillUnmount can cancel — without that,
+  // a remount triggered by an EditorHost path swap (which keys the
+  // Editor by `${path}#${loadGeneration}`) would let the prior
+  // instance's callback fire against the new instance, re-introducing
+  // the stale-idents-on-new-path bug.
+  private selectionDeferralTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(props: EditorProps) {
     super(props);
@@ -300,6 +307,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   componentWillUnmount() {
     document.removeEventListener('keydown', this.handleKeyDown);
+    if (this.selectionDeferralTimer !== null) {
+      clearTimeout(this.selectionDeferralTimer);
+      this.selectionDeferralTimer = null;
+    }
   }
 
   handleKeyDown = (e: KeyboardEvent) => {
@@ -584,9 +595,22 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     // which is asynchronous in React 19 — calling it inline here would
     // return the prior selection. Reading inside the setTimeout closure
     // guarantees the call happens after the setState commit.
+    //
+    // Track the timer in an instance field so componentWillUnmount can
+    // cancel it; a host that key-swaps the Editor (path change in
+    // EditorHost) must not see this instance's idents land on the new
+    // instance's path. A new selection in the same instance also
+    // supersedes any pending deferral so the host always sees the
+    // latest committed selection.
     const onSelectionChanged = this.props.onSelectionChanged;
     if (onSelectionChanged) {
-      setTimeout(() => onSelectionChanged(this.getSelectionIdents()), 0);
+      if (this.selectionDeferralTimer !== null) {
+        clearTimeout(this.selectionDeferralTimer);
+      }
+      this.selectionDeferralTimer = setTimeout(() => {
+        this.selectionDeferralTimer = null;
+        onSelectionChanged(this.getSelectionIdents());
+      }, 0);
     }
   };
 

@@ -122,6 +122,41 @@ describe('Editor.handleSelection -> onSelectionChanged', () => {
     }).not.toThrow();
   });
 
+  it('cancels the deferred callback on unmount so a remount does not see stale idents', () => {
+    // EditorHost keys the Editor by `${path}#${loadGeneration}`, so a path
+    // swap unmounts the current Editor and mounts a fresh one. The
+    // setTimeout(0) deferral must not fire after componentWillUnmount,
+    // or the unmounted Editor's onSelectionChanged callback runs against
+    // a host that has since switched paths — re-introducing the
+    // stale-idents-on-new-path bug the EditorHost-side fix already
+    // closed for the debounce window.
+    const callback = jest.fn();
+    const editor = makeEditor({
+      onSelectionChanged: callback,
+      selectionIdents: ['stale_ident'],
+    });
+
+    editor.handleSelection(new Set<number>([1]));
+
+    // componentWillUnmount also clears the document keydown listener,
+    // which doesn't exist under @jest-environment node — stub it so we
+    // can call the lifecycle hook without bringing in jsdom.
+    const documentStub = {
+      removeEventListener: () => {},
+      addEventListener: () => {},
+    } as unknown as Document;
+    (globalThis as { document?: Document }).document = documentStub;
+    try {
+      editor.componentWillUnmount();
+    } finally {
+      delete (globalThis as { document?: Document }).document;
+    }
+
+    jest.advanceTimersByTime(0);
+
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it('reads idents at fire time so the host sees the committed state', () => {
     // React 19's setState is asynchronous — `this.state.selection` is not
     // updated synchronously when handleSelection's setState call returns.

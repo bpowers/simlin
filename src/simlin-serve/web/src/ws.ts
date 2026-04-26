@@ -167,6 +167,19 @@ export class UpdatesSocket {
   }
 
   private handleOpen(): void {
+    // A successful open is the operational signal that the server is
+    // healthy: a quiet-but-stable connection that opens, receives no
+    // broadcast frames, and eventually drops (laptop sleep, network
+    // blip, server reload) must not have its failure counter walked up
+    // forever across each cycle, or MAX_CONSECUTIVE_FAILURES is
+    // reachable in normal use and the socket permanently flips to
+    // 'dead'. handleMessage's reset is not enough because the message
+    // path may never fire on quiet projects.
+    if (this.consecutiveFailures !== 0) {
+      this.consecutiveFailures = 0;
+      this.onStatus?.('connected');
+    }
+
     const pending = this.pendingFocusedFrame;
     if (pending !== null) {
       this.pendingFocusedFrame = null;
