@@ -108,18 +108,12 @@ fn canonicalize_within_root(state: &AppState, abs_path: &Path) -> Result<PathBuf
     Ok(canonical)
 }
 
-/// Path-traversal check for paths whose target does not yet exist
-/// (`create`). Walks up the path parents until we find one that exists,
-/// canonicalizes it, and confirms it lives under the canonicalized
-/// registry root. Returns the absolute path with `.` and `..` segments
-/// resolved — which the caller passes to `atomic_write`.
-///
-/// We walk up rather than canonicalizing the leaf because `canonicalize`
-/// requires the path to exist; a fresh model file by definition does not.
-/// Walking up means we still defend against a `..` chain that would
-/// escape the tree even if every named directory along the chain is
-/// non-existent (since the deepest *existing* ancestor still has to be
-/// inside the root).
+/// Wrap [`crate::path_resolution::resolve_create_target`] to surface
+/// failures as `AccessError`. We canonicalize the registry root once
+/// and route every `OutOfRoot` rejection (including symlink escapes
+/// and `..` traversals) to `NotFound` so MCP clients cannot
+/// distinguish "exists but forbidden" from "missing" — same posture as
+/// [`canonicalize_within_root`].
 fn resolve_create_path_within_root(
     state: &AppState,
     abs_path: &Path,
@@ -130,62 +124,16 @@ fn resolve_create_path_within_root(
         .map_err(|_| AccessError::NotFound {
             path: abs_path.to_path_buf(),
         })?;
-
-    // Find the deepest existing ancestor and canonicalize from there.
-    let mut existing_ancestor = abs_path;
-    while !existing_ancestor.exists() {
-        match existing_ancestor.parent() {
-            Some(parent) => existing_ancestor = parent,
-            None => {
-                return Err(AccessError::NotFound {
-                    path: abs_path.to_path_buf(),
-                });
-            }
-        }
-    }
-    let canonical_ancestor =
-        existing_ancestor
-            .canonicalize()
-            .map_err(|_| AccessError::NotFound {
+    crate::path_resolution::resolve_create_target(abs_path, &root_canonical).map_err(
+        |err| match err {
+            crate::path_resolution::CreatePathError::OutOfRoot => AccessError::NotFound {
                 path: abs_path.to_path_buf(),
-            })?;
-    if !canonical_ancestor.starts_with(&root_canonical) {
-        return Err(AccessError::NotFound {
-            path: abs_path.to_path_buf(),
-        });
-    }
-
-    // Compose the canonical absolute path: canonical_ancestor + the
-    // remainder of abs_path. lexically_resolve_remainder collapses any
-    // `.` components and rejects `..` (since the rest of the path was
-    // never part of the canonical ancestor).
-    let remainder = abs_path
-        .strip_prefix(existing_ancestor)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| abs_path.to_path_buf());
-    let mut resolved = canonical_ancestor;
-    for component in remainder.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(name) => {
-                resolved.push(name);
-            }
-            std::path::Component::ParentDir
-            | std::path::Component::RootDir
-            | std::path::Component::Prefix(_) => {
-                return Err(AccessError::NotFound {
-                    path: abs_path.to_path_buf(),
-                });
-            }
-        }
-    }
-
-    if !resolved.starts_with(&root_canonical) {
-        return Err(AccessError::NotFound {
-            path: abs_path.to_path_buf(),
-        });
-    }
-    Ok(resolved)
+            },
+            crate::path_resolution::CreatePathError::IoError(_) => AccessError::NotFound {
+                path: abs_path.to_path_buf(),
+            },
+        },
+    )
 }
 
 /// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Same rule

@@ -493,6 +493,30 @@ pub async fn create_new_project(
         None => state.root.join(&filename),
     };
 
+    // Resolve the create target through the canonicalize-deepest-existing-
+    // ancestor algorithm BEFORE any byte hits disk. The previous
+    // canonicalize-after-write step relied on best-effort cleanup to
+    // remove a file that had already landed outside the root via a
+    // symlinked parent_dir; making the boundary check structural means
+    // the rejection happens before OpenOptions::create_new(true) runs at
+    // all. Same primitive RegistryAccess::create uses for the MCP path.
+    let root_canonical = state
+        .root
+        .canonicalize()
+        .map_err(|e| NewProjectError::Internal(format!("canonicalize root: {e}")))?;
+    let resolved_path =
+        match crate::path_resolution::resolve_create_target(&abs_path, &root_canonical) {
+            Ok(p) => p,
+            Err(crate::path_resolution::CreatePathError::OutOfRoot) => {
+                return Err(NewProjectError::Forbidden);
+            }
+            Err(crate::path_resolution::CreatePathError::IoError(err)) => {
+                return Err(NewProjectError::Internal(format!(
+                    "resolve create target: {err}"
+                )));
+            }
+        };
+
     let mut project = simlin_mcp_core::types::build_empty_project();
     project.name = name.to_string();
 
@@ -502,7 +526,7 @@ pub async fn create_new_project(
     // resolve_save_target dispatches by format; for Stmx/SdJson the result
     // is "in place at this absolute path" (no rename-over), which is exactly
     // what we need here.
-    let target = resolve_save_target(&abs_path, project_format);
+    let target = resolve_save_target(&resolved_path, project_format);
     let outcome = serialize_project(&project, &target)
         .map_err(|e| NewProjectError::Internal(format!("serialize: {e}")))?;
 

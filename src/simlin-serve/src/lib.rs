@@ -16,6 +16,7 @@ pub mod loro_doc;
 pub mod mcp;
 pub mod middleware;
 pub mod parse;
+pub mod path_resolution;
 pub mod registry;
 pub mod scan;
 pub mod serving;

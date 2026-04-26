@@ -176,3 +176,48 @@ async fn http_create_stmx_produces_xmile_with_canonical_empty_project_shape() {
     assert_eq!(parsed.sim_specs.dt, canonical.sim_specs.dt);
     assert_eq!(parsed.sim_specs.sim_method, canonical.sim_specs.sim_method);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_create_rejects_symlinked_parent_dir_before_writing() {
+    // The boundary check in create_new_project must reject a symlinked
+    // parent_dir BEFORE the file is created. Without the pre-write
+    // check, a parent_dir whose directory is a symlink to outside the
+    // root would let `OpenOptions::create_new(true)` follow the symlink
+    // and land bytes outside the root before the canonicalize-then-
+    // strip-prefix step rejects the request.
+    let temp = TempDir::new().unwrap();
+    let outer = temp.path().canonicalize().unwrap();
+    let inner = outer.join("inner");
+    let escape_target = outer.join("escape_target");
+    fs::create_dir(&inner).unwrap();
+    fs::create_dir(&escape_target).unwrap();
+    std::os::unix::fs::symlink(&escape_target, inner.join("escape")).unwrap();
+
+    let state = build_state(inner.clone());
+
+    let (status, body) = http_post_new(
+        state,
+        serde_json::json!({
+            "name": "should_not_land",
+            "format": "stmx",
+            "parent_dir": "escape",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "symlinked parent_dir must be rejected; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // The file must NOT have landed at the symlink target. Without the
+    // pre-write check, `<escape_target>/should_not_land.stmx` would
+    // exist (and the best-effort cleanup might not have removed it).
+    let leaked = escape_target.join("should_not_land.stmx");
+    assert!(
+        !leaked.exists(),
+        "no file must land outside the root; found {leaked:?}"
+    );
+}
