@@ -49,12 +49,17 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Exposed as a library function so integration tests and future callers can
 /// exercise the router without spawning a process or binding a TCP port.
 ///
-/// Layers (outer-to-inner): body-size limit, request tracing, host
-/// validation. The host validator runs innermost — closest to the
-/// handlers — because the body-limit and trace layers are inexpensive
-/// and applying them ahead of the host check keeps the rejection path
-/// observable in tracing output. (Cost-benefit goes the other way for
-/// expensive layers: the host check would gate them out.)
+/// Tower's `Router::layer` calls stack in reverse application order: the last
+/// `.layer()` call wraps all the others and becomes the outermost layer.
+/// Applied below as host_validator → RequestBodyLimitLayer → TraceLayer, the
+/// actual outer-to-inner execution order is:
+///   TraceLayer (outermost) → RequestBodyLimitLayer → host_validator (innermost)
+///
+/// The host validator runs innermost — closest to the handlers — because the
+/// body-limit and trace layers are inexpensive and applying them ahead of the
+/// host check keeps the rejection path observable in tracing output.
+/// (Cost-benefit goes the other way for expensive layers: the host check would
+/// gate them out.)
 pub fn build_router(state: AppState) -> Router {
     // The `/api/...` and `/healthz` routes are registered with `.route(...)`
     // so they take precedence over the SPA fallback, which catches everything

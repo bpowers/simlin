@@ -160,9 +160,11 @@ fn ui_origin(ui_url: &str) -> String {
 fn extract_jsonrpc_response(body: &str) -> Value {
     for event in body.split("\n\n") {
         for line in event.lines() {
-            if let Some(rest) = line.strip_prefix("data:")
-                && let rest = rest.trim()
-                && !rest.is_empty()
+            let Some(raw) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let rest = raw.trim();
+            if !rest.is_empty()
                 && let Ok(v) = serde_json::from_str::<Value>(rest)
                 && v.get("jsonrpc").is_some()
             {
