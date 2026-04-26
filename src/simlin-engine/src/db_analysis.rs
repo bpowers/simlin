@@ -95,11 +95,10 @@ pub enum RefShape {
 
 /// One occurrence of a source variable in a target's AST.
 ///
-/// Production code only consumes `shape` and `target_element` (the source
-/// ident is already known by the caller, which iterates the variable-level
-/// edge map). `source` is preserved because per-reference test fixtures
-/// and any future per-reference partial-equation generator (Phase 4) need
-/// to distinguish the source ident from the surrounding context.
+/// The walker emits one site per reference. Callers iterating the
+/// variable-level edge map already know the source ident, so the site
+/// only needs to carry the per-reference `shape` and (for arrayed
+/// per-element targets) the `target_element` it was discovered under.
 ///
 /// `target_element` is set only when the reference appears inside an
 /// `Ast::Arrayed` per-element expression: the value is the canonical
@@ -109,8 +108,6 @@ pub enum RefShape {
 /// according to the shape's normal broadcast/diagonal rules).
 #[derive(Debug, Clone)]
 pub(crate) struct ReferenceSite {
-    #[allow(dead_code)] // read by collect_reference_sites_tests; reserved for Phase 4
-    pub source: String,
     pub shape: RefShape,
     pub target_element: Option<String>,
 }
@@ -309,7 +306,6 @@ fn collect_in_expr(
 
     let make_site = |shape: RefShape| -> ReferenceSite {
         ReferenceSite {
-            source: source_ident.to_string(),
             shape,
             target_element: target_element.map(|s| s.to_string()),
         }
@@ -1712,7 +1708,6 @@ mod collect_reference_sites_tests {
 
         let sites = collect(&project, "births", "population");
         assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert_eq!(sites[0].source, "population");
         assert_eq!(sites[0].shape, RefShape::Bare);
     }
 
