@@ -86,6 +86,23 @@ pub struct Link {
 /// per-element evaluation).  Mixed loops (scalar + arrayed nodes, or
 /// cross-element feedback) have empty `dimensions` and use
 /// element-specific link names.
+///
+/// # `stocks` granularity invariant
+///
+/// The granularity of `stocks` depends on the loop's branch:
+///
+/// - **Mixed/scalar loops** (`dimensions.is_empty()`): stocks are
+///   **element-level** names (e.g., `"pop[nyc]"`).  This is required
+///   because `partition_for_loop` looks up stocks in
+///   `model_element_cycle_partitions`, whose `stock_partition` map is
+///   keyed on element-level names.  Using variable-level names here would
+///   cause every mixed/scalar loop to return `None`, silently corrupting
+///   per-loop normalization in `compute_rel_loop_scores`.
+///
+/// - **A2A loops** (`!dimensions.is_empty()`): stocks are
+///   **variable-level** names (e.g., `"pop"`).  A2A loops are expanded
+///   per-element during simulation so variable-level names are correct;
+///   the element-level partition lookup is not used for A2A loops.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Loop {

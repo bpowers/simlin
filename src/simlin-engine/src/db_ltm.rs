@@ -2271,6 +2271,23 @@ pub(crate) fn build_element_level_loops(
                     .map(|n| Ident::new(n))
                     .collect();
 
+                // Each arrayed circuit node that is a stock must appear in
+                // `stocks` with its subscript intact. Stripping the subscript
+                // here would break partition_for_loop: model_element_cycle_
+                // partitions keys stock_partition on element-level names
+                // (e.g. "pop[nyc]"), not variable-level names (e.g. "pop").
+                debug_assert!(
+                    element_nodes
+                        .iter()
+                        .filter(|n| n.contains('[') && {
+                            let var_name = strip_subscript(n);
+                            var_graph.stocks.contains(&Ident::new(var_name))
+                        })
+                        .all(|n| stocks.iter().any(|s| s.as_str() == *n)),
+                    "mixed/scalar branch: arrayed stock node lost its subscript; \
+                     element_nodes={element_nodes:?} stocks={stocks:?}"
+                );
+
                 all_loops.push(Loop {
                     id: String::new(),
                     links,
