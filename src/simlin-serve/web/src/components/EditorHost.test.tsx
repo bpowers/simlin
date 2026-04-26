@@ -1048,4 +1048,141 @@ describe('EditorHost', () => {
       jest.useRealTimers();
     }
   });
+
+  test('handleVersionConflict drops stale refetch when path swaps mid-conflict', async () => {
+    // Stages a 409 conflict refetch behind a manually-resolved promise so the
+    // path swap to B can complete (and loadProject(B) can settle) BEFORE the
+    // conflict refetch's setState fires. Without the fix, the conflict
+    // refetch's setState lands last and overwrites B's loaded payload with
+    // A's stale post-409 data, stranding the Editor on a "Loading b.stmx..."
+    // splash with no in-flight fetch to ever resolve it.
+    let resolveConflictRefetch: (value: unknown) => void = () => {};
+    const conflictRefetchPromise = new Promise<unknown>((resolve) => {
+      resolveConflictRefetch = resolve;
+    });
+
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":"a0"}', version: 0, source_format: 'stmx' }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({ error: 'version_mismatch', expected: 0, actual: 5 }),
+      })
+      .mockReturnValueOnce(conflictRefetchPromise)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":"b0"}', version: 0, source_format: 'stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="a.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":"a0"}'));
+
+    const onSave = EditorMock.lastProps!.onSave;
+    let savePromise: Promise<unknown> | null = null;
+    await act(async () => {
+      savePromise = onSave({ format: 'json', data: '{"v":"a0"}' }, 0);
+      // Microtask flush so the 409 lands and handleVersionConflict's
+      // fetchProject(A) call is registered as the gated refetch.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    rerender(<EditorHost path="b.stmx" liveVersion={1} />);
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":"b0"}'));
+
+    await act(async () => {
+      resolveConflictRefetch({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":"a5"}', version: 5, source_format: 'stmx' }),
+      });
+      await savePromise!.catch(() => {
+        // The save still throws the conflict toast error; suppressed here
+        // so the test can finish.
+      });
+    });
+
+    expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":"b0"}');
+    expect(EditorMock.lastProps?.name).toBe('b.stmx');
+    // A clobbered loadedPath would render "Loading b.stmx..." with no
+    // in-flight fetch to recover from.
+    expect(screen.queryByText(/Loading b\.stmx/i)).toBeNull();
+  });
+
+  test('handleSave drops stale serverVersion update when path swaps mid-save', async () => {
+    // The post-await setState in handleSave writes the saved version into
+    // the EditorHost's serverVersion slot without checking that the user is
+    // still on the saved path. After a path swap, that stale write would
+    // make state.serverVersion track A's saved version instead of B's
+    // freshly-loaded version, breaking the WS refetch gate for B.
+    //
+    // Probe: after the swap, deliver a liveVersion advance for B that is
+    // higher than B's loaded version but lower than A's saved version.
+    // With the fix, state.serverVersion still reflects B and the gate
+    // fires a refetch. Without the fix, A's clobbered version is too high
+    // and the refetch is silently dropped.
+    //
+    // B's loaded version is chosen to match the swap-time liveVersion so
+    // the path-unchanged refetch loop does not fire (otherwise the loop
+    // would advance serverVersion past A's clobber value and mask the
+    // bug).
+    let resolvePost: (value: unknown) => void = () => {};
+    const postPromise = new Promise<unknown>((resolve) => {
+      resolvePost = resolve;
+    });
+
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":"a0"}', version: 0, source_format: 'stmx' }),
+      })
+      .mockReturnValueOnce(postPromise)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":"b2"}', version: 2, source_format: 'stmx' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":"b5"}', version: 5, source_format: 'stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="a.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":"a0"}'));
+
+    const onSave = EditorMock.lastProps!.onSave;
+    let savePromise: Promise<unknown> | null = null;
+    await act(async () => {
+      savePromise = onSave({ format: 'json', data: '{"v":"a0"}' }, 0);
+      await Promise.resolve();
+    });
+
+    rerender(<EditorHost path="b.stmx" liveVersion={2} />);
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":"b2"}'));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      resolvePost({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: 10, path: 'a.stmx' }),
+      });
+      await savePromise!;
+    });
+
+    rerender(<EditorHost path="b.stmx" liveVersion={5} />);
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":"b5"}'));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
 });

@@ -295,6 +295,12 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     if (!path) {
       return undefined;
     }
+    // Capture the current load generation so a path swap (or any other
+    // event that bumps `currentLoadKey`) during the in-flight POST drops
+    // our post-await setState — otherwise A's saved version would
+    // overwrite B's freshly-loaded serverVersion and break the WS
+    // refetch gate.
+    const loadKey = this.currentLoadKey;
     try {
       const result = await saveProject(path, project.data, currVersion);
       if (result.path !== path) {
@@ -304,7 +310,11 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       // save (which arrives with the same version) does not trigger a
       // refetch. `setState` here only matters for the WS gate; the
       // Editor itself owns its `projectVersion` via `result.version`.
-      this.setState({ serverVersion: result.version });
+      // Skip the gate update when the user navigated away during the
+      // POST: the version belongs to a path we no longer display.
+      if (loadKey === this.currentLoadKey && this.props.path === path) {
+        this.setState({ serverVersion: result.version });
+      }
       return result.version;
     } catch (err) {
       if (err instanceof VersionConflictError) {
@@ -328,8 +338,18 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
   // remount with the new initial JSON + version. Refetch failures
   // propagate to the caller so the user sees the underlying error
   // instead of a stale conflict toast.
+  //
+  // Mirrors `loadProject`'s currentLoadKey sentinel so a path swap that
+  // lands while the conflict refetch is in flight drops the stale
+  // setState (which would otherwise strand the UI on "Loading <new>…"
+  // with no in-flight fetch to recover from).
   private async handleVersionConflict(path: string): Promise<void> {
+    this.currentLoadKey += 1;
+    const loadKey = this.currentLoadKey;
     const latest = await fetchProject(path);
+    if (loadKey !== this.currentLoadKey || this.props.path !== path) {
+      return;
+    }
     if (this.props.onConflict) {
       this.props.onConflict(latest.json, latest.version);
       return;
