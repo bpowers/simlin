@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use simlin_serve::build_router;
+use simlin_serve::events::EventBus;
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
@@ -21,6 +22,8 @@ async fn healthz_returns_ok() {
         registry: Arc::new(ProjectRegistry::new(canonical.clone())),
         git: Arc::new(GitProbe::unavailable_for_tests()),
         root: Arc::new(canonical),
+        events: Arc::new(EventBus::new()),
+        launch_token: Arc::new(String::new()),
     };
     let app = build_router(state);
     let response = app

@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod discovery;
+pub mod events;
 pub mod git;
 pub mod handlers;
 pub mod launcher;

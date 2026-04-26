@@ -19,6 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
+use crate::events::EventBus;
 use crate::git::GitProbe;
 use crate::parse::{ParseError, parse_to_datamodel};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
@@ -36,6 +37,16 @@ pub struct AppState {
     /// registry) so handlers that resolve user-supplied paths can canonicalize
     /// against the same anchor the registry uses.
     pub root: Arc<PathBuf>,
+    /// Internal pub/sub for `WsMessage` events. The save handler calls
+    /// `events.publish` after a successful merge; the WebSocket handler
+    /// (Phase 3 Task 7) creates one subscriber per connected client.
+    pub events: Arc<EventBus>,
+    /// One-time launch token — same value baked into the launch URL.
+    /// The WebSocket upgrade handler validates the `?token=...` query
+    /// param against this with a constant-time compare; HTTP handlers
+    /// don't read it (they're loopback-only by virtue of the bind, and
+    /// the SPA proves origin via the loaded HTML carrying the token).
+    pub launch_token: Arc<String>,
 }
 
 /// Wire shape for a single project entry. Identical to `ProjectMeta` except

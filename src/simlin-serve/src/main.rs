@@ -13,6 +13,7 @@ use tracing_subscriber::fmt;
 
 use simlin_serve::build_router;
 use simlin_serve::cli::Args;
+use simlin_serve::events::EventBus;
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::launcher::{build_launch_url, open_browser};
@@ -42,12 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(error = %err, "initial scan failed; registry starts empty");
     }
 
-    let state = AppState {
-        registry,
-        git,
-        root: Arc::new(canonical_root),
-    };
-
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], args.port))).await?;
     let bound = listener.local_addr()?;
 
@@ -55,6 +50,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // token associated with a port we failed to acquire.
     let token = generate_launch_token();
     let launch_url = build_launch_url(bound.port(), &token);
+
+    // Token is shared into the AppState so the WebSocket upgrade handler
+    // can validate the `?token=...` query param against the same value
+    // that ended up in the launch URL.
+    let state = AppState {
+        registry,
+        git,
+        root: Arc::new(canonical_root),
+        events: Arc::new(EventBus::new()),
+        launch_token: Arc::new(token.clone()),
+    };
 
     // Always print the URL — users with --no-open or running headless still
     // need to see and copy it. stdout (not tracing) so the URL is plain and

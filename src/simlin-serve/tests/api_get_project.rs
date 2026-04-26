@@ -14,6 +14,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use simlin_serve::build_router;
+use simlin_serve::events::EventBus;
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
@@ -34,6 +35,8 @@ fn build_state(root: PathBuf) -> AppState {
         registry: Arc::new(ProjectRegistry::new(root.clone())),
         git: Arc::new(GitProbe::unavailable_for_tests()),
         root: Arc::new(root),
+        events: Arc::new(EventBus::new()),
+        launch_token: Arc::new(String::new()),
     }
 }
 
