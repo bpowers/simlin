@@ -76,15 +76,15 @@ up at app launch, not hot-reloaded.
 
 Once connected, the AI sees five tools:
 
-| Tool            | Purpose                                                      |
-| --------------- | ------------------------------------------------------------ |
-| `list_projects` | Enumerate every model file in the working directory tree.   |
-| `read_model`    | Return the canonical JSON for one model.                     |
-| `edit_model`    | Apply a list of structural edits and persist the result.    |
-| `create_model`  | Write a new model file and register it with the server.     |
-| `simulate`      | Run a simulation (with optional overrides) and return time-series data. |
+| Tool             | Purpose                                                      |
+| ---------------- | ------------------------------------------------------------ |
+| `ListProjects`   | Enumerate every model file in the working directory tree.   |
+| `ReadModel`      | Return the canonical JSON for one model.                     |
+| `EditModel`      | Apply a list of structural edits and persist the result.    |
+| `CreateModel`    | Write a new model file and register it with the server.     |
+| `Simulate`       | Run a simulation (with optional overrides) and return time-series data. |
 
-Edits made through `edit_model` and `create_model` flow through the same
+Edits made through `EditModel` and `CreateModel` flow through the same
 merge primitive as browser saves, so concurrent edits from both sides
 converge instead of clobbering each other.
 

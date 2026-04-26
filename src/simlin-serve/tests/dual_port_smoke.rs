@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Imperative Shell
+
 //! Integration tests for the dual-port serve binary.
 //!
 //! These tests start the actual `simlin-serve` binary as a subprocess in
@@ -124,6 +126,55 @@ fn dual_port_smoke_binds_both_listeners() {
     assert!(
         mcp_line.contains("/mcp"),
         "MCP URL must point at the /mcp path: {mcp_line}"
+    );
+}
+
+#[test]
+fn port_conflict_on_ui_exits_with_friendly_error() {
+    let temp = TempDir::new().expect("tempdir");
+
+    // Occupy an ephemeral port so the UI bind fails.
+    let occupy = StdTcpListener::bind("127.0.0.1:0").expect("occupy ephemeral");
+    let occupied_port = occupy.local_addr().expect("local_addr").port();
+
+    // Start simlin-serve pointed at the occupied UI port. The MCP port
+    // uses an ephemeral address (--mcp-port=0) so only the UI bind fails.
+    let output = Command::new(BIN)
+        .args([
+            "--port",
+            &occupied_port.to_string(),
+            "--mcp-port",
+            "0",
+            "--no-open",
+            temp.path().to_str().expect("utf-8 tempdir"),
+        ])
+        .output()
+        .expect("run simlin-serve");
+
+    drop(occupy);
+
+    assert!(
+        !output.status.success(),
+        "simlin-serve should exit non-zero when the UI port is in use; \
+         stdout={:?}, stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("address already in use"),
+        "stderr must include 'address already in use': {stderr}"
+    );
+    assert!(
+        stderr.contains("HTTP/UI server"),
+        "stderr must label the failing listener as the HTTP/UI server: {stderr}"
+    );
+    // The UI listener is bound with port_hint: None, so no --port hint
+    // should appear in the error.
+    assert!(
+        !stderr.contains("--port"),
+        "stderr must not include a --port hint (UI has no flag suggestion): {stderr}"
     );
 }
 

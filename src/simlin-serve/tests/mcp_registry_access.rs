@@ -306,6 +306,187 @@ async fn browser_save_and_mcp_save_are_both_observable_in_the_loro_doc() {
     assert_eq!(mcp_aux["equation"].as_str(), Some("1234"));
 }
 
+// ---- AC5.4 (reverse order): MCP save first, then browser save ----
+
+/// AC5.4 complement: performs the edits in the reverse order — MCP writes
+/// first, browser writes second — and verifies both edits survive in the
+/// final merged state. The original test exercises browser-then-MCP; this
+/// one confirms the merge is symmetric (independent of operation order).
+#[tokio::test]
+async fn mcp_save_first_then_browser_save_both_observable_in_loro_doc() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = copy_fixture("teacup.xmile", &canonical_root);
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &abs, ProjectFormat::Xmile);
+
+    // 1) MCP save first: rewrite the first aux equation to "5678".
+    let access = RegistryAccess::new(state.clone());
+    let opened = access.open(&abs).await.expect("open");
+    assert_eq!(opened.version, 0);
+    let mcp_edited = rewrite_first_aux_equation(&opened.project, "5678");
+    let mcp_version = access
+        .save(&abs, &mcp_edited, opened.source_format, Some(0))
+        .await
+        .expect("mcp save");
+    assert_eq!(mcp_version, 1);
+
+    // 2) Browser save: rename the project to "via-browser-second".
+    let (after_mcp_version, after_mcp_json) =
+        http_get_project(state.clone(), "/api/projects/teacup.xmile").await;
+    assert_eq!(after_mcp_version, 1);
+
+    let mut browser_value: Value = serde_json::from_str(&after_mcp_json).expect("parse");
+    browser_value["name"] = serde_json::json!("via-browser-second");
+    let browser_payload = serde_json::json!({
+        "json": serde_json::to_string(&browser_value).unwrap(),
+        "version": after_mcp_version,
+    });
+    let (status, body) = fetch(
+        (*state).clone(),
+        "POST",
+        "/api/projects/teacup.xmile",
+        Body::from(serde_json::to_vec(&browser_payload).unwrap()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "browser save failed: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let response = parse_body(&body);
+    let after_browser_version = response["version"].as_u64().expect("version");
+    assert_eq!(after_browser_version, 2);
+
+    // 3) Final state: both edits are present.
+    let (final_version, final_json) =
+        http_get_project(state.clone(), "/api/projects/teacup.xmile").await;
+    assert_eq!(final_version, 2);
+    let final_value: Value = serde_json::from_str(&final_json).expect("parse final");
+    assert_eq!(
+        final_value["name"].as_str(),
+        Some("via-browser-second"),
+        "browser-set name must survive in the final state"
+    );
+    let model0 = &final_value["models"][0];
+    let auxes = model0["auxiliaries"]
+        .as_array()
+        .expect("models[0].auxiliaries is an array");
+    let mcp_aux = auxes
+        .iter()
+        .find(|v| v.get("equation").and_then(|e| e.as_str()) == Some("5678"))
+        .expect("MCP-set equation must be present in the final canonical JSON");
+    assert_eq!(mcp_aux["equation"].as_str(), Some("5678"));
+}
+
+// ---- Path-traversal defense: save and create ----
+
+#[tokio::test]
+async fn save_rejects_paths_outside_root() {
+    let temp = TempDir::new().expect("tempdir");
+    let outer = temp.path().canonicalize().expect("canon outer");
+    let inner = outer.join("subroot");
+    fs::create_dir(&inner).expect("create subroot");
+
+    // Plant the escape file outside inner root so canonicalize() can
+    // resolve the path (canonicalize_within_root checks after resolution).
+    let outside = outer.join("escape.xmile");
+    fs::copy(
+        std::path::PathBuf::from(FIXTURES_DIR).join("teacup.xmile"),
+        &outside,
+    )
+    .expect("seed escape file");
+
+    let state = build_state(inner.clone());
+    // Seed the outside file into the registry so the save path reaches
+    // the traversal check (not the NotFound-from-registry path).
+    seed_registry(&state, &outside, ProjectFormat::Xmile);
+
+    let access = RegistryAccess::new(state);
+    let opened_project = {
+        let json_body = r#"{"name":"escape","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        let json_project: simlin_engine::json::Project =
+            serde_json::from_str(json_body).expect("parse");
+        simlin_engine::datamodel::Project::from(json_project)
+    };
+
+    // Attempt to save via a `..` traversal path that resolves outside inner.
+    let attempted = inner.join("..").join("escape.xmile");
+    match access
+        .save(&attempted, &opened_project, SourceFormat::Xmile, None)
+        .await
+    {
+        Err(simlin_mcp_core::errors::AccessError::NotFound { .. }) => {}
+        Err(other) => panic!("expected NotFound for path outside root, got {other:?}"),
+        Ok(_) => panic!("expected NotFound for path outside root, got Ok"),
+    }
+}
+
+#[tokio::test]
+async fn create_rejects_paths_with_dotdot_remainder() {
+    let temp = TempDir::new().expect("tempdir");
+    let outer = temp.path().canonicalize().expect("canon outer");
+    let inner = outer.join("subroot");
+    fs::create_dir(&inner).expect("create subroot");
+    // `inner/sub/` does not exist, so the deepest existing ancestor is `inner`.
+    // The remainder after stripping `inner` contains `..`, which must be rejected.
+    let state = build_state(inner.clone());
+    let access = RegistryAccess::new(state);
+
+    let project = {
+        let json_body = r#"{"name":"escape","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        let json_project: simlin_engine::json::Project =
+            serde_json::from_str(json_body).expect("parse");
+        simlin_engine::datamodel::Project::from(json_project)
+    };
+
+    // `inner/sub/../../escape.stmx` — sub/ doesn't exist; after walking up
+    // to `inner`, the remainder is `sub/../../escape.stmx` which contains `..`.
+    let attempted = inner.join("sub").join("..").join("..").join("escape.stmx");
+    match access
+        .create(&attempted, &project, SourceFormat::Xmile)
+        .await
+    {
+        Err(simlin_mcp_core::errors::AccessError::NotFound { .. }) => {}
+        Err(other) => panic!("expected NotFound for dotdot remainder, got {other:?}"),
+        Ok(_) => panic!("expected NotFound for dotdot remainder, got Ok"),
+    }
+}
+
+#[tokio::test]
+async fn create_rejects_paths_resolving_outside_root() {
+    let temp = TempDir::new().expect("tempdir");
+    let outer = temp.path().canonicalize().expect("canon outer");
+    let inner = outer.join("subroot");
+    fs::create_dir(&inner).expect("create subroot");
+
+    // The deepest existing ancestor will be `outer` (outside `inner`).
+    // canonicalize(outer) won't start_with(canonicalize(inner)), so it must be rejected.
+    let state = build_state(inner.clone());
+    let access = RegistryAccess::new(state);
+
+    let project = {
+        let json_body = r#"{"name":"escape","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        let json_project: simlin_engine::json::Project =
+            serde_json::from_str(json_body).expect("parse");
+        simlin_engine::datamodel::Project::from(json_project)
+    };
+
+    // `inner/../escape.stmx` — the parent `outer` exists and canonicalizes,
+    // but it is outside `inner`. The remainder after stripping `outer` would
+    // be `escape.stmx` but the ancestor check fires first.
+    let attempted = inner.join("..").join("escape.stmx");
+    match access
+        .create(&attempted, &project, SourceFormat::Xmile)
+        .await
+    {
+        Err(simlin_mcp_core::errors::AccessError::NotFound { .. }) => {}
+        Err(other) => panic!("expected NotFound for path outside root, got {other:?}"),
+        Ok(_) => panic!("expected NotFound for path outside root, got Ok"),
+    }
+}
+
 // ---- Task 3: RegistryAccess::create ----
 
 /// Build a minimal valid native-JSON project for create tests. Uses the

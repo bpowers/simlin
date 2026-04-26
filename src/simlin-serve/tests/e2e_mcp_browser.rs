@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Imperative Shell
+
 //! End-to-end test: an MCP `EditModel` call routes through the same
 //! `apply_canonical_json` merge primitive as the browser save handler,
 //! so the WebSocket subscriber attached to the UI port observes a
