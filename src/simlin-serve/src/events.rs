@@ -122,6 +122,18 @@ pub enum WsMessage {
         /// look up the entry by string equality.
         path: String,
     },
+    /// A project file was renamed in place; the in-memory `LoroDoc`,
+    /// version, and content hash are preserved across the path key
+    /// transition. The browser keeps the editor mounted and updates
+    /// the displayed path. Distinct from `ProjectRemoved` + a fresh
+    /// discovery because re-keying retains all path-independent state
+    /// the editor depends on.
+    ProjectRenamed {
+        /// Forward-slash relative path the project used to live at.
+        from: String,
+        /// Forward-slash relative path the project now lives at.
+        to: String,
+    },
     /// The browser focused (or switched to) a project. Phase 7's MCP
     /// notifications router fans this out as `simlin/projectFocused` so
     /// AI clients can track which project the user is currently looking
@@ -356,6 +368,33 @@ mod tests {
         let value = serde_json::to_value(&msg).expect("serialize");
         assert_eq!(value["type"].as_str(), Some("projectFocused"));
         assert_eq!(value["path"].as_str(), Some("sub/foo.stmx"));
+    }
+
+    #[test]
+    fn project_renamed_serializes_with_camel_case_and_tag() {
+        let msg = WsMessage::ProjectRenamed {
+            from: "old/path.stmx".into(),
+            to: "new/path.stmx".into(),
+        };
+        let value = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(value["type"].as_str(), Some("projectRenamed"));
+        assert_eq!(value["from"].as_str(), Some("old/path.stmx"));
+        assert_eq!(value["to"].as_str(), Some("new/path.stmx"));
+    }
+
+    #[tokio::test]
+    async fn project_renamed_round_trips_through_eventbus() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        let msg = WsMessage::ProjectRenamed {
+            from: "a.stmx".into(),
+            to: "b.stmx".into(),
+        };
+        bus.publish(msg.clone());
+
+        let got = rx.recv().await.expect("recv");
+        assert_eq!(got, msg);
     }
 
     #[test]

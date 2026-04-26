@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use notify_debouncer_full::DebouncedEvent;
-use notify_debouncer_full::notify::event::{EventKind, ModifyKind};
+use notify_debouncer_full::notify::event::{EventKind, ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use tokio::sync::Notify;
@@ -122,6 +122,17 @@ pub enum ClassifiedEvent {
         path: PathBuf,
         format: Option<ProjectFormat>,
     },
+    /// A model file was renamed in place. Emitted only for the canonical
+    /// paired form `RenameMode::Both` with both paths classifying as
+    /// model files; mixed model + non-model renames degrade to `Removed`
+    /// or `ModelFile { Created }`. `format` reflects the destination's
+    /// extension because a rename across formats (.xmile -> .stmx) keys
+    /// future events on the new identity.
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+        format: ProjectFormat,
+    },
     /// Anything else: events under excluded dirs, files with unknown
     /// extensions, metadata-only changes, etc.
     Ignored,
@@ -152,6 +163,49 @@ pub fn classify(event: &DebouncedEvent) -> ClassifiedEvent {
         Some(p) => p.clone(),
         None => return ClassifiedEvent::Ignored,
     };
+
+    // Canonical paired-rename form: handle before the destination-only
+    // dispatch so a mixed model + non-model rename can decompose into
+    // its source side (Removed) instead of being lost. The exclusion
+    // filter applies separately to each path because a rename can move
+    // a file out of (or into) an excluded subtree.
+    if matches!(
+        event.kind,
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+    ) && event.paths.len() == 2
+    {
+        let from = event.paths[0].clone();
+        let to = event.paths[1].clone();
+        let from_excluded = path_traverses_excluded_dir(&from);
+        let to_excluded = path_traverses_excluded_dir(&to);
+        let from_format = if from_excluded {
+            None
+        } else {
+            classify_extension(&from)
+        };
+        let to_format = if to_excluded {
+            None
+        } else {
+            classify_extension(&to)
+        };
+        return match (from_format, to_format) {
+            (Some(_), Some(to_fmt)) => ClassifiedEvent::Renamed {
+                from,
+                to,
+                format: to_fmt,
+            },
+            (Some(from_fmt), None) => ClassifiedEvent::Removed {
+                path: from,
+                format: Some(from_fmt),
+            },
+            (None, Some(to_fmt)) => ClassifiedEvent::ModelFile {
+                path: to,
+                format: to_fmt,
+                change: ChangeKind::Created,
+            },
+            (None, None) => ClassifiedEvent::Ignored,
+        };
+    }
 
     if let Some(repo_root) = git_internal_repo_root(&path) {
         return ClassifiedEvent::GitInternal { repo_root };
@@ -351,6 +405,9 @@ impl WatcherActor {
                 }
                 ClassifiedEvent::Removed { path, format } => {
                     Self::handle_model_removal(state, path, format).await;
+                }
+                ClassifiedEvent::Renamed { from, to, format } => {
+                    Self::handle_model_rename(state, from, to, format).await;
                 }
                 ClassifiedEvent::GitInternal { repo_root } => {
                     Self::handle_git_change(state, repo_root).await;
@@ -634,6 +691,23 @@ impl WatcherActor {
         // broadcast channel preserves publish order within one sender's
         // call sequence so subscribers always see ProjectChanged first.
         crate::diagnostics::maybe_emit_diagnostics_changed(state, &canonical, &new_project);
+    }
+
+    /// Handle a paired-form rename event by re-keying the registry entry
+    /// from `from` to `to` and broadcasting `ProjectRenamed`. Implemented
+    /// in Task 2; this stub keeps the dispatch wiring building.
+    async fn handle_model_rename(
+        _state: &AppState,
+        from: PathBuf,
+        to: PathBuf,
+        format: ProjectFormat,
+    ) {
+        tracing::debug!(
+            from = %from.display(),
+            to = %to.display(),
+            ?format,
+            "watcher: rename event (handler stubbed)"
+        );
     }
 
     /// Drop the registry entry for `path` and broadcast `ProjectRemoved`
@@ -1073,13 +1147,95 @@ mod tests {
     }
 
     #[test]
-    fn classify_uses_last_path_for_rename_pair() {
-        // For renames the debouncer emits paths = [from, to]; the
-        // classifier should key off `to` (the new canonical location).
-        // Here `from` was a `.stmx` and `to` is a `.md` -- so the
-        // event should be Ignored (the file is no longer a model).
+    fn classify_rename_both_with_two_model_paths_returns_renamed() {
+        // The canonical paired form: `from` is one model file, `to` is
+        // another. The classifier surfaces a Renamed variant with the
+        // destination format so the handler can re-key the registry
+        // entry without dropping doc state.
+        let from = PathBuf::from("/repo/models/x.stmx");
+        let to = PathBuf::from("/repo/models/y.stmx");
+        let event = make_debounced(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            vec![from.clone(), to.clone()],
+        );
+        assert_eq!(
+            classify(&event),
+            ClassifiedEvent::Renamed {
+                from,
+                to,
+                format: ProjectFormat::Stmx,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_rename_both_to_different_format_uses_destination_format() {
+        // A rename that crosses model formats (e.g. `.xmile` -> `.stmx`)
+        // is a single Renamed event tagged with the destination format,
+        // since the registry must track the file under its new identity.
+        let from = PathBuf::from("/repo/models/x.xmile");
+        let to = PathBuf::from("/repo/models/x.stmx");
+        let event = make_debounced(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            vec![from.clone(), to.clone()],
+        );
+        assert_eq!(
+            classify(&event),
+            ClassifiedEvent::Renamed {
+                from,
+                to,
+                format: ProjectFormat::Stmx,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_rename_model_to_non_model_returns_removed() {
+        // The user renamed a model file to something we don't recognize
+        // (e.g. they're archiving it). Treat this as a removal of the
+        // original model so the registry drops its entry; the destination
+        // is silently ignored.
         let from = PathBuf::from("/repo/models/x.stmx");
         let to = PathBuf::from("/repo/notes/x.md");
+        let event = make_debounced(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            vec![from.clone(), to],
+        );
+        assert_eq!(
+            classify(&event),
+            ClassifiedEvent::Removed {
+                path: from,
+                format: Some(ProjectFormat::Stmx),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_rename_non_model_to_model_returns_created() {
+        // The user gave a previously-untracked file a model extension.
+        // Surface it as a Created event so the merge path discovers and
+        // hydrates the new entry.
+        let from = PathBuf::from("/repo/notes/x.md");
+        let to = PathBuf::from("/repo/models/x.stmx");
+        let event = make_debounced(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            vec![from, to.clone()],
+        );
+        assert_eq!(
+            classify(&event),
+            ClassifiedEvent::ModelFile {
+                path: to,
+                format: ProjectFormat::Stmx,
+                change: ChangeKind::Created,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_rename_both_with_two_non_model_paths_is_ignored() {
+        // Neither side is a model. Nothing for us to do.
+        let from = PathBuf::from("/repo/notes/x.md");
+        let to = PathBuf::from("/repo/notes/y.md");
         let event = make_debounced(
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
             vec![from, to],

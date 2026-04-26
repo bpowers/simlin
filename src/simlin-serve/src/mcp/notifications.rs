@@ -133,6 +133,13 @@ pub fn wire_pair(msg: WsMessage) -> (&'static str, serde_json::Value) {
                 "path": path,
             }),
         ),
+        WsMessage::ProjectRenamed { from, to } => (
+            "simlin/projectRenamed",
+            json!({
+                "from": from,
+                "to": to,
+            }),
+        ),
         WsMessage::ProjectFocused { path } => (
             "simlin/projectFocused",
             json!({
@@ -185,6 +192,17 @@ mod tests {
         });
         assert_eq!(method, "simlin/projectRemoved");
         assert_eq!(params["path"].as_str(), Some("old/foo.stmx"));
+    }
+
+    #[test]
+    fn wire_pair_project_renamed() {
+        let (method, params) = wire_pair(WsMessage::ProjectRenamed {
+            from: "old.stmx".into(),
+            to: "new.stmx".into(),
+        });
+        assert_eq!(method, "simlin/projectRenamed");
+        assert_eq!(params["from"].as_str(), Some("old.stmx"));
+        assert_eq!(params["to"].as_str(), Some("new.stmx"));
     }
 
     #[test]
