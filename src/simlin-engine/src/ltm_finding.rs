@@ -1231,11 +1231,15 @@ mod tests {
                             from: Ident::new("x"),
                             to: Ident::new("y"),
                             polarity: crate::ltm::LinkPolarity::Positive,
+                            // Shape is populated in Phase 4 at loop construction.
+                            shape: None,
                         },
                         Link {
                             from: Ident::new("y"),
                             to: Ident::new("x"),
                             polarity: crate::ltm::LinkPolarity::Positive,
+                            // Shape is populated in Phase 4 at loop construction.
+                            shape: None,
                         },
                     ],
                     stocks: vec![],
@@ -1253,11 +1257,15 @@ mod tests {
                             from: Ident::new("a"),
                             to: Ident::new("b"),
                             polarity: crate::ltm::LinkPolarity::Negative,
+                            // Shape is populated in Phase 4 at loop construction.
+                            shape: None,
                         },
                         Link {
                             from: Ident::new("b"),
                             to: Ident::new("a"),
                             polarity: crate::ltm::LinkPolarity::Positive,
+                            // Shape is populated in Phase 4 at loop construction.
+                            shape: None,
                         },
                     ],
                     stocks: vec![],
@@ -1325,6 +1333,8 @@ mod tests {
                 from: Ident::new(from),
                 to: Ident::new(to),
                 polarity: crate::ltm::LinkPolarity::Positive,
+                // Shape is populated in Phase 4 at loop construction.
+                shape: None,
             })
             .collect();
         FoundLoop {

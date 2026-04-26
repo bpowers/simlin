@@ -17,12 +17,12 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use super::{
-    Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, SourceModel, SourceProject,
+    Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, RefShape, SourceModel, SourceProject,
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
-    model_implicit_var_info, model_module_ident_context, model_module_map,
-    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
-    variable_dimensions, variable_size,
+    build_submodel_metadata, canonical_module_input_set, collect_reference_shapes, compute_layout,
+    link_score_equation_text, model_implicit_var_info, model_module_ident_context,
+    model_module_map, parse_source_variable_with_module_context, project_datamodel_dims,
+    project_units_context, variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -271,6 +271,153 @@ pub fn compile_ltm_var_fragment(
         model,
         project,
     )
+}
+
+/// Compute the per-shape link score equation text for a single causal link.
+///
+/// Sibling of [`super::link_score_equation_text`]. Where the legacy
+/// function keys only on `(from, to)` and emits one variable per causal
+/// link, this shape-aware variant emits one variable per
+/// `(from, to, shape)` tuple. `model_ltm_variables` calls this once per
+/// unique shape in the target's AST so per-shape link scores can be
+/// ceteris-paribus scored against their actual reference site.
+///
+/// Module-involved links delegate to the same module formulas as the
+/// legacy function (composite reference / black-box delta-ratio). Their
+/// equations are independent of `shape`, but the variable name still
+/// carries the suffix so the emission loop can keep one entry per
+/// (from, to, shape) tuple in the `Vec<LtmSyntheticVar>`.
+///
+/// `lsv.dimensions` is left empty here; the caller (the link emission
+/// loop) sets dimensions per the link-score-dimensions policy after
+/// receiving the value.
+///
+/// Salsa-tracked so a per-shape link score is recomputed only when the
+/// involved variables (and their shape-classifying dimensions) change.
+/// Lives in `db_ltm.rs` rather than `db.rs` so the latter stays under
+/// the project's per-file line cap.
+#[salsa::tracked(returns(ref))]
+pub fn link_score_equation_text_shaped<'db>(
+    db: &'db dyn Db,
+    link_id: LtmLinkId<'db>,
+    shape: RefShape,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<crate::db::LtmSyntheticVar> {
+    use crate::common::{Canonical, Ident};
+    use crate::db::LtmSyntheticVar;
+    use crate::db::{
+        black_box_delta_ratio_equation, find_model_output_ports_for_module, model_causal_edges,
+    };
+
+    let from_name = link_id.link_from(db);
+    let to_name = link_id.link_to(db);
+    let from_ident = Ident::<Canonical>::new(from_name);
+    let to_ident = Ident::<Canonical>::new(to_name);
+
+    let from_var = super::reconstruct_single_variable(db, model, project, from_name);
+    let to_var = super::reconstruct_single_variable(db, model, project, to_name)?;
+
+    let var_name = crate::ltm_augment::link_score_var_name(from_name, to_name, &shape);
+
+    let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
+    let to_is_module = to_var.is_module();
+
+    // Module-involved links: shape doesn't change the equation (modules
+    // are scalar nodes in the causal graph; their composite-reference and
+    // black-box delta-ratio formulas don't reach into the AST). Reuse the
+    // legacy formulas, but key the synthetic variable by the shape-driven
+    // name so the emission loop's per-shape map works.
+    if from_is_module || to_is_module {
+        let is_discovery = project.ltm_discovery_mode(db);
+        let equation = if !from_is_module && to_is_module {
+            if let crate::variable::Variable::Module { inputs, .. } = &to_var {
+                if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
+                    if is_discovery {
+                        let edges = model_causal_edges(db, model, project);
+                        let output_ports = find_model_output_ports_for_module(edges, to_name);
+                        let output_ref = output_ports
+                            .first()
+                            .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))
+                            .unwrap_or_else(|| format!("{}\u{00B7}output", to_ident.as_str()));
+                        black_box_delta_ratio_equation(from_ident.as_str(), &output_ref)
+                    } else {
+                        format!(
+                            "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
+                            module = to_ident.as_str(),
+                            port = input.dst.as_str(),
+                        )
+                    }
+                } else {
+                    black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+                }
+            } else {
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+            }
+        } else if from_is_module && !to_is_module {
+            let module_output_ref: Option<String> = to_var
+                .ast()
+                .map(|ast| crate::variable::identifier_set(ast, &[], None))
+                .and_then(|deps| {
+                    let prefix = format!("{}\u{00B7}", from_ident.as_str());
+                    deps.into_iter()
+                        .find(|d| d.as_str().starts_with(&prefix))
+                        .map(|d| d.to_string())
+                });
+            if let Some(output_ref) = module_output_ref {
+                black_box_delta_ratio_equation(&output_ref, to_ident.as_str())
+            } else {
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+            }
+        } else {
+            black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+        };
+
+        return Some(LtmSyntheticVar {
+            name: var_name,
+            equation,
+            dimensions: vec![],
+        });
+    }
+
+    // Standard ceteris-paribus formula for non-module links.
+    //
+    // Build the source's per-dimension element lists so the per-shape
+    // partial-equation builder can validate literal-index names like
+    // `[NYC]` against the source's actual dimensions. For scalar sources
+    // this is empty, which is the right input for Bare-shape calls (no
+    // subscripts to classify).
+    let source_dim_elements: Vec<Vec<String>> =
+        if let Some(from_sv) = model.variables(db).get(from_name) {
+            variable_dimensions(db, *from_sv, project)
+                .iter()
+                .map(crate::ltm_augment::dimension_element_names)
+                .collect()
+        } else {
+            // Implicit variables (SMOOTH/DELAY expansions) aren't in
+            // source_vars and are scalar by construction.
+            Vec::new()
+        };
+
+    let mut all_vars = HashMap::new();
+    if let Some(ref fv) = from_var {
+        all_vars.insert(from_ident.clone(), fv.clone());
+    }
+    all_vars.insert(to_ident.clone(), to_var.clone());
+    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+        &from_ident,
+        &to_ident,
+        &shape,
+        &source_dim_elements,
+        &to_var,
+        &all_vars,
+    );
+
+    Some(LtmSyntheticVar {
+        name: var_name,
+        equation,
+        dimensions: vec![],
+    })
 }
 
 /// Compile an arbitrary LTM equation string to symbolic bytecodes.
@@ -2048,6 +2195,8 @@ fn build_element_level_loops(
                         from: from.clone(),
                         to: to.clone(),
                         polarity: var_link_polarity,
+                        // Shape is populated in Phase 4 at loop construction.
+                        shape: None,
                     });
                 }
 
@@ -2419,6 +2568,102 @@ pub fn model_ltm_variables(
         Some(cross_vars)
     }
 
+    /// Enumerate the unique `RefShape`s under which `to`'s AST references `from`.
+    ///
+    /// Returns `None` for module sources/targets (modules are scalar nodes
+    /// in the causal graph; their link score equations don't depend on
+    /// per-reference AST shape) -- the caller should fall back to a
+    /// single Bare emission. Returns an empty vec when no AST reference
+    /// exists (e.g., structural edges or implicit synthesized references)
+    /// -- the caller should also fall back.
+    ///
+    /// For non-module variables, reconstructs the target's `Variable`
+    /// (which carries the AST) and walks it via `collect_reference_shapes`.
+    fn enumerate_shapes(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        model: SourceModel,
+        project: SourceProject,
+    ) -> Option<Vec<RefShape>> {
+        let to_sv = source_vars.get(to)?;
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        if let Some(from_sv) = source_vars.get(from)
+            && from_sv.kind(db) == SourceVariableKind::Module
+        {
+            return None;
+        }
+        let from_dims = source_vars
+            .get(from)
+            .map(|sv| variable_dimensions(db, *sv, project).clone())
+            .unwrap_or_default();
+        let target_var = super::reconstruct_single_variable(db, model, project, to)?;
+        let source_is_arrayed = !from_dims.is_empty();
+        Some(collect_reference_shapes(
+            &target_var,
+            from,
+            source_is_arrayed,
+            &from_dims,
+        ))
+    }
+
+    /// Emit per-shape link scores for a single (from, to) edge.
+    ///
+    /// The emission is shape-driven (Phase 3): one `LtmSyntheticVar` per
+    /// `(from, to, shape)` tuple, named by `link_score_var_name`. Module
+    /// links and edges with no AST reference fall back to a single
+    /// Bare emission so the legacy behavior is preserved at structural
+    /// boundaries.
+    ///
+    /// `fallback_shape` is the shape to use when shape enumeration is
+    /// not possible or yields no results (loop-iteration path before
+    /// Phase 4 fills in `Link.shape`). Pass `RefShape::Bare` for the
+    /// pre-Phase-4 default.
+    #[allow(clippy::too_many_arguments)] // helper threads through emission context
+    fn emit_per_shape_link_scores(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        fallback_shape: RefShape,
+        model: SourceModel,
+        project: SourceProject,
+        dm_dims: &[crate::datamodel::Dimension],
+        vars: &mut Vec<LtmSyntheticVar>,
+    ) {
+        let shapes = enumerate_shapes(db, source_vars, from, to, model, project)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| vec![fallback_shape]);
+
+        let target_dims = link_score_dimensions(db, source_vars, from, to, project, dm_dims);
+
+        for shape in shapes {
+            let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+            if let Some(mut lsv) =
+                link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
+            {
+                // Set the canonical name and dimensions per Phase 3 Task 4/5.
+                lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                lsv.dimensions = match &shape {
+                    // FixedIndex: each per-element link score takes the
+                    // target's dimensions if the target is arrayed, or
+                    // empty if the target is scalar (one scalar per element).
+                    // The existing link_score_dimensions logic returns
+                    // target dims for compatible cases and empty otherwise,
+                    // which already implements this rule.
+                    RefShape::FixedIndex(_) => target_dims.clone(),
+                    // Bare and Wildcard inherit target dims via the same
+                    // compatibility rule as before.
+                    _ => target_dims.clone(),
+                };
+                vars.push(lsv);
+            }
+        }
+    }
+
     if has_input_ports || is_discovery {
         for (from, tos) in &edges_result.edges {
             for to in tos {
@@ -2429,13 +2674,17 @@ pub fn model_ltm_variables(
                     vars.extend(cross_vars);
                     continue;
                 }
-                let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-                if let Some(mut lsv) = link_score_equation_text(db, link_id, model, project).clone()
-                {
-                    lsv.dimensions =
-                        link_score_dimensions(db, source_vars, from, to, project, dm_dims);
-                    vars.push(lsv);
-                }
+                emit_per_shape_link_scores(
+                    db,
+                    source_vars,
+                    from,
+                    to,
+                    RefShape::Bare,
+                    model,
+                    project,
+                    dm_dims,
+                    &mut vars,
+                );
             }
         }
     } else if let Some(ref detected_loops) = loops {
@@ -2456,20 +2705,22 @@ pub fn model_ltm_variables(
                         vars.extend(cross_vars);
                         continue;
                     }
-                    let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
-                    if let Some(mut lsv) =
-                        link_score_equation_text(db, link_id, model, project).clone()
-                    {
-                        lsv.dimensions = link_score_dimensions(
-                            db,
-                            source_vars,
-                            link.from.as_str(),
-                            link.to.as_str(),
-                            project,
-                            dm_dims,
-                        );
-                        vars.push(lsv);
-                    }
+                    // Loop-iteration path: link.shape is not populated
+                    // until Phase 4 plumbs it through; fall back to Bare
+                    // for now. Per-shape enumeration via the AST still
+                    // applies inside emit_per_shape_link_scores.
+                    let fallback_shape = link.shape.clone().unwrap_or(RefShape::Bare);
+                    emit_per_shape_link_scores(
+                        db,
+                        source_vars,
+                        link.from.as_str(),
+                        link.to.as_str(),
+                        fallback_shape,
+                        model,
+                        project,
+                        dm_dims,
+                        &mut vars,
+                    );
                 }
             }
         }

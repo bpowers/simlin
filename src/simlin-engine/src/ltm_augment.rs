@@ -313,6 +313,10 @@ pub(crate) fn build_partial_equation_shaped(
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
 /// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
 /// so a variable named `max` won't corrupt `MAX(max, s)`.
+///
+/// Legacy single-shape builder, scheduled for removal at the end of Phase 3
+/// (Task 8) once `build_partial_equation_shaped` covers every call site.
+#[allow(dead_code)] // removed at end of Phase 3
 fn wrap_deps_in_previous(expr: Expr0, deps: &HashSet<Ident<Canonical>>) -> Expr0 {
     match expr {
         Expr0::Var(ref ident, loc) => {
@@ -365,6 +369,7 @@ fn wrap_deps_in_previous(expr: Expr0, deps: &HashSet<Ident<Canonical>>) -> Expr0
     }
 }
 
+#[allow(dead_code)] // removed at end of Phase 3
 fn wrap_index_deps_in_previous(index: IndexExpr0, deps: &HashSet<Ident<Canonical>>) -> IndexExpr0 {
     match index {
         IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_deps_in_previous(e, deps)),
@@ -380,6 +385,10 @@ fn wrap_index_deps_in_previous(index: IndexExpr0, deps: &HashSet<Ident<Canonical
 /// Parse an equation, wrap all dependency references except `exclude` in PREVIOUS(),
 /// and return the resulting equation text.  Falls back to lowercased original text
 /// if parsing fails.
+///
+/// Legacy single-shape builder, scheduled for removal at the end of Phase 3
+/// (Task 8) once `build_partial_equation_shaped` covers every call site.
+#[allow(dead_code)] // removed at end of Phase 3
 fn build_partial_equation(
     equation_text: &str,
     deps: &HashSet<Ident<Canonical>>,
@@ -433,6 +442,7 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 /// identifier, so the generated names cannot be confused with user
 /// variables. The `parse_link_offsets` discovery parser strips the
 /// `⁚wildcard` / `⁚dynamic` suffix before resolving offsets.
+#[allow(dead_code)] // consumed by per-shape link score emission in Task 5
 pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> String {
     let from_part = match shape {
         RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),
@@ -558,19 +568,34 @@ fn read_rss_mib() -> Option<f64> {
 /// Generate the equation for a link score variable.
 /// Exposed as `generate_link_score_equation_for_link` for use by tracked
 /// functions in `db.rs`.
+///
+/// `shape` selects which AST occurrences of `from` remain live in the
+/// partial equation; non-matching occurrences (and every reference to
+/// other deps) are wrapped in `PREVIOUS()`. `source_dim_elements` carries
+/// the source variable's dimension element names (one inner vec per
+/// dimension, in source-declared order, canonical lowercase) so that
+/// literal index names like `[NYC]` can be classified as `FixedIndex`
+/// rather than the conservative `DynamicIndex` fallback.
+///
+/// Flow-to-stock links use a fixed structural formula and ignore both
+/// `shape` and `source_dim_elements`.
 pub(crate) fn generate_link_score_equation_for_link(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
 ) -> String {
-    generate_link_score_equation(from, to, to_var, all_vars)
+    generate_link_score_equation(from, to, shape, source_dim_elements, to_var, all_vars)
 }
 
 /// Generate the equation for a link score variable
 fn generate_link_score_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
 ) -> String {
@@ -586,14 +611,15 @@ fn generate_link_score_equation(
         && matches!(to_var, Variable::Var { is_flow: true, .. });
 
     if is_flow_to_stock {
-        // Use flow-to-stock formula
+        // Flow-to-stock uses a fixed structural formula -- no AST parse,
+        // so neither `shape` nor `source_dim_elements` matter here.
         generate_flow_to_stock_equation(from.as_str(), to.as_str(), to_var)
     } else if is_stock_to_flow {
         // Use stock-to-flow formula
-        generate_stock_to_flow_equation(from, to, to_var)
+        generate_stock_to_flow_equation(from, to, shape, source_dim_elements, to_var)
     } else {
         // Use standard auxiliary-to-auxiliary formula
-        generate_auxiliary_to_auxiliary_equation(from, to, to_var)
+        generate_auxiliary_to_auxiliary_equation(from, to, shape, source_dim_elements, to_var)
     }
 }
 
@@ -601,6 +627,8 @@ fn generate_link_score_equation(
 fn generate_auxiliary_to_auxiliary_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
     to_var: &Variable,
 ) -> String {
     use crate::ast::Ast;
@@ -646,7 +674,8 @@ fn generate_auxiliary_to_auxiliary_equation(
         HashSet::new()
     };
 
-    let partial_eq = build_partial_equation(&to_equation, &deps, from);
+    let partial_eq =
+        build_partial_equation_shaped(&to_equation, &deps, from, shape, source_dim_elements);
 
     let from_q = quote_ident(from.as_str());
     let to_q = quote_ident(to.as_str());
@@ -711,6 +740,8 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
 fn generate_stock_to_flow_equation(
     stock: &Ident<Canonical>,
     flow: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
     flow_var: &Variable,
 ) -> String {
     // For stock-to-flow, we need to calculate how the stock influences the flow
@@ -750,7 +781,8 @@ fn generate_stock_to_flow_equation(
         HashSet::new()
     };
 
-    let partial_eq = build_partial_equation(&flow_equation, &deps, stock);
+    let partial_eq =
+        build_partial_equation_shaped(&flow_equation, &deps, stock, shape, source_dim_elements);
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
     // For stock-to-flow: x=stock, z=flow

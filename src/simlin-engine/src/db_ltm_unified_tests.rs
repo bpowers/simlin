@@ -714,3 +714,117 @@ fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
         ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 }
+
+// -- Phase 3 (per-shape link scores) --
+//
+// AC3.1 / AC3.3: when a target equation references a source under multiple
+// distinct RefShapes, model_ltm_variables must emit one LtmSyntheticVar
+// per (from, to, shape) tuple. Wildcard shapes always carry the
+// '\u{205A}wildcard' suffix (Task 4 naming convention); FixedIndex shapes
+// carry the per-element prefixed-from form. Discovery mode is used here
+// so the link emission loop runs for every causal edge, not just edges
+// in detected loops.
+
+#[test]
+fn per_shape_link_scores_for_share_with_sum() {
+    use salsa::Setter;
+
+    // share[R] = pop / SUM(pop[*]) references `pop` under both Bare
+    // (in the numerator) and Wildcard (inside SUM) shapes. Phase 3
+    // emission must produce two distinct link scores.
+    //
+    // We use a stock for `pop` because `model_ltm_variables` short-
+    // circuits to an empty result when the model has no stocks (LTM
+    // is for feedback loops; stocks are the structural anchor).
+    let mut db = SimlinDb::default();
+    let project = TestProject::new("share_sum")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &[], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .build_datamodel();
+
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let names: Vec<&String> = ltm.vars.iter().map(|v| &v.name).collect();
+
+    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share";
+    let wildcard_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard";
+
+    assert!(
+        names.iter().any(|n| n.as_str() == bare_name),
+        "expected Bare-shape link score {bare_name:?}; got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.as_str() == wildcard_name),
+        "expected Wildcard-shape link score {wildcard_name:?}; got: {names:?}"
+    );
+}
+
+#[test]
+fn fixed_index_link_score_emits_per_element_name() {
+    use salsa::Setter;
+
+    // rel_pop[R] = pop / pop[NYC] references `pop` under both Bare
+    // (numerator's same-element ref) and FixedIndex(nyc) (the literal
+    // [NYC] subscript) shapes. Phase 3 must emit two distinct link
+    // scores for the (pop, rel_pop) pair: one Bare-named and one
+    // FixedIndex-named with the bracketed source.
+    //
+    // We use a stock for `pop` so the model has at least one stock --
+    // `model_ltm_variables` short-circuits to an empty result on
+    // stockless models (LTM is for feedback loops).
+    let mut db = SimlinDb::default();
+    let project = TestProject::new("rel_pop")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &[], &[], None)
+        .array_aux("rel_pop[Region]", "pop / pop[NYC]")
+        .build_datamodel();
+
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let names: Vec<&String> = ltm.vars.iter().map(|v| &v.name).collect();
+
+    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}rel_pop";
+    let fixed_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop";
+
+    assert!(
+        names.iter().any(|n| n.as_str() == bare_name),
+        "expected Bare-shape link score {bare_name:?}; got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.as_str() == fixed_name),
+        "expected FixedIndex(nyc)-shape link score {fixed_name:?}; got: {names:?}"
+    );
+
+    // Total: exactly 2 distinct (pop, rel_pop) link scores -- the bare
+    // (Region-A2A) one and the FixedIndex(nyc) per-element one. Other
+    // link scores (e.g., self-loops, unrelated edges) shouldn't be
+    // counted. We match anything containing both 'pop' and 'rel_pop'
+    // in the suffix portion of the name.
+    let pop_to_rel: usize = names
+        .iter()
+        .filter(|n| {
+            n.contains("link_score\u{205A}pop")
+                && (n.contains("\u{2192}rel_pop")
+                    || n.contains("[nyc]\u{2192}rel_pop")
+                    || n.contains("[boston]\u{2192}rel_pop"))
+        })
+        .count();
+    assert_eq!(
+        pop_to_rel, 2,
+        "expected exactly 2 distinct (pop, rel_pop) link scores (Bare + FixedIndex(nyc)); \
+         got {pop_to_rel} matching names: {names:?}"
+    );
+}

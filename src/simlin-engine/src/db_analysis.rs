@@ -73,8 +73,8 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
 /// `i` is a position iterator). The shape determines element-edge
 /// emission and per-reference partial-equation construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum RefShape {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
     /// context with an arrayed source, this is same-element. In a scalar
     /// context with a scalar source, this is a plain scalar dep.
@@ -199,6 +199,32 @@ fn resolve_literal_index(
 /// `(source, shape)` are kept; downstream emission deduplicates edges
 /// implicitly via the `BTreeSet` value type, but the per-site count may
 /// matter for callers that use sites as a metric.
+/// Return the unique `RefShape`s under which `source_ident` is referenced
+/// in `target_var`'s AST.
+///
+/// Sibling of [`collect_reference_sites`] that drops the per-site
+/// `target_element` and source-name fields. Used by `model_ltm_variables`
+/// to enumerate the shapes for which a per-shape link score must be
+/// emitted (one `LtmSyntheticVar` per `(from, to, shape)` tuple).
+///
+/// Order is the AST-walk order of first occurrence; duplicates are
+/// removed. Returns an empty vec when the source isn't referenced.
+pub(crate) fn collect_reference_shapes(
+    target_var: &crate::variable::Variable,
+    source_ident: &str,
+    source_is_arrayed: bool,
+    source_dims: &[crate::dimensions::Dimension],
+) -> Vec<RefShape> {
+    let sites = collect_reference_sites(target_var, source_ident, source_is_arrayed, source_dims);
+    let mut shapes: Vec<RefShape> = Vec::new();
+    for site in sites {
+        if !shapes.iter().any(|s| s == &site.shape) {
+            shapes.push(site.shape);
+        }
+    }
+    shapes
+}
+
 fn collect_reference_sites(
     target_var: &crate::variable::Variable,
     source_ident: &str,
