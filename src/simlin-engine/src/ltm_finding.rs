@@ -46,16 +46,6 @@ const LINK_SCORE_PREFIX: &str = "$⁚ltm⁚link_score⁚";
 /// Separator between from/to in link score variable names (U+2192 RIGHTWARDS ARROW)
 const LTM_LINK_SEP: char = '→';
 
-/// Trailing shape suffixes appended to the `to` name by `link_score_var_name`
-/// for shapes other than Bare/FixedIndex. These suffixes make per-shape link
-/// score names a stable function of `(from, to, shape)` and prevent collisions
-/// when multiple references with different shapes coexist for the same edge.
-/// Discovery does not need the original shape, so we strip these suffixes
-/// before resolving the canonical `to` ident. The single source of truth for
-/// the suffix strings lives in `ltm_augment` so a new shape can be added in
-/// one place.
-use crate::ltm_augment::LINK_SCORE_SHAPE_SUFFIXES as LTM_TO_SHAPE_SUFFIXES;
-
 // --- Internal types ---
 
 /// An outbound edge in the search graph: target variable and |link_score|.
@@ -293,6 +283,25 @@ impl SearchGraph {
 /// all link scores are treated as scalar (no expansion). Suffix
 /// stripping still applies because the suffix is encoded in the
 /// `results.offsets` key itself.
+/// Shape priority rank for collapsing duplicate `(from, to)` keys when
+/// both Bare and a shape-suffixed variant exist for the same edge. Lower
+/// rank wins, mirroring the priority used by
+/// `ltm_augment::resolve_link_score_name_for_loop`. The rank only
+/// matters when two emitted variants collapse onto the same key after
+/// suffix stripping (specifically Bare vs. Wildcard or Bare vs.
+/// DynamicIndex).
+///
+/// FixedIndex names like `pop[nyc]→share` produce element-level keys
+/// that don't collide with Bare's `(pop, share)` key, so they don't
+/// participate in dedup. They're tagged at the `Bare` rank for
+/// simplicity (the dedup is a no-op for them).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ShapeRank {
+    Bare = 0,
+    Wildcard = 1,
+    DynamicIndex = 2,
+}
+
 fn parse_link_offsets(
     results: &Results,
     ltm_vars: &[LtmSyntheticVar],
@@ -306,94 +315,126 @@ fn parse_link_offsets(
         .map(|v| (crate::common::canonicalize(&v.name).into_owned(), v))
         .collect();
 
-    let mut link_offsets = Vec::new();
+    // Phase 1: parse every variable into one or more `(LinkOffset,
+    // ShapeRank)` entries. The rank records which shape variant the
+    // offset came from so phase 2 can dedupe deterministically when
+    // suffix stripping collapses Bare and Wildcard/DynamicIndex onto
+    // the same key.
+    let mut tagged: Vec<(LinkOffset, ShapeRank)> = Vec::new();
 
     for (var_name, &offset) in &results.offsets {
         let name_str = var_name.as_str();
-        if let Some(suffix) = name_str.strip_prefix(LINK_SCORE_PREFIX) {
-            // Split on the arrow separator to get from and to. The
-            // arrow appears exactly once between `from_part` and
-            // `to_part` (see `link_score_var_name`).
-            if let Some((from_str, to_raw)) = suffix.split_once(LTM_LINK_SEP) {
-                // Strip the trailing shape suffix (`⁚wildcard` or
-                // `⁚dynamic`) from the to-name. The suffix is part of
-                // the synthesized variable name to disambiguate per-
-                // shape link scores; for offset resolution the
-                // canonical to ident is suffix-free.
-                let to_str = strip_to_shape_suffix(to_raw);
+        let Some(suffix) = name_str.strip_prefix(LINK_SCORE_PREFIX) else {
+            continue;
+        };
+        let Some((from_str, to_raw)) = suffix.split_once(LTM_LINK_SEP) else {
+            continue;
+        };
 
-                // Look up the LtmSyntheticVar for this link score to
-                // get its dimensions. The lookup uses the full original
-                // name (including any shape suffix) since that is what
-                // `ltm_augment` synthesized.
-                let var_dims = ltm_var_map
-                    .get(name_str)
-                    .map(|v| &v.dimensions[..])
-                    .unwrap_or(&[]);
+        // Strip the trailing shape suffix (`⁚wildcard` or `⁚dynamic`)
+        // from the to-name to recover the canonical to ident. Record
+        // which suffix was present so phase 2 can rank.
+        let (to_str, rank) = strip_to_shape_suffix_with_rank(to_raw);
 
-                // FixedIndex A2A: source carries `[elem]` and the link
-                // score has dimensions, so each slot represents the
-                // edge for `(from[elem], to[d])` at element `d`. Only
-                // the target side expands.
-                if from_str.contains('[') && !var_dims.is_empty() {
-                    expand_fixed_from_a2a_link_offsets(
-                        from_str,
-                        to_str,
-                        offset,
-                        var_dims,
-                        dims,
-                        &mut link_offsets,
-                    );
-                    continue;
-                }
+        // Look up the LtmSyntheticVar for this link score to get its
+        // dimensions. The lookup uses the full original name (including
+        // any shape suffix) since that is what `ltm_augment` synthesized.
+        let var_dims = ltm_var_map
+            .get(name_str)
+            .map(|v| &v.dimensions[..])
+            .unwrap_or(&[]);
 
-                // Cross-dimensional / FixedIndex scalar pass-through:
-                // the name is already element-level on at least one
-                // side, and there is no further per-element expansion
-                // to do.
-                if from_str.contains('[') || to_str.contains('[') {
-                    let from = Ident::new(from_str);
-                    let to = Ident::new(to_str);
-                    link_offsets.push(((from, to), offset));
-                    continue;
-                }
+        let mut entries: Vec<LinkOffset> = Vec::new();
 
-                if var_dims.is_empty() {
-                    // Scalar link score: one entry at the base offset.
-                    let from = Ident::new(from_str);
-                    let to = Ident::new(to_str);
-                    link_offsets.push(((from, to), offset));
-                } else {
-                    // Bare A2A link score: expand to N element-level
-                    // edges with the source AND target both subscripted.
-                    expand_a2a_link_offsets(
-                        from_str,
-                        to_str,
-                        offset,
-                        var_dims,
-                        dims,
-                        &mut link_offsets,
-                    );
-                }
-            }
+        // FixedIndex A2A: source carries `[elem]` and the link score
+        // has dimensions, so each slot represents the edge for
+        // `(from[elem], to[d])` at element `d`. Only the target side
+        // expands.
+        if from_str.contains('[') && !var_dims.is_empty() {
+            expand_fixed_from_a2a_link_offsets(
+                from_str,
+                to_str,
+                offset,
+                var_dims,
+                dims,
+                &mut entries,
+            );
+        } else if from_str.contains('[') || to_str.contains('[') {
+            // Cross-dimensional / FixedIndex scalar pass-through: the
+            // name is already element-level on at least one side, and
+            // there is no further per-element expansion to do.
+            entries.push(((Ident::new(from_str), Ident::new(to_str)), offset));
+        } else if var_dims.is_empty() {
+            // Scalar link score: one entry at the base offset.
+            entries.push(((Ident::new(from_str), Ident::new(to_str)), offset));
+        } else {
+            // Bare A2A link score: expand to N element-level edges
+            // with the source AND target both subscripted.
+            expand_a2a_link_offsets(from_str, to_str, offset, var_dims, dims, &mut entries);
+        }
+
+        for entry in entries {
+            tagged.push((entry, rank));
         }
     }
 
+    // Phase 2: dedupe by (from, to) key. When two emitted variants
+    // collapse onto the same key (Bare vs Wildcard/DynamicIndex after
+    // suffix stripping), keep the lowest-rank entry. Without this,
+    // `SearchGraph::from_results` would register parallel edges and
+    // `discover_loops_with_graph::link_offset_map` would pick one
+    // nondeterministically (HashMap iteration order over
+    // `results.offsets` chooses the survivor). This matches the
+    // shape-priority rule used by
+    // `ltm_augment::resolve_link_score_name_for_loop` so loop_score,
+    // pathway, and discovery all reference the same shape variant for
+    // a given edge -- the documented edge-aliasing under-counting
+    // limitation is consistent across consumers.
+    let mut by_key: HashMap<(Ident<Canonical>, Ident<Canonical>), (usize, ShapeRank)> =
+        HashMap::with_capacity(tagged.len());
+    for ((key, offset), rank) in tagged {
+        by_key
+            .entry(key)
+            .and_modify(|existing| {
+                if rank < existing.1 {
+                    *existing = (offset, rank);
+                }
+            })
+            .or_insert((offset, rank));
+    }
+
+    // Sort the result so the output is deterministic across runs (the
+    // HashMap iteration above is not). Downstream `SearchGraph` sorts
+    // its adjacency lists by score, but the input order influences
+    // tie-breaking and reproducibility of intermediate diagnostics.
+    let mut link_offsets: Vec<LinkOffset> = by_key
+        .into_iter()
+        .map(|(key, (offset, _rank))| (key, offset))
+        .collect();
+    link_offsets.sort_by(|a, b| {
+        a.0.0
+            .as_str()
+            .cmp(b.0.0.as_str())
+            .then_with(|| a.0.1.as_str().cmp(b.0.1.as_str()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
     link_offsets
 }
 
-/// Strip a trailing shape suffix (`⁚wildcard` or `⁚dynamic`) from a
-/// link score's to-name. Returns the unchanged input if no known suffix
-/// is present. Mirrors the suffix appended by
-/// `ltm_augment::link_score_var_name` for non-Bare, non-FixedIndex
-/// reference shapes.
-fn strip_to_shape_suffix(to_raw: &str) -> &str {
-    for suffix in LTM_TO_SHAPE_SUFFIXES {
-        if let Some(stripped) = to_raw.strip_suffix(suffix) {
-            return stripped;
-        }
+/// Strip the shape suffix from a link score's to-name and report which
+/// suffix (if any) was present. The rank is consumed by
+/// `parse_link_offsets`'s dedup step to pick the priority-winning
+/// variant when Bare and a suffixed variant collide on the same
+/// `(from, to)` key. Mirrors the suffixes appended by
+/// `ltm_augment::link_score_var_name`.
+fn strip_to_shape_suffix_with_rank(to_raw: &str) -> (&str, ShapeRank) {
+    if let Some(stripped) = to_raw.strip_suffix(crate::ltm_augment::LINK_SCORE_WILDCARD_SUFFIX) {
+        return (stripped, ShapeRank::Wildcard);
     }
-    to_raw
+    if let Some(stripped) = to_raw.strip_suffix(crate::ltm_augment::LINK_SCORE_DYNAMIC_SUFFIX) {
+        return (stripped, ShapeRank::DynamicIndex);
+    }
+    (to_raw, ShapeRank::Bare)
 }
 
 /// Expand an A2A link score into per-element `LinkOffset` entries.
@@ -1569,6 +1610,143 @@ mod tests {
         assert_eq!(from.as_str(), "pop[nyc]");
         assert_eq!(to.as_str(), "total");
         assert_eq!(*offset, 42);
+    }
+
+    /// Regression test: when `emit_per_shape_link_scores` produces both
+    /// `pop→share` (Bare) and `pop→share⁚wildcard` (Wildcard) for the
+    /// same edge, suffix stripping collapses them onto the same
+    /// `(from, to)` key. The buggy version returned two `LinkOffset`
+    /// entries with the same key but different offsets, which caused:
+    ///
+    ///   - `SearchGraph::from_results` to register two parallel edges
+    ///     and pick whichever had the higher abs(score) per timestep,
+    ///   - `discover_loops_with_graph::link_offset_map` to keep
+    ///     whichever entry happened to be inserted last (HashMap
+    ///     iteration order over `results.offsets`),
+    ///
+    /// silently producing nondeterministic loop/pathway scores across
+    /// runs. The two consumers could even disagree (graph search picks
+    /// one shape's series, scoring uses another).
+    ///
+    /// The fix dedupes by shape priority -- Bare wins -- mirroring the
+    /// loop-score / pathway resolver. This documents the same edge-
+    /// aliasing under-counting limitation at the discovery layer.
+    #[test]
+    fn test_parse_link_offsets_dedupes_bare_and_wildcard_for_same_edge() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
+            7usize,
+        );
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"),
+            13usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 20);
+
+        let ltm_vars = vec![
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
+                equation: String::new(),
+                dimensions: vec![],
+            },
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
+                    .to_string(),
+                equation: String::new(),
+                dimensions: vec![],
+            },
+        ];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
+
+        // Bare and Wildcard collapse onto the same (pop, share) key
+        // after suffix stripping. The dedup must yield exactly one
+        // entry, picking Bare per priority order.
+        assert_eq!(
+            parsed.len(),
+            1,
+            "duplicate (from, to) keys must dedupe to one entry; got: {parsed:?}",
+        );
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(from.as_str(), "pop");
+        assert_eq!(to.as_str(), "share");
+        assert_eq!(
+            *offset, 7,
+            "must pick Bare's offset (7) over Wildcard's offset (13)",
+        );
+    }
+
+    /// Regression test: A2A wildcard expansion also collides with
+    /// Bare A2A expansion at the per-element key level. For
+    /// `births[Region] = pop[Region] + SUM(pop[*])` the emitter
+    /// produces both `pop→births` (Bare A2A) and
+    /// `pop→births⁚wildcard` (Wildcard A2A); each expands to per-
+    /// element keys like `(pop[nyc], births[nyc])`. Without dedup,
+    /// `SearchGraph` ends up with two parallel edges per element and
+    /// `link_offset_map` picks one nondeterministically.
+    #[test]
+    fn test_parse_link_offsets_dedupes_a2a_bare_and_wildcard() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births"),
+            10usize,
+        );
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\u{205A}wildcard"),
+            20usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 30);
+
+        let ltm_vars = vec![
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string(),
+                equation: String::new(),
+                dimensions: vec!["Region".to_string()],
+            },
+            crate::db::LtmSyntheticVar {
+                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\u{205A}wildcard"
+                    .to_string(),
+                equation: String::new(),
+                dimensions: vec!["Region".to_string()],
+            },
+        ];
+        let dims = vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+
+        // Each element-level key must appear exactly once.
+        let mut counts: HashMap<(String, String), usize> = HashMap::new();
+        for ((from, to), _) in &parsed {
+            *counts
+                .entry((from.as_str().to_string(), to.as_str().to_string()))
+                .or_insert(0) += 1;
+        }
+        for ((from, to), count) in &counts {
+            assert_eq!(
+                *count, 1,
+                "duplicate per-element key ({from}, {to}) appeared {count} times: {parsed:?}",
+            );
+        }
+
+        // Verify the Bare A2A entries won (offsets 10 and 11), not
+        // the Wildcard entries (offsets 20 and 21).
+        let nyc = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "births[nyc]")
+            .expect("expected pop[nyc] -> births[nyc]");
+        assert_eq!(nyc.1, 10, "must pick Bare A2A's offset (10) for NYC");
+
+        let boston = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[boston]" && t.as_str() == "births[boston]")
+            .expect("expected pop[boston] -> births[boston]");
+        assert_eq!(boston.1, 11, "must pick Bare A2A's offset (11) for Boston");
     }
 
     #[test]
