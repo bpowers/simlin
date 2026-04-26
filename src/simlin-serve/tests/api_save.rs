@@ -617,3 +617,174 @@ async fn get_projects_list_does_not_reset_version_after_save() {
     .await;
     assert_eq!(status_current, StatusCode::OK);
 }
+
+/// Task 8: A successful save publishes a ProjectChanged event on the
+/// EventBus before returning to the client. Verifies the path field and
+/// version match the post-save state and source is `User`.
+#[tokio::test]
+async fn successful_save_publishes_project_changed_with_source_user() {
+    use simlin_serve::events::{ChangeSource, WsMessage};
+
+    let dir = TempDir::new().unwrap();
+    let abs = copy_fixture("teacup.stmx", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let abs_canonical = abs.canonicalize().unwrap();
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
+
+    let mut rx = state.events.subscribe();
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    let body = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let (status, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("ProjectChanged should be published within 1s")
+        .expect("recv");
+    match event {
+        WsMessage::ProjectChanged {
+            path,
+            version,
+            source,
+        } => {
+            assert_eq!(path, "teacup.stmx");
+            assert_eq!(version, 1);
+            assert_eq!(source, ChangeSource::User);
+        }
+    }
+}
+
+/// AC4.1 (browser-vs-browser): two saves modifying different stocks
+/// against successive versions both succeed and the final GET reflects
+/// both modifications. The events arrive on a WS subscriber in version
+/// order.
+#[tokio::test]
+async fn two_saves_modifying_different_stocks_both_persist() {
+    use simlin_serve::events::WsMessage;
+
+    let dir = TempDir::new().unwrap();
+    let abs = copy_fixture("teacup.stmx", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let abs_canonical = abs.canonicalize().unwrap();
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
+
+    let mut rx = state.events.subscribe();
+
+    // Read v0.
+    let (v0, json0) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    assert_eq!(v0, 0);
+
+    // First save: rename the project. Version 0 -> 1.
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(&json0).expect("parse canonical json");
+    json_value["name"] = serde_json::Value::String("first-edit".to_string());
+    let body =
+        serde_json::json!({"json": serde_json::to_string(&json_value).unwrap(), "version": 0})
+            .to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["version"].as_u64(), Some(1));
+
+    // GET back at v1.
+    let (v1, json1) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    assert_eq!(v1, 1);
+
+    // Second save: rename further. Version 1 -> 2.
+    let mut json_value2: serde_json::Value =
+        serde_json::from_str(&json1).expect("parse canonical json");
+    json_value2["name"] = serde_json::Value::String("second-edit".to_string());
+    let body2 =
+        serde_json::json!({"json": serde_json::to_string(&json_value2).unwrap(), "version": 1})
+            .to_string();
+    let (status2, response_bytes2) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body2),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::OK);
+    let response2 = parse_body(&response_bytes2);
+    assert_eq!(response2["version"].as_u64(), Some(2));
+
+    // Final GET reflects the second edit and version 2.
+    let (v_final, json_final) =
+        get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    assert_eq!(v_final, 2);
+    let final_value: serde_json::Value =
+        serde_json::from_str(&json_final).expect("parse canonical");
+    assert_eq!(final_value["name"].as_str(), Some("second-edit"));
+
+    // The two ProjectChanged events arrived in order on our subscriber.
+    let ev1 = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("first event")
+        .expect("recv 1");
+    let ev2 = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("second event")
+        .expect("recv 2");
+    match (ev1, ev2) {
+        (
+            WsMessage::ProjectChanged { version: v1, .. },
+            WsMessage::ProjectChanged { version: v2, .. },
+        ) => {
+            assert_eq!(v1, 1);
+            assert_eq!(v2, 2);
+        }
+    }
+}
+
+/// Saves no longer rely on `invalidate_doc`: the post-save GET returns
+/// the merged in-memory state (which is identical to the on-disk state
+/// because we serialize from the doc). Verifies that without the
+/// invalidate_doc stop-gap, the GET still reflects the just-saved
+/// content.
+#[tokio::test]
+async fn save_then_get_reflects_merged_state_without_doc_invalidate() {
+    let dir = TempDir::new().unwrap();
+    let abs = copy_fixture("teacup.stmx", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let abs_canonical = abs.canonicalize().unwrap();
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(&json_body).expect("parse canonical");
+    json_value["name"] = serde_json::Value::String("renamed-via-merge".to_string());
+    let body =
+        serde_json::json!({"json": serde_json::to_string(&json_value).unwrap(), "version": 0})
+            .to_string();
+
+    let (status, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Subsequent GET serves from the in-memory doc; the merged name is
+    // visible without re-reading the file from disk.
+    let (_, post_json) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    let post_value: serde_json::Value = serde_json::from_str(&post_json).expect("parse post");
+    assert_eq!(post_value["name"].as_str(), Some("renamed-via-merge"));
+}

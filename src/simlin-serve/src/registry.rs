@@ -367,47 +367,100 @@ impl ProjectRegistry {
             size: prev.size,
             git: prev.git,
             version,
-            // Drop the previous doc so the next read re-hydrates from
-            // the freshly-written sidecar. Carrying the doc forward
-            // would leak the parsed-from-`.mdl` content past the save
-            // that produced the sidecar — Phase 3 Task 8 (Subcomponent
-            // B) will replace this drop with an in-memory merge so the
-            // doc is updated alongside the disk write rather than
-            // discarded.
-            doc: Default::default(),
+            // Carry the just-merged doc forward to the sidecar key so
+            // the post-redirect cache reflects the saved state without
+            // a re-parse. This complements Task 8's
+            // `check_increment_and_merge`: the merge runs against the
+            // .mdl-keyed doc just before this redirect runs, so the
+            // doc Arc here already holds the post-merge state.
+            doc: prev.doc,
         };
         guard.insert(sidecar_path, new_meta);
         Ok(())
     }
 
-    /// Drop the cached `ProjectDoc` for `abs_path` so the next read
-    /// re-hydrates from disk.
+    /// Combined optimistic-lock version check, version increment, and
+    /// `apply_canonical_json` merge against the entry's `ProjectDoc`.
     ///
-    /// Phase 3 stop-gap: until Task 8 (Subcomponent B) routes saves
-    /// through `apply_canonical_json` against the doc, the save handler
-    /// writes to disk without touching the doc — leaving the cache
-    /// stale. Calling this from the save handler keeps the
-    /// "next GET reflects what's on disk" invariant intact at the cost
-    /// of a re-parse on the next read. Once Task 8 lands, this becomes
-    /// unnecessary (saves merge into the doc directly) and can be
-    /// removed.
-    pub fn invalidate_doc(&self, abs_path: &Path) {
-        let guard = self
+    /// This is the fused primitive Task 8 introduces: instead of
+    /// `check_and_increment` (registry only) followed by a separate
+    /// disk-write step that left the in-memory doc out of date, the
+    /// save handler now drives every write through here. The single
+    /// registry-write-lock acquisition wraps:
+    ///
+    /// 1. Look up the entry; return `NotFound` when absent.
+    /// 2. Verify `expected_version` matches; return `VersionMismatch`
+    ///    otherwise (the failing client refetches against `actual`).
+    /// 3. Lazily hydrate the entry's `ProjectDoc` if it isn't already
+    ///    cached (mirrors `get_or_init_doc` but inlined since we
+    ///    already hold the registry lock).
+    /// 4. Call `apply_canonical_json` on the doc with the new state.
+    /// 5. Bump the entry's version.
+    ///
+    /// Lock scope: holding the registry write lock through the merge
+    /// is the documented trade-off (plan Notes 5/11). Within one
+    /// process the LoroDoc has interior mutability and no internal
+    /// lock, so we serialize all writes ourselves; doing it under the
+    /// registry lock avoids needing a second tier of per-entry write
+    /// locks. Disk I/O (the actual file write) happens outside this
+    /// method, against the returned `Arc<ProjectDoc>`.
+    ///
+    /// On success returns the new version paired with the Arc'd doc so
+    /// the caller can serialize and stat the disk file outside the
+    /// lock.
+    pub fn check_increment_and_merge(
+        &self,
+        abs_path: &Path,
+        expected_version: u64,
+        new_json: &serde_json::Value,
+    ) -> Result<(u64, Arc<ProjectDoc>), RegistryError> {
+        let mut guard = self
             .inner
-            .read()
+            .write()
             .expect("registry RwLock poisoned by panic in another thread");
-        if let Some(entry) = guard.get(abs_path) {
-            let doc_slot = entry.doc.clone();
-            // Release the registry read lock before taking the doc
-            // write lock to keep the order consistent with the
-            // hydration path (which only ever holds these locks in
-            // registry-then-doc order).
-            drop(guard);
-            let mut doc_guard = doc_slot
-                .write()
-                .expect("doc RwLock poisoned by panic in another thread");
-            *doc_guard = None;
+        let entry = guard.get_mut(abs_path).ok_or(RegistryError::NotFound)?;
+        if entry.version != expected_version {
+            return Err(RegistryError::VersionMismatch {
+                expected: expected_version,
+                actual: entry.version,
+            });
         }
+
+        // Resolve the doc Arc, hydrating from disk if this is the first
+        // touch for this entry. The `doc` slot's RwLock is independent
+        // of the registry's RwLock, so taking it while we hold the
+        // registry write lock can't deadlock — they protect disjoint
+        // state.
+        let format = entry.format;
+        let doc_slot = entry.doc.clone();
+        let arc_doc = {
+            let read_guard = doc_slot
+                .read()
+                .expect("doc RwLock poisoned by panic in another thread");
+            if let Some(existing) = read_guard.as_ref() {
+                existing.clone()
+            } else {
+                drop(read_guard);
+                let mut write_guard = doc_slot
+                    .write()
+                    .expect("doc RwLock poisoned by panic in another thread");
+                if let Some(existing) = write_guard.as_ref() {
+                    existing.clone()
+                } else {
+                    let doc = hydrate_doc_from_disk(abs_path, format)?;
+                    let arc = Arc::new(doc);
+                    *write_guard = Some(arc.clone());
+                    arc
+                }
+            }
+        };
+
+        arc_doc
+            .apply_canonical_json(new_json)
+            .map_err(|e| RegistryError::HydrationFailed(format!("apply: {e}")))?;
+        entry.version += 1;
+        let new_version = entry.version;
+        Ok((new_version, arc_doc))
     }
 
     /// Number of entries currently in the registry.
@@ -1139,36 +1192,107 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_doc_drops_the_cached_doc() {
-        // Hydrate, invalidate, then get_or_init_doc again — the new Arc
-        // should be different from the original (proving re-hydration
-        // produced a fresh ProjectDoc).
+    fn check_increment_and_merge_returns_not_found_for_unknown_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let err = reg
+            .check_increment_and_merge(
+                Path::new("/tmp/root/missing.stmx"),
+                0,
+                &serde_json::json!({}),
+            )
+            .unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+    }
+
+    #[test]
+    fn check_increment_and_merge_rejects_stale_version() {
+        // A stale expected_version must produce VersionMismatch and
+        // leave both the registry version and the doc untouched.
         let temp = tempfile::TempDir::new().expect("tempdir");
         let reg = ProjectRegistry::new(temp.path().to_path_buf());
-        let abs = temp.path().join("model.sd.json");
-        let json = r#"{"name":"demo","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
-        std::fs::write(&abs, json).expect("write file");
+        let abs = temp.path().join("m.sd.json");
+        let initial = r#"{"name":"demo","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, initial).expect("write");
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        meta.version = 5;
+        reg.upsert(abs.clone(), meta);
+
+        let err = reg
+            .check_increment_and_merge(&abs, 4, &serde_json::json!({"name":"x"}))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RegistryError::VersionMismatch {
+                expected: 4,
+                actual: 5
+            }
+        );
+        assert_eq!(reg.get(&abs).expect("entry").version, 5);
+    }
+
+    #[test]
+    fn check_increment_and_merge_increments_and_applies_merge() {
+        // Successful path: version increments and the merged JSON is
+        // observable via the returned Arc<ProjectDoc>'s export.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("m.sd.json");
+        let initial = r#"{"name":"demo","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, initial).expect("write");
         reg.upsert(
             abs.clone(),
             make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson),
         );
 
-        let first = reg.get_or_init_doc(&abs).expect("first hydration");
-        reg.invalidate_doc(&abs);
-        let second = reg
-            .get_or_init_doc(&abs)
-            .expect("re-hydration after invalidate");
-        assert!(
-            !Arc::ptr_eq(&first, &second),
-            "after invalidate, the next get_or_init_doc must re-hydrate (fresh Arc)"
-        );
+        let new_json = serde_json::json!({
+            "name":"renamed",
+            "simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},
+            "models":[{"name":"main"}]
+        });
+        let (version, doc) = reg
+            .check_increment_and_merge(&abs, 0, &new_json)
+            .expect("merge");
+        assert_eq!(version, 1);
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported["name"].as_str(), Some("renamed"));
+        assert_eq!(reg.get(&abs).expect("entry").version, 1);
     }
 
     #[test]
-    fn invalidate_doc_is_noop_for_unknown_path() {
-        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
-        // No panic, no error — just nothing to do.
-        reg.invalidate_doc(Path::new("/tmp/root/nope.stmx"));
-        assert!(reg.is_empty());
+    fn check_increment_and_merge_hydrates_from_disk_on_first_touch() {
+        // Entry exists but the doc slot is empty. The merge call should
+        // hydrate from disk inline (under the registry lock), apply the
+        // new state, and return the hydrated+merged doc.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("m.sd.json");
+        let initial = r#"{"name":"on-disk","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, initial).expect("write");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson),
+        );
+
+        // doc slot is empty before the call.
+        {
+            let entry = reg.get(&abs).expect("entry");
+            assert!(entry.doc.read().expect("read doc slot").is_none());
+        }
+
+        let updated = serde_json::json!({
+            "name":"after-merge",
+            "simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},
+            "models":[{"name":"main"}]
+        });
+        let (version, _doc) = reg
+            .check_increment_and_merge(&abs, 0, &updated)
+            .expect("merge after hydration");
+        assert_eq!(version, 1);
+
+        // Subsequent get_or_init_doc returns the doc with the merged
+        // state (proves caching took effect).
+        let cached = reg.get_or_init_doc(&abs).expect("cached doc");
+        let exported = cached.export_canonical_json().expect("export");
+        assert_eq!(exported["name"].as_str(), Some("after-merge"));
     }
 }

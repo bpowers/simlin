@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
-use crate::events::{EventBus, WsMessage};
+use crate::events::{ChangeSource, EventBus, WsMessage};
 use crate::git::GitProbe;
-use crate::parse::{ParseError, parse_to_datamodel};
+use crate::parse::ParseError;
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
@@ -335,46 +335,39 @@ impl IntoResponse for SaveError {
 
 /// `POST /api/projects/{*rel_path}` — save edits to a model.
 ///
-/// Pipeline (Subcomponent A; the actual disk write lands in Subcomponent
-/// B):
+/// Phase 3 (Task 8) routes every successful save through the in-memory
+/// `ProjectDoc` rather than writing the raw incoming JSON straight to
+/// disk:
 ///
 /// 1. Sanitize + canonicalize the relative path. 404 if the file is
 ///    missing; 403 if it canonicalizes outside the scan root.
-/// 2. Read the current on-disk content and parse it into a
-///    `datamodel::Project`. We need this both for the baseline error set
-///    and for the post-write metadata refresh in Subcomponent B.
-/// 3. Compute the pre-edit baseline (errors that exist before the save).
-/// 4. Optimistic version check via `check_and_increment` (claims the
-///    next version under the registry write lock). On stale, 409 with
-///    the actual current version so the client can refetch.
-/// 5. Validate the incoming JSON. If `serde_json` rejects it -> 400. If
-///    the project parses but introduces *new* errors not in the baseline
-///    -> 422 with the new errors.
-/// 6. Stub success: return the new version + the relative path. The
-///    actual file write is added in Subcomponent B.
+/// 2. Ensure a registry entry exists (lazy upsert with version 0).
+/// 3. Pre-fetch the baseline error set from the doc-exported JSON (the
+///    in-memory pre-edit project state). The doc is hydrated from disk
+///    if this is its first touch; subsequent saves serve from memory.
+/// 4. Validate the incoming body against the baseline. JSON parse
+///    failure -> 400; new errors introduced by the edit -> 422.
+/// 5. Re-canonicalize the validated `datamodel::Project` to JSON (so
+///    the doc tree always reflects the canonicalized form, regardless
+///    of subtle drift in the incoming request).
+/// 6. Call `check_increment_and_merge` — under one registry-write-lock
+///    acquisition this checks the optimistic-lock version, increments
+///    it, and applies the new JSON into the doc. Stale version -> 409.
+/// 7. Outside the lock, serialize the merged doc state back to a
+///    `datamodel::Project` and write it to disk with the format-aware
+///    writer. Sidecar redirects move the registry key as before.
+/// 8. Refresh the registry mtime/size from the post-write stat.
+/// 9. Publish a `ProjectChanged { source: User }` event to subscribed
+///    WebSocket clients so other tabs can remount their editors.
+///
+/// The `invalidate_doc` stop-gap from Task 5 is removed: the doc is
+/// the post-save state by virtue of the merge in step 6.
 pub async fn save_project(
     State(state): State<AppState>,
     AxumPath(rel_path): AxumPath<String>,
     Json(body): Json<SaveRequest>,
 ) -> Result<Json<SaveResponse>, SaveError> {
     let resolved = resolve_save_path(&state, &rel_path)?;
-
-    // Read + parse the current on-disk content. We need the parsed
-    // project to capture the pre-edit baseline so saves that *fix*
-    // existing errors are not blocked.
-    let current_contents = std::fs::read_to_string(&resolved.effective_path).map_err(|e| {
-        SaveError::Internal(anyhow::anyhow!(
-            "read {}: {e}",
-            resolved.effective_path.display()
-        ))
-    })?;
-    let current_project = parse_to_datamodel(
-        &resolved.effective_path,
-        resolved.effective_format,
-        &current_contents,
-    )
-    .map_err(|e| SaveError::BadRequest(e.to_string()))?;
-    let baseline: BaselineErrors = crate::validation::compute_baseline(&current_project);
 
     // Ensure the registry has an entry for the canonical path. Populated
     // by scan_into_registry on listing requests; if a client saves without
@@ -407,35 +400,34 @@ pub async fn save_project(
         });
     }
 
-    // Optimistic version check. Holding the registry write lock across
-    // the read-compare-increment makes concurrent saves safe; the lock
-    // is released before any subsequent file I/O (see
-    // `check_and_increment` for the trade-off).
-    let new_version = match state
+    // Pre-fetch baseline from the doc's exported JSON rather than
+    // re-reading the file from disk. On first touch the doc is hydrated
+    // from disk (single read), but every subsequent save consults the
+    // already-hydrated in-memory state. The baseline is the set of
+    // errors that already exist pre-edit; we use it to suppress them
+    // from the post-edit error set so saves that *fix* errors are not
+    // blocked.
+    let current_doc = state
         .registry
-        .check_and_increment(&resolved.canonical, body.version)
-    {
-        Ok(v) => v,
-        Err(RegistryError::VersionMismatch { expected, actual }) => {
-            return Err(SaveError::VersionMismatch { expected, actual });
-        }
-        Err(RegistryError::NotFound) => {
-            // We just upserted above; this can only happen if the entry
-            // was concurrently removed (unlikely for a single-user tool
-            // but worth being defensive about).
-            return Err(SaveError::Internal(anyhow::anyhow!(
-                "registry entry vanished between upsert and version check"
-            )));
-        }
-        Err(e @ RegistryError::HydrationFailed(_)) => {
-            // `check_and_increment` doesn't trigger doc hydration, so we
-            // shouldn't see this variant here; surface as Internal if we
-            // somehow do.
-            return Err(SaveError::Internal(anyhow::anyhow!(
-                "unexpected hydration failure: {e}"
-            )));
-        }
-    };
+        .get_or_init_doc(&resolved.canonical)
+        .map_err(|e| match e {
+            RegistryError::NotFound => SaveError::NotFound,
+            RegistryError::HydrationFailed(msg) => SaveError::BadRequest(msg),
+            RegistryError::VersionMismatch { expected, actual } => {
+                SaveError::VersionMismatch { expected, actual }
+            }
+        })?;
+    let current_json_value = current_doc
+        .export_canonical_json()
+        .map_err(|e| SaveError::Internal(anyhow::anyhow!("export current doc: {e}")))?;
+    let current_json_project: simlin_engine::json::Project =
+        serde_json::from_value(current_json_value).map_err(|e| {
+            SaveError::Internal(anyhow::anyhow!(
+                "convert current doc state to json::Project: {e}"
+            ))
+        })?;
+    let current_project: simlin_engine::datamodel::Project = current_json_project.into();
+    let baseline: BaselineErrors = crate::validation::compute_baseline(&current_project);
 
     // Validate the incoming body against the baseline.
     let outcome: ValidationOutcome = match validate_save(&body.json, &baseline) {
@@ -450,6 +442,51 @@ pub async fn save_project(
         });
     }
 
+    // Re-canonicalize the validated project to JSON for the merge. We
+    // route through `json::Project::from(&datamodel::Project)` rather
+    // than passing the raw incoming `body.json` so the doc always sees
+    // the canonical engine shape regardless of what the client wrote
+    // (case, whitespace, optional-field omission, etc.).
+    let canonical_project: simlin_engine::json::Project = (&outcome.project).into();
+    let canonical_value = serde_json::to_value(&canonical_project)
+        .map_err(|e| SaveError::Internal(anyhow::anyhow!("serialize canonical project: {e}")))?;
+
+    // Atomic version-check + increment + merge against the doc.
+    let (new_version, merged_doc) = match state.registry.check_increment_and_merge(
+        &resolved.canonical,
+        body.version,
+        &canonical_value,
+    ) {
+        Ok(out) => out,
+        Err(RegistryError::VersionMismatch { expected, actual }) => {
+            return Err(SaveError::VersionMismatch { expected, actual });
+        }
+        Err(RegistryError::NotFound) => {
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "registry entry vanished between upsert and merge"
+            )));
+        }
+        Err(RegistryError::HydrationFailed(msg)) => {
+            return Err(SaveError::Internal(anyhow::anyhow!("merge failed: {msg}")));
+        }
+    };
+
+    // Build the on-disk project from the doc's post-merge state. In
+    // practice the merged JSON equals `canonical_value` modulo sort
+    // order, but going through the doc's own export keeps the writer
+    // strictly downstream of the merge so any future divergence (Phase
+    // 7 server-side annotations, say) remains coherent.
+    let merged_json = merged_doc
+        .export_canonical_json()
+        .map_err(|e| SaveError::Internal(anyhow::anyhow!("export merged doc: {e}")))?;
+    let merged_json_project: simlin_engine::json::Project = serde_json::from_value(merged_json)
+        .map_err(|e| {
+            SaveError::Internal(anyhow::anyhow!(
+                "convert merged doc state to json::Project: {e}"
+            ))
+        })?;
+    let merged_project: simlin_engine::datamodel::Project = merged_json_project.into();
+
     // Resolve the target shape from the request URL's source format.
     // For `.mdl` we always pick the SidecarJson arm; the registry-side
     // redirect happens after the write so the new entry replaces the
@@ -457,7 +494,7 @@ pub async fn save_project(
     // (including ones following an earlier redirect where the frontend
     // updated its URL state) we use the SdJson arm.
     let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
-    let written_path = save_to_disk(&outcome.project, &target)
+    let written_path = save_to_disk(&merged_project, &target)
         .map_err(|e| SaveError::Internal(anyhow::anyhow!("save_to_disk: {e}")))?;
 
     // For SidecarJson, redirect the registry's `.mdl` key to the new
@@ -522,14 +559,6 @@ pub async fn save_project(
             .refresh_meta(&registry_key, mtime, metadata.len());
     }
 
-    // Invalidate the cached ProjectDoc so the next GET re-hydrates
-    // from the just-written disk content. This is a Phase 3 stop-gap
-    // documented on `ProjectRegistry::invalidate_doc`; Task 8 in
-    // Subcomponent B will replace it by routing the save through
-    // `apply_canonical_json` against the doc, keeping the in-memory
-    // state coherent with disk without a cache flush.
-    state.registry.invalidate_doc(&registry_key);
-
     // For SidecarJson the response path points at the freshly-created
     // sidecar so the SPA can update its URL state to follow the
     // redirect. For the other arms the path is unchanged.
@@ -546,6 +575,17 @@ pub async fn save_project(
         }
     };
 
+    // Publish AFTER the disk write + meta refresh so a subscriber can
+    // assume the file on disk reflects the announced version. Two
+    // concurrent saves' events may arrive in either order from the
+    // subscriber's perspective; the client uses the version number to
+    // decide whether to re-render, so order doesn't change correctness.
+    state.events.publish(WsMessage::ProjectChanged {
+        path: response_path.clone(),
+        version: new_version,
+        source: ChangeSource::User,
+    });
+
     Ok(Json(SaveResponse {
         version: new_version,
         path: response_path,
@@ -553,11 +593,14 @@ pub async fn save_project(
 }
 
 /// Path-resolution outcome shared between the save handler's various
-/// error paths. The `initial_format` is what the request URL maps to;
-/// the `effective_*` pair carries the post-sidecar redirection (a
-/// `.mdl` request whose sibling `.sd.json` exists reads from the
-/// sidecar on the GET path; we honor the same redirect for save's
-/// baseline computation).
+/// error paths. `initial_format` is what the request URL maps to; the
+/// registry entry the save handler operates on is keyed by `canonical`
+/// throughout the flow. Sidecar redirection (a `.mdl` request whose
+/// sibling `.sd.json` exists) is now expressed entirely through the
+/// post-write `redirect_to_sidecar` move on the registry — Task 8
+/// reads the pre-edit baseline from the in-memory `ProjectDoc` rather
+/// than re-reading the on-disk file, so we no longer need a separate
+/// effective_path for the baseline source.
 struct ResolvedPath {
     /// The canonicalized absolute path of the requested file.
     canonical: PathBuf,
@@ -567,17 +610,11 @@ struct ResolvedPath {
     root_canonical: PathBuf,
     /// The relative path (relative to the scan root) the client should
     /// see in the response. May differ from the request when a sidecar
-    /// redirect happens; Subcomponent B owns that case.
+    /// redirect happens.
     relative_path: PathBuf,
     /// Source format inferred from the request URL itself (no sidecar
     /// redirect). Used for the registry-entry seed.
     initial_format: ProjectFormat,
-    /// The file we actually read for the baseline pre-edit project.
-    /// For `.mdl` requests with a sibling `.sd.json` this is the
-    /// sidecar (mirrors the GET handler's preference rule).
-    effective_path: PathBuf,
-    /// Format of `effective_path`.
-    effective_format: ProjectFormat,
 }
 
 /// Resolve a request `rel_path` to a canonical, scan-root-confined
@@ -612,17 +649,6 @@ fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, S
     let initial_format = format_for_path(&canonical)
         .ok_or_else(|| SaveError::BadRequest("unrecognized file extension".to_string()))?;
 
-    let (effective_path, effective_format) = if matches!(initial_format, ProjectFormat::Mdl) {
-        let sidecar = sidecar_for_mdl(&canonical);
-        if sidecar.is_file() {
-            (sidecar, ProjectFormat::SdJson)
-        } else {
-            (canonical.clone(), ProjectFormat::Mdl)
-        }
-    } else {
-        (canonical.clone(), initial_format)
-    };
-
     let relative_path = canonical
         .strip_prefix(&root_canonical)
         .map(Path::to_path_buf)
@@ -633,8 +659,6 @@ fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, S
         root_canonical,
         relative_path,
         initial_format,
-        effective_path,
-        effective_format,
     })
 }
 
