@@ -10,13 +10,15 @@
 //! handlers. The submodules layer in over the next phases:
 //!
 //! - `access` — `RegistryAccess` impl of `simlin_mcp_core::ProjectAccess`.
-//! - (later) `server` — the rmcp `ServerHandler` that mounts the tool surface.
-//! - (later) `transport` — the streamable-HTTP service factory.
+//! - `server` — the rmcp `ServerHandler` that mounts the tool surface.
+//! - `transport` — the streamable-HTTP service factory mounted at `/mcp`.
 
 pub mod access;
 pub mod list_projects;
 pub mod server;
 pub mod simulate;
+pub mod transport;
 
 pub use access::RegistryAccess;
 pub use server::SimlinServeMcpServer;
+pub use transport::build_mcp_router;
