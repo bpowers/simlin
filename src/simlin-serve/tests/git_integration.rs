@@ -180,3 +180,34 @@ fn cache_invalidates_on_index_mtime_change() {
         "cache must reflect the post-stage state once index mtime changes"
     );
 }
+
+// Regression test for the quoted-path bug: git's default core.quotePath=true
+// would emit non-ASCII filenames as C-escaped octal sequences (e.g.
+// `"r\303\251servoir.stmx"` with the surrounding quotes). The parser must
+// see the raw path, not the quoted form. Without passing
+// `-c core.quotePath=false`, this test would fail because the path strings
+// from `git status` and `git ls-files` would not match the real filename.
+#[test]
+fn non_ascii_filename_is_tracked_clean_after_commit() {
+    if !git_available() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    init_repo(dir.path());
+
+    // U+00E9 (LATIN SMALL LETTER E WITH ACUTE) triggers core.quotePath quoting.
+    let filename = "r\u{00e9}servoir.stmx";
+    let f = dir.path().join(filename);
+    std::fs::write(&f, "<root/>\n").unwrap();
+    run_git(dir.path(), &["add", filename]);
+    run_git(dir.path(), &["commit", "-q", "-m", "add reservoir"]);
+
+    let probe = GitProbe::detect();
+    assert_eq!(
+        probe.status_for(&f),
+        GitState::Tracked { dirty: false },
+        "committed non-ASCII filename must be reported as Tracked{{dirty:false}}, \
+         not Untracked (would indicate a quoted-path parsing bug)"
+    );
+}
