@@ -285,10 +285,8 @@ fn json_to_loro_value(value: &Value) -> LoroValue {
 ///    - **Object**: if the live entry is already a sub-`LoroMap`, recurse
 ///      into it. Otherwise (missing, or wrong type) `insert_container`
 ///      a fresh `LoroMap` and recurse into the new one.
-///    - **Array**: delegate to `merge_list` (Task 3 — currently lands
-///      arrays via `insert` of a `LoroValue::List`, which materializes
-///      as an inline list rather than a `LoroList` container; Task 3
-///      replaces this with proper container-backed list handling).
+///    - **Array**: delegate to `merge_list`, which uses replace-and-repush
+///      semantics on a `LoroList` container.
 ///
 /// The `path` parameter is appended-only so `ShapeError` messages can
 /// point at the offending location (`.models[2].stocks` etc.).
@@ -299,30 +297,40 @@ fn merge_map(map: &LoroMap, json: &JsonMap<String, Value>, path: &str) -> Result
         .map(|(k, _)| k.as_str())
         .collect();
 
-    let live_keys: Vec<String> = {
-        let mut keys = Vec::new();
-        // for_each must not mutate the map under the same iterator;
-        // collect first, mutate after.
-        map.for_each(|k, _| keys.push(k.to_string()));
+    // Collect live keys first; for_each must not mutate the map under the
+    // same iterator.
+    let live_keys: HashSet<String> = {
+        let mut keys = HashSet::new();
+        map.for_each(|k, _| {
+            keys.insert(k.to_string());
+        });
         keys
     };
-    for key in live_keys {
-        if !incoming_keys.contains(key.as_str()) {
-            map.delete(&key)?;
-        }
+
+    // Null-valued incoming keys are treated as explicit deletions. Keys that
+    // are live but absent from the non-null incoming set are also deleted.
+    // Union both cases and delete once per key.
+    let null_keys: HashSet<&str> = json
+        .iter()
+        .filter(|(_, v)| v.is_null())
+        .map(|(k, _)| k.as_str())
+        .collect();
+    for key in live_keys
+        .iter()
+        .filter(|k| !incoming_keys.contains(k.as_str()))
+        .map(|k| k.as_str())
+        .chain(null_keys.iter().copied())
+        .collect::<HashSet<&str>>()
+    {
+        // delete returns Err for missing keys in some Loro versions;
+        // ignore that failure mode since the post-condition (key absent)
+        // holds either way.
+        let _ = map.delete(key);
     }
 
     for (key, value) in json {
         if value.is_null() {
-            // `null` was already filtered out of `incoming_keys`, but the
-            // live-side delete pass only removed it if it was actually
-            // there. Issue an explicit delete so callers using `null` to
-            // unset a key see consistent behavior whether or not the key
-            // was previously present.
-            // delete returns Err for missing keys in some Loro versions;
-            // ignore that failure mode since the post-condition (key
-            // absent) holds either way.
-            let _ = map.delete(key);
+            // Deletion already handled in the unified delete pass above.
             continue;
         }
 
@@ -1301,5 +1309,43 @@ mod tests {
         let stocks = out["models"][0]["stocks"].as_array().expect("stocks array");
         assert_eq!(stocks[0]["name"], "Alpha Stock");
         assert_eq!(stocks[1]["name"], "Zebra Stock");
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_object_with_list() {
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "x": { "a": 1 } }))
+            .expect("first");
+        let updated = serde_json::json!({ "x": [1, 2] });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_list_with_object() {
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "x": [1] }))
+            .expect("first");
+        let updated = serde_json::json!({ "x": { "a": 1 } });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
+
+    #[test]
+    fn apply_canonical_json_handles_deep_nested_object_to_scalar_transition() {
+        // Three levels deep: the leaf transitions from an object to a scalar.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({
+            "a": { "b": { "c": { "leaf": true } } }
+        }))
+        .expect("first");
+        let updated = serde_json::json!({
+            "a": { "b": { "c": 42 } }
+        });
+        doc.apply_canonical_json(&updated).expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
     }
 }
