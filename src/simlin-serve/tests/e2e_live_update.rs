@@ -85,6 +85,7 @@ async fn spawn_server(fixture: &str) -> (AppState, String, TempDir) {
             git: GitState::Untracked,
             version: 0,
             doc: Default::default(),
+            last_disk_hash: 0,
         },
     );
 

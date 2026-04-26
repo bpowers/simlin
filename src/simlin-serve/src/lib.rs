@@ -9,6 +9,7 @@ pub mod discovery;
 pub mod events;
 pub mod git;
 pub mod handlers;
+pub mod hashing;
 pub mod launcher;
 pub mod loro_doc;
 pub mod parse;

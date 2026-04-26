@@ -88,9 +88,22 @@ pub fn resolve_save_target(absolute_path: &Path, source_format: ProjectFormat) -
     }
 }
 
+/// Outcome of a successful disk write: the path that landed on disk plus
+/// the exact byte sequence that was written. The caller hashes those
+/// bytes for echo-suppression on the file watcher's ingestion path
+/// (Phase 4); without the bytes here, the handler would either re-serialize
+/// (work duplication, possible drift) or re-read the file (TOCTOU window
+/// against the watcher's own event).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteOutcome {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
 /// Serialize `project` into the format implied by `target`, then write
-/// it atomically. Returns the path that was written so the caller can
-/// stat it for the registry metadata refresh.
+/// it atomically. Returns the path that was written and the exact bytes
+/// emitted, so the caller can both stat for registry metadata and
+/// fingerprint for echo suppression in a single pass.
 ///
 /// `SidecarJson` writes only the sidecar; the `.mdl` is never modified
 /// (the design's "sidecar becomes the new source of truth once it
@@ -98,22 +111,34 @@ pub fn resolve_save_target(absolute_path: &Path, source_format: ProjectFormat) -
 pub fn save_to_disk(
     project: &datamodel::Project,
     target: &SaveTarget,
-) -> Result<PathBuf, SaveDiskError> {
+) -> Result<WriteOutcome, SaveDiskError> {
     match target {
         SaveTarget::InPlaceXmile(path) => {
             let xmile = simlin_engine::to_xmile(project).map_err(SaveDiskError::XmileSerialize)?;
-            atomic_write_to(path, xmile.as_bytes())?;
-            Ok(path.clone())
+            let bytes = xmile.into_bytes();
+            atomic_write_to(path, &bytes)?;
+            Ok(WriteOutcome {
+                path: path.clone(),
+                bytes,
+            })
         }
         SaveTarget::SidecarJson { sidecar_path, .. } => {
             let json_str = render_pretty_json(project)?;
-            atomic_write_to(sidecar_path, json_str.as_bytes())?;
-            Ok(sidecar_path.clone())
+            let bytes = json_str.into_bytes();
+            atomic_write_to(sidecar_path, &bytes)?;
+            Ok(WriteOutcome {
+                path: sidecar_path.clone(),
+                bytes,
+            })
         }
         SaveTarget::SdJson(path) => {
             let json_str = render_pretty_json(project)?;
-            atomic_write_to(path, json_str.as_bytes())?;
-            Ok(path.clone())
+            let bytes = json_str.into_bytes();
+            atomic_write_to(path, &bytes)?;
+            Ok(WriteOutcome {
+                path: path.clone(),
+                bytes,
+            })
         }
     }
 }
@@ -215,10 +240,13 @@ mod tests {
         let target = SaveTarget::InPlaceXmile(target_path.clone());
         let project = empty_project();
 
-        let written = save_to_disk(&project, &target).expect("write succeeds");
-        assert_eq!(written, target_path);
+        let outcome = save_to_disk(&project, &target).expect("write succeeds");
+        assert_eq!(outcome.path, target_path);
 
         let bytes = fs::read(&target_path).expect("file exists");
+        // Outcome carries the same bytes that landed on disk so the caller
+        // doesn't need a separate fs::read() to fingerprint them.
+        assert_eq!(outcome.bytes, bytes);
         let mut reader = Cursor::new(&bytes[..]);
         let reparsed = simlin_engine::open_xmile(&mut reader).expect("reparses");
         assert_eq!(reparsed.name, project.name);
@@ -292,8 +320,11 @@ mod tests {
             sidecar_path: sidecar_path.clone(),
         };
         let project = empty_project();
-        let written = save_to_disk(&project, &target).expect("write succeeds");
-        assert_eq!(written, sidecar_path, "writer must return the sidecar path");
+        let outcome = save_to_disk(&project, &target).expect("write succeeds");
+        assert_eq!(
+            outcome.path, sidecar_path,
+            "writer must return the sidecar path"
+        );
 
         // The .mdl file must be byte-identical to what we wrote.
         let post_mdl = fs::read(&mdl_path).unwrap();
@@ -342,10 +373,11 @@ mod tests {
         let target = SaveTarget::SdJson(target_path.clone());
         let project = empty_project();
 
-        let written = save_to_disk(&project, &target).expect("write succeeds");
-        assert_eq!(written, target_path);
+        let outcome = save_to_disk(&project, &target).expect("write succeeds");
+        assert_eq!(outcome.path, target_path);
 
         let bytes = fs::read(&target_path).unwrap();
+        assert_eq!(outcome.bytes, bytes);
         let json_project: simlin_engine::json::Project =
             serde_json::from_slice(&bytes).expect("sd.json parses back");
         let reparsed: datamodel::Project = json_project.into();

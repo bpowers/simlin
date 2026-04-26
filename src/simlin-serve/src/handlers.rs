@@ -193,6 +193,7 @@ pub async fn get_project(
             git: GitState::Untracked,
             version: 0,
             doc: Default::default(),
+            last_disk_hash: 0,
         }
     });
 
@@ -396,6 +397,7 @@ pub async fn save_project(
                 git: GitState::Untracked,
                 version: 0,
                 doc: Default::default(),
+                last_disk_hash: 0,
             }
         });
     }
@@ -494,8 +496,13 @@ pub async fn save_project(
     // (including ones following an earlier redirect where the frontend
     // updated its URL state) we use the SdJson arm.
     let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
-    let written_path = save_to_disk(&merged_project, &target)
+    let write_outcome = save_to_disk(&merged_project, &target)
         .map_err(|e| SaveError::Internal(anyhow::anyhow!("save_to_disk: {e}")))?;
+    let written_path = write_outcome.path.clone();
+    // Compute the echo-suppression hash from the bytes we just wrote.
+    // The Phase 4 watcher uses this to recognize its own atomic-write
+    // events and skip redundant merges.
+    let written_hash = crate::hashing::content_hash(&write_outcome.bytes);
 
     // For SidecarJson, redirect the registry's `.mdl` key to the new
     // sidecar key (carrying the just-incremented version forward) so
@@ -539,6 +546,7 @@ pub async fn save_project(
                             git: GitState::Untracked,
                             version: new_version,
                             doc: Default::default(),
+                            last_disk_hash: 0,
                         },
                     );
                     sidecar_path.clone()
@@ -548,15 +556,16 @@ pub async fn save_project(
         SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => resolved.canonical.clone(),
     };
 
-    // Refresh the registry's mtime + size from the freshly-written
-    // file so a subsequent listing reflects the new modification time
-    // and byte count. The SPA's stale-data heuristics depend on these.
+    // Refresh the registry's mtime + size + hash from the freshly-written
+    // file. The mtime and size feed the SPA's stale-data heuristics; the
+    // hash is the echo-suppression key the Phase 4 watcher uses when it
+    // sees the OS-level write event for the file we just wrote.
     if let Ok(metadata) = std::fs::metadata(&written_path)
         && let Ok(mtime) = metadata.modified()
     {
         state
             .registry
-            .refresh_meta(&registry_key, mtime, metadata.len());
+            .refresh_after_write(&registry_key, mtime, metadata.len(), written_hash);
     }
 
     // For SidecarJson the response path points at the freshly-created

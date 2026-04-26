@@ -78,6 +78,19 @@ pub struct ProjectMeta {
     /// is observable through every other.
     #[serde(skip)]
     pub doc: Arc<RwLock<Option<Arc<ProjectDoc>>>>,
+    /// XXH3-64 hash of the bytes most recently written to this path by the
+    /// server's save handler. Used by the Phase 4 file watcher for echo
+    /// suppression: when the watcher sees a `Modify` event for the same
+    /// path, it computes the hash of the current on-disk bytes and skips
+    /// re-merging when the hash matches this value (i.e. we're seeing our
+    /// own atomic-write, not an external edit).
+    ///
+    /// Defaults to `0` and stays at `0` for entries the server has never
+    /// written. A genuine on-disk hash that happens to be `0` would also
+    /// short-circuit, but the false-positive rate is `2^-64` and only
+    /// affects redundant work, not correctness.
+    #[serde(skip)]
+    pub last_disk_hash: u64,
 }
 
 /// Failures produced by registry operations that need to report a
@@ -329,6 +342,24 @@ impl ProjectRegistry {
         }
     }
 
+    /// Like `refresh_meta`, but also stores the XXH3-64 hash of the bytes
+    /// just written. The hash is the echo-suppression key the Phase 4 file
+    /// watcher uses to recognize its own atomic-write events.
+    ///
+    /// No-op if the path is not in the registry. Called by the save handler
+    /// after a successful disk write.
+    pub fn refresh_after_write(&self, abs_path: &Path, mtime: SystemTime, size: u64, hash: u64) {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if let Some(entry) = guard.get_mut(abs_path) {
+            entry.mtime = mtime;
+            entry.size = size;
+            entry.last_disk_hash = hash;
+        }
+    }
+
     /// Move a `.mdl` entry to its `.sd.json` sidecar key after the
     /// sidecar is created on disk. Carries the version forward (so an
     /// in-flight optimistic-lock conversation isn't broken by the
@@ -374,6 +405,11 @@ impl ProjectRegistry {
             // .mdl-keyed doc just before this redirect runs, so the
             // doc Arc here already holds the post-merge state.
             doc: prev.doc,
+            // Disk-write fingerprint follows the canonical-form path. The
+            // .mdl entry's hash (typically 0) is meaningless once the
+            // sidecar takes over as source of truth; the next save will
+            // refresh this slot with the sidecar's bytes.
+            last_disk_hash: prev.last_disk_hash,
         };
         guard.insert(sidecar_path, new_meta);
         Ok(())
@@ -598,6 +634,7 @@ mod tests {
             git: GitState::Untracked,
             version: 0,
             doc: Default::default(),
+            last_disk_hash: 0,
         }
     }
 
@@ -689,6 +726,7 @@ mod tests {
                 git: GitState::Untracked,
                 version: 0,
                 doc: Default::default(),
+                last_disk_hash: 0,
             },
         );
         reg.upsert(
@@ -701,6 +739,7 @@ mod tests {
                 git: GitState::Tracked { dirty: true },
                 version: 0,
                 doc: Default::default(),
+                last_disk_hash: 0,
             },
         );
 
@@ -847,6 +886,38 @@ mod tests {
             &nonexistent,
             SystemTime::UNIX_EPOCH + Duration::from_secs(42),
             123,
+        );
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn refresh_after_write_stores_hash_alongside_mtime_and_size() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx),
+        );
+        let new_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let new_size = 9_999u64;
+        let new_hash = 0xdead_beef_dead_beefu64;
+        reg.refresh_after_write(&abs, new_mtime, new_size, new_hash);
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.mtime, new_mtime);
+        assert_eq!(entry.size, new_size);
+        assert_eq!(entry.last_disk_hash, new_hash);
+    }
+
+    #[test]
+    fn refresh_after_write_is_noop_for_missing_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let nonexistent = PathBuf::from("/tmp/root/missing.stmx");
+        reg.refresh_after_write(
+            &nonexistent,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(42),
+            123,
+            0xfeed_face_feed_faceu64,
         );
         assert!(reg.is_empty());
     }
@@ -1081,6 +1152,7 @@ mod tests {
                 git: GitState::Untracked,
                 version: new_version,
                 doc: Default::default(),
+                last_disk_hash: 0,
             },
         );
 
@@ -1125,6 +1197,7 @@ mod tests {
                 git: GitState::Untracked,
                 version: new_version,
                 doc: Default::default(),
+                last_disk_hash: 0,
             },
         );
 

@@ -108,6 +108,7 @@ pub fn scan_into_registry(
             git: git_state,
             version: 0,
             doc: Default::default(),
+            last_disk_hash: 0,
         };
 
         visited.insert(abs_path.clone());

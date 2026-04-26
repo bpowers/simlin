@@ -58,6 +58,7 @@ fn seed_registry(state: &AppState, abs_path: &std::path::Path, format: ProjectFo
             git: GitState::Untracked,
             version: 0,
             doc: Default::default(),
+            last_disk_hash: 0,
         },
     );
 }

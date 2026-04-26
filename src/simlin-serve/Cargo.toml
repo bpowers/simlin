@@ -33,6 +33,8 @@ open = "5"
 anyhow = "1"
 loro = "1.11"
 subtle = "2"
+notify-debouncer-full = "0.7"
+twox-hash = { version = "2", default-features = false, features = ["xxhash3_64", "std"] }
 
 [build-dependencies]
 anyhow = "1"
