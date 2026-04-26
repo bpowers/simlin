@@ -156,6 +156,110 @@ async fn read_model_delegates_to_simlin_mcp_core() {
 }
 
 #[tokio::test]
+async fn list_projects_returns_registry_snapshot() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs_xmile = copy_fixture("teacup.xmile", &canonical_root);
+    let abs_stmx = copy_fixture("teacup.stmx", &canonical_root);
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &abs_xmile, ProjectFormat::Xmile);
+    seed_registry(&state, &abs_stmx, ProjectFormat::Stmx);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    let mut params = CallToolRequestParams::new("ListProjects");
+    params = params.with_arguments(serde_json::Map::new());
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("ListProjects call_tool succeeds");
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "successful ListProjects must not mark is_error"
+    );
+    let structured = result
+        .structured_content
+        .expect("ListProjects must return structured content");
+
+    let projects = structured
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .expect("projects field must be an array");
+    assert_eq!(projects.len(), 2, "expected two seeded entries");
+
+    let names: Vec<&str> = projects
+        .iter()
+        .map(|p| p.get("path").and_then(|v| v.as_str()).expect("path"))
+        .collect();
+    assert!(names.iter().any(|n| n.ends_with("teacup.xmile")));
+    assert!(names.iter().any(|n| n.ends_with("teacup.stmx")));
+
+    for entry in projects {
+        assert!(
+            entry.get("format").and_then(|v| v.as_str()).is_some(),
+            "format must be a string: {entry}"
+        );
+        assert!(
+            entry.get("git").is_some(),
+            "git state must be present: {entry}"
+        );
+        assert_eq!(
+            entry.get("version").and_then(|v| v.as_u64()),
+            Some(0),
+            "freshly seeded entries report version 0: {entry}"
+        );
+        assert!(
+            entry.get("mtime").is_none(),
+            "mtime should not appear on the AI surface: {entry}"
+        );
+        assert!(
+            entry.get("size").is_none(),
+            "size should not appear on the AI surface: {entry}"
+        );
+    }
+
+    assert_eq!(
+        structured.get("gitAvailable").and_then(|v| v.as_bool()),
+        Some(false),
+        "test GitProbe is unavailable_for_tests"
+    );
+    let root = structured
+        .get("root")
+        .and_then(|v| v.as_str())
+        .expect("root field must be a string");
+    assert_eq!(root, canonical_root.display().to_string());
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn list_projects_advertised_in_tools_list() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    let result = client
+        .peer()
+        .list_tools(None)
+        .await
+        .expect("tools/list must succeed");
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        names.contains(&"ListProjects"),
+        "tools/list must advertise ListProjects; got: {names:?}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
 async fn get_info_includes_workspace_dir_in_instructions() {
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");

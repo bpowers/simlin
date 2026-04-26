@@ -14,6 +14,7 @@
 //! - (later) `transport` — the streamable-HTTP service factory.
 
 pub mod access;
+pub mod list_projects;
 pub mod server;
 
 pub use access::RegistryAccess;

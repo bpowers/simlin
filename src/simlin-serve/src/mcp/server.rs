@@ -35,6 +35,7 @@ use simlin_mcp_core::tools::read_model::{ReadModelInput, read_model};
 
 use crate::handlers::AppState;
 use crate::mcp::access::RegistryAccess;
+use crate::mcp::list_projects::{ListProjectsInput, run as run_list_projects};
 
 /// rmcp `ServerHandler` impl exposing the simlin-serve tool surface.
 ///
@@ -160,6 +161,22 @@ impl<A: ProjectAccess> SimlinServeMcpServer<A> {
             Ok(output) => call_tool_success(&output),
             Err(err) => Ok(call_tool_error(&err)),
         }
+    }
+
+    #[tool(
+        name = "ListProjects",
+        description = "List all system-dynamics model files in the working \
+            directory tree, with their format, version, and git status. \
+            Returns the absolute working-directory root so the AI can build \
+            paths relative to it for use with read_model / edit_model / \
+            simulate."
+    )]
+    async fn list_projects(
+        &self,
+        Parameters(_input): Parameters<ListProjectsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let output = run_list_projects(&self.state);
+        call_tool_success(&output)
     }
 }
 
