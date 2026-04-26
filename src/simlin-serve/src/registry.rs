@@ -68,6 +68,31 @@ pub struct ProjectMeta {
     pub version: u64,
 }
 
+/// Failures produced by registry operations that need to report a
+/// distinguishable error rather than just succeed-or-do-nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RegistryError {
+    /// No entry exists for the given absolute path.
+    NotFound,
+    /// The caller's `expected_version` did not match the entry's stored
+    /// version. `actual` is the current value as observed under the lock so
+    /// the caller can refetch against it.
+    VersionMismatch { expected: u64, actual: u64 },
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegistryError::NotFound => write!(f, "registry entry not found"),
+            RegistryError::VersionMismatch { expected, actual } => {
+                write!(f, "version mismatch: expected {expected}, actual {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
 /// Concurrent registry of `ProjectMeta` keyed by absolute canonical path.
 ///
 /// Cloning is cheap (`Arc`-shared inner state). The internal `RwLock` uses
@@ -139,6 +164,40 @@ impl ProjectRegistry {
             .write()
             .expect("registry RwLock poisoned by panic in another thread");
         guard.remove(path);
+    }
+
+    /// Optimistic-lock primitive: under the write lock, check that
+    /// `expected_version` matches the entry's stored version, then increment
+    /// it and return the new value.
+    ///
+    /// The lock is held across the read+compare+increment sequence so two
+    /// concurrent calls cannot both observe the same `expected_version` and
+    /// both succeed. The lock is released *before* the caller does any file
+    /// I/O — the version is "claimed" optimistically. If the subsequent disk
+    /// write fails, the registry's version is one ahead of disk content;
+    /// this is acceptable for a single-user local tool because a) the
+    /// version monotonically increases (no rollback ambiguity), and b) the
+    /// next successful save will rewrite the file with the post-increment
+    /// version. Phase 3's Loro-doc cache replaces this with a different
+    /// concurrency model.
+    pub fn check_and_increment(
+        &self,
+        abs_path: &Path,
+        expected_version: u64,
+    ) -> Result<u64, RegistryError> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let entry = guard.get_mut(abs_path).ok_or(RegistryError::NotFound)?;
+        if entry.version != expected_version {
+            return Err(RegistryError::VersionMismatch {
+                expected: expected_version,
+                actual: entry.version,
+            });
+        }
+        entry.version += 1;
+        Ok(entry.version)
     }
 
     /// Number of entries currently in the registry.
@@ -320,5 +379,97 @@ mod tests {
         assert_eq!(format!("{}", ProjectFormat::Xmile), "xmile");
         assert_eq!(format!("{}", ProjectFormat::Mdl), "mdl");
         assert_eq!(format!("{}", ProjectFormat::SdJson), "sd_json");
+    }
+
+    #[test]
+    fn check_and_increment_returns_not_found_for_unknown_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let err = reg
+            .check_and_increment(Path::new("/tmp/root/missing.stmx"), 0)
+            .unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+    }
+
+    #[test]
+    fn check_and_increment_increments_on_match() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 5;
+        reg.upsert(abs.clone(), meta);
+
+        let new_version = reg.check_and_increment(&abs, 5).expect("matches");
+        assert_eq!(new_version, 6);
+        assert_eq!(reg.get(&abs).expect("entry").version, 6);
+    }
+
+    #[test]
+    fn check_and_increment_rejects_stale_version() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 5;
+        reg.upsert(abs.clone(), meta);
+
+        // First call increments 5 -> 6.
+        reg.check_and_increment(&abs, 5).expect("first match");
+        // Second call with the now-stale `5` must fail and report `actual: 6`.
+        let err = reg.check_and_increment(&abs, 5).unwrap_err();
+        assert_eq!(
+            err,
+            RegistryError::VersionMismatch {
+                expected: 5,
+                actual: 6
+            }
+        );
+        // The registry must not have incremented further on the failed attempt.
+        assert_eq!(reg.get(&abs).expect("entry").version, 6);
+    }
+
+    #[test]
+    fn check_and_increment_is_serialized_under_concurrency() {
+        // Two threads both attempting `check_and_increment(_, 5)` must see
+        // exactly one Ok and one VersionMismatch. The Barrier synchronizes
+        // the start so the race is real, not sequential.
+        use std::sync::Barrier;
+        use std::thread;
+
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("contended.stmx");
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 5;
+        reg.upsert(abs.clone(), meta);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let reg = reg.clone();
+            let abs = abs.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                reg.check_and_increment(&abs, 5)
+            }));
+        }
+        let results: Vec<Result<u64, RegistryError>> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let oks: Vec<_> = results.iter().filter(|r| r.is_ok()).collect();
+        let errs: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+        assert_eq!(oks.len(), 1, "exactly one thread must succeed");
+        assert_eq!(errs.len(), 1, "exactly one thread must observe stale");
+        assert_eq!(*oks[0].as_ref().unwrap(), 6u64);
+        assert_eq!(
+            *errs[0].as_ref().unwrap_err(),
+            RegistryError::VersionMismatch {
+                expected: 5,
+                actual: 6
+            }
+        );
+        // Final state: version is exactly 6 (not 7).
+        assert_eq!(reg.get(&abs).expect("entry").version, 6);
     }
 }
