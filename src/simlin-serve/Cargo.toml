@@ -27,6 +27,7 @@ ignore = "0.4"
 simlin-engine = { path = "../simlin-engine" }
 simlin-mcp-core = { path = "../simlin-mcp-core" }
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
+schemars = { version = "1", features = ["preserve_order"] }
 rust-embed = "8"
 mime_guess = "2"
 rand = "0.10"
@@ -47,3 +48,4 @@ tempfile = "3"
 serde_yaml = "0.9"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
+rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server", "client", "transport-async-rw"] }

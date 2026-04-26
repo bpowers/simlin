@@ -14,5 +14,7 @@
 //! - (later) `transport` — the streamable-HTTP service factory.
 
 pub mod access;
+pub mod server;
 
 pub use access::RegistryAccess;
+pub use server::SimlinServeMcpServer;
