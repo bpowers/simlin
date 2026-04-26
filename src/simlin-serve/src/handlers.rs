@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::GitProbe;
 use crate::parse::{ParseError, datamodel_to_canonical_json, parse_to_datamodel};
-use crate::registry::{GitState, ProjectFormat, ProjectRegistry};
+use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
+use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
 
 /// Process-wide state injected into every handler. Cloning is cheap because
 /// each field is `Arc`-shared; the inner data is never copied per-request.
@@ -213,6 +214,8 @@ pub struct ValidationError {
 /// Axum render them.
 #[derive(Debug)]
 pub enum SaveError {
+    /// Path resolved against the scan root but no file exists there.
+    NotFound,
     /// Optimistic-lock mismatch: the client's `version` is stale. The
     /// `actual` field tells the client what to refetch against.
     VersionMismatch {
@@ -236,6 +239,10 @@ pub enum SaveError {
 impl IntoResponse for SaveError {
     fn into_response(self) -> Response {
         match self {
+            SaveError::NotFound => {
+                let body = serde_json::json!({ "error": "not found" });
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
             SaveError::VersionMismatch { expected, actual } => {
                 let body = serde_json::json!({
                     "error": "version_mismatch",
@@ -268,14 +275,218 @@ impl IntoResponse for SaveError {
     }
 }
 
-/// `POST /api/projects/{*rel_path}` — save edits to a model. Stub for Task 1;
-/// later tasks fill in the version check, validation, and disk write.
+/// `POST /api/projects/{*rel_path}` — save edits to a model.
+///
+/// Pipeline (Subcomponent A; the actual disk write lands in Subcomponent
+/// B):
+///
+/// 1. Sanitize + canonicalize the relative path. 404 if the file is
+///    missing; 403 if it canonicalizes outside the scan root.
+/// 2. Read the current on-disk content and parse it into a
+///    `datamodel::Project`. We need this both for the baseline error set
+///    and for the post-write metadata refresh in Subcomponent B.
+/// 3. Compute the pre-edit baseline (errors that exist before the save).
+/// 4. Optimistic version check via `check_and_increment` (claims the
+///    next version under the registry write lock). On stale, 409 with
+///    the actual current version so the client can refetch.
+/// 5. Validate the incoming JSON. If `serde_json` rejects it -> 400. If
+///    the project parses but introduces *new* errors not in the baseline
+///    -> 422 with the new errors.
+/// 6. Stub success: return the new version + the relative path. The
+///    actual file write is added in Subcomponent B.
 pub async fn save_project(
-    State(_state): State<AppState>,
-    AxumPath(_rel_path): AxumPath<String>,
-    Json(_body): Json<SaveRequest>,
+    State(state): State<AppState>,
+    AxumPath(rel_path): AxumPath<String>,
+    Json(body): Json<SaveRequest>,
 ) -> Result<Json<SaveResponse>, SaveError> {
-    Err(SaveError::Internal(anyhow::anyhow!("not yet implemented")))
+    let resolved = resolve_save_path(&state, &rel_path)?;
+
+    // Read + parse the current on-disk content. We need the parsed
+    // project to capture the pre-edit baseline so saves that *fix*
+    // existing errors are not blocked.
+    let current_contents = std::fs::read_to_string(&resolved.effective_path).map_err(|e| {
+        SaveError::Internal(anyhow::anyhow!(
+            "read {}: {e}",
+            resolved.effective_path.display()
+        ))
+    })?;
+    let current_project = parse_to_datamodel(
+        &resolved.effective_path,
+        resolved.effective_format,
+        &current_contents,
+    )
+    .map_err(|e| SaveError::BadRequest(e.to_string()))?;
+    let baseline: BaselineErrors = crate::validation::compute_baseline(&current_project);
+
+    // The registry must have an entry for the canonical path (it's
+    // populated by `scan_into_registry`, which `list_projects` calls on
+    // every request). If a client posts directly without first hitting
+    // GET /api/projects, the entry may not yet exist; auto-upsert with
+    // version 0 in that case so the version check below operates on a
+    // known starting point. (`Phase 4`'s file watcher will keep the
+    // registry pre-populated with no manual upsert needed.)
+    if state.registry.get(&resolved.canonical).is_none() {
+        let metadata = std::fs::metadata(&resolved.canonical).map_err(|e| {
+            SaveError::Internal(anyhow::anyhow!(
+                "stat {}: {e}",
+                resolved.canonical.display()
+            ))
+        })?;
+        let mtime = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        state.registry.upsert(
+            resolved.canonical.clone(),
+            ProjectMeta {
+                path: PathBuf::new(),
+                format: resolved.initial_format,
+                mtime,
+                size: metadata.len(),
+                git: GitState::Untracked,
+                version: 0,
+            },
+        );
+    }
+
+    // Optimistic version check. Holding the registry write lock across
+    // the read-compare-increment makes concurrent saves safe; the lock
+    // is released before any subsequent file I/O (see
+    // `check_and_increment` for the trade-off).
+    let new_version = match state
+        .registry
+        .check_and_increment(&resolved.canonical, body.version)
+    {
+        Ok(v) => v,
+        Err(RegistryError::VersionMismatch { expected, actual }) => {
+            return Err(SaveError::VersionMismatch { expected, actual });
+        }
+        Err(RegistryError::NotFound) => {
+            // We just upserted above; this can only happen if the entry
+            // was concurrently removed (unlikely for a single-user tool
+            // but worth being defensive about).
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "registry entry vanished between upsert and version check"
+            )));
+        }
+    };
+
+    // Validate the incoming body against the baseline.
+    let outcome: ValidationOutcome = match validate_save(&body.json, &baseline) {
+        Ok(o) => o,
+        Err(ValidationFailure::JsonParse(e)) => {
+            return Err(SaveError::BadRequest(format!("json parse error: {e}")));
+        }
+    };
+    if !outcome.new_errors.is_empty() {
+        return Err(SaveError::Validation {
+            errors: outcome.new_errors,
+        });
+    }
+
+    // Stub success: subcomponent B replaces this with the disk write.
+    Ok(Json(SaveResponse {
+        version: new_version,
+        path: path_to_forward_slash(&resolved.relative_path),
+    }))
+}
+
+/// Path-resolution outcome shared between the save handler's various
+/// error paths. The `initial_format` is what the request URL maps to;
+/// the `effective_*` pair carries the post-sidecar redirection (a
+/// `.mdl` request whose sibling `.sd.json` exists reads from the
+/// sidecar on the GET path; we honor the same redirect for save's
+/// baseline computation).
+struct ResolvedPath {
+    /// The canonicalized absolute path of the requested file.
+    canonical: PathBuf,
+    /// The relative path (relative to the scan root) the client should
+    /// see in the response. May differ from the request when a sidecar
+    /// redirect happens; Subcomponent B owns that case.
+    relative_path: PathBuf,
+    /// Source format inferred from the request URL itself (no sidecar
+    /// redirect). Used for the registry-entry seed.
+    initial_format: ProjectFormat,
+    /// The file we actually read for the baseline pre-edit project.
+    /// For `.mdl` requests with a sibling `.sd.json` this is the
+    /// sidecar (mirrors the GET handler's preference rule).
+    effective_path: PathBuf,
+    /// Format of `effective_path`.
+    effective_format: ProjectFormat,
+}
+
+/// Resolve a request `rel_path` to a canonical, scan-root-confined
+/// path. Mirrors the GET handler's path resolution but maps to
+/// `SaveError` instead of `ApiError`. Path traversal, missing files,
+/// and out-of-root canonical resolutions all produce distinct errors.
+fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, SaveError> {
+    let safe_rel = sanitize_rel_path(rel_path).map_err(api_error_to_save_error)?;
+    let candidate = state.root.join(&safe_rel);
+    let canonical = match candidate.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SaveError::NotFound);
+        }
+        Err(e) => {
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "canonicalize {}: {e}",
+                candidate.display()
+            )));
+        }
+    };
+    let root_canonical = state.root.canonicalize().map_err(|e| {
+        SaveError::Internal(anyhow::anyhow!(
+            "canonicalize root {}: {e}",
+            state.root.display()
+        ))
+    })?;
+    if !canonical.starts_with(&root_canonical) {
+        return Err(SaveError::Forbidden);
+    }
+
+    let initial_format = format_for_path(&canonical)
+        .ok_or_else(|| SaveError::BadRequest("unrecognized file extension".to_string()))?;
+
+    let (effective_path, effective_format) = if matches!(initial_format, ProjectFormat::Mdl) {
+        let sidecar = sidecar_for_mdl(&canonical);
+        if sidecar.is_file() {
+            (sidecar, ProjectFormat::SdJson)
+        } else {
+            (canonical.clone(), ProjectFormat::Mdl)
+        }
+    } else {
+        (canonical.clone(), initial_format)
+    };
+
+    let relative_path = canonical
+        .strip_prefix(&root_canonical)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| canonical.clone());
+
+    Ok(ResolvedPath {
+        canonical,
+        relative_path,
+        initial_format,
+        effective_path,
+        effective_format,
+    })
+}
+
+/// Translate the few `ApiError` variants that `sanitize_rel_path` can
+/// produce into the corresponding `SaveError`. `ApiError::Internal`
+/// is unreachable here because `sanitize_rel_path` only returns
+/// `BadRequest` variants, but matched explicitly for completeness.
+fn api_error_to_save_error(err: ApiError) -> SaveError {
+    match err {
+        ApiError::BadRequest(msg) => SaveError::BadRequest(msg),
+        ApiError::Forbidden => SaveError::Forbidden,
+        ApiError::NotFound => {
+            // sanitize_rel_path doesn't produce NotFound; if a future
+            // refactor introduces it, surfacing as 400 is the most
+            // conservative choice.
+            SaveError::BadRequest("not found".to_string())
+        }
+        ApiError::Internal(msg) => SaveError::Internal(anyhow::anyhow!(msg)),
+    }
 }
 
 /// Errors surfaced through HTTP. The `IntoResponse` impl owns the status code
@@ -466,6 +677,13 @@ mod tests {
             Some(ProjectFormat::SdJson)
         );
         assert_eq!(format_for_path(Path::new("/tmp/x.txt")), None);
+    }
+
+    #[test]
+    fn save_error_not_found_maps_to_404() {
+        let err = SaveError::NotFound;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
