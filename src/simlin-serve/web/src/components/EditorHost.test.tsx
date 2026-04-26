@@ -942,6 +942,58 @@ describe('EditorHost', () => {
     }
   });
 
+  test('selectionChanged drops the frame when path swaps during the debounce window', async () => {
+    // A selection on project A captures variable idents in A's namespace.
+    // If the user swaps to project B within the 150ms debounce window the
+    // pending frame must NOT fire under B's path: emitting A's idents
+    // against B produces phantom MCP notifications referencing identifiers
+    // that may not exist in B at all.
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ json: '{}', version: 0, source_format: 'stmx' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ json: '{}', version: 0, source_format: 'stmx' }),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      const { socket, sent } = makeFakeSocket();
+      const { rerender } = render(<EditorHost path="a.stmx" socket={socket} />);
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      sent.length = 0;
+
+      EditorMock.lastProps?.onSelectionChanged?.(['var_a']);
+
+      // Inside the debounce window, swap to path B before the timer fires.
+      act(() => {
+        jest.advanceTimersByTime(50);
+      });
+      rerender(<EditorHost path="b.stmx" socket={socket} />);
+      sent.length = 0; // discard the projectFocused frame from the swap
+
+      // Advance past the 150ms debounce. The pending timer fires.
+      act(() => {
+        jest.advanceTimersByTime(150);
+      });
+
+      // No selection frame should be emitted: A's idents do not belong to
+      // B's namespace, and the selection was never re-fired against B.
+      expect(sent.filter((m) => m.type === 'selectionChanged')).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('selectionChanged uses the current path when emitted', async () => {
     jest.useFakeTimers();
     try {

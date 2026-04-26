@@ -218,22 +218,28 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
 
   // Coalesce a burst of selection changes into one WS frame. Each new
   // call replaces any pending frame so only the latest selection set
-  // is sent. The path is read from props at flush time to ensure a
-  // selection event that happens to arrive across a path swap targets
-  // the project the user actually has selected.
+  // is sent. The path is captured at schedule time and re-checked at
+  // flush; a path swap during the debounce window invalidates the
+  // pending frame because the captured idents reference the *previous*
+  // project's namespace and would land as a phantom selection on the
+  // new project.
   private handleSelectionChanged = (idents: ReadonlyArray<string>): void => {
     if (this.selectionDebounceTimer !== null) {
       clearTimeout(this.selectionDebounceTimer);
     }
+    const targetPath = this.props.path;
+    if (!targetPath) {
+      this.selectionDebounceTimer = null;
+      return;
+    }
     this.selectionDebounceTimer = setTimeout(() => {
       this.selectionDebounceTimer = null;
-      const path = this.props.path;
-      if (!path) {
+      if (this.props.path !== targetPath) {
         return;
       }
       this.props.socket?.send({
         type: 'selectionChanged',
-        path,
+        path: targetPath,
         variableIdents: idents,
       });
     }, SELECTION_DEBOUNCE_MS);
