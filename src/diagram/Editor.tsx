@@ -472,19 +472,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       this.setState({
         modelErrors: [...this.state.modelErrors, err as Error],
       });
-      return;
-    }
-
-    this.inSave = false;
-
-    if (this.saveQueued) {
-      this.saveQueued = false;
-      if (version) {
-        await this.save(version);
-      } else {
-        this.setState({
-          modelErrors: [...this.state.modelErrors, new Error('last save failed, please reload')],
-        });
+    } finally {
+      this.inSave = false;
+      if (this.saveQueued) {
+        this.saveQueued = false;
+        // Use the new server version when available; fall back to
+        // currVersion on error so the queued edit still attempts to flush
+        // rather than being silently dropped.
+        await this.save(version ?? currVersion);
       }
     }
   }
