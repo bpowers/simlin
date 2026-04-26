@@ -966,3 +966,145 @@ fn cross_element_fixed_index_link_carries_fixed_index_shape() {
             .collect::<Vec<_>>()
     );
 }
+
+// -- Phase 4 Task 3.5 (edge-aliasing limitation regression test) --
+//
+// AC4.2 documented limitation: when a target equation references the
+// same source under BOTH a Bare and a FixedIndex(NYC) shape (e.g.,
+// `share[Region] = pop + pop[NYC]`), the same diagonal element-edge
+// `pop[nyc] -> share[nyc]` is contributed by two distinct AST refs.
+// The element graph deduplicates them into a single edge, and Phase 3
+// emits two distinct link-score variables (one per shape). The Phase 4
+// loop-link annotation heuristic, working only from node-name
+// surface, must collapse to a single shape per loop link -- matched
+// source/target subscripts pick Bare. The resulting loop score
+// references only the Bare link-score (under-counting the FixedIndex
+// contribution).
+//
+// This test pins the current heuristic's behavior so a future
+// shape-threading refinement that emits both contributions or picks
+// differently triggers a deliberate test update.
+
+#[test]
+fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
+    use salsa::Setter;
+
+    // Build a feedback-closed model so loop construction runs and
+    // populates Link.shape. The aliased edge appears inside the A2A
+    // loop pop[r] -> share[r] -> update[r] -> pop[r]:
+    //
+    //   pop[Region]: stock with inflow update[Region]
+    //   share[Region] = pop + pop[NYC]   <- BOTH Bare and FixedIndex(NYC)
+    //                                       contribute to pop[nyc]->share[nyc]
+    //   update[Region] = share * 0.001
+    let mut db = SimlinDb::default();
+    let project = TestProject::new("aliasing")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop + pop[NYC]")
+        .array_flow("update[Region]", "share * 0.001", None)
+        .build_datamodel();
+
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    // Discovery mode emits link scores for ALL edges, so both the
+    // Bare and FixedIndex variants land in the surface even though
+    // (in exhaustive mode) the FixedIndex variant might be elided
+    // for a non-loop edge.
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    // -- Item 1: element graph dedup -- the diagonal aliased edge
+    // pop[nyc] -> share[nyc] appears once.
+    let element_edges = model_element_causal_edges(&db, model, source_project);
+    let pop_nyc_targets = element_edges
+        .edges
+        .get("pop[nyc]")
+        .expect("pop[nyc] should have outgoing edges");
+    assert!(
+        pop_nyc_targets.contains("share[nyc]"),
+        "expected pop[nyc] -> share[nyc] in element graph; targets: {pop_nyc_targets:?}"
+    );
+
+    // -- Item 2: BOTH link score variables emitted --
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let names: Vec<&String> = ltm.vars.iter().map(|v| &v.name).collect();
+    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share";
+    let fixed_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share";
+    assert!(
+        names.iter().any(|n| n.as_str() == bare_name),
+        "expected Bare link score {bare_name:?}; got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.as_str() == fixed_name),
+        "expected FixedIndex(nyc) link score {fixed_name:?}; got: {names:?}"
+    );
+
+    // -- Item 3: heuristic's chosen shape on the aliased edge in a
+    // loop -- pop[nyc] -> share[nyc] is inside an A2A loop and the
+    // A2A branch sets Bare for every link (matched source/target
+    // subscripts). This pins the documented under-counting behavior.
+    //
+    // Switch back to exhaustive mode so loops are constructed.
+    source_project.set_ltm_discovery_mode(&mut db).to(false);
+    let loops = build_loops_for_test(
+        &TestProject::new("aliasing")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("pop[Region]", "100", &["update"], &[], None)
+            .array_aux("share[Region]", "pop + pop[NYC]")
+            .array_flow("update[Region]", "share * 0.001", None),
+    );
+    assert!(
+        !loops.is_empty(),
+        "expected at least one loop in the aliasing fixture"
+    );
+
+    // Find the link in some loop whose stripped from is "pop" and
+    // stripped to is "share". The heuristic's choice on this aliased
+    // edge is the documented current behavior.
+    let mut chosen_shapes: Vec<Option<RefShape>> = Vec::new();
+    for l in &loops {
+        for link in &l.links {
+            // Compare stripped variable names so we catch both A2A
+            // (variable-level pop->share) and per-element forms.
+            let from_stripped = link
+                .from
+                .as_str()
+                .split('[')
+                .next()
+                .unwrap_or(link.from.as_str());
+            let to_stripped = link
+                .to
+                .as_str()
+                .split('[')
+                .next()
+                .unwrap_or(link.to.as_str());
+            if from_stripped == "pop" && to_stripped == "share" {
+                chosen_shapes.push(link.shape.clone());
+            }
+        }
+    }
+    assert!(
+        !chosen_shapes.is_empty(),
+        "expected at least one pop->share link in the loops; got loops: {:?}",
+        loops.iter().map(|l| l.id.clone()).collect::<Vec<_>>()
+    );
+
+    // Pin the documented limitation: every pop->share loop link gets
+    // Bare under the current heuristic (A2A branch unconditionally
+    // sets Bare). A future shape-threading refinement that emits a
+    // FixedIndex variant for this edge would change the expectation
+    // here -- exactly the deliberate breakage we want.
+    for shape in &chosen_shapes {
+        assert_eq!(
+            shape,
+            &Some(RefShape::Bare),
+            "documented limitation: heuristic should pick Bare on the \
+             aliased edge inside the A2A loop, missing the FixedIndex \
+             contribution; got {shape:?}"
+        );
+    }
+}
