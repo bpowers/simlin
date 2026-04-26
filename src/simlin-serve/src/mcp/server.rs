@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -61,6 +62,13 @@ pub struct SimlinServeMcpServer<A: ProjectAccess> {
     /// re-borrowing `state.root` because rmcp's `Self: Clone` requires
     /// every field to be cloneable cheaply.
     root: Arc<PathBuf>,
+    /// One-shot dedupe flag for the per-session notification forwarder.
+    /// `initialize` flips this from false to true under a single
+    /// compare-and-swap; subsequent calls observe the flag already set
+    /// and skip the spawn. Wrapped in `Arc` so the `Clone` impl shares
+    /// the same flag across every clone of the server (rmcp's session
+    /// machinery requires `Self: Clone`).
+    forwarder_spawned: Arc<AtomicBool>,
     /// The router is consumed by the `tool_handler` macro expansion, not
     /// by direct method calls — silence the dead-code warning.
     #[allow(dead_code)]
@@ -76,6 +84,7 @@ impl SimlinServeMcpServer<RegistryAccess> {
             access,
             state,
             root,
+            forwarder_spawned: Arc::new(AtomicBool::new(false)),
             tool_router: Self::tool_router(),
         }
     }
@@ -91,6 +100,7 @@ impl<A: ProjectAccess> SimlinServeMcpServer<A> {
             access: Arc::new(access),
             state,
             root,
+            forwarder_spawned: Arc::new(AtomicBool::new(false)),
             tool_router: Self::tool_router(),
         }
     }
@@ -248,14 +258,23 @@ impl<A: ProjectAccess> ServerHandler for SimlinServeMcpServer<A> {
             ctx.peer.set_peer_info(request);
         }
 
-        // Per-session notification forwarder. Each MCP session subscribes
-        // to its own broadcast receiver and gets its own `Peer` clone;
-        // when the session ends `send_notification` returns
-        // `ServiceError::TransportClosed` and the spawned task exits
-        // naturally. No global registry is required.
-        let peer = ctx.peer.clone();
-        let bus_rx = self.state.events.subscribe();
-        tokio::spawn(forward_events_to_peer(peer, bus_rx));
+        // Per-session notification forwarder. Spawn at most once per
+        // session: a buggy client that re-sends `initialize` would
+        // otherwise stack duplicate forwarders and the SPA would receive
+        // every `simlin/projectChanged` notification N times. We track
+        // the spawn via an `AtomicBool` on the server instance because
+        // `peer_info().is_none()` is unreliable as a "first call" probe
+        // (rmcp may have already cached info before our impl runs).
+        if !self.forwarder_spawned.swap(true, Ordering::AcqRel) {
+            // Each MCP session subscribes to its own broadcast receiver
+            // and gets its own `Peer` clone; when the session ends
+            // `send_notification` returns `ServiceError::TransportClosed`
+            // and the spawned task exits naturally. No global registry
+            // is required.
+            let peer = ctx.peer.clone();
+            let bus_rx = self.state.events.subscribe();
+            tokio::spawn(forward_events_to_peer(peer, bus_rx));
+        }
 
         Ok(self.get_info())
     }
