@@ -788,15 +788,16 @@ fn generate_stock_to_flow_equation(
     )
 }
 
-/// Resolve the link-score variable name a loop_score equation should
-/// reference for a single loop link.
+/// Resolve the link-score variable name a downstream consumer (loop
+/// score, pathway score, composite score) should reference for a single
+/// `(from, to)` edge.
 ///
 /// `emit_per_shape_link_scores` emits names per-shape based on what the
 /// target's AST contains: `pop→share` (Bare), `pop→share⁚wildcard`
-/// (Wildcard), `pop[nyc]→share` (FixedIndex via element-level `from`),
-/// and so on. The loop topology doesn't carry the access shape, so we
-/// resolve at equation-generation time by trying candidate names in
-/// priority order against the set of names actually emitted.
+/// (Wildcard), `pop[nyc]→share` (FixedIndex via element-level `from`
+/// prefix), and so on. The downstream consumer doesn't carry the access
+/// shape, so we resolve at equation-generation time by trying candidate
+/// names in priority order against the set of names actually emitted.
 ///
 /// Priority:
 ///
@@ -805,27 +806,68 @@ fn generate_stock_to_flow_equation(
 ///    which combines with Bare naming to match the per-element name
 ///    `try_cross_dimensional_link_scores` emits. This is also the only
 ///    correct choice when both Bare and a suffixed variant coexist, so
-///    that the documented edge-aliasing limitation stays consistent.
+///    the documented edge-aliasing limitation stays consistent.
 ///
-/// 2. `Wildcard` (`⁚wildcard` suffix) -- e.g., `share[r] = SUM(pop[*])`
+/// 2. `FixedIndex` -- e.g., `share[r] = pop[NYC]` where the only AST
+///    occurrence of `pop` is a literal-element subscript. The emitted
+///    name is `pop[nyc]→share`. We scan `emitted` for any name matching
+///    `{from}[...]→{to}` (no shape suffix) and pick the lexicographically
+///    first match, deterministically resolving multi-element targets
+///    like `share[r] = pop[NYC] + pop[BOSTON]`. Picking one is the
+///    documented edge-aliasing under-counting; here it manifests across
+///    multiple FixedIndex variants.
+///
+/// 3. `Wildcard` (`⁚wildcard` suffix) -- e.g., `share[r] = SUM(pop[*])`
 ///    where the only AST occurrence of `pop` is inside a wildcard
-///    reducer. Without this fallback, the loop_score would reference
-///    the never-emitted Bare name.
+///    reducer.
 ///
-/// 3. `DynamicIndex` (`⁚dynamic` suffix) -- analogous to Wildcard for
+/// 4. `DynamicIndex` (`⁚dynamic` suffix) -- analogous to Wildcard for
 ///    expression-indexed subscripts.
 ///
 /// If none of the candidates is in `emitted`, return the Bare canonical
 /// name anyway and let the fragment compiler's stub-dep fallback fire.
 /// That matches the pre-resolver behavior on the unreachable branch.
-fn resolve_link_score_name_for_loop(from: &str, to: &str, emitted: &HashSet<String>) -> String {
-    for shape in [RefShape::Bare, RefShape::Wildcard, RefShape::DynamicIndex] {
-        let candidate = link_score_var_name(from, to, &shape);
-        if emitted.contains(&candidate) {
-            return candidate;
-        }
+pub(crate) fn resolve_link_score_name_for_loop(
+    from: &str,
+    to: &str,
+    emitted: &HashSet<String>,
+) -> String {
+    let bare = link_score_var_name(from, to, &RefShape::Bare);
+    if emitted.contains(&bare) {
+        return bare;
     }
-    link_score_var_name(from, to, &RefShape::Bare)
+    if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted) {
+        return fixed;
+    }
+    let wildcard = link_score_var_name(from, to, &RefShape::Wildcard);
+    if emitted.contains(&wildcard) {
+        return wildcard;
+    }
+    let dynamic = link_score_var_name(from, to, &RefShape::DynamicIndex);
+    if emitted.contains(&dynamic) {
+        return dynamic;
+    }
+    bare
+}
+
+/// Scan `emitted` for any link-score variable name matching the
+/// FixedIndex pattern `{prefix}{from}[...]→{to}` (no shape suffix).
+/// Returns the lexicographically first match for determinism.
+fn find_fixed_index_emitted_name(
+    from: &str,
+    to: &str,
+    emitted: &HashSet<String>,
+) -> Option<String> {
+    let prefix = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}[");
+    let suffix = format!("]\u{2192}{to}");
+    let mut matches: Vec<&String> = emitted
+        .iter()
+        .filter(|n| {
+            n.starts_with(&prefix) && n.ends_with(&suffix) && n.len() > prefix.len() + suffix.len()
+        })
+        .collect();
+    matches.sort();
+    matches.first().map(|s| (*s).clone())
 }
 
 /// Generate the equation for a loop score variable.
@@ -2019,6 +2061,75 @@ mod tests {
         );
         // Loop score is the product of the two references.
         assert!(eq.contains(" * "), "expected product join; got: {eq}");
+    }
+
+    /// Regression test: when only a `FixedIndex` variant is in `emitted`
+    /// (e.g., `share[r] = pop[NYC]` -- only `pop[nyc]→share` is emitted),
+    /// the resolver must pick that variant rather than fall back to the
+    /// never-emitted Bare canonical name.
+    #[test]
+    fn resolver_picks_fixed_index_when_bare_not_emitted() {
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
+
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        assert_eq!(
+            chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share",
+            "resolver should pick the FixedIndex variant when Bare is not emitted",
+        );
+    }
+
+    /// Regression test: when multiple FixedIndex variants exist (e.g.,
+    /// `share[r] = pop[NYC] + pop[BOSTON]`), the resolver picks
+    /// deterministically (lexicographically first). This documents the
+    /// edge-aliasing limitation: only one variant contributes to the
+    /// loop score.
+    #[test]
+    fn resolver_picks_fixed_index_deterministically_with_multiple_variants() {
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
+        emitted
+            .insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}share".to_string());
+
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        // Lexicographic sort: "pop[boston]→share" < "pop[nyc]→share".
+        assert_eq!(
+            chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}share",
+            "resolver should pick the lexicographically first FixedIndex variant",
+        );
+    }
+
+    /// Regression test: Bare must win when both Bare and a suffixed
+    /// variant coexist (the documented edge-aliasing behavior).
+    #[test]
+    fn resolver_prefers_bare_over_other_shapes() {
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string());
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard".to_string(),
+        );
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
+
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        assert_eq!(
+            chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share",
+            "Bare must win when present, regardless of other variants",
+        );
+    }
+
+    /// Regression test: bracketed `from` (cross-dimensional case) flows
+    /// through Bare naming verbatim and must resolve to the matching
+    /// per-element name emitted by `try_cross_dimensional_link_scores`.
+    #[test]
+    fn resolver_resolves_cross_dim_bracketed_from() {
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string());
+
+        let chosen = resolve_link_score_name_for_loop("pop[nyc]", "total", &emitted);
+        assert_eq!(
+            chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total",
+            "bracketed from + Bare should match the emitted per-element name",
+        );
     }
 
     /// Regression test: when only the Wildcard variant is in `emitted`,

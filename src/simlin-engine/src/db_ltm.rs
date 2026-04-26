@@ -2875,7 +2875,22 @@ pub fn model_ltm_variables(
         }
     }
 
-    // Pathway and composite scores for models with input ports
+    // Pathway and composite scores for models with input ports.
+    //
+    // Each pathway is a product of link-score references. Since
+    // emit_per_shape_link_scores only emits the names that appear in
+    // each target's AST, we resolve each link against the set of
+    // already-emitted names with shape priority (Bare > FixedIndex >
+    // Wildcard > DynamicIndex). Without this, an input-port model with
+    // an edge like `share[r] = SUM(x[*])` would reference the never-
+    // emitted Bare canonical name `x→share`, and the fragment
+    // compiler's stub-dep fallback would silently drop that pathway's
+    // contribution to the composite score.
+    let pathway_emitted_names: HashSet<String> = vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
+        .map(|v| v.name.clone())
+        .collect();
     for (input_port, port_pathways) in &pathways {
         let mut pathway_names = Vec::new();
         for (idx, pathway_links) in port_pathways.iter().enumerate() {
@@ -2888,11 +2903,12 @@ pub fn model_ltm_variables(
             let link_score_refs: Vec<String> = pathway_links
                 .iter()
                 .map(|link| {
-                    format!(
-                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}\"",
+                    let resolved = crate::ltm_augment::resolve_link_score_name_for_loop(
                         link.from.as_str(),
-                        link.to.as_str()
-                    )
+                        link.to.as_str(),
+                        &pathway_emitted_names,
+                    );
+                    format!("\"{resolved}\"")
                 })
                 .collect();
 
