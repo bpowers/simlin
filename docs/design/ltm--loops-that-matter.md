@@ -585,8 +585,7 @@ element-graph SCC sizes that previously drove tech-debt #25's auto-flip
 pressure on FixedIndex models are no longer inflated by spurious edges,
 though `MAX_LTM_SCC_NODES = 50` was retained because WRLD3-class models
 trip the gate from variable-level cycle structure rather than
-element-graph artifacts. The full plan and its phase tasks live in
-`docs/implementation-plans/2026-04-25-ltm-per-ref-elem-graph/`.
+element-graph artifacts.
 
 ### Link Score Classification
 
