@@ -113,6 +113,12 @@ pub struct ProjectMeta {
 pub enum RegistryError {
     /// No entry exists for the given absolute path.
     NotFound,
+    /// An entry already exists at the target path. Returned by
+    /// `rename_entry` when `to` is already tracked, so the caller can
+    /// decide whether to displace the existing entry explicitly (e.g. by
+    /// publishing `ProjectRemoved` for `to` first) rather than silently
+    /// overwriting it.
+    AlreadyExists,
     /// The caller's `expected_version` did not match the entry's stored
     /// version. `actual` is the current value as observed under the lock so
     /// the caller can refetch against it.
@@ -130,6 +136,7 @@ impl PartialEq for RegistryError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (RegistryError::NotFound, RegistryError::NotFound) => true,
+            (RegistryError::AlreadyExists, RegistryError::AlreadyExists) => true,
             (
                 RegistryError::VersionMismatch {
                     expected: a,
@@ -152,6 +159,7 @@ impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RegistryError::NotFound => write!(f, "registry entry not found"),
+            RegistryError::AlreadyExists => write!(f, "registry entry already exists at target"),
             RegistryError::VersionMismatch { expected, actual } => {
                 write!(f, "version mismatch: expected {expected}, actual {actual}")
             }
@@ -501,6 +509,10 @@ impl ProjectRegistry {
     /// display path is recomputed against the registry root.
     ///
     /// Returns `RegistryError::NotFound` if no entry exists at `from`.
+    /// Returns `RegistryError::AlreadyExists` if an entry is already tracked
+    /// at `to`: the caller is responsible for deciding whether to displace
+    /// the existing entry (e.g. by removing it and broadcasting
+    /// `ProjectRemoved` first) rather than silently overwriting its state.
     /// The whole transition runs under the write lock so it's atomic
     /// w.r.t. concurrent saves and watcher events.
     ///
@@ -512,6 +524,9 @@ impl ProjectRegistry {
             .inner
             .write()
             .expect("registry RwLock poisoned by panic in another thread");
+        if guard.contains_key(to) {
+            return Err(RegistryError::AlreadyExists);
+        }
         let mut entry = guard.remove(from).ok_or(RegistryError::NotFound)?;
         entry.path = relativize(&self.root, to);
         guard.insert(to.to_path_buf(), entry);
@@ -1639,6 +1654,42 @@ mod tests {
         let to = PathBuf::from("/tmp/root/elsewhere.stmx");
         let err = reg.rename_entry(&from, &to).unwrap_err();
         assert_eq!(err, RegistryError::NotFound);
+    }
+
+    /// When the destination is already tracked, `rename_entry` must return
+    /// `AlreadyExists` and leave both entries unchanged. The caller is
+    /// responsible for emitting `ProjectRemoved` for the destination before
+    /// deciding how to proceed, so the SPA never ends up with a stale
+    /// sidebar entry that silently lost its state.
+    #[test]
+    fn rename_entry_returns_already_exists_when_destination_tracked() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let a = root.join("a.stmx");
+        let b = root.join("b.stmx");
+
+        let mut a_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        a_meta.version = 3;
+        reg.upsert(a.clone(), a_meta);
+
+        let mut b_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        b_meta.version = 9;
+        reg.upsert(b.clone(), b_meta);
+
+        let err = reg.rename_entry(&a, &b).unwrap_err();
+        assert_eq!(err, RegistryError::AlreadyExists);
+
+        // Both entries must remain unchanged after the failed rename.
+        assert_eq!(
+            reg.get(&a).expect("a still present").version,
+            3,
+            "source entry must not be removed"
+        );
+        assert_eq!(
+            reg.get(&b).expect("b still present").version,
+            9,
+            "destination entry must not be overwritten"
+        );
     }
 
     #[test]

@@ -753,6 +753,29 @@ impl WatcherActor {
                 Self::handle_model_change(state, to, format, ChangeKind::Created).await;
                 return;
             }
+            Err(RegistryError::AlreadyExists) => {
+                // The destination is already tracked (e.g. `mv a.stmx b.stmx`
+                // when b.stmx is also being watched). Explicitly remove the
+                // destination entry so the SPA drops its stale sidebar row,
+                // then re-apply the source state as a fresh Created at the
+                // destination. This preserves the source's doc and version
+                // while giving the SPA a clean signal to refresh its view.
+                let to_display = match to_key.strip_prefix(state.root.as_ref()) {
+                    Ok(rel) => path_to_forward_slash(rel),
+                    Err(_) => path_to_forward_slash(&to_key),
+                };
+                tracing::debug!(
+                    from = %from.display(),
+                    to = %to.display(),
+                    "watcher: rename destination already tracked; removing it then re-keying"
+                );
+                state.registry.remove(&to_key);
+                state
+                    .events
+                    .publish(WsMessage::ProjectRemoved { path: to_display });
+                Self::handle_model_change(state, to, format, ChangeKind::Created).await;
+                return;
+            }
             Err(err) => {
                 tracing::warn!(
                     from = %from.display(),

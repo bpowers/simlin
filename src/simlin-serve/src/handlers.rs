@@ -10,6 +10,8 @@
 //! cheaply cloneable (each field is `Arc`-shared) so Axum extractors can pull
 //! it out of every request without contention.
 
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 use std::sync::Arc;
 
@@ -222,6 +224,9 @@ pub async fn get_project(
             RegistryError::HydrationFailed(msg) => ApiError::BadRequest(msg),
             RegistryError::VersionMismatch { .. } => ApiError::Internal(format!(
                 "unexpected version mismatch from get_or_init_doc: {e}"
+            )),
+            RegistryError::AlreadyExists => ApiError::Internal(format!(
+                "unexpected AlreadyExists from get_or_init_doc: {e}"
             )),
         })?;
 
@@ -447,10 +452,12 @@ fn sanitize_new_project_name(raw: &str) -> Result<&str, NewProjectError> {
 
 /// Validate a caller-supplied `parent_dir` (forward-slash separated).
 ///
-/// Reuses `sanitize_rel_path` for the no-traversal/no-absolute checks
-/// and additionally rejects empty path components so a trailing or
-/// leading slash never creates a `<root>/<name>.<ext>` path that the
-/// caller didn't request.
+/// Rejects entirely empty `raw` values up front. For non-empty input,
+/// delegates to `sanitize_rel_path` which rejects `..` segments and
+/// absolute paths (including root `/` and Windows drive prefixes).
+/// PathBuf normalization by `sanitize_rel_path` absorbs double, leading,
+/// or trailing slashes in the path string, so those never produce
+/// unexpected parent positions.
 fn sanitize_new_project_parent_dir(raw: &str) -> Result<PathBuf, NewProjectError> {
     if raw.is_empty() {
         return Err(NewProjectError::InvalidParentDir(
@@ -493,19 +500,15 @@ pub async fn create_new_project(
         None => state.root.join(&filename),
     };
 
-    if abs_path.exists() {
-        return Err(NewProjectError::Conflict);
-    }
-
     let mut project = simlin_mcp_core::types::build_empty_project();
     project.name = name.to_string();
 
     let project_format = format.project_format();
 
-    // Re-use the existing format-aware writer plumbing so the bytes the
-    // HTTP create path lands match what a save against the same file
-    // would produce.  resolve_save_target dispatches by format; for
-    // Stmx/SdJson the result is "in place at this absolute path".
+    // Serialize to bytes first so we can use create_new for the disk write.
+    // resolve_save_target dispatches by format; for Stmx/SdJson the result
+    // is "in place at this absolute path" (no rename-over), which is exactly
+    // what we need here.
     let target = resolve_save_target(&abs_path, project_format);
     let outcome = serialize_project(&project, &target)
         .map_err(|e| NewProjectError::Internal(format!("serialize: {e}")))?;
@@ -518,7 +521,31 @@ pub async fn create_new_project(
             .map_err(|e| NewProjectError::Internal(format!("create parent dir: {e}")))?;
     }
 
-    commit_write(&outcome).map_err(|e| NewProjectError::Internal(format!("commit_write: {e}")))?;
+    // Atomic exclusive create: the OS guarantees that exactly one concurrent
+    // POST with the same name succeeds. The second sees AlreadyExists before
+    // any bytes are written, preventing both a TOCTOU race and a silent
+    // overwrite of an existing file. Note: we intentionally do not use
+    // commit_write / atomic_write here — those use a tempfile + rename,
+    // which does not have create_new semantics and would silently overwrite
+    // an existing file. The trade-off is that a crash mid-write could leave
+    // a partial file; for a brand-new empty project the content is trivially
+    // small and easily re-created, so this is acceptable.
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&outcome.path)
+    {
+        Ok(mut file) => {
+            file.write_all(&outcome.bytes)
+                .map_err(|e| NewProjectError::Internal(format!("write: {e}")))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(NewProjectError::Conflict);
+        }
+        Err(e) => {
+            return Err(NewProjectError::Internal(format!("create: {e}")));
+        }
+    }
 
     // Defense in depth: confirm the freshly-written file actually lives
     // under the canonicalized scan root.  resolve_save_target trusted
@@ -737,6 +764,9 @@ pub async fn save_project(
             RegistryError::VersionMismatch { expected, actual } => {
                 SaveError::VersionMismatch { expected, actual }
             }
+            RegistryError::AlreadyExists => SaveError::Internal(anyhow::anyhow!(
+                "unexpected AlreadyExists from get_or_init_doc"
+            )),
         })?;
     let current_json_value = current_doc
         .export_canonical_json()
@@ -789,6 +819,11 @@ pub async fn save_project(
         }
         Err(RegistryError::HydrationFailed(msg)) => {
             return Err(SaveError::Internal(anyhow::anyhow!("merge failed: {msg}")));
+        }
+        Err(RegistryError::AlreadyExists) => {
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "unexpected AlreadyExists from check_increment_and_merge"
+            )));
         }
     };
 

@@ -275,6 +275,9 @@ impl ProjectAccess for RegistryAccess {
                         // honest mapping.
                         AccessError::VersionMismatch { expected, actual }
                     }
+                    RegistryError::AlreadyExists => AccessError::ParseError(anyhow::anyhow!(
+                        "unexpected AlreadyExists from get_or_init_doc"
+                    )),
                 }
             })?;
 
@@ -344,6 +347,9 @@ impl ProjectAccess for RegistryAccess {
                 RegistryError::VersionMismatch { expected, actual } => {
                     AccessError::VersionMismatch { expected, actual }
                 }
+                RegistryError::AlreadyExists => AccessError::ParseError(anyhow::anyhow!(
+                    "unexpected AlreadyExists from get_or_init_doc"
+                )),
             })?;
         let current_json_value = current_doc
             .export_canonical_json()
@@ -402,6 +408,9 @@ impl ProjectAccess for RegistryAccess {
                 RegistryError::HydrationFailed(msg) => {
                     AccessError::ParseError(anyhow::anyhow!(msg))
                 }
+                RegistryError::AlreadyExists => AccessError::ParseError(anyhow::anyhow!(
+                    "unexpected AlreadyExists from check_increment_and_merge"
+                )),
             })?;
 
         // Re-export the merged state so the bytes written to disk reflect

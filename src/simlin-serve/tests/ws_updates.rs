@@ -382,6 +382,31 @@ async fn cross_origin_attacker_is_rejected_under_strict_origin() {
     }
 }
 
+/// With `strict_origin=false` (the developer convenience mode), an upgrade
+/// that carries no `Origin` header must succeed. Browser-native WebSocket
+/// always sets Origin; this path is exercised by non-browser clients such as
+/// `wscat` or raw `curl --no-buffer` where setting Origin is inconvenient.
+#[tokio::test]
+async fn non_strict_origin_accepts_no_origin_header() {
+    let (_state, addr, _dir) = spawn_server_with_strict_origin("k", false).await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+
+    // tokio_tungstenite does not set an Origin header by default, which
+    // exercises the `None` origin arm in the handler with strict_origin=false.
+    let result = connect_async(&url).await;
+    match result {
+        Ok((mut ws, response)) => {
+            assert_eq!(
+                response.status().as_u16(),
+                101,
+                "non-strict-origin must accept upgrades with no Origin header"
+            );
+            let _ = ws.close(None).await;
+        }
+        Err(e) => panic!("expected successful upgrade with strict_origin=false, got: {e:?}"),
+    }
+}
+
 #[tokio::test]
 async fn unknown_inbound_variant_is_logged_and_ignored() {
     // diagnosticsChanged is server-only (no inbound counterpart). A client
