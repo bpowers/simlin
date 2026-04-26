@@ -5,6 +5,89 @@ serves them to a browser-based viewer/editor. Distributed as the `@simlin/serve`
 npm package, intended to be invoked as `npx @simlin/serve` from any project
 directory.
 
+`simlin-serve` also exposes an MCP server at `/mcp` on port `7878` (override
+with `--mcp-port`), so AI assistants can read, edit, simulate, and create
+models in the same working directory the browser is editing. The MCP and
+HTTP/UI handlers share one in-memory Loro document, so edits from either side
+converge and the browser remounts the editor within ~1s of an AI edit.
+
+## Configuring AI clients
+
+Both clients below assume `simlin-serve` is already running in the directory
+that holds your models. Start it first (e.g. `npx @simlin/serve`) and leave
+it running while the AI client is connected. The MCP URL is stable across
+launches because the port defaults to `7878`, so this configuration is
+one-time — you don't need to update it whenever you restart the server.
+
+### Claude Code CLI
+
+Claude Code speaks MCP-over-HTTP natively, so no proxy is needed. Add the
+server in user scope (available in every project):
+
+```bash
+claude mcp add --transport http --scope user simlin-serve http://127.0.0.1:7878/mcp
+```
+
+Or, to scope the configuration to a single project (and check it into git so
+collaborators inherit the same setup), drop the equivalent into `.mcp.json`
+at the repository root:
+
+```json
+{
+  "mcpServers": {
+    "simlin-serve": {
+      "type": "http",
+      "url": "http://127.0.0.1:7878/mcp"
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Claude Desktop (as of April 2026) speaks MCP-over-stdio only, so it needs the
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) proxy to bridge to
+our HTTP server. Install it once globally:
+
+```bash
+npm install -g mcp-remote
+```
+
+Then add an entry to Claude Desktop's config file:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "simlin-serve": {
+      "command": "npx",
+      "args": ["mcp-remote", "http://127.0.0.1:7878/mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the config; new MCP servers are picked
+up at app launch, not hot-reloaded.
+
+### Available tools
+
+Once connected, the AI sees five tools:
+
+| Tool            | Purpose                                                      |
+| --------------- | ------------------------------------------------------------ |
+| `list_projects` | Enumerate every model file in the working directory tree.   |
+| `read_model`    | Return the canonical JSON for one model.                     |
+| `edit_model`    | Apply a list of structural edits and persist the result.    |
+| `create_model`  | Write a new model file and register it with the server.     |
+| `simulate`      | Run a simulation (with optional overrides) and return time-series data. |
+
+Edits made through `edit_model` and `create_model` flow through the same
+merge primitive as browser saves, so concurrent edits from both sides
+converge instead of clobbering each other.
+
 ## WebSocket Protocol
 
 The server exposes a single WebSocket endpoint for live updates:
