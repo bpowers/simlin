@@ -26,7 +26,7 @@ use tokio::sync::broadcast;
 use crate::events::{ChangeSource, ClientWsMessage, EventBus, WsMessage};
 use crate::git::GitProbe;
 use crate::parse::ParseError;
-use crate::path_resolution::{self, ResolutionError, sidecar_for_mdl, to_forward_slash};
+use crate::path_resolution::{self, ResolutionError, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
@@ -165,22 +165,21 @@ pub async fn get_project(
         }
     };
 
-    // Determine source format and apply the .mdl sidecar preference: if the
-    // request was for `<x>.mdl` and `<x>.sd.json` exists alongside it, swap
-    // to the sidecar.
+    // Determine source format. The sidecar-preference rule is applied
+    // through `path_resolution::apply_sidecar_preference`; when it
+    // redirects the format becomes SdJson regardless of the initial
+    // dispatch (the input was `.mdl`, the resolved registry key is the
+    // sibling `.sd.json`).
     let initial_format = format_for_path(&canonical).ok_or(ApiError::BadRequest(
         "unrecognized file extension".to_string(),
     ))?;
 
-    let (effective_path, effective_format) = if matches!(initial_format, ProjectFormat::Mdl) {
-        let sidecar = sidecar_for_mdl(&canonical);
-        if sidecar.is_file() {
-            (sidecar, ProjectFormat::SdJson)
-        } else {
-            (canonical.clone(), ProjectFormat::Mdl)
-        }
+    let resolved_key = path_resolution::apply_sidecar_preference(&canonical, &root_canonical);
+    let effective_path = resolved_key.path;
+    let effective_format = if resolved_key.redirected_to_sidecar {
+        ProjectFormat::SdJson
     } else {
-        (canonical.clone(), initial_format)
+        initial_format
     };
 
     // Ensure the registry has an entry for the effective path so
@@ -1095,30 +1094,22 @@ fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, S
 
     // Sidecar-preference rule: when the request is for `.mdl` and the
     // sibling `.sd.json` exists on disk, route the save to the sidecar
-    // key. Mirrors `get_project`'s read-side preference (handlers.rs
-    // line ~181) and `RegistryAccess::open`'s MCP-side preference; the
-    // common contract is "once the sidecar exists, it is the canonical
-    // entry for both reads and writes".
-    //
-    // Without this, a stale tab POSTing to the `.mdl` path with
-    // version=0 (after a prior save's `redirect_to_sidecar` removed the
-    // `.mdl` registry entry) would be served by the save handler's
-    // `ensure_or_get` fallback: a fresh `.mdl` entry at version 0 would
-    // be inserted, the optimistic-lock check would pass (0 == 0), and
-    // the stale edit would silently overwrite newer sidecar content.
-    // Resolving to the sidecar key keeps the version check honest.
-    let (effective_canonical, effective_format) = if matches!(initial_format, ProjectFormat::Mdl) {
-        let sidecar = sidecar_for_mdl(&canonical);
-        if sidecar.is_file() {
-            match sidecar.canonicalize() {
-                Ok(p) => (p, ProjectFormat::SdJson),
-                Err(_) => (canonical.clone(), ProjectFormat::Mdl),
-            }
-        } else {
-            (canonical.clone(), ProjectFormat::Mdl)
-        }
+    // key. Mirrors `get_project`'s read-side preference and
+    // `RegistryAccess::open`/`save`'s MCP-side preference; the shared
+    // primitive in `path_resolution::apply_sidecar_preference` is the
+    // single point that implements the rule. Without it, a stale tab
+    // POSTing to the `.mdl` path with `version=0` (after a prior save's
+    // `redirect_to_sidecar` removed the `.mdl` registry entry) would
+    // hit the `ensure_or_get` fallback below at version 0; the
+    // optimistic-lock check would spuriously pass (0 == 0) and silently
+    // overwrite newer sidecar content. Resolving to the sidecar key
+    // keeps the version check honest.
+    let resolved_key = path_resolution::apply_sidecar_preference(&canonical, &root_canonical);
+    let effective_canonical = resolved_key.path;
+    let effective_format = if resolved_key.redirected_to_sidecar {
+        ProjectFormat::SdJson
     } else {
-        (canonical.clone(), initial_format)
+        initial_format
     };
 
     let relative_path = effective_canonical

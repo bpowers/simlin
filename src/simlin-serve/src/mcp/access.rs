@@ -30,7 +30,7 @@ use simlin_mcp_core::types::{ErrorOutput, SourceFormat};
 use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
-use crate::path_resolution::{self, is_mdl_extension, sidecar_for_mdl, to_forward_slash};
+use crate::path_resolution::{self, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
 use crate::writer::{SaveTarget, commit_write, resolve_save_target, serialize_project};
@@ -69,26 +69,31 @@ fn project_format_to_source_format(format: ProjectFormat) -> SourceFormat {
 }
 
 /// Canonicalize `abs_path` and confirm it is a descendant of the
-/// canonicalized registry root. Returns the canonicalized path on
-/// success.
+/// canonicalized registry root. Returns `(canonical_leaf,
+/// canonical_root)` so callers can pass the latter back into
+/// `path_resolution::apply_sidecar_preference` without re-canonicalising
+/// the root.
 ///
 /// On any failure (path missing, escapes the root, cannot canonicalize the
 /// root itself) returns `AccessError::NotFound { path }` so callers
 /// uniformly surface "I cannot operate on that path" — distinguishing a
 /// permission error from a genuinely missing file would leak filesystem
 /// layout to MCP clients.
-fn canonicalize_within_root(state: &AppState, abs_path: &Path) -> Result<PathBuf, AccessError> {
+fn canonicalize_within_root(
+    state: &AppState,
+    abs_path: &Path,
+) -> Result<(PathBuf, PathBuf), AccessError> {
     let root_canonical = state
         .root
         .canonicalize()
         .map_err(|_| AccessError::NotFound {
             path: abs_path.to_path_buf(),
         })?;
-    path_resolution::resolve_existing_within_root(abs_path, &root_canonical).map_err(|_| {
-        AccessError::NotFound {
+    let canonical = path_resolution::resolve_existing_within_root(abs_path, &root_canonical)
+        .map_err(|_| AccessError::NotFound {
             path: abs_path.to_path_buf(),
-        }
-    })
+        })?;
+    Ok((canonical, root_canonical))
 }
 
 /// Wrap [`crate::path_resolution::resolve_create_target`] to surface
@@ -183,7 +188,7 @@ fn serialize_for_create(
 
 impl ProjectAccess for RegistryAccess {
     async fn open(&self, abs_path: &Path) -> Result<OpenedProject, AccessError> {
-        let canonical = canonicalize_within_root(&self.state, abs_path)?;
+        let (canonical, root_canonical) = canonicalize_within_root(&self.state, abs_path)?;
 
         // Sidecar preference for `.mdl` reads: when a sibling `.sd.json`
         // exists, route the open to the sidecar so MCP and HTTP return
@@ -191,25 +196,11 @@ impl ProjectAccess for RegistryAccess {
         // `ReadModel` of `foo.mdl` after a save returns either NotFound
         // (when redirect_to_sidecar removed the .mdl entry) or stale
         // .mdl bytes (when a scan re-inserted the entry); HTTP
-        // `get_project` always follows the sidecar via `sidecar.is_file()`.
-        // The disk check is the single source of truth — even if a stale
-        // .mdl-keyed entry lingers in the registry, the sidecar wins.
-        let resolved = if is_mdl_extension(&canonical) {
-            let sidecar = sidecar_for_mdl(&canonical);
-            if sidecar.is_file() {
-                // Canonicalize the sidecar path as well; symlinks within
-                // the watched tree must resolve to the same key the
-                // save handler / scanner / watcher would use.
-                match sidecar.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => canonical.clone(),
-                }
-            } else {
-                canonical.clone()
-            }
-        } else {
-            canonical.clone()
-        };
+        // `get_project` always follows the sidecar. The shared helper
+        // re-canonicalises the sidecar and verifies it lives inside the
+        // registry root so a malicious symlink sidecar cannot redirect
+        // reads outside the watched tree.
+        let resolved = path_resolution::apply_sidecar_preference(&canonical, &root_canonical).path;
 
         let doc = self
             .state
@@ -265,27 +256,16 @@ impl ProjectAccess for RegistryAccess {
         _format: SourceFormat,
         expected_version: Option<u64>,
     ) -> Result<u64, AccessError> {
-        let canonical = canonicalize_within_root(&self.state, abs_path)?;
+        let (canonical, root_canonical) = canonicalize_within_root(&self.state, abs_path)?;
 
         // Sidecar-preference: when the caller passes a `.mdl` path that
         // already has a sibling `.sd.json` on disk, route the save to the
-        // sidecar key. Mirrors `open`'s preference rule and the
-        // HTTP save handler, so MCP `EditModel(.mdl)` after a prior save
+        // sidecar key. Mirrors `open`'s preference rule and the HTTP
+        // save handler, so MCP `EditModel(.mdl)` after a prior save
         // surfaces a real version-mismatch (not a NotFound or a stale
-        // overwrite) instead of bypassing optimistic locking.
-        let resolved = if is_mdl_extension(&canonical) {
-            let sidecar = sidecar_for_mdl(&canonical);
-            if sidecar.is_file() {
-                match sidecar.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => canonical.clone(),
-                }
-            } else {
-                canonical.clone()
-            }
-        } else {
-            canonical.clone()
-        };
+        // overwrite) instead of bypassing optimistic locking. The same
+        // shared helper enforces the sidecar-must-live-under-root rule.
+        let resolved = path_resolution::apply_sidecar_preference(&canonical, &root_canonical).path;
 
         // The MCP-supplied `format` is the project's *content shape* the
         // caller perceives (Xmile vs NativeJson vs SdaiJson). The on-disk
