@@ -20,6 +20,7 @@ use simlin_serve::launcher::{build_launch_url, open_browser};
 use simlin_serve::registry::ProjectRegistry;
 use simlin_serve::scan::scan_into_registry;
 use simlin_serve::token::generate_launch_token;
+use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,6 +71,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.no_open {
         open_browser(&launch_url);
     }
+
+    // Spawn the file watcher (Phase 4). The shutdown signal is held here
+    // so a future Ctrl-C handler (Task 8) can trigger graceful teardown
+    // of both the server and the watcher; on the current path the actor
+    // exits when the binary terminates and the join handle is dropped.
+    let watcher_shutdown: ShutdownSignal = Arc::new(tokio::sync::Notify::new());
+    let _watcher_handle = match spawn_watcher(state.clone(), watcher_shutdown.clone(), None) {
+        Ok(h) => Some(h),
+        Err(err) => {
+            // Failing to set up the watcher is non-fatal: the server still
+            // serves the directory snapshot taken at startup. Surfacing
+            // the error keeps the operator aware that disk edits won't
+            // trigger live updates until the cause is fixed.
+            tracing::warn!(error = %err, "failed to spawn file watcher; disk edits will not be observed");
+            None
+        }
+    };
 
     axum::serve(listener, build_router(state)).await?;
     Ok(())

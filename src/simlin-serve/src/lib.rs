@@ -18,6 +18,7 @@ pub mod scan;
 pub mod static_assets;
 pub mod token;
 pub mod validation;
+pub mod watcher;
 pub mod writer;
 
 use axum::Router;
