@@ -181,11 +181,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 20. LTM FixedIndex References Expand to N-squared Edges
 
 - **Component**: simlin-engine (src/simlin-engine/src/db_analysis.rs)
-- **Severity**: high
-- **Description**: `classify_element_dependency` lumps both wildcard reducers (`population[*]`) and fixed-index references (`population[NYC]`) under `CrossElement`, which `expand_edge_to_elements` then expands to the full N-by-N element cross-product. For a pattern like `relative_pop[R] = population / population[NYC]` the true element structure is two N-edge patterns (same-element and broadcast from NYC), not N-squared. On arrays with tens of elements the spurious edges trigger combinatorial loop-enumeration blow-ups even though their runtime link scores are effectively zero. Fix: add a `FixedIndex(element)` classification and emit `source[element] -> target[d]` edges instead of the all-to-all expansion.
+- **Severity**: RESOLVED (2026-04-25)
+- **Description**: (**Resolved** during the per-reference element graph refactor; see commit ff3f1afe and `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md`.) `classify_element_dependency` lumped both wildcard reducers (`population[*]`) and fixed-index references (`population[NYC]`) under `CrossElement`, which `expand_edge_to_elements` then expanded to the full N-by-N element cross-product. For a pattern like `relative_pop[R] = population / population[NYC]` the true element structure is two N-edge patterns (same-element and broadcast from NYC), not N-squared. On arrays with tens of elements the spurious edges triggered combinatorial loop-enumeration blow-ups even though their runtime link scores were effectively zero. The fix replaces the per-`(from, to)` classifier with an AST-walking per-reference emitter (`collect_reference_sites` + `emit_edges_for_reference`) that classifies each reference by `RefShape` and emits `source[element] -> target[d]` for `FixedIndex(element)` references rather than the all-to-all expansion.
 - **Measure**: Build a test model with explicit subscript references and count element-level edges vs. `N + N` expected.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-25
 
 ### 21. LTM Polarity Analysis Has Reducer Blind Spots
 
@@ -230,10 +230,10 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 26. LTM A2A Partial Equation Is Wrong When Target Mixes Same-Element and Cross-Element References
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs `build_partial_equation`)
-- **Severity**: medium
-- **Description**: For a target like `share[R] = population / SUM(population[*])` the source `population` appears both as a bare (same-element) reference and inside a wildcard reducer. The A2A ceteris-paribus wrapper leaves all `population` references unchanged, so when `share[nyc]` is evaluated in the partial, `SUM(population[*])` uses CURRENT populations for every element instead of PREV for the non-target elements. The partial equals the full expression, link-score magnitude is always 1, and dominance is misattributed. Fix: detect dual-mode references during AST analysis and either split into separate same-element and cross-element link scores or fall back to explicit per-element scalar scores for the edge.
+- **Severity**: RESOLVED (2026-04-25)
+- **Description**: (**Resolved** alongside #20 via per-shape partial equations; see commit a3f595ac and `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md`.) For a target like `share[R] = population / SUM(population[*])` the source `population` appears both as a bare (same-element) reference and inside a wildcard reducer. The old A2A ceteris-paribus wrapper left all `population` references unchanged, so when `share[nyc]` was evaluated in the partial, `SUM(population[*])` used CURRENT populations for every element instead of PREV for the non-target elements. The partial equalled the full expression, link-score magnitude was always 1, and dominance was misattributed. The fix splits the link score per `RefShape`: `model_ltm_variables` now emits one `LtmSyntheticVar` per `(from, to, shape)` triple, and `build_partial_equation_shaped` (in `ltm_augment.rs`) holds the matching-shape references live while wrapping the rest in `PREVIOUS()`. So `share = pop / SUM(pop[*])` produces both a Bare link score (`pop / PREVIOUS(SUM(pop[*]))`) and a Wildcard link score (`PREVIOUS(pop) / SUM(pop[*])`), each accurately attributing per-shape dominance.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-25
 
 ### 27. LTM STDDEV/RANK Fallback Scores Are Silently Wrong
 
