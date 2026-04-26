@@ -21,27 +21,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::RefShape;
 
-/// Phase 1 stub renamed to `build_partial_equation_shaped` in Phase 3 Task 1.
-/// Kept as a thin alias for one commit so the Phase 1 #[ignore]-d tests continue
-/// to compile during the transition; Task 2 removes the alias and migrates the
-/// tests to call `build_partial_equation_shaped` directly.
-#[allow(dead_code)]
-pub(crate) fn build_partial_equation_for_shape(
-    equation_text: &str,
-    deps: &HashSet<Ident<Canonical>>,
-    live_source: &Ident<Canonical>,
-    live_shape: &RefShape,
-    source_dim_elements: &[Vec<String>],
-) -> String {
-    build_partial_equation_shaped(
-        equation_text,
-        deps,
-        live_source,
-        live_shape,
-        source_dim_elements,
-    )
-}
-
 /// Classify an `Expr0` subscript's shape based on its indices.
 ///
 /// Mirrors `db_analysis::resolve_literal_index`'s classification logic but at
@@ -1216,9 +1195,18 @@ mod tests {
     /// Build a `HashSet<Ident<Canonical>>` from string slices for use in
     /// per-shape partial-equation tests. Each input string is canonicalized
     /// via `Ident::new`, matching the wrapping path that
-    /// `build_partial_equation_for_shape` exercises in Phase 3.
+    /// `build_partial_equation_shaped` exercises.
     fn deps_set(idents: &[&str]) -> HashSet<Ident<Canonical>> {
         idents.iter().map(|s| Ident::new(s)).collect()
+    }
+
+    /// Source-dimension element names for the per-shape partial-equation
+    /// tests using a single `Region` dimension with elements `nyc` and
+    /// `boston` (canonical lowercase form, in source-declared order).
+    /// Used by `classify_expr0_subscript_shape` to validate that a literal
+    /// subscript like `[NYC]` resolves to a known element.
+    fn region_dim_elements() -> Vec<Vec<String>> {
+        vec![vec!["nyc".to_string(), "boston".to_string()]]
     }
 
     // -- dimension_element_names tests --
@@ -1688,10 +1676,10 @@ mod tests {
         assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");
     }
 
-    // -- build_partial_equation_for_shape: per-shape partial equation tests --
+    // -- build_partial_equation_shaped: per-shape partial equation tests --
     //
     // Each test below pins the exact text that
-    // `build_partial_equation_for_shape` must return when handed a specific
+    // `build_partial_equation_shaped` must return when handed a specific
     // `RefShape`. The expected strings were captured from `print_eqn` during
     // Task 0.5 reconnaissance and are already canonicalized: identifiers and
     // element names are lowercase (`print_ident` routes through
@@ -1703,13 +1691,15 @@ mod tests {
     // Whitespace canonicalization happens entirely inside `print_eqn`, so the
     // assertions can use the literal expected string without any pre-trim.
     //
-    // These tests stay `#[ignore]` until Phase 3 replaces the
-    // `unimplemented!()` body of `build_partial_equation_for_shape`; today
-    // they fail with the panic that documents the desired post-Phase-3
-    // contract.
+    // The Bare and Wildcard tests don't need `source_dim_elements` because
+    // their classification doesn't depend on element-name lookups (Bare is a
+    // top-level Var; Wildcard is detected from the `[*]` index alone). The
+    // FixedIndex tests pass `region_dim_elements()` so
+    // `classify_expr0_subscript_shape` can validate `[NYC]` and `[Boston]`
+    // against the source's declared elements; otherwise both literal indices
+    // would fall back to `DynamicIndex` and both subscripts would be wrapped.
 
     #[test]
-    #[ignore = "Phase 3: per-shape partial equations"]
     fn test_partial_equation_share_bare_shape() {
         // share[R] = population / SUM(population[*])
         // For the bare-Var reference (`population`), the bare ref stays live
@@ -1717,13 +1707,11 @@ mod tests {
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
-        let partial =
-            build_partial_equation_for_shape(equation, &deps, &source, &RefShape::Bare, &[]);
+        let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
         assert_eq!(partial, "population / sum(PREVIOUS(population[*]))");
     }
 
     #[test]
-    #[ignore = "Phase 3: per-shape partial equations"]
     fn test_partial_equation_share_wildcard_shape() {
         // share[R] = population / SUM(population[*])
         // For the wildcard reducer's source ref (`population[*]`), the
@@ -1732,12 +1720,11 @@ mod tests {
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
         let partial =
-            build_partial_equation_for_shape(equation, &deps, &source, &RefShape::Wildcard, &[]);
+            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Wildcard, &[]);
         assert_eq!(partial, "PREVIOUS(population) / sum(population[*])");
     }
 
     #[test]
-    #[ignore = "Phase 3: per-shape partial equations"]
     fn test_partial_equation_migration_pressure_fixed_nyc() {
         // migration_pressure[NYC] = (population[NYC] - population[Boston]) * 0.01
         // For the FixedIndex(nyc) shape, the `population[nyc]` reference stays
@@ -1748,12 +1735,13 @@ mod tests {
         let equation = "(population[NYC] - population[Boston]) * 0.01";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
-        let partial = build_partial_equation_for_shape(
+        let dims = region_dim_elements();
+        let partial = build_partial_equation_shaped(
             equation,
             &deps,
             &source,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
-            &[],
+            &dims,
         );
         assert_eq!(
             partial,
@@ -1762,7 +1750,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 3: per-shape partial equations"]
     fn test_partial_equation_migration_pressure_fixed_boston() {
         // Same equation text as the NYC case -- the per-shape builder works
         // per (reference-site, shape) pair, so the input equation is the
@@ -1772,12 +1759,13 @@ mod tests {
         let equation = "(population[NYC] - population[Boston]) * 0.01";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
-        let partial = build_partial_equation_for_shape(
+        let dims = region_dim_elements();
+        let partial = build_partial_equation_shaped(
             equation,
             &deps,
             &source,
             &RefShape::FixedIndex(vec!["boston".to_string()]),
-            &[],
+            &dims,
         );
         assert_eq!(
             partial,
