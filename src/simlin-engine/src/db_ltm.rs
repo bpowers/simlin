@@ -1930,6 +1930,59 @@ fn strip_subscript(name: &str) -> &str {
     }
 }
 
+/// Return the contents of an element-level node name's first `[...]`
+/// subscript group as a borrowed slice, or `None` for bare names.
+///
+/// For `"pop[nyc]"` returns `Some("nyc")`; for `"share[boston,adult]"`
+/// returns `Some("boston,adult")`; for `"pop"` returns `None`.
+/// Defensive about missing closing brackets: returns `None` if the
+/// name has `[` but no matching `]` (treated as bare so the caller
+/// degrades to the safe Bare-shape default rather than emitting a
+/// malformed FixedIndex).
+//
+// `dead_code` is suppressed because Phase 4 Task 3 (the loop-link
+// annotation pass) is the first production caller; the helper is
+// covered by unit tests in `mod tests` below in the meantime.
+#[allow(dead_code)]
+pub(crate) fn parse_subscript(name: &str) -> Option<&str> {
+    let start = name.find('[')?;
+    let close = name[start..].find(']')?;
+    Some(&name[start + 1..start + close])
+}
+
+/// Infer the access shape from an element-level node name.
+///
+/// - `"pop"` -> `Bare`
+/// - `"pop[nyc]"` -> `FixedIndex(vec!["nyc"])`
+/// - `"share[boston,adult]"` -> `FixedIndex(vec!["boston", "adult"])`
+/// - `"share[*]"` (unusual; element graph shouldn't contain wildcards) -> `Wildcard`
+///
+/// Element names are returned verbatim (the element graph already
+/// stores them in canonical lowercase). The function does not
+/// distinguish A2A same-element references from FixedIndex -- the
+/// element graph uses identical node-name format for both. Callers
+/// needing that distinction must consult the loop's circuit structure
+/// (e.g., A2A loops have all nodes at the same element across the
+/// cycle) or compare source and target subscripts directly.
+//
+// `dead_code` is suppressed because Phase 4 Task 3 (the loop-link
+// annotation pass) is the first production caller; the helper is
+// covered by unit tests in `mod tests` below in the meantime.
+#[allow(dead_code)]
+pub(crate) fn infer_link_shape_from_node_name(name: &str) -> RefShape {
+    match parse_subscript(name) {
+        None => RefShape::Bare,
+        Some(inside) => {
+            if inside.contains('*') {
+                RefShape::Wildcard
+            } else {
+                let elems: Vec<String> = inside.split(',').map(str::to_string).collect();
+                RefShape::FixedIndex(elems)
+            }
+        }
+    }
+}
+
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -2855,3 +2908,29 @@ pub fn model_ltm_variables(
 #[cfg(test)]
 #[path = "db_ltm_tests.rs"]
 mod db_ltm_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_link_shape_bare() {
+        assert_eq!(infer_link_shape_from_node_name("pop"), RefShape::Bare);
+    }
+
+    #[test]
+    fn infer_link_shape_fixed_single_dim() {
+        assert_eq!(
+            infer_link_shape_from_node_name("pop[nyc]"),
+            RefShape::FixedIndex(vec!["nyc".to_string()])
+        );
+    }
+
+    #[test]
+    fn infer_link_shape_fixed_multi_dim() {
+        assert_eq!(
+            infer_link_shape_from_node_name("share[boston,adult]"),
+            RefShape::FixedIndex(vec!["boston".to_string(), "adult".to_string()])
+        );
+    }
+}
