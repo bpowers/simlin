@@ -19,16 +19,20 @@
 //! 3. Broadcasts `ProjectChanged { source: Agent }` after a successful
 //!    merge so connected browser sockets remount their editors.
 
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::sync::Arc;
 
 use simlin_engine::datamodel;
 use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
 use simlin_mcp_core::errors::AccessError;
-use simlin_mcp_core::types::SourceFormat;
+use simlin_mcp_core::types::{ErrorOutput, SourceFormat};
 
+use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
-use crate::registry::{ProjectFormat, RegistryError};
+use crate::hashing::content_hash;
+use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
+use crate::validation::{compute_baseline, validate_save_project};
+use crate::writer::{SaveTarget, commit_write, resolve_save_target, serialize_project};
 
 /// Registry-backed `ProjectAccess` impl shared by every MCP session.
 ///
@@ -60,6 +64,20 @@ fn project_format_to_source_format(format: ProjectFormat) -> SourceFormat {
     match format {
         ProjectFormat::Stmx | ProjectFormat::Xmile | ProjectFormat::Mdl => SourceFormat::Xmile,
         ProjectFormat::SdJson => SourceFormat::NativeJson,
+    }
+}
+
+/// Render a relative path as a forward-slash string so the wire format
+/// is platform-agnostic. Mirrors `handlers::path_to_forward_slash`; we
+/// duplicate rather than re-export because the handler form is private
+/// today and the broadcast envelope's wire shape is the contract that
+/// matters here.
+fn path_to_forward_slash(path: &Path) -> String {
+    let display = path.to_string_lossy().into_owned();
+    if MAIN_SEPARATOR == '/' {
+        display
+    } else {
+        display.replace(MAIN_SEPARATOR, "/")
     }
 }
 
@@ -140,16 +158,220 @@ impl ProjectAccess for RegistryAccess {
 
     async fn save(
         &self,
-        _abs_path: &Path,
-        _project: &datamodel::Project,
+        abs_path: &Path,
+        project: &datamodel::Project,
         _format: SourceFormat,
-        _expected_version: Option<u64>,
+        expected_version: Option<u64>,
     ) -> Result<u64, AccessError> {
-        // Implemented in Task 2.
-        Err(AccessError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "RegistryAccess::save not yet implemented",
-        )))
+        let canonical = canonicalize_within_root(&self.state, abs_path)?;
+
+        // The MCP-supplied `format` is the project's *content shape* the
+        // caller perceives (Xmile vs NativeJson vs SdaiJson). The on-disk
+        // *file shape* — and therefore where the new bytes land — is
+        // dictated by the registry's `ProjectFormat`, which is what's
+        // currently on disk. A `.mdl` entry must always sidecar; a `.stmx`
+        // entry must always overwrite in place; etc.
+        let registry_meta =
+            self.state
+                .registry
+                .get(&canonical)
+                .ok_or_else(|| AccessError::NotFound {
+                    path: canonical.clone(),
+                })?;
+        let registry_format = registry_meta.format;
+
+        // Validate the post-edit project against a baseline of pre-edit
+        // errors so saves that *fix* errors are accepted but saves that
+        // *introduce* errors are rejected. The baseline is the current
+        // doc state — `check_increment_and_merge` will rewrite the doc
+        // shortly, so this is the last chance to capture pre-edit
+        // diagnostics without a redundant disk read.
+        let current_doc = self
+            .state
+            .registry
+            .get_or_init_doc(&canonical)
+            .map_err(|e| match e {
+                RegistryError::NotFound => AccessError::NotFound {
+                    path: canonical.clone(),
+                },
+                RegistryError::HydrationFailed(msg) => {
+                    AccessError::ParseError(anyhow::anyhow!(msg))
+                }
+                RegistryError::VersionMismatch { expected, actual } => {
+                    AccessError::VersionMismatch { expected, actual }
+                }
+            })?;
+        let current_json_value = current_doc
+            .export_canonical_json()
+            .map_err(|e| AccessError::ParseError(anyhow::anyhow!("export current doc: {e}")))?;
+        let current_json_project: simlin_engine::json::Project =
+            serde_json::from_value(current_json_value).map_err(|e| {
+                AccessError::ParseError(anyhow::anyhow!(
+                    "convert current doc state to json::Project: {e}"
+                ))
+            })?;
+        let current_project: datamodel::Project = current_json_project.into();
+        let baseline = compute_baseline(&current_project);
+
+        let outcome = validate_save_project(project, &baseline);
+        if !outcome.new_errors.is_empty() {
+            let errors: Vec<ErrorOutput> = outcome
+                .new_errors
+                .into_iter()
+                .map(|e| ErrorOutput {
+                    code: e.code,
+                    message: e.message,
+                    model_name: e.model_name,
+                    variable_name: e.variable_name,
+                    kind: e.kind,
+                })
+                .collect();
+            return Err(AccessError::Validation { errors });
+        }
+
+        // Re-canonicalize the validated project so the merge sees the
+        // engine's canonical JSON shape regardless of any subtle drift in
+        // the input the MCP caller produced.
+        let canonical_project: simlin_engine::json::Project = (&outcome.project).into();
+        let canonical_value = serde_json::to_value(&canonical_project).map_err(|e| {
+            AccessError::ParseError(anyhow::anyhow!("serialize canonical project: {e}"))
+        })?;
+
+        // When the caller doesn't pass an expected_version we just fetch
+        // the current registry value: AI clients have no read-then-write
+        // ergonomics, so optimistic-locking against an MCP-only conversation
+        // is meaningless. Browser saves continue to pass an explicit
+        // version through the HTTP handler.
+        let version_check = expected_version.unwrap_or(registry_meta.version);
+
+        let (new_version, merged_doc) = self
+            .state
+            .registry
+            .check_increment_and_merge(&canonical, version_check, &canonical_value)
+            .map_err(|e| match e {
+                RegistryError::NotFound => AccessError::NotFound {
+                    path: canonical.clone(),
+                },
+                RegistryError::VersionMismatch { expected, actual } => {
+                    AccessError::VersionMismatch { expected, actual }
+                }
+                RegistryError::HydrationFailed(msg) => {
+                    AccessError::ParseError(anyhow::anyhow!(msg))
+                }
+            })?;
+
+        // Re-export the merged state so the bytes written to disk reflect
+        // exactly what the doc holds (and any future server-side
+        // annotations remain coherent).
+        let merged_value = merged_doc
+            .export_canonical_json()
+            .map_err(|e| AccessError::ParseError(anyhow::anyhow!("export merged doc: {e}")))?;
+        let merged_json_project: simlin_engine::json::Project =
+            serde_json::from_value(merged_value).map_err(|e| {
+                AccessError::ParseError(anyhow::anyhow!(
+                    "convert merged doc state to json::Project: {e}"
+                ))
+            })?;
+        let merged_project: datamodel::Project = merged_json_project.into();
+
+        let target = resolve_save_target(&canonical, registry_format);
+        let write_outcome = serialize_project(&merged_project, &target).map_err(|e| {
+            AccessError::WriteError(std::io::Error::other(format!("serialize_project: {e}")))
+        })?;
+        let written_path = write_outcome.path.clone();
+        let written_hash = content_hash(&write_outcome.bytes);
+
+        // Prime the echo-suppression hash before the OS-visible write so
+        // the file watcher's inotify event sees the new hash by the time
+        // it computes one — same ordering rule the HTTP handler enforces.
+        self.state
+            .registry
+            .prime_echo_hash(&canonical, written_hash);
+
+        commit_write(&write_outcome).map_err(|e| {
+            AccessError::WriteError(std::io::Error::other(format!("commit_write: {e}")))
+        })?;
+
+        // For SidecarJson (a `.mdl` save), the registry key moves from
+        // the .mdl path to the .sd.json sidecar path. Subsequent reads
+        // via either path will land on the sidecar entry.
+        let registry_key: PathBuf = match &target {
+            SaveTarget::SidecarJson {
+                mdl_path,
+                sidecar_path,
+            } => {
+                match self
+                    .state
+                    .registry
+                    .redirect_to_sidecar(mdl_path, sidecar_path.clone())
+                {
+                    Ok(()) => sidecar_path.clone(),
+                    Err(e) => {
+                        // The .mdl entry was concurrently removed (e.g. by a
+                        // scan between merge and redirect). Re-insert the
+                        // sidecar key carrying the just-incremented version
+                        // so the registry still tracks the on-disk file.
+                        // Same fallback the HTTP handler uses.
+                        tracing::warn!(
+                            error = %e,
+                            "MCP save: registry redirect_to_sidecar failed; re-inserting sidecar entry"
+                        );
+                        self.state.registry.upsert_max_version(
+                            sidecar_path.clone(),
+                            ProjectMeta {
+                                path: PathBuf::new(),
+                                format: ProjectFormat::SdJson,
+                                mtime: std::time::SystemTime::UNIX_EPOCH,
+                                size: 0,
+                                git: GitState::Untracked,
+                                version: new_version,
+                                doc: Default::default(),
+                                last_disk_hash: written_hash,
+                            },
+                        );
+                        sidecar_path.clone()
+                    }
+                }
+            }
+            SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => canonical.clone(),
+        };
+
+        // Refresh mtime/size/hash from the freshly-written file so the
+        // SPA's stale-data heuristics see the new values. The hash is
+        // already what `prime_echo_hash` stored; refreshing here keeps
+        // the three fields atomic w.r.t. concurrent reads.
+        if let Ok(metadata) = std::fs::metadata(&written_path)
+            && let Ok(mtime) = metadata.modified()
+        {
+            self.state.registry.refresh_after_write(
+                &registry_key,
+                mtime,
+                metadata.len(),
+                written_hash,
+            );
+        }
+
+        // Build the relative path used in the broadcast envelope. We use
+        // the canonicalized root so symlinked-in subtrees hash to the
+        // same string the HTTP handler emits.
+        let root_canonical = self.state.root.canonicalize().map_err(|e| {
+            AccessError::IoError(std::io::Error::other(format!(
+                "canonicalize root for broadcast: {e}"
+            )))
+        })?;
+        let rel = registry_key
+            .strip_prefix(&root_canonical)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| registry_key.clone());
+        let rel_str = path_to_forward_slash(&rel);
+
+        self.state.events.publish(WsMessage::ProjectChanged {
+            path: rel_str,
+            version: new_version,
+            source: ChangeSource::Agent,
+        });
+
+        Ok(new_version)
     }
 
     async fn create(
