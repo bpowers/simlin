@@ -14,16 +14,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use rmcp::ServiceExt;
-use rmcp::model::CallToolRequestParams;
-use simlin_serve::events::EventBus;
+use rmcp::model::{CallToolRequestParams, CustomNotification};
+use rmcp::service::NotificationContext;
+use rmcp::{ClientHandler, RoleClient, ServiceExt};
+use simlin_serve::events::{ChangeSource, EventBus, ValidationError, WsMessage};
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::mcp::{RegistryAccess, SimlinServeMcpServer};
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -471,4 +473,363 @@ async fn get_info_includes_workspace_dir_in_instructions() {
         instructions.contains(&display),
         "instructions must contain the workspace dir; got: {instructions:?}"
     );
+}
+
+/// One captured custom notification: (method, params).
+type CapturedEvent = (String, Option<serde_json::Value>);
+
+/// Test client that records every custom notification received from the
+/// server. Each new notification appends to `events`; tests poll the
+/// vector with a short timeout rather than wiring per-event signaling
+/// because some tests publish multiple events back-to-back.
+#[derive(Clone, Default)]
+struct NotificationCapture {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+impl ClientHandler for NotificationCapture {
+    async fn on_custom_notification(
+        &self,
+        notification: CustomNotification,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        let CustomNotification { method, params, .. } = notification;
+        self.events.lock().await.push((method, params));
+    }
+}
+
+async fn spawn_server_pair_with_capture(
+    state: Arc<AppState>,
+) -> (
+    rmcp::service::RunningService<RoleClient, NotificationCapture>,
+    rmcp::service::RunningService<rmcp::RoleServer, SimlinServeMcpServer<RegistryAccess>>,
+    NotificationCapture,
+) {
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let server = SimlinServeMcpServer::<RegistryAccess>::new(state);
+    let server_task = tokio::spawn(async move { server.serve(server_io).await });
+    let capture = NotificationCapture::default();
+    let client = capture
+        .clone()
+        .serve(client_io)
+        .await
+        .expect("client failed to initialize");
+    let server = server_task
+        .await
+        .expect("server task panicked")
+        .expect("server failed to initialize");
+    (client, server, capture)
+}
+
+/// Wait until `predicate` returns true on the captured events, polling
+/// every 25ms up to `timeout`. Returns the captured snapshot at the time
+/// the predicate first held, or panics if the predicate never held.
+async fn wait_for_events<F>(capture: &NotificationCapture, timeout: Duration, mut predicate: F)
+where
+    F: FnMut(&[CapturedEvent]) -> bool,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        {
+            let events = capture.events.lock().await;
+            if predicate(&events) {
+                return;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let events = capture.events.lock().await;
+            panic!(
+                "predicate did not hold within {:?}; captured: {:#?}",
+                timeout, *events
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn project_changed_event_arrives_as_simlin_project_changed_notification() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    state.events.publish(WsMessage::ProjectChanged {
+        path: "models/teacup.xmile".into(),
+        version: 3,
+        source: ChangeSource::User,
+    });
+
+    wait_for_events(&capture, Duration::from_secs(2), |events| {
+        events
+            .iter()
+            .any(|(method, _)| method == "simlin/projectChanged")
+    })
+    .await;
+
+    let events = capture.events.lock().await;
+    let entry = events
+        .iter()
+        .find(|(method, _)| method == "simlin/projectChanged")
+        .expect("projectChanged notification recorded");
+    let params = entry.1.as_ref().expect("params present");
+    assert_eq!(params["path"].as_str(), Some("models/teacup.xmile"));
+    assert_eq!(params["version"].as_u64(), Some(3));
+    assert_eq!(params["source"].as_str(), Some("user"));
+    drop(events);
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn project_focused_event_arrives_as_simlin_project_focused_notification() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    state.events.publish(WsMessage::ProjectFocused {
+        path: "a.stmx".into(),
+    });
+
+    wait_for_events(&capture, Duration::from_secs(2), |events| {
+        events
+            .iter()
+            .any(|(method, _)| method == "simlin/projectFocused")
+    })
+    .await;
+
+    let events = capture.events.lock().await;
+    let entry = events
+        .iter()
+        .find(|(method, _)| method == "simlin/projectFocused")
+        .expect("projectFocused notification recorded");
+    let params = entry.1.as_ref().expect("params present");
+    assert_eq!(params["path"].as_str(), Some("a.stmx"));
+    drop(events);
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn selection_changed_event_arrives_with_camel_case_idents() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    state.events.publish(WsMessage::SelectionChanged {
+        path: "x.stmx".into(),
+        variable_idents: vec!["alpha".into(), "beta".into()],
+    });
+
+    wait_for_events(&capture, Duration::from_secs(2), |events| {
+        events
+            .iter()
+            .any(|(method, _)| method == "simlin/selectionChanged")
+    })
+    .await;
+
+    let events = capture.events.lock().await;
+    let entry = events
+        .iter()
+        .find(|(method, _)| method == "simlin/selectionChanged")
+        .expect("selectionChanged notification recorded");
+    let params = entry.1.as_ref().expect("params present");
+    assert_eq!(params["path"].as_str(), Some("x.stmx"));
+    let idents = params["variableIdents"]
+        .as_array()
+        .expect("variableIdents is an array");
+    assert_eq!(idents.len(), 2);
+    assert_eq!(idents[0].as_str(), Some("alpha"));
+    assert_eq!(idents[1].as_str(), Some("beta"));
+    drop(events);
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn diagnostics_changed_event_arrives_with_error_list() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    state.events.publish(WsMessage::DiagnosticsChanged {
+        path: "models/teacup.xmile".into(),
+        errors: vec![ValidationError {
+            code: "syntax".into(),
+            message: "bad equation".into(),
+            model_name: Some("main".into()),
+            variable_name: Some("y".into()),
+            kind: "variable".into(),
+        }],
+    });
+
+    wait_for_events(&capture, Duration::from_secs(2), |events| {
+        events
+            .iter()
+            .any(|(method, _)| method == "simlin/diagnosticsChanged")
+    })
+    .await;
+
+    let events = capture.events.lock().await;
+    let entry = events
+        .iter()
+        .find(|(method, _)| method == "simlin/diagnosticsChanged")
+        .expect("diagnosticsChanged notification recorded");
+    let params = entry.1.as_ref().expect("params present");
+    assert_eq!(params["path"].as_str(), Some("models/teacup.xmile"));
+    let errors = params["errors"].as_array().expect("errors is an array");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["code"].as_str(), Some("syntax"));
+    assert_eq!(errors[0]["modelName"].as_str(), Some("main"));
+    drop(events);
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn project_removed_event_arrives_as_simlin_project_removed_notification() {
+    // Phase 4's ProjectRemoved variant flows through the same forwarder
+    // path. Asserts the wire_pair coverage stays exhaustive across all
+    // five WsMessage variants.
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    state.events.publish(WsMessage::ProjectRemoved {
+        path: "deleted.stmx".into(),
+    });
+
+    wait_for_events(&capture, Duration::from_secs(2), |events| {
+        events
+            .iter()
+            .any(|(method, _)| method == "simlin/projectRemoved")
+    })
+    .await;
+
+    let events = capture.events.lock().await;
+    let entry = events
+        .iter()
+        .find(|(method, _)| method == "simlin/projectRemoved")
+        .expect("projectRemoved notification recorded");
+    let params = entry.1.as_ref().expect("params present");
+    assert_eq!(params["path"].as_str(), Some("deleted.stmx"));
+    drop(events);
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn forwarder_subscribes_during_initialize_and_unsubscribes_on_disconnect() {
+    // The per-session pattern's contract: each connected MCP session
+    // owns exactly one broadcast receiver, which Drop-cleans when the
+    // forwarder task exits. After the client disconnects and the
+    // session ends, receiver_count() must drop back to its baseline.
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let baseline = state.events.receiver_count();
+
+    let (client, server, _capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    // After initialize, the forwarder task holds one receiver. Other
+    // session-internal subscribers are not expected, so the increment
+    // is exactly 1 — but allow a wider check so unrelated future
+    // additions don't make the test brittle.
+    let connected = state.events.receiver_count();
+    assert!(
+        connected > baseline,
+        "forwarder must subscribe during initialize: baseline={baseline}, connected={connected}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+
+    // The forwarder loop wakes only on the next recv() or on session
+    // shutdown; nudge it with a publish so it observes TransportClosed
+    // (or RecvError::Closed) and exits, then poll until the receiver
+    // count drops. Without this nudge a clean cancel still works but
+    // can take longer to clear.
+    state.events.publish(WsMessage::ProjectFocused {
+        path: "shutdown-nudge".into(),
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let count = state.events.receiver_count();
+        if count <= baseline {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "receiver count did not return to baseline within 2s: \
+                 baseline={baseline}, current={count}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn multiple_events_arrive_in_order_to_a_single_session() {
+    // Sanity check that ordering is preserved per-session: a sequence
+    // of three publishes lands at the client in the same order. (This
+    // is *not* the cross-tool-response ordering covered by Phase 7
+    // Note 3 — that one is intentionally not guaranteed.)
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server, capture) = spawn_server_pair_with_capture(state.clone()).await;
+
+    state.events.publish(WsMessage::ProjectFocused {
+        path: "first".into(),
+    });
+    state.events.publish(WsMessage::ProjectChanged {
+        path: "first".into(),
+        version: 1,
+        source: ChangeSource::Agent,
+    });
+    state.events.publish(WsMessage::ProjectFocused {
+        path: "second".into(),
+    });
+
+    wait_for_events(&capture, Duration::from_secs(2), |events| events.len() >= 3).await;
+
+    let events = capture.events.lock().await;
+    let methods: Vec<&str> = events.iter().map(|(m, _)| m.as_str()).collect();
+    let first_focused = methods
+        .iter()
+        .position(|m| *m == "simlin/projectFocused")
+        .expect("first projectFocused");
+    let project_changed = methods
+        .iter()
+        .position(|m| *m == "simlin/projectChanged")
+        .expect("projectChanged");
+    let second_focused = methods
+        .iter()
+        .rposition(|m| *m == "simlin/projectFocused")
+        .expect("second projectFocused");
+    assert!(
+        first_focused < project_changed && project_changed < second_focused,
+        "events out of order: {methods:?}"
+    );
+    drop(events);
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
 }

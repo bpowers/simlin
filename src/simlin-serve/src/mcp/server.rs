@@ -22,8 +22,9 @@ use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ErrorCode, Implementation, ListResourcesResult, PaginatedRequestParams,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities, ServerInfo,
+    CallToolResult, ErrorCode, Implementation, InitializeRequestParams, InitializeResult,
+    ListResourcesResult, PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams,
+    ReadResourceResult, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -36,6 +37,7 @@ use simlin_mcp_core::tools::read_model::{ReadModelInput, read_model};
 use crate::handlers::AppState;
 use crate::mcp::access::RegistryAccess;
 use crate::mcp::list_projects::{ListProjectsInput, run as run_list_projects};
+use crate::mcp::notifications::forward_events_to_peer;
 use crate::mcp::simulate::{SimulateInput, run as run_simulate};
 
 /// rmcp `ServerHandler` impl exposing the simlin-serve tool surface.
@@ -226,6 +228,30 @@ impl<A: ProjectAccess> ServerHandler for SimlinServeMcpServer<A> {
              available models, then read_model / edit_model / simulate to interact with them.",
             self.root.display()
         ))
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        // Mirror the rmcp default's peer-info caching so the rest of the
+        // session can read the client's capabilities back out via
+        // `peer.peer_info()` when needed (parity with the trait default).
+        if ctx.peer.peer_info().is_none() {
+            ctx.peer.set_peer_info(request);
+        }
+
+        // Per-session notification forwarder. Each MCP session subscribes
+        // to its own broadcast receiver and gets its own `Peer` clone;
+        // when the session ends `send_notification` returns
+        // `ServiceError::TransportClosed` and the spawned task exits
+        // naturally. No global registry is required.
+        let peer = ctx.peer.clone();
+        let bus_rx = self.state.events.subscribe();
+        tokio::spawn(forward_events_to_peer(peer, bus_rx));
+
+        Ok(self.get_info())
     }
 
     async fn list_resources(

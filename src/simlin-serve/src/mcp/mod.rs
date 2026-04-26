@@ -12,11 +12,13 @@
 //! handlers. The submodules layer in over the next phases:
 //!
 //! - `access` — `RegistryAccess` impl of `simlin_mcp_core::ProjectAccess`.
+//! - `notifications` — per-session forwarder bridging `EventBus` to MCP.
 //! - `server` — the rmcp `ServerHandler` that mounts the tool surface.
 //! - `transport` — the streamable-HTTP service factory mounted at `/mcp`.
 
 pub mod access;
 pub mod list_projects;
+pub mod notifications;
 pub mod server;
 pub mod simulate;
 pub mod transport;

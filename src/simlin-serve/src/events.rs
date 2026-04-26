@@ -74,6 +74,14 @@ impl EventBus {
     pub fn publish(&self, msg: WsMessage) {
         let _ = self.tx.send(msg);
     }
+
+    /// Number of live receivers currently subscribed. Surface from
+    /// `tokio::sync::broadcast::Sender::receiver_count` so tests can
+    /// assert that per-session forwarders unsubscribe when their MCP
+    /// session closes.
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
 }
 
 impl Default for EventBus {
