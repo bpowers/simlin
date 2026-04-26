@@ -665,14 +665,61 @@ impl WatcherActor {
         });
     }
 
-    /// Stub for Subcomponent A. Task 6 replaces this with the real
-    /// `registry.remove(...)` + `WsMessage::ProjectRemoved` broadcast.
-    async fn handle_model_removal(_state: &AppState, path: PathBuf, format: Option<ProjectFormat>) {
-        tracing::debug!(
-            path = %path.display(),
+    /// Drop the registry entry for `path` and broadcast `ProjectRemoved`
+    /// so the SPA's sidebar can drop the entry. The path is not
+    /// canonicalized here because canonicalize() requires the file to
+    /// exist; we use the post-strip-prefix relative path that matches
+    /// the registry's display key.
+    ///
+    /// Sidecar pairing on .mdl: when the .sd.json sidecar is removed the
+    /// .mdl theoretically becomes the source-of-truth again. Implementing
+    /// that round-trip is documented in the design plan (note 9) and
+    /// deferred to Phase 8 polish; for Phase 4 we simply remove whichever
+    /// path the watcher tells us about. The registry is permissive
+    /// (`remove` is a no-op for unknown keys) so this is safe even when
+    /// the path was already absent.
+    async fn handle_model_removal(state: &AppState, path: PathBuf, format: Option<ProjectFormat>) {
+        // The registry key is the canonical path; canonicalize() can't
+        // run on a now-deleted file, so we strip the watcher root prefix
+        // and recompose against `state.root` (which is canonicalized at
+        // server startup). For paths outside the root we fall back to
+        // the original `path`; the registry's `remove` is no-op-on-miss.
+        let registry_key = match path.strip_prefix(state.root.as_ref()) {
+            Ok(rel) => state.root.as_ref().join(rel),
+            Err(_) => path.clone(),
+        };
+
+        // Was the entry actually present? `remove` doesn't tell us, so
+        // we look up first; this lets us suppress spurious
+        // `ProjectRemoved` broadcasts for paths the registry never
+        // tracked (e.g., a file deleted under the watched root that
+        // matched our extension filter but was never discovered).
+        let was_present = state.registry.get(&registry_key).is_some();
+        state.registry.remove(&registry_key);
+
+        if !was_present {
+            tracing::debug!(
+                path = %path.display(),
+                ?format,
+                "watcher: removal for path not in registry; skipping broadcast"
+            );
+            return;
+        }
+
+        let display_path = match path.strip_prefix(state.root.as_ref()) {
+            Ok(rel) => path_to_forward_slash(rel),
+            Err(_) => path_to_forward_slash(&path),
+        };
+
+        tracing::info!(
+            path = %display_path,
             ?format,
-            "watcher actor: model file removal (stub)"
+            "watcher: model file removed"
         );
+
+        state
+            .events
+            .publish(WsMessage::ProjectRemoved { path: display_path });
     }
 
     /// Stub for Subcomponent A. Task 7 replaces this with

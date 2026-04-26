@@ -660,6 +660,7 @@ async fn successful_save_publishes_project_changed_with_source_user() {
             assert_eq!(version, 1);
             assert_eq!(source, ChangeSource::User);
         }
+        WsMessage::ProjectRemoved { .. } => panic!("save must not publish a removal"),
     }
 }
 
@@ -749,6 +750,7 @@ async fn two_saves_modifying_different_stocks_both_persist() {
             assert_eq!(v1, 1);
             assert_eq!(v2, 2);
         }
+        _ => panic!("expected two ProjectChanged events, got a different sequence"),
     }
 }
 

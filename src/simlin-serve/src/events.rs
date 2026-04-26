@@ -96,6 +96,17 @@ pub enum WsMessage {
         /// phases add `Agent` (MCP) and `Disk` (file watcher).
         source: ChangeSource,
     },
+    /// A project file was removed from disk (e.g. `rm` from a terminal).
+    /// Phase 4's file watcher emits this so the SPA can drop the entry
+    /// from its sidebar list. There is no version field because the
+    /// project no longer exists; the client treats the path as the
+    /// authoritative key for matching against its in-memory project list.
+    ProjectRemoved {
+        /// Forward-slash relative path the project used to live at.
+        /// Same wire shape as `ProjectChanged.path` so the client can
+        /// look up the entry by string equality.
+        path: String,
+    },
 }
 
 /// Provenance discriminator carried on every `ProjectChanged` event.
@@ -180,6 +191,7 @@ mod tests {
             WsMessage::ProjectChanged { version, .. } => {
                 assert_eq!(version, 36, "auto-resume must yield the oldest retained");
             }
+            WsMessage::ProjectRemoved { .. } => panic!("did not publish a removal here"),
         }
     }
 
@@ -195,6 +207,16 @@ mod tests {
         assert_eq!(value["path"].as_str(), Some("sub/foo.stmx"));
         assert_eq!(value["version"].as_u64(), Some(7));
         assert_eq!(value["source"].as_str(), Some("user"));
+    }
+
+    #[test]
+    fn project_removed_serializes_with_camel_case_and_tag() {
+        let msg = WsMessage::ProjectRemoved {
+            path: "sub/foo.stmx".into(),
+        };
+        let value = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(value["type"].as_str(), Some("projectRemoved"));
+        assert_eq!(value["path"].as_str(), Some("sub/foo.stmx"));
     }
 
     #[test]
@@ -237,6 +259,7 @@ mod tests {
             WsMessage::ProjectChanged { path, .. } => {
                 assert_eq!(path, "late");
             }
+            WsMessage::ProjectRemoved { .. } => panic!("did not publish a removal here"),
         }
     }
 }
