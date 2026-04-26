@@ -516,6 +516,17 @@ impl ProjectAccess for RegistryAccess {
             source: ChangeSource::Agent,
         });
 
+        // Emit DiagnosticsChanged AFTER ProjectChanged when the post-merge
+        // diagnostic set differs from what was cached on the registry
+        // entry. Same ordering invariant as the HTTP handler: the
+        // broadcast channel preserves publish order within one sender's
+        // call sequence.
+        crate::diagnostics::maybe_emit_diagnostics_changed(
+            &self.state,
+            &registry_key,
+            &merged_project,
+        );
+
         Ok(new_version)
     }
 
@@ -598,6 +609,12 @@ impl ProjectAccess for RegistryAccess {
             version: 0,
             source: ChangeSource::Agent,
         });
+
+        // Same ordering rule as the save path: ProjectChanged first,
+        // then DiagnosticsChanged if the new project introduced any
+        // diagnostics. A clean newly-created project produces no
+        // notification (cached set is empty, computed set is empty).
+        crate::diagnostics::maybe_emit_diagnostics_changed(&self.state, &resolved, project);
 
         Ok(())
     }

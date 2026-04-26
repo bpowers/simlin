@@ -374,6 +374,49 @@ impl ProjectRegistry {
         }
     }
 
+    /// Atomic compare-and-update of the entry's `last_diagnostic_keys`
+    /// cache.
+    ///
+    /// Under the registry write lock:
+    /// 1. Look up the entry; return `false` if absent (no entry to
+    ///    update, and no `DiagnosticsChanged` should fire either).
+    /// 2. Compare the cached `last_diagnostic_keys` against `new_keys`.
+    ///    Equal → return `false` (caller suppresses the broadcast).
+    /// 3. Replace the cached set with `new_keys` and return `true`.
+    ///
+    /// Why one method instead of an explicit get+compare+set sequence:
+    /// the broadcast decision and the cache update must observe the
+    /// same snapshot of the entry. A racing save that lands between a
+    /// caller's `get` and `upsert` could otherwise produce duplicate
+    /// notifications or, worse, a notification that loses to a stale
+    /// re-cache.
+    ///
+    /// The method is fire-and-forget for the missing-entry case. That
+    /// matters at startup boundaries (a freshly created entry's
+    /// MCP `create` path may publish `ProjectChanged` after the
+    /// `upsert_max_version` but before the surrounding code drops the
+    /// entry). In practice this is rare; the helper logs nothing
+    /// because the absence is benign.
+    pub fn update_diagnostic_keys_if_changed(
+        &self,
+        abs_path: &Path,
+        new_keys: &BTreeSet<(String, Option<String>)>,
+    ) -> bool {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let entry = match guard.get_mut(abs_path) {
+            Some(e) => e,
+            None => return false,
+        };
+        if entry.last_diagnostic_keys == *new_keys {
+            return false;
+        }
+        entry.last_diagnostic_keys = new_keys.clone();
+        true
+    }
+
     /// Like `refresh_meta`, but also stores the XXH3-64 hash of the bytes
     /// just written. The hash is the echo-suppression key the Phase 4 file
     /// watcher uses to recognize its own atomic-write events.
@@ -1002,6 +1045,73 @@ mod tests {
         assert_eq!(entry.mtime, new_mtime);
         assert_eq!(entry.size, new_size);
         assert_eq!(entry.last_disk_hash, new_hash);
+    }
+
+    #[test]
+    fn update_diagnostic_keys_if_changed_returns_false_for_missing_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let nonexistent = PathBuf::from("/tmp/root/missing.stmx");
+        let mut keys = BTreeSet::new();
+        keys.insert(("syntax".to_string(), Some("x".to_string())));
+        assert!(!reg.update_diagnostic_keys_if_changed(&nonexistent, &keys));
+    }
+
+    #[test]
+    fn update_diagnostic_keys_if_changed_returns_false_when_set_equals_cached() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        let mut cached = BTreeSet::new();
+        cached.insert(("syntax".to_string(), Some("x".to_string())));
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.last_diagnostic_keys = cached.clone();
+        reg.upsert(abs.clone(), meta);
+
+        assert!(!reg.update_diagnostic_keys_if_changed(&abs, &cached));
+        // The cached set must still equal the original (no clobber).
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.last_diagnostic_keys, cached);
+    }
+
+    #[test]
+    fn update_diagnostic_keys_if_changed_returns_true_when_set_differs_and_swaps() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        let cached = BTreeSet::new();
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.last_diagnostic_keys = cached;
+        reg.upsert(abs.clone(), meta);
+
+        let mut new_keys = BTreeSet::new();
+        new_keys.insert(("unknown_dependency".to_string(), Some("bad".to_string())));
+        assert!(reg.update_diagnostic_keys_if_changed(&abs, &new_keys));
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.last_diagnostic_keys, new_keys);
+    }
+
+    #[test]
+    fn update_diagnostic_keys_if_changed_swaps_back_to_empty() {
+        // The "all errors fixed" transition: cached has entries, new is
+        // empty. The method must report changed and replace the cached
+        // set with the empty one so the next invocation reports
+        // unchanged.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        let mut cached = BTreeSet::new();
+        cached.insert(("syntax".to_string(), Some("x".to_string())));
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.last_diagnostic_keys = cached;
+        reg.upsert(abs.clone(), meta);
+
+        let empty = BTreeSet::new();
+        assert!(reg.update_diagnostic_keys_if_changed(&abs, &empty));
+        let entry = reg.get(&abs).expect("entry");
+        assert!(entry.last_diagnostic_keys.is_empty());
+
+        // Second call with the same empty set: no-op.
+        assert!(!reg.update_diagnostic_keys_if_changed(&abs, &empty));
     }
 
     #[test]

@@ -2,16 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// pattern: Functional Core
+// pattern: Imperative Shell
 //
-// Pure helpers that compute a project's current diagnostic set and decide
-// whether it differs from the cached set on a registry entry. The save
-// handler, the watcher merge path, and the MCP RegistryAccess path all
-// drive the same comparison through these helpers, so the wire shape of
-// `DiagnosticsChanged` is canonical regardless of which surface produced
-// the change.
+// `compute_diagnostic_set` and `diagnostics_set_changed` are pure
+// (Functional Core) helpers, but `maybe_emit_diagnostics_changed`
+// orchestrates the registry write lock and EventBus broadcast and so
+// classifies the whole module as Shell. The module stays small enough
+// to keep both surfaces co-located rather than splitting along
+// pure/impure lines.
 
-//! Diagnostic-set computation and change detection.
+//! Diagnostic-set computation, change detection, and broadcast helper.
 //!
 //! `compute_diagnostic_set` runs the engine's salsa-based diagnostic
 //! pipeline once and returns both:
@@ -23,8 +23,16 @@
 //! `diagnostics_set_changed` compares a `ProjectMeta`'s cached
 //! `last_diagnostic_keys` against a freshly computed set; the call sites
 //! emit a `DiagnosticsChanged` notification only when the two differ.
+//!
+//! `maybe_emit_diagnostics_changed` is the merge-path helper invoked
+//! from each of the four surfaces that produce a successful merge (the
+//! HTTP save handler, the MCP `RegistryAccess::save` and `::create`
+//! paths, and the file watcher). It computes the new set, drives the
+//! atomic compare-and-update on the registry, and publishes the
+//! notification when the set actually differs.
 
 use std::collections::BTreeSet;
+use std::path::{MAIN_SEPARATOR, Path};
 
 use simlin_engine::datamodel;
 use simlin_engine::db::{
@@ -32,7 +40,8 @@ use simlin_engine::db::{
 };
 use simlin_engine::errors::{FormattedErrorKind, collect_formatted_errors};
 
-use crate::events::ValidationError;
+use crate::events::{ValidationError, WsMessage};
+use crate::handlers::AppState;
 use crate::registry::ProjectMeta;
 
 /// Canonical ordered key for one validation diagnostic. Pair of (error
@@ -105,6 +114,73 @@ pub fn compute_diagnostic_set(
 /// transient warning codes) lives in one place.
 pub fn diagnostics_set_changed(meta: &ProjectMeta, new_keys: &BTreeSet<DiagnosticKey>) -> bool {
     meta.last_diagnostic_keys != *new_keys
+}
+
+/// Recompute diagnostics for `project`, atomically swap the cached set
+/// on the registry entry keyed by `abs_path`, and (only when the set
+/// actually changed) broadcast `WsMessage::DiagnosticsChanged` on the
+/// shared `EventBus`.
+///
+/// Ordering invariant: each merge surface MUST publish its
+/// `ProjectChanged` notification BEFORE calling this helper. Both
+/// publishes happen sequentially inside the same async task, and
+/// `tokio::sync::broadcast` preserves FIFO order within one sender's
+/// call sequence, so subscribers always observe `ProjectChanged`
+/// followed by `DiagnosticsChanged`. A future maintainer who is
+/// tempted to parallelize the two publishes would break this contract;
+/// the per-session MCP forwarder (Phase 7 Subcomponent D) and the
+/// browser editor both rely on it to avoid showing diagnostics for a
+/// version the consumer has not yet observed.
+///
+/// The registry write lock is held only across the compare-and-swap on
+/// `last_diagnostic_keys`. Lock duration scales with the cost of one
+/// `BTreeSet` clone — at most a handful of small `(String, Option<String>)`
+/// pairs — and is independent of the diagnostic-pipeline cost (which
+/// runs lock-free before the lock is taken). The lock is dropped before
+/// the broadcast so a subscriber doing extra work in its `recv` path
+/// cannot stall other registry mutators.
+///
+/// `abs_path` is the canonical absolute path used as the registry key.
+/// The wire `path` field is computed by stripping the registry root
+/// prefix and converting to forward slashes (`MAIN_SEPARATOR -> '/'`)
+/// so the wire shape matches what `ProjectChanged` would publish for
+/// the same operation.
+pub fn maybe_emit_diagnostics_changed(
+    state: &AppState,
+    abs_path: &Path,
+    project: &datamodel::Project,
+) {
+    let (new_keys, formatted) = compute_diagnostic_set(project);
+
+    if !state
+        .registry
+        .update_diagnostic_keys_if_changed(abs_path, &new_keys)
+    {
+        return;
+    }
+
+    let display_path = relative_display_path(state.root.as_ref(), abs_path);
+
+    state.events.publish(WsMessage::DiagnosticsChanged {
+        path: display_path,
+        errors: formatted,
+    });
+}
+
+/// Strip the registry-root prefix from `abs_path` and render with
+/// forward slashes so the wire path matches the `ProjectChanged`
+/// envelope for the same operation. Falls back to the absolute path
+/// when the prefix doesn't apply (which would be a programming error
+/// the caller should surface elsewhere; the fallback exists so the
+/// notification still carries *something* useful for debugging).
+fn relative_display_path(root: &Path, abs_path: &Path) -> String {
+    let rel = abs_path.strip_prefix(root).unwrap_or(abs_path);
+    let display = rel.to_string_lossy().into_owned();
+    if MAIN_SEPARATOR == '/' {
+        display
+    } else {
+        display.replace(MAIN_SEPARATOR, "/")
+    }
 }
 
 #[cfg(test)]

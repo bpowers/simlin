@@ -184,6 +184,32 @@ where
     }
 }
 
+/// Read text frames until one whose `type` field matches `expected` is
+/// found, discarding any intervening frames. Useful when the test cares
+/// about a specific notification kind in a stream that may include
+/// adjacent variants (e.g. `projectChanged` interleaved with
+/// `diagnosticsChanged`). Bounded by `timeout`.
+async fn next_text_frame_of_type<S>(
+    ws: &mut S,
+    expected: &str,
+    timeout: std::time::Duration,
+) -> serde_json::Value
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timed out waiting for ws frame of type {expected:?}");
+        }
+        let frame = next_text_frame(ws, remaining).await;
+        if frame["type"].as_str() == Some(expected) {
+            return frame;
+        }
+    }
+}
+
 #[tokio::test]
 async fn save_post_emits_project_changed_and_get_reflects_merged_state() {
     let (_state, addr, _dir) = spawn_server("teacup.xmile").await;
@@ -227,8 +253,13 @@ async fn save_post_emits_project_changed_and_get_reflects_merged_state() {
     // The WS subscriber must see the corresponding ProjectChanged
     // within a small timeout. The 5s budget is generous for CI; in
     // practice the publish happens microseconds after the response.
-    let ev = next_text_frame(&mut ws, std::time::Duration::from_secs(5)).await;
-    assert_eq!(ev["type"].as_str(), Some("projectChanged"));
+    //
+    // Phase 7 may also produce a `diagnosticsChanged` AFTER this
+    // `projectChanged` if the project's diagnostic set differs from
+    // its cached snapshot. We filter to the variant we care about so
+    // the test's intent (project change broadcast) stays focused.
+    let ev =
+        next_text_frame_of_type(&mut ws, "projectChanged", std::time::Duration::from_secs(5)).await;
     assert_eq!(ev["path"].as_str(), Some("teacup.xmile"));
     assert_eq!(ev["version"].as_u64(), Some(1));
     assert_eq!(ev["source"].as_str(), Some("user"));
@@ -269,8 +300,8 @@ async fn save_post_emits_project_changed_and_get_reflects_merged_state() {
     );
     assert_eq!(save_body2["version"].as_u64(), Some(2));
 
-    let ev2 = next_text_frame(&mut ws, std::time::Duration::from_secs(5)).await;
-    assert_eq!(ev2["type"].as_str(), Some("projectChanged"));
+    let ev2 =
+        next_text_frame_of_type(&mut ws, "projectChanged", std::time::Duration::from_secs(5)).await;
     assert_eq!(ev2["path"].as_str(), Some("teacup.xmile"));
     assert_eq!(ev2["version"].as_u64(), Some(2));
     assert_eq!(ev2["source"].as_str(), Some("user"));

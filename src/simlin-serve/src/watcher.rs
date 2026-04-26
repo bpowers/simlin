@@ -628,6 +628,12 @@ impl WatcherActor {
             version: new_version,
             source: ChangeSource::Disk,
         });
+
+        // Emit DiagnosticsChanged after ProjectChanged when the
+        // post-merge diagnostic set differs from the cached set. The
+        // broadcast channel preserves publish order within one sender's
+        // call sequence so subscribers always see ProjectChanged first.
+        crate::diagnostics::maybe_emit_diagnostics_changed(state, &canonical, &new_project);
     }
 
     /// Drop the registry entry for `path` and broadcast `ProjectRemoved`

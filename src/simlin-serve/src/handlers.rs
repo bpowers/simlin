@@ -616,6 +616,14 @@ pub async fn save_project(
         source: ChangeSource::User,
     });
 
+    // Then emit DiagnosticsChanged if the post-merge diagnostic set
+    // differs from what's cached on the registry entry. The two
+    // publishes happen sequentially in this same async task; the
+    // broadcast channel preserves FIFO within one sender's call sequence
+    // so subscribers always see ProjectChanged first. Documented in
+    // `diagnostics::maybe_emit_diagnostics_changed`.
+    crate::diagnostics::maybe_emit_diagnostics_changed(&state, &registry_key, &merged_project);
+
     Ok(Json(SaveResponse {
         version: new_version,
         path: response_path,
