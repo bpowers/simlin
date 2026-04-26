@@ -8,6 +8,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { EditorHost } from './EditorHost';
 import type { GetProjectResponse, JsonProjectData } from '../api';
 import { Editor as EditorMock } from '../test-utils/diagram-mock';
+import type { ClientWsMessage, UpdatesSocket } from '../ws';
 
 function makeFetchResolving(response: GetProjectResponse, status = 200): jest.Mock {
   return jest.fn().mockResolvedValue({
@@ -15,6 +16,21 @@ function makeFetchResolving(response: GetProjectResponse, status = 200): jest.Mo
     status,
     json: async () => response,
   });
+}
+
+// Stand-in for `UpdatesSocket` that records the frames `EditorHost` would
+// have sent. We avoid constructing a real `UpdatesSocket` here because
+// `EditorHost` only consumes the `send` method, and a fake keeps the
+// component test focused on its own emissions rather than the
+// reconnect/parse machinery covered by ws.test.ts.
+function makeFakeSocket(): { socket: UpdatesSocket; sent: Array<ClientWsMessage> } {
+  const sent: Array<ClientWsMessage> = [];
+  const socket = {
+    send: (msg: ClientWsMessage) => {
+      sent.push(msg);
+    },
+  } as unknown as UpdatesSocket;
+  return { socket, sent };
 }
 
 let originalFetch: typeof globalThis.fetch | undefined;
@@ -679,5 +695,92 @@ describe('EditorHost', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('emits projectFocused on mount when a path and socket are provided', async () => {
+    globalThis.fetch = makeFetchResolving({
+      json: '{}',
+      version: 0,
+      source_format: 'stmx',
+    }) as unknown as typeof globalThis.fetch;
+
+    const { socket, sent } = makeFakeSocket();
+    render(<EditorHost path="teacup.stmx" socket={socket} />);
+
+    expect(sent).toEqual([{ type: 'projectFocused', path: 'teacup.stmx' }]);
+  });
+
+  test('does not emit projectFocused on mount when no path is selected', () => {
+    const { socket, sent } = makeFakeSocket();
+    render(<EditorHost path={null} socket={socket} />);
+
+    expect(sent).toEqual([]);
+  });
+
+  test('does not throw when no socket is provided (optional prop)', async () => {
+    globalThis.fetch = makeFetchResolving({
+      json: '{}',
+      version: 0,
+      source_format: 'stmx',
+    }) as unknown as typeof globalThis.fetch;
+
+    expect(() => render(<EditorHost path="teacup.stmx" />)).not.toThrow();
+  });
+
+  test('emits projectFocused for the new path when path changes', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{}', version: 0, source_format: 'stmx' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{}', version: 0, source_format: 'stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { socket, sent } = makeFakeSocket();
+    const { rerender } = render(<EditorHost path="a.stmx" socket={socket} />);
+    expect(sent).toEqual([{ type: 'projectFocused', path: 'a.stmx' }]);
+
+    rerender(<EditorHost path="b.stmx" socket={socket} />);
+    expect(sent).toEqual([
+      { type: 'projectFocused', path: 'a.stmx' },
+      { type: 'projectFocused', path: 'b.stmx' },
+    ]);
+  });
+
+  test('does not re-emit projectFocused when an unrelated prop changes', async () => {
+    globalThis.fetch = makeFetchResolving({
+      json: '{}',
+      version: 0,
+      source_format: 'stmx',
+    }) as unknown as typeof globalThis.fetch;
+
+    const { socket, sent } = makeFakeSocket();
+    const { rerender } = render(<EditorHost path="a.stmx" socket={socket} liveVersion={0} />);
+    expect(sent).toHaveLength(1);
+
+    // Bumping liveVersion shouldn't be misread as a path change.
+    rerender(<EditorHost path="a.stmx" socket={socket} liveVersion={1} />);
+    expect(sent).toHaveLength(1);
+  });
+
+  test('emits projectFocused when path transitions from null to a value', async () => {
+    globalThis.fetch = makeFetchResolving({
+      json: '{}',
+      version: 0,
+      source_format: 'stmx',
+    }) as unknown as typeof globalThis.fetch;
+
+    const { socket, sent } = makeFakeSocket();
+    const { rerender } = render(<EditorHost path={null} socket={socket} />);
+    expect(sent).toEqual([]);
+
+    rerender(<EditorHost path="a.stmx" socket={socket} />);
+    expect(sent).toEqual([{ type: 'projectFocused', path: 'a.stmx' }]);
   });
 });

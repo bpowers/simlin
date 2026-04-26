@@ -217,6 +217,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
               liveVersion={liveVersion}
               liveSource={liveSource}
               onPathRedirect={this.handlePathRedirect}
+              socket={this.socket ?? undefined}
             />
           </div>
         )}

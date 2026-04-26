@@ -31,6 +31,21 @@ export type WsMessage =
       readonly path: string;
     };
 
+// Browser-originated frames sent over the same channel. Mirrors
+// `simlin_serve::events::ClientWsMessage` (the inbound counterpart parsed
+// by `handle_socket`); diagnostics-style events have no client-side
+// counterpart and must not appear here.
+export type ClientWsMessage =
+  | {
+      readonly type: 'projectFocused';
+      readonly path: string;
+    }
+  | {
+      readonly type: 'selectionChanged';
+      readonly path: string;
+      readonly variableIdents: ReadonlyArray<string>;
+    };
+
 type OnMessageFn = (msg: WsMessage) => void;
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'dead';
 type OnStatusFn = (status: ConnectionStatus) => void;
@@ -94,6 +109,24 @@ export class UpdatesSocket {
       this.socket.close();
       this.socket = null;
     }
+  }
+
+  // Sends a client-originated frame (focus, selection) over the active
+  // WebSocket. Frames issued before the connection finishes opening or
+  // after `close()` are dropped silently rather than queued: a focus or
+  // selection event from a torn-down editor is stale by the time the
+  // socket recovers, and the next mount will emit a fresh one. Replays
+  // would also race with the server's view of which session "owns"
+  // these intent signals.
+  send(msg: ClientWsMessage): void {
+    if (this.closed) {
+      return;
+    }
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify(msg));
   }
 
   private connect(): void {

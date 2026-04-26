@@ -8,7 +8,7 @@ import { Editor } from '@simlin/diagram';
 
 import { fetchProject, saveProject, ValidationError, VersionConflictError } from '../api';
 import type { GetProjectResponse, JsonProjectData, ServerValidationError } from '../api';
-import type { ChangeSource } from '../ws';
+import type { ChangeSource, UpdatesSocket } from '../ws';
 
 type EditorHostProps = Readonly<{
   path: string | null;
@@ -40,6 +40,13 @@ type EditorHostProps = Readonly<{
   // `key` prop forces a remount so its internal state matches the new
   // initial JSON).
   onConflict?: (latestJson: string, latestVersion: number) => void;
+  // Live-update channel used to push browser intent (project focus,
+  // selection) back to the server so MCP clients can be notified. The
+  // prop is optional because (a) the App skips the socket entirely
+  // when no launch token is present, and (b) component tests that only
+  // exercise the fetch/save paths don't need a socket. Phase 7 wires
+  // `projectFocused` and `selectionChanged` through this channel.
+  socket?: UpdatesSocket;
 }>;
 
 type EditorHostState = {
@@ -116,6 +123,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
   componentDidMount(): void {
     if (this.props.path) {
       void this.loadProject(this.props.path);
+      this.emitProjectFocused(this.props.path);
     }
   }
 
@@ -140,6 +148,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       this.clearDiskNoticeTimer();
       this.setState({ diskNoticeVisible: false });
       void this.loadProject(this.props.path);
+      this.emitProjectFocused(this.props.path);
       return;
     }
     // Path unchanged: check whether the WS-driven liveVersion advanced
@@ -162,6 +171,14 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       }
       void this.loadProject(path);
     }
+  }
+
+  // Tell the server which project the browser is currently looking at
+  // so the MCP notification fan-out can correlate AI sessions with the
+  // user's focus. The `Editor` component itself doesn't know this — the
+  // host owns the path-to-project mapping.
+  private emitProjectFocused(path: string): void {
+    this.props.socket?.send({ type: 'projectFocused', path });
   }
 
   private showDiskNotice(): void {

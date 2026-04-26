@@ -23,6 +23,10 @@ class MockWebSocket {
   onclose: ((ev: CloseEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   closeArgs: { code?: number; reason?: string } | null = null;
+  // Recorded payloads from `send()`. We record the raw stringified
+  // frame (matching what the production WebSocket would have written
+  // to the wire) so tests can assert the exact JSON envelope.
+  sentFrames: Array<string> = [];
 
   static instances: Array<MockWebSocket> = [];
 
@@ -52,6 +56,10 @@ class MockWebSocket {
   close(code?: number, reason?: string): void {
     this.closeArgs = { code, reason };
     this.readyState = MockWebSocket.CLOSED;
+  }
+
+  send(data: string): void {
+    this.sentFrames.push(data);
   }
 }
 
@@ -261,5 +269,75 @@ describe('UpdatesSocket', () => {
     expect(ws.closeArgs).toBeNull();
     socket.close();
     expect(ws.closeArgs).not.toBeNull();
+  });
+
+  test('send() writes the JSON-encoded ClientWsMessage when the socket is open', () => {
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({
+      type: 'projectFocused',
+      path: 'a.stmx',
+    });
+
+    socket.close();
+  });
+
+  test('send() encodes selectionChanged frames with variableIdents', () => {
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    socket.send({
+      type: 'selectionChanged',
+      path: 'a.stmx',
+      variableIdents: ['teacup_temperature', 'ambient'],
+    });
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({
+      type: 'selectionChanged',
+      path: 'a.stmx',
+      variableIdents: ['teacup_temperature', 'ambient'],
+    });
+
+    socket.close();
+  });
+
+  test('send() drops frames when the socket is not yet open', () => {
+    // The socket is in CONNECTING state until `open()` is invoked. Sending
+    // before the connection is up would throw on a real WebSocket; the
+    // public contract here is to drop silently so transient timing windows
+    // around mount/unmount don't tear down the app.
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    expect(ws.sentFrames).toHaveLength(0);
+    socket.close();
+  });
+
+  test('send() drops frames after close() has been called', () => {
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+    socket.close();
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    expect(ws.sentFrames).toHaveLength(0);
   });
 });
