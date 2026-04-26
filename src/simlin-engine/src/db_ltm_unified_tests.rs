@@ -833,12 +833,21 @@ fn fixed_index_link_score_emits_per_element_name() {
 //
 // AC4.1 / AC4.2: build_element_level_loops must populate Link.shape
 // so the loop-score equation generator picks the right per-shape
-// link-score variable name. For pure-A2A loops every link is Bare;
-// for cross-element circuits the heuristic still emits Bare (the
-// diagonal-link-score approximation comment); for mixed/scalar
-// circuits the shape is derived per-link from comparing source vs
-// target subscripts (bare source -> Bare; matched subscripts ->
-// Bare; differing source subscript -> FixedIndex).
+// link-score variable name. For pure-A2A loops every link is Bare
+// and carries variable-level names.
+//
+// For mixed/scalar loops the shape is Bare and the link names are
+// normalized to match the link-score variables that are actually emitted:
+//  - Cross-dimensional edges (subscripted from, bare to): element-level
+//    from is preserved so the loop score references the per-element link
+//    score emitted by try_cross_dimensional_link_scores.
+//  - All other edges (A2A inside a mixed loop, scalar-to-arrayed, etc.):
+//    subscripts are stripped so the loop score references the variable-level
+//    A2A or scalar link score emitted by emit_per_shape_link_scores.
+//
+// Using FixedIndex (old heuristic) caused doubly-bracketed names like
+// "population[nyc][nyc]→total_pop" because link_score_var_name prepends
+// "[nyc]" to the already-subscripted from name.
 
 /// Build the element-level loops for a TestProject by replicating the
 /// same orchestration `model_ltm_variables` does internally. Phase 4
@@ -893,78 +902,99 @@ fn a2a_loop_links_carry_bare_shape() {
     }
 }
 
+/// Collect all quoted variable references from a loop_score equation.
+///
+/// Loop-score equations have the form `"name1" * "name2" * ...`.  This
+/// parser returns every string between double-quote pairs so the caller
+/// can check that each referenced name is actually emitted as a variable.
+fn extract_quoted_refs(equation: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut rest = equation;
+    while let Some(open) = rest.find('"') {
+        let inner = &rest[open + 1..];
+        if let Some(close) = inner.find('"') {
+            refs.push(inner[..close].to_string());
+            rest = &inner[close + 1..];
+        } else {
+            break;
+        }
+    }
+    refs
+}
+
 #[test]
-fn cross_element_fixed_index_link_carries_fixed_index_shape() {
-    // Build a feedback-closed model whose cross-element circuits land
-    // in the mixed/scalar branch of build_element_level_loops. The
-    // simplest such fixture pairs an arrayed stock with a scalar
-    // reducer inside the feedback path:
+fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
+    // Regression test for the "doubly-bracketed name" bug that occurred
+    // when the mixed/scalar branch used FixedIndex(source_elem) as the
+    // link shape. link_score_var_name(Bare) takes `from` verbatim, so
+    // "pop[nyc]→total_pop" is well-formed. link_score_var_name(FixedIndex
+    // (["nyc"])) would prepend "[nyc]" a second time, yielding the
+    // malformed "pop[nyc][nyc]→total_pop" which no emitted variable
+    // matches, making the loop score silently reference an undefined name.
     //
-    //   pop[r] (stock, inflow=births)
-    //   total_pop = SUM(pop[*])                       (scalar aux)
-    //   births[r] = total_pop * 0.005 + pop * 0.05    (mixed inputs)
+    // The fixture:
+    //   pop[Region] (stock, inflow=births)
+    //   total_pop = SUM(pop[*])           (scalar aux, cross-element)
+    //   births[Region] = total_pop * 0.005 + pop * 0.05  (mixed inputs)
     //
-    // The mixed loop pop[r] -> total_pop -> births[r] -> pop[r] has
-    // a scalar node (total_pop), so all_subscripted is false and the
-    // group falls through to the mixed/scalar branch. The link
-    // pop[nyc] -> total_pop has a subscripted source feeding a bare
-    // target, so the heuristic in this branch must annotate the link
-    // with FixedIndex(["nyc"]) -- the per-element link-score variant.
-    let project = TestProject::new("mixed_scalar_shape")
+    // The loop pop[r] -> total_pop -> births[r] -> pop[r] goes through a
+    // scalar node, so it lands in the mixed/scalar branch.
+    let project = TestProject::new("mixed_scalar_roundtrip")
         .named_dimension("Region", &["NYC", "Boston"])
         .array_stock("pop[Region]", "100", &["births"], &[], None)
         .scalar_aux("total_pop", "SUM(pop[*])")
         .array_flow("births[Region]", "total_pop * 0.005 + pop * 0.05", None);
 
-    let loops = build_loops_for_test(&project);
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    // Collect the full set of emitted variable names.
+    let emitted: std::collections::HashSet<String> =
+        ltm.vars.iter().map(|v| v.name.clone()).collect();
+
     assert!(
-        !loops.is_empty(),
-        "expected at least one loop in the mixed-scalar fixture"
+        !emitted.is_empty(),
+        "expected LTM variables to be emitted for this feedback model"
     );
 
-    // Every link must carry an annotated shape (Some, never None
-    // after Phase 4).
-    for l in &loops {
-        for link in &l.links {
+    // Assert no emitted name contains "][" -- the telltale sign of a
+    // doubly-bracketed malformed name.
+    for name in &emitted {
+        assert!(
+            !name.contains("]["),
+            "emitted variable name contains doubly-bracketed '][': {name:?}"
+        );
+    }
+
+    // For every loop_score equation, every quoted link-score reference
+    // must appear in the emitted set.  A missing reference means the
+    // loop score multiplies by an undefined variable, producing NaN.
+    let loop_score_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .collect();
+
+    assert!(
+        !loop_score_vars.is_empty(),
+        "expected at least one loop_score variable; emitted: {emitted:?}"
+    );
+
+    for lsv in &loop_score_vars {
+        let refs = extract_quoted_refs(&lsv.equation);
+        for r in &refs {
             assert!(
-                link.shape.is_some(),
-                "every loop link must carry an annotated shape after \
-                 Phase 4; loop {:?} link {:?}->{:?} is None",
-                l.id,
-                link.from.as_str(),
-                link.to.as_str(),
+                emitted.contains(r),
+                "loop_score {:?} references {:?} which is not in emitted vars.\n\
+                 Emitted names: {emitted:?}",
+                lsv.name,
+                r
             );
         }
     }
-
-    // At least one link in some loop must carry FixedIndex -- this
-    // is the pop[r] -> total_pop edge inside the mixed loop, where
-    // the source subscript differs from (here: dominates) the bare
-    // target.
-    let any_fixed_index = loops.iter().any(|l| {
-        l.links
-            .iter()
-            .any(|link| matches!(link.shape, Some(RefShape::FixedIndex(_))))
-    });
-    assert!(
-        any_fixed_index,
-        "expected at least one loop link with FixedIndex shape from \
-         the pop[r] -> total_pop edge in the mixed/scalar loop; loops: {:?}",
-        loops
-            .iter()
-            .map(|l| (
-                l.id.clone(),
-                l.links
-                    .iter()
-                    .map(|lk| (
-                        lk.from.as_str().to_string(),
-                        lk.to.as_str().to_string(),
-                        lk.shape.clone()
-                    ))
-                    .collect::<Vec<_>>(),
-            ))
-            .collect::<Vec<_>>()
-    );
 }
 
 // -- Phase 4 Task 3.5 (edge-aliasing limitation regression test) --
