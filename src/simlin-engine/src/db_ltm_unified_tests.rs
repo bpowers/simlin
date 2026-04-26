@@ -828,3 +828,141 @@ fn fixed_index_link_score_emits_per_element_name() {
          got {pop_to_rel} matching names: {names:?}"
     );
 }
+
+// -- Phase 4 (Link.shape annotation in build_element_level_loops) --
+//
+// AC4.1 / AC4.2: build_element_level_loops must populate Link.shape
+// so the loop-score equation generator picks the right per-shape
+// link-score variable name. For pure-A2A loops every link is Bare;
+// for cross-element circuits the heuristic still emits Bare (the
+// diagonal-link-score approximation comment); for mixed/scalar
+// circuits the shape is derived per-link from comparing source vs
+// target subscripts (bare source -> Bare; matched subscripts ->
+// Bare; differing source subscript -> FixedIndex).
+
+/// Build the element-level loops for a TestProject by replicating the
+/// same orchestration `model_ltm_variables` does internally. Phase 4
+/// added `pub(crate)` visibility on `build_element_level_loops` so
+/// tests can inspect the `Link.shape` annotations directly.
+fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let circuits = model_element_loop_circuits(&db, model, sync.project);
+    if circuits.is_empty() {
+        return vec![];
+    }
+    let var_graph = causal_graph_with_modules(&db, model, sync.project);
+    let source_vars = model.variables(&db);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    build_element_level_loops(
+        circuits,
+        &var_graph,
+        source_vars,
+        &db,
+        sync.project,
+        dm_dims.as_slice(),
+    )
+}
+
+#[test]
+fn a2a_loop_links_carry_bare_shape() {
+    // Pure A2A: pop[r] -> births[r] -> pop[r]. Every link in the
+    // resulting A2A loop must be annotated with Some(RefShape::Bare)
+    // so that loop-score generation references the canonical
+    // {from}->{to} link score (no per-element prefix).
+    let project = TestProject::new("a2a_shape")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "pop * 0.1", None);
+
+    let loops = build_loops_for_test(&project);
+    assert!(!loops.is_empty(), "expected at least one A2A loop");
+    for l in &loops {
+        for link in &l.links {
+            assert_eq!(
+                link.shape,
+                Some(RefShape::Bare),
+                "A2A loop link {:?}->{:?} should carry Bare shape, got {:?}",
+                link.from.as_str(),
+                link.to.as_str(),
+                link.shape,
+            );
+        }
+    }
+}
+
+#[test]
+fn cross_element_fixed_index_link_carries_fixed_index_shape() {
+    // Build a feedback-closed model whose cross-element circuits land
+    // in the mixed/scalar branch of build_element_level_loops. The
+    // simplest such fixture pairs an arrayed stock with a scalar
+    // reducer inside the feedback path:
+    //
+    //   pop[r] (stock, inflow=births)
+    //   total_pop = SUM(pop[*])                       (scalar aux)
+    //   births[r] = total_pop * 0.005 + pop * 0.05    (mixed inputs)
+    //
+    // The mixed loop pop[r] -> total_pop -> births[r] -> pop[r] has
+    // a scalar node (total_pop), so all_subscripted is false and the
+    // group falls through to the mixed/scalar branch. The link
+    // pop[nyc] -> total_pop has a subscripted source feeding a bare
+    // target, so the heuristic in this branch must annotate the link
+    // with FixedIndex(["nyc"]) -- the per-element link-score variant.
+    let project = TestProject::new("mixed_scalar_shape")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .scalar_aux("total_pop", "SUM(pop[*])")
+        .array_flow("births[Region]", "total_pop * 0.005 + pop * 0.05", None);
+
+    let loops = build_loops_for_test(&project);
+    assert!(
+        !loops.is_empty(),
+        "expected at least one loop in the mixed-scalar fixture"
+    );
+
+    // Every link must carry an annotated shape (Some, never None
+    // after Phase 4).
+    for l in &loops {
+        for link in &l.links {
+            assert!(
+                link.shape.is_some(),
+                "every loop link must carry an annotated shape after \
+                 Phase 4; loop {:?} link {:?}->{:?} is None",
+                l.id,
+                link.from.as_str(),
+                link.to.as_str(),
+            );
+        }
+    }
+
+    // At least one link in some loop must carry FixedIndex -- this
+    // is the pop[r] -> total_pop edge inside the mixed loop, where
+    // the source subscript differs from (here: dominates) the bare
+    // target.
+    let any_fixed_index = loops.iter().any(|l| {
+        l.links
+            .iter()
+            .any(|link| matches!(link.shape, Some(RefShape::FixedIndex(_))))
+    });
+    assert!(
+        any_fixed_index,
+        "expected at least one loop link with FixedIndex shape from \
+         the pop[r] -> total_pop edge in the mixed/scalar loop; loops: {:?}",
+        loops
+            .iter()
+            .map(|l| (
+                l.id.clone(),
+                l.links
+                    .iter()
+                    .map(|lk| (
+                        lk.from.as_str().to_string(),
+                        lk.to.as_str().to_string(),
+                        lk.shape.clone()
+                    ))
+                    .collect::<Vec<_>>(),
+            ))
+            .collect::<Vec<_>>()
+    );
+}

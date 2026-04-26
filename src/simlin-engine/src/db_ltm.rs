@@ -2018,7 +2018,13 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
 /// Mixed: any circuit containing a scalar node or where the group has
 /// circuits with different variable-level structures. Each gets its own
 /// scalar loop with a unique element-specific ID suffix.
-fn build_element_level_loops(
+///
+/// Visibility is `pub(crate)` so unit tests in
+/// `db_ltm_unified_tests.rs` can drive this function directly to
+/// inspect per-link `shape` annotations -- the field isn't otherwise
+/// observable through the LtmVariablesResult.vars surface (which only
+/// exposes the rendered equation strings).
+pub(crate) fn build_element_level_loops(
     element_circuits: &super::LoopCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
     source_vars: &HashMap<String, super::SourceVariable>,
@@ -2138,7 +2144,13 @@ fn build_element_level_loops(
                 .iter()
                 .map(|n| Ident::new(strip_subscript(n)))
                 .collect();
-            let links = var_graph.circuit_to_links(&var_level_nodes);
+            let mut links = var_graph.circuit_to_links(&var_level_nodes);
+            // A2A loop: every link is a same-element diagonal access, so
+            // the loop-score equation must reference the canonical
+            // {from}->{to} link-score variable (the Bare-shape name).
+            for link in &mut links {
+                link.shape = Some(RefShape::Bare);
+            }
             let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
             let polarity = var_graph.calculate_polarity(&links);
 
@@ -2203,7 +2215,15 @@ fn build_element_level_loops(
             }
 
             if unique_cycle.len() >= 2 {
-                let links = var_graph.circuit_to_links(&unique_cycle);
+                let mut links = var_graph.circuit_to_links(&unique_cycle);
+                // Cross-element circuits are scored as a scalar loop using
+                // the diagonal-link-score approximation: every link reads
+                // the canonical {from}->{to} A2A link score (Bare shape).
+                // The actual off-diagonal sensitivities are not directly
+                // available -- this is the documented approximation.
+                for link in &mut links {
+                    link.shape = Some(RefShape::Bare);
+                }
                 let stocks = var_graph.find_stocks_in_loop(&unique_cycle);
                 let polarity = var_graph.calculate_polarity(&links);
 
@@ -2244,12 +2264,31 @@ fn build_element_level_loops(
                     } else {
                         crate::ltm::LinkPolarity::Unknown
                     };
+                    // Per-link shape from comparing source and target
+                    // subscripts (the heuristic documented above
+                    // build_element_level_loops):
+                    //   - bare source                 -> Bare
+                    //   - matched source/target subs  -> Bare (diagonal)
+                    //   - source-subscripted only or
+                    //     differing source subscript  -> FixedIndex(source elems)
+                    // Note: this drops information when the same edge
+                    // is contributed by multiple distinct refs
+                    // (FixedIndex aliasing); see Task 3.5's regression
+                    // test for the documented limitation.
+                    let from_subscript = parse_subscript(from.as_str());
+                    let to_subscript = parse_subscript(to.as_str());
+                    let shape = match (from_subscript, to_subscript) {
+                        (None, _) => RefShape::Bare,
+                        (Some(fs), Some(ts)) if fs == ts => RefShape::Bare,
+                        (Some(fs), _) => {
+                            RefShape::FixedIndex(fs.split(',').map(str::to_string).collect())
+                        }
+                    };
                     links.push(crate::ltm::Link {
                         from: from.clone(),
                         to: to.clone(),
                         polarity: var_link_polarity,
-                        // Shape is populated in Phase 4 at loop construction.
-                        shape: None,
+                        shape: Some(shape),
                     });
                 }
 
