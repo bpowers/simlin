@@ -413,6 +413,42 @@ pub(crate) fn quote_ident(ident: &str) -> String {
     }
 }
 
+/// Compute the canonical synthetic-variable name for a per-shape link score.
+///
+/// Naming convention (Phase 3):
+/// - `Bare`: `$⁚ltm⁚link_score⁚{from}→{to}` — the legacy A2A/scalar form,
+///   unchanged.
+/// - `FixedIndex(elems)`: `$⁚ltm⁚link_score⁚{from}[{elems_joined}]→{to}` —
+///   the per-element prefixed-from form already used by
+///   `try_cross_dimensional_link_scores`.
+/// - `Wildcard`: `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard` — ALWAYS suffixed,
+///   even when no Bare reference coexists. This makes the link score name a
+///   stable function of `(from, to, shape)` so the discovery parser doesn't
+///   need to reason about per-model collisions.
+/// - `DynamicIndex`: `$⁚ltm⁚link_score⁚{from}→{to}⁚dynamic` — analogous to
+///   Wildcard.
+///
+/// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
+/// (RIGHTWARDS ARROW) are intentional: they collide with no legal
+/// identifier, so the generated names cannot be confused with user
+/// variables. The `parse_link_offsets` discovery parser strips the
+/// `⁚wildcard` / `⁚dynamic` suffix before resolving offsets.
+pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> String {
+    let from_part = match shape {
+        RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),
+        _ => from.to_string(),
+    };
+    let to_part = match shape {
+        RefShape::Wildcard => format!("{}\u{205A}wildcard", to),
+        RefShape::DynamicIndex => format!("{}\u{205A}dynamic", to),
+        _ => to.to_string(),
+    };
+    format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+        from_part, to_part
+    )
+}
+
 /// Generate absolute loop score variables for all loops.
 ///
 /// Emits one `$⁚ltm⁚loop_score⁚{id}` synthetic aux per loop (product of
@@ -1810,5 +1846,55 @@ mod tests {
         let partial = build_partial_equation_shaped("pop + unknown", &deps, &live, &shape, &dims);
         assert!(partial.contains("unknown"), "partial: {partial}");
         assert!(!partial.contains("PREVIOUS(unknown)"), "partial: {partial}");
+    }
+
+    // -- link_score_var_name: per-shape naming convention --
+    //
+    // The naming helper produces a stable name for each `(from, to, shape)`
+    // tuple regardless of which other shapes coexist in the same model.
+    // Bare uses the legacy canonical form; FixedIndex prefixes the source
+    // with the bracketed element name(s); Wildcard and DynamicIndex always
+    // append a stable suffix on the target side. The discovery parser
+    // (Phase 3 Task 7) strips the suffix before looking up offsets.
+
+    #[test]
+    fn link_score_name_bare_canonical() {
+        assert_eq!(
+            link_score_var_name("pop", "births", &RefShape::Bare),
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births"
+        );
+    }
+
+    #[test]
+    fn link_score_name_fixed_index() {
+        let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+        assert_eq!(
+            link_score_var_name("pop", "rel_pop", &shape),
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop"
+        );
+    }
+
+    #[test]
+    fn link_score_name_wildcard_always_suffixed() {
+        // Suffix is unconditional - same name regardless of whether Bare
+        // coexists. This is the resolution of code-review issues I2 + I6:
+        // the suffix is a function of `(from, to, shape)` alone, so the
+        // discovery parser needs no per-model collision analysis.
+        assert_eq!(
+            link_score_var_name("pop", "total", &RefShape::Wildcard),
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}total\u{205A}wildcard"
+        );
+        assert_eq!(
+            link_score_var_name("pop", "share", &RefShape::Wildcard),
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
+        );
+    }
+
+    #[test]
+    fn link_score_name_dynamic_index_always_suffixed() {
+        assert_eq!(
+            link_score_var_name("pop", "tgt", &RefShape::DynamicIndex),
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}tgt\u{205A}dynamic"
+        );
     }
 }
