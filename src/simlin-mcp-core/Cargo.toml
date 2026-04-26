@@ -18,3 +18,5 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+rmcp = { version = "1", features = ["server", "macros", "client", "transport-async-rw"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }
