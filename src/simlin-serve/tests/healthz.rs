@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
 use simlin_serve::git::GitProbe;
@@ -13,6 +13,13 @@ use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+// Synthetic test ports used by oneshot tests that don't bind a real
+// listener — the host validator middleware (Phase 8 Task 8) checks
+// the request `Host:` header against `127.0.0.1:<ui_port>`, so the
+// header below must match these values.
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
 
 #[tokio::test]
 async fn healthz_returns_ok() {
@@ -24,6 +31,9 @@ async fn healthz_returns_ok() {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     };
     let app = build_router(state);
     let response = app
@@ -31,6 +41,7 @@ async fn healthz_returns_ok() {
             Request::builder()
                 .method("GET")
                 .uri("/healthz")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .body(Body::empty())
                 .expect("request build"),
         )

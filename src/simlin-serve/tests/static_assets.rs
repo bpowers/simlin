@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
 use simlin_serve::git::GitProbe;
@@ -21,6 +21,10 @@ use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+// Synthetic ports for the host validator middleware (Phase 8 Task 8).
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
 
 fn web_dist_index_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist/index.html")
@@ -43,6 +47,9 @@ fn build_state() -> AppState {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     }
 }
 
@@ -59,6 +66,7 @@ async fn root_path_serves_index_html() {
             Request::builder()
                 .method("GET")
                 .uri("/")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -98,6 +106,7 @@ async fn unknown_extensionless_path_falls_through_to_index() {
             Request::builder()
                 .method("GET")
                 .uri("/some/spa/route")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -126,6 +135,7 @@ async fn missing_asset_with_extension_returns_404() {
             Request::builder()
                 .method("GET")
                 .uri("/assets/missing-asset.js")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -149,6 +159,7 @@ async fn api_routes_take_precedence_over_static_fallback() {
             Request::builder()
                 .method("GET")
                 .uri("/api/projects")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .body(Body::empty())
                 .unwrap(),
         )

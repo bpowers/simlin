@@ -94,6 +94,11 @@ fn build_state(dir: &Path) -> AppState {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new("watcher-git-token".to_string()),
+        // Watcher-git tests stay below the HTTP surface, so the host
+        // validator is never consulted; ports are placeholders.
+        ui_port: 0,
+        mcp_port: 0,
+        strict_origin: true,
     }
 }
 

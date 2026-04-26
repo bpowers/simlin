@@ -24,13 +24,30 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header;
 
 /// Test harness: bind a port, spawn the server, return (state, address, dir).
 /// The caller must keep `TempDir` alive; dropping it removes the root and the
 /// server starts returning 404 for project lookups.
+///
+/// Bind comes BEFORE state construction so the actual ephemeral port
+/// can be passed into AppState.ui_port — the host-validator middleware
+/// uses that to compute the per-launch allowlist, and tokio_tungstenite
+/// always sets `Host: 127.0.0.1:<port>` based on the URL.
 async fn spawn_server(token: &str) -> (AppState, String, TempDir) {
+    spawn_server_with_strict_origin(token, false).await
+}
+
+async fn spawn_server_with_strict_origin(
+    token: &str,
+    strict_origin: bool,
+) -> (AppState, String, TempDir) {
     let dir = TempDir::new().expect("tempdir");
     let canonical = dir.path().canonicalize().expect("canonicalize");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
 
     let state = AppState {
         registry: Arc::new(ProjectRegistry::new(canonical.clone())),
@@ -38,10 +55,11 @@ async fn spawn_server(token: &str) -> (AppState, String, TempDir) {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(token.to_string()),
+        ui_port: addr.port(),
+        mcp_port: 0,
+        strict_origin,
     };
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
     let router = build_router(state.clone());
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
@@ -292,6 +310,75 @@ async fn malformed_inbound_frame_does_not_close_connection() {
     match msg {
         WsMessage::ProjectFocused { path } => assert_eq!(path, "survived.stmx"),
         other => panic!("expected ProjectFocused, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn strict_origin_rejects_upgrade_with_no_origin_header() {
+    // The default production posture is `strict_origin=true`. The SPA
+    // always sets Origin; a request with no Origin is hostile or
+    // malformed, so the upgrade must be refused with 403.
+    let (_state, addr, _dir) = spawn_server_with_strict_origin("k", true).await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+
+    let result = connect_async(&url).await;
+    match result {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                403,
+                "missing Origin under strict-origin must produce 403 Forbidden"
+            );
+        }
+        Err(other) => panic!("expected HTTP error, got {other:?}"),
+        Ok(_) => panic!("strict-origin should refuse this upgrade"),
+    }
+}
+
+#[tokio::test]
+async fn allowed_origin_passes_under_strict_origin() {
+    let (state, addr, _dir) = spawn_server_with_strict_origin("k", true).await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+    let port = state.ui_port;
+
+    // Build a request with an Origin matching the loopback allowlist.
+    let mut request = url.clone().into_client_request().expect("build request");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        format!("http://127.0.0.1:{port}").parse().expect("origin"),
+    );
+
+    let (mut ws, response) = connect_async(request).await.expect("connect");
+    assert_eq!(
+        response.status().as_u16(),
+        101,
+        "loopback Origin must be accepted under strict-origin"
+    );
+    let _ = ws.close(None).await;
+}
+
+#[tokio::test]
+async fn cross_origin_attacker_is_rejected_under_strict_origin() {
+    let (_state, addr, _dir) = spawn_server_with_strict_origin("k", true).await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+
+    let mut request = url.into_client_request().expect("build request");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        "http://evil.example.com".parse().expect("origin"),
+    );
+
+    let result = connect_async(request).await;
+    match result {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            assert_eq!(
+                resp.status().as_u16(),
+                403,
+                "cross-origin must produce 403 Forbidden"
+            );
+        }
+        Err(other) => panic!("expected HTTP error, got {other:?}"),
+        Ok(_) => panic!("cross-origin upgrade should be rejected"),
     }
 }
 

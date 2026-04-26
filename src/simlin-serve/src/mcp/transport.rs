@@ -16,12 +16,14 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::middleware::from_fn_with_state;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::AppState;
 use crate::mcp::{RegistryAccess, SimlinServeMcpServer};
+use crate::middleware::host_validator_middleware;
 
 /// Build the axum router that serves the MCP transport. The returned
 /// router exposes a single nested service at `/mcp` that speaks the MCP
@@ -30,7 +32,12 @@ use crate::mcp::{RegistryAccess, SimlinServeMcpServer};
 /// Each new MCP session triggers a fresh `SimlinServeMcpServer` via the
 /// factory closure; cloning the shared `Arc<AppState>` is cheap and keeps
 /// every session pointed at the same in-memory project state.
+///
+/// The host validator (Phase 8 Task 8) layers in front of the rmcp
+/// service so a request with a non-allowlisted `Host:` header is
+/// rejected before the StreamableHttpService starts a session.
 pub fn build_mcp_router(state: Arc<AppState>) -> Router {
+    let host_state = (*state).clone();
     let factory = move || {
         Ok(SimlinServeMcpServer::<RegistryAccess>::new(Arc::clone(
             &state,
@@ -45,6 +52,7 @@ pub fn build_mcp_router(state: Arc<AppState>) -> Router {
     // the path here, update build_mcp_router's docstring.
     Router::new()
         .nest_service("/mcp", mcp_service)
+        .layer(from_fn_with_state(host_state, host_validator_middleware))
         // Trace layer surfaces MCP traffic in the same `tracing` output as
         // the HTTP/UI server so a single `RUST_LOG=simlin_serve=info` keeps
         // both visible.
@@ -74,6 +82,9 @@ mod tests {
             root: Arc::new(root),
             events: Arc::new(EventBus::new()),
             launch_token: Arc::new(String::new()),
+            ui_port: 12345,
+            mcp_port: 12346,
+            strict_origin: true,
         })
     }
 
@@ -93,14 +104,15 @@ mod tests {
 
         // GET without an Accept header: rmcp rejects with 406; what matters
         // here is that we got *any* response from the rmcp service rather
-        // than the SPA fallback's 404.
+        // than the SPA fallback's 404. The `Host` header carries the test
+        // build_state mcp_port so the host validator passes.
         let response = router
             .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
                     .uri("/mcp")
-                    .header("host", "127.0.0.1")
+                    .header("host", "127.0.0.1:12346")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -120,7 +132,7 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/no-such-endpoint")
-                    .header("host", "127.0.0.1")
+                    .header("host", "127.0.0.1:12346")
                     .body(Body::empty())
                     .expect("request"),
             )

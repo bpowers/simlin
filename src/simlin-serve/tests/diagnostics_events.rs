@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use serde_json::{Value, json};
 use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::types::SourceFormat;
@@ -87,6 +87,10 @@ const FIXED_PLUS_VAR_SD_JSON: &str = r#"{
     }]
 }"#;
 
+// Synthetic ports for the host validator middleware (Phase 8 Task 8).
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
+
 fn build_state(root: PathBuf) -> Arc<AppState> {
     Arc::new(AppState {
         registry: Arc::new(ProjectRegistry::new(root.clone())),
@@ -94,6 +98,9 @@ fn build_state(root: PathBuf) -> Arc<AppState> {
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     })
 }
 
@@ -123,6 +130,7 @@ async fn http_post_save(state: AppState, uri: &str, body: Value) -> (StatusCode,
             Request::builder()
                 .method("POST")
                 .uri(uri)
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .expect("request"),

@@ -32,6 +32,11 @@ fn build_app_state(dir: &std::path::Path) -> AppState {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new("smoke-token".to_string()),
+        // Watcher tests don't go through the HTTP layer, so the host
+        // validator is never consulted; ports are placeholders.
+        ui_port: 0,
+        mcp_port: 0,
+        strict_origin: true,
     }
 }
 

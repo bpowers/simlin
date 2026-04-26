@@ -43,6 +43,11 @@ fn build_state(root: PathBuf) -> Arc<AppState> {
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        // MCP tool-surface tests speak through the rmcp duplex stream
+        // rather than HTTP, so the host validator never runs.
+        ui_port: 0,
+        mcp_port: 0,
+        strict_origin: true,
     })
 }
 

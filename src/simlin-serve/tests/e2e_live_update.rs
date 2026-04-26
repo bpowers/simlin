@@ -68,12 +68,22 @@ async fn spawn_server(fixture: &str) -> (AppState, String, TempDir) {
         other => panic!("unsupported fixture format: {other}"),
     };
 
+    // Bind before constructing AppState so the actual ephemeral port
+    // can flow into AppState.ui_port for the host-validator middleware
+    // (Phase 8 Task 8). raw_http and tokio_tungstenite both set the
+    // Host header from the connect address, so this matches naturally.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
     let state = AppState {
         registry: Arc::new(ProjectRegistry::new(canonical_root.clone())),
         git: Arc::new(GitProbe::unavailable_for_tests()),
         root: Arc::new(canonical_root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(TOKEN.to_string()),
+        ui_port: port,
+        mcp_port: 0,
+        strict_origin: false,
     };
     state.registry.upsert(
         abs_canonical.clone(),
@@ -90,8 +100,6 @@ async fn spawn_server(fixture: &str) -> (AppState, String, TempDir) {
         },
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("local_addr").port();
     let router = build_router(state.clone());
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;

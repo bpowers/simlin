@@ -35,6 +35,11 @@ use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
 use tower::ServiceExt;
 
+// Synthetic ports for the host validator middleware (Phase 8 Task 8).
+// The save below uses these in its `Host:` header.
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
+
 /// Helper: build an `AppState` rooted at `dir` with a fresh registry, no
 /// git visibility, and an `EventBus`.
 fn build_state(dir: &Path) -> AppState {
@@ -45,6 +50,9 @@ fn build_state(dir: &Path) -> AppState {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new("watcher-merge-token".to_string()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     }
 }
 
@@ -634,6 +642,7 @@ async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
     let request = Request::builder()
         .method("POST")
         .uri("/api/projects/model.sd.json")
+        .header("host", format!("127.0.0.1:{TEST_UI_PORT}"))
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .expect("build request");

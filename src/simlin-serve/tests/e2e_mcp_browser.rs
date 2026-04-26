@@ -62,6 +62,11 @@ fn spawn_and_collect_urls(temp: &std::path::Path) -> (Child, StartupOutput) {
             "--mcp-port",
             "0",
             "--no-open",
+            // tokio_tungstenite (the test's WS client) doesn't set
+            // an Origin header, so disable strict-origin to mirror
+            // the dev-time wscat scenario rather than the SPA.
+            "--strict-origin",
+            "false",
             temp.to_str().expect("utf-8 tempdir"),
         ])
         .stdout(Stdio::piped())

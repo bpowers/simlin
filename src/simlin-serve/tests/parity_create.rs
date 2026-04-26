@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use simlin_mcp_core::test_support::TestFileSystemAccess;
 use simlin_mcp_core::tools::create_model::{CreateModelInput, create_model};
 use simlin_serve::build_router;
@@ -37,6 +37,10 @@ use simlin_serve::registry::ProjectRegistry;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+// Synthetic ports for the host validator middleware (Phase 8 Task 8).
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
+
 fn build_state(root: PathBuf) -> AppState {
     AppState {
         registry: Arc::new(ProjectRegistry::new(root.clone())),
@@ -44,6 +48,9 @@ fn build_state(root: PathBuf) -> AppState {
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     }
 }
 
@@ -54,6 +61,7 @@ async fn http_post_new(state: AppState, body: serde_json::Value) -> (StatusCode,
             Request::builder()
                 .method("POST")
                 .uri("/api/projects/new")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .expect("request build"),

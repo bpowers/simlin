@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use serde_json::Value;
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
@@ -18,6 +18,11 @@ use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+// Synthetic ports for the host validator middleware (Phase 8 Task 8).
+// Matches `Host:` headers below.
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
 
 fn touch(dir: &std::path::Path, rel: &str, contents: &[u8]) -> PathBuf {
     let p = dir.join(rel);
@@ -35,6 +40,9 @@ fn build_state(root: PathBuf, git: GitProbe) -> AppState {
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     }
 }
 
@@ -45,6 +53,7 @@ async fn fetch_projects(state: AppState) -> Value {
             Request::builder()
                 .method("GET")
                 .uri("/api/projects")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .body(Body::empty())
                 .expect("request build"),
         )

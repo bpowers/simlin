@@ -24,6 +24,12 @@ use tower::ServiceExt;
 // above that so this test continues to exercise the rejection path.
 const OVERSIZED_BYTES: usize = 17 * 1024 * 1024;
 
+// Synthetic ports that match the `Host:` header on every request below.
+// The host validator middleware (Phase 8 Task 8) rejects mismatched values
+// with 421 Misdirected Request before the body-limit layer even fires.
+const TEST_UI_PORT: u16 = 12345;
+const TEST_MCP_PORT: u16 = 12346;
+
 fn build_state() -> AppState {
     let dir = TempDir::new().expect("tempdir");
     let canonical = dir.path().canonicalize().expect("canonicalize");
@@ -36,6 +42,9 @@ fn build_state() -> AppState {
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
+        ui_port: TEST_UI_PORT,
+        mcp_port: TEST_MCP_PORT,
+        strict_origin: true,
     }
 }
 
@@ -51,6 +60,7 @@ async fn oversized_content_length_is_rejected_by_body_limit() {
             Request::builder()
                 .method("GET")
                 .uri("/api/projects")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .header(header::CONTENT_LENGTH, OVERSIZED_BYTES.to_string())
                 .body(Body::empty())
                 .expect("request build"),
@@ -75,6 +85,7 @@ async fn within_limit_request_passes_through() {
             Request::builder()
                 .method("GET")
                 .uri("/healthz")
+                .header(header::HOST, format!("127.0.0.1:{TEST_UI_PORT}"))
                 .header(header::CONTENT_LENGTH, "0")
                 .body(Body::empty())
                 .expect("request build"),

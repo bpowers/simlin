@@ -67,13 +67,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Token is shared into the AppState so the WebSocket upgrade handler
     // can validate the `?token=...` query param against the same value
-    // that ended up in the launch URL.
+    // that ended up in the launch URL.  ui_port and mcp_port carry the
+    // actually-bound ports (which differ from `args.port` / `args.mcp_port`
+    // when the user passed `0`) so the host-validator middleware computes
+    // the per-launch allowlist correctly.
     let state = AppState {
         registry,
         git,
         root: Arc::new(canonical_root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(token.clone()),
+        ui_port: ui_addr.port(),
+        mcp_port: mcp_addr.port(),
+        strict_origin: args.strict_origin,
     };
 
     // Single println! per stable line so subprocess-based smoke tests can

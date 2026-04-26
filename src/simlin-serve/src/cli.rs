@@ -30,6 +30,20 @@ pub struct Args {
     /// When set, do not attempt to open a browser tab on startup.
     #[arg(long, default_value_t = false)]
     pub no_open: bool,
+
+    /// Reject WebSocket upgrades whose `Origin:` header is missing.
+    /// Defaults to `true`, which is the production-correct setting (the
+    /// SPA always sends an Origin). Set to `false` to allow non-browser
+    /// clients like `wscat` during development. Note that a present
+    /// Origin must always match the loopback allowlist, regardless of
+    /// this flag — the flag only governs the empty-Origin case.
+    ///
+    /// Uses `ArgAction::Set` so callers explicitly pass
+    /// `--strict-origin true` or `--strict-origin false`; this avoids
+    /// the off-by-default `--strict-origin` flag idiom (which would
+    /// invert from the documented production-correct posture).
+    #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
+    pub strict_origin: bool,
 }
 
 impl Args {
@@ -62,6 +76,10 @@ mod tests {
         assert_eq!(args.port, 0);
         assert_eq!(args.mcp_port, 7878);
         assert!(!args.no_open);
+        // Strict origin is on by default — the SPA always sends Origin,
+        // and a missing Origin from the production launch path is a
+        // hostile or malformed client.
+        assert!(args.strict_origin);
     }
 
     #[test]
@@ -98,5 +116,14 @@ mod tests {
     fn no_open_flag_is_parsed() {
         let args = Args::parse_from(["simlin-serve", "--no-open"]);
         assert!(args.no_open);
+    }
+
+    #[test]
+    fn strict_origin_can_be_disabled_for_dev_clients() {
+        // ArgAction::Set requires an explicit value; the dev-time use
+        // case is non-browser clients like `wscat` that don't set an
+        // Origin header.
+        let args = Args::parse_from(["simlin-serve", "--strict-origin", "false"]);
+        assert!(!args.strict_origin);
     }
 }

@@ -650,6 +650,9 @@ mod tests {
             root: Arc::new(root),
             events: Arc::new(EventBus::new()),
             launch_token: Arc::new(String::new()),
+            ui_port: 0,
+            mcp_port: 0,
+            strict_origin: true,
         })
     }
 

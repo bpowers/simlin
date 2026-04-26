@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -50,6 +50,20 @@ pub struct AppState {
     /// don't read it (they're loopback-only by virtue of the bind, and
     /// the SPA proves origin via the loaded HTML carrying the token).
     pub launch_token: Arc<String>,
+    /// Bound UI/HTTP port. The host validator middleware uses this to
+    /// compute the per-launch allowlist (`127.0.0.1:<ui_port>`,
+    /// `localhost:<ui_port>`); 0 in tests where ephemeral ports are
+    /// irrelevant. Populated by `main()` after `bind_or_die` returns
+    /// the actual bound port (which may differ from the requested port
+    /// when the user passed `--port 0`).
+    pub ui_port: u16,
+    /// Bound MCP port — same role as `ui_port` for the MCP router.
+    pub mcp_port: u16,
+    /// When true (the `--strict-origin` default), an empty `Origin`
+    /// header on the WebSocket upgrade is rejected — the SPA always
+    /// carries one. False relaxes that to allow non-browser clients
+    /// like `wscat` for local development.
+    pub strict_origin: bool,
 }
 
 /// Wire shape for a single project entry. Identical to `ProjectMeta` except
@@ -1148,6 +1162,17 @@ pub struct WsParams {
 /// or value -> 401. Missing token -> 400 (Axum's `Query` extractor
 /// rejects the request before the handler runs).
 ///
+/// Origin validation (Phase 8 Task 8): the `Origin:` request header is
+/// compared against the SPA's allowlist
+/// (`http://127.0.0.1:<ui_port>`, `http://localhost:<ui_port>`).
+/// Browser-native `WebSocket` always sets this header for cross-origin
+/// inspection; rejecting non-allowlisted values prevents a malicious
+/// page from upgrading the WS even if it somehow obtained the token.
+/// An empty `Origin` is honored under `--strict-origin=false` (the
+/// default `--strict-origin=true` rejects it) so non-browser clients
+/// like `wscat` keep working in dev. The HTTP-side host validator runs
+/// before this handler, so the loopback `Host:` is already proven.
+///
 /// Inbound (client → server) frames carry [`ClientWsMessage`] variants
 /// (`projectFocused` and `selectionChanged`). Server-computed events
 /// (`projectChanged`, `projectRemoved`, `diagnosticsChanged`) have no
@@ -1156,10 +1181,31 @@ pub struct WsParams {
 pub async fn updates_ws_handler(
     State(state): State<AppState>,
     Query(params): Query<WsParams>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     if !tokens_match(&params.token, &state.launch_token) {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
+
+    // Origin validation: a present header must hit the allowlist; an
+    // empty one is honored only when `--strict-origin=false`.  The
+    // HTTP-side host validator (Phase 8 Task 8) ran ahead of this
+    // handler, so the loopback Host is already proven.
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    match origin {
+        Some(o) if crate::middleware::is_allowed_origin(o, state.ui_port) => {}
+        Some(o) => {
+            tracing::warn!(origin = %o, "ws: rejecting upgrade with disallowed Origin");
+            return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+        }
+        None => {
+            if state.strict_origin {
+                tracing::warn!("ws: rejecting upgrade with no Origin header (strict)");
+                return (StatusCode::FORBIDDEN, "origin required").into_response();
+            }
+            tracing::info!("ws: accepting upgrade with no Origin header (dev mode)");
+        }
     }
 
     let rx = state.events.subscribe();

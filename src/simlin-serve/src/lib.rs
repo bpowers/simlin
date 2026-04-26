@@ -14,6 +14,7 @@ pub mod hashing;
 pub mod launcher;
 pub mod loro_doc;
 pub mod mcp;
+pub mod middleware;
 pub mod parse;
 pub mod registry;
 pub mod scan;
@@ -26,6 +27,7 @@ pub mod writer;
 
 use axum::Router;
 use axum::http::StatusCode;
+use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -33,6 +35,7 @@ use tower_http::trace::TraceLayer;
 use crate::handlers::{
     AppState, create_new_project, get_project, list_projects, save_project, updates_ws_handler,
 };
+use crate::middleware::host_validator_middleware;
 use crate::static_assets::static_handler;
 
 /// Maximum accepted request body size. POST bodies carry the full
@@ -46,9 +49,12 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Exposed as a library function so integration tests and future callers can
 /// exercise the router without spawning a process or binding a TCP port.
 ///
-/// Layers (outer-to-inner): body-size limit, request tracing. The limit is
-/// applied first so an oversized body is rejected before any tracing event
-/// records its size.
+/// Layers (outer-to-inner): body-size limit, request tracing, host
+/// validation. The host validator runs innermost — closest to the
+/// handlers — because the body-limit and trace layers are inexpensive
+/// and applying them ahead of the host check keeps the rejection path
+/// observable in tracing output. (Cost-benefit goes the other way for
+/// expensive layers: the host check would gate them out.)
 pub fn build_router(state: AppState) -> Router {
     // The `/api/...` and `/healthz` routes are registered with `.route(...)`
     // so they take precedence over the SPA fallback, which catches everything
@@ -72,6 +78,7 @@ pub fn build_router(state: AppState) -> Router {
         // a present `?token=...` query param ahead of the handler body.
         .route("/api/updates", get(updates_ws_handler))
         .fallback(static_handler)
+        .layer(from_fn_with_state(state.clone(), host_validator_middleware))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
