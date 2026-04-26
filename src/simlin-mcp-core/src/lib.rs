@@ -17,3 +17,7 @@ pub mod errors;
 pub mod open;
 pub mod tools;
 pub mod types;
+
+pub use access::{OpenedProject, ProjectAccess};
+pub use errors::{AccessError, ValidationError};
+pub use types::SourceFormat;
