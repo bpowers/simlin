@@ -46,6 +46,15 @@ const LINK_SCORE_PREFIX: &str = "$⁚ltm⁚link_score⁚";
 /// Separator between from/to in link score variable names (U+2192 RIGHTWARDS ARROW)
 const LTM_LINK_SEP: char = '→';
 
+/// Trailing shape suffixes appended to the `to` name by `link_score_var_name`
+/// for shapes other than Bare/FixedIndex. These suffixes make per-shape link
+/// score names a stable function of `(from, to, shape)` and prevent collisions
+/// when multiple references with different shapes coexist for the same edge.
+/// Discovery does not need the original shape, so we strip these suffixes
+/// before resolving the canonical `to` ident. Mirrors the constants in
+/// `ltm_augment::link_score_var_name`.
+const LTM_TO_SHAPE_SUFFIXES: &[&str] = &["\u{205A}wildcard", "\u{205A}dynamic"];
+
 // --- Internal types ---
 
 /// An outbound edge in the search graph: target variable and |link_score|.
@@ -265,12 +274,24 @@ impl SearchGraph {
 /// dimension element -- where each element-level edge maps
 /// `from[elem]->to[elem]` to `base_offset + element_index`.
 ///
-/// Cross-dimensional per-element scores (names containing `[` in the
-/// from-name, e.g. `$..link_score..population[nyc]->total_pop`) are
-/// already element-level and map directly to one offset.
+/// Naming patterns handled (see `ltm_augment::link_score_var_name`):
+/// 1. Bare A2A: `from→to` with non-empty dims → expands to N
+///    `(from[d], to[d])` entries (Bare path).
+/// 2. Bare scalar: `from→to` with empty dims → single `(from, to)`.
+/// 3. Wildcard / DynamicIndex suffix: `from→to⁚wildcard` (or
+///    `⁚dynamic`) → suffix is stripped from `to`; remaining
+///    classification (scalar vs A2A) follows from `ltm_var.dimensions`.
+/// 4. FixedIndex A2A: `from[elem]→to` with non-empty dims → expands to
+///    N entries `(from[elem], to[d])` over the *target* dimension. The
+///    source carries a fixed element subscript; only the target varies.
+/// 5. FixedIndex / cross-dimensional scalar: `from[elem]→to` (or
+///    similar with `[` already in either side) with empty dims → single
+///    pass-through entry.
 ///
 /// When `ltm_vars` is empty (e.g. in the non-salsa convenience path),
-/// all link scores are treated as scalar (no expansion).
+/// all link scores are treated as scalar (no expansion). Suffix
+/// stripping still applies because the suffix is encoded in the
+/// `results.offsets` key itself.
 fn parse_link_offsets(
     results: &Results,
     ltm_vars: &[LtmSyntheticVar],
@@ -289,10 +310,46 @@ fn parse_link_offsets(
     for (var_name, &offset) in &results.offsets {
         let name_str = var_name.as_str();
         if let Some(suffix) = name_str.strip_prefix(LINK_SCORE_PREFIX) {
-            // Split on the arrow separator to get from and to
-            if let Some((from_str, to_str)) = suffix.split_once(LTM_LINK_SEP) {
-                // Check if this is a cross-dimensional per-element score
-                // (already element-level, contains `[` in from-name).
+            // Split on the arrow separator to get from and to. The
+            // arrow appears exactly once between `from_part` and
+            // `to_part` (see `link_score_var_name`).
+            if let Some((from_str, to_raw)) = suffix.split_once(LTM_LINK_SEP) {
+                // Strip the trailing shape suffix (`⁚wildcard` or
+                // `⁚dynamic`) from the to-name. The suffix is part of
+                // the synthesized variable name to disambiguate per-
+                // shape link scores; for offset resolution the
+                // canonical to ident is suffix-free.
+                let to_str = strip_to_shape_suffix(to_raw);
+
+                // Look up the LtmSyntheticVar for this link score to
+                // get its dimensions. The lookup uses the full original
+                // name (including any shape suffix) since that is what
+                // `ltm_augment` synthesized.
+                let var_dims = ltm_var_map
+                    .get(name_str)
+                    .map(|v| &v.dimensions[..])
+                    .unwrap_or(&[]);
+
+                // FixedIndex A2A: source carries `[elem]` and the link
+                // score has dimensions, so each slot represents the
+                // edge for `(from[elem], to[d])` at element `d`. Only
+                // the target side expands.
+                if from_str.contains('[') && !var_dims.is_empty() {
+                    expand_fixed_from_a2a_link_offsets(
+                        from_str,
+                        to_str,
+                        offset,
+                        var_dims,
+                        dims,
+                        &mut link_offsets,
+                    );
+                    continue;
+                }
+
+                // Cross-dimensional / FixedIndex scalar pass-through:
+                // the name is already element-level on at least one
+                // side, and there is no further per-element expansion
+                // to do.
                 if from_str.contains('[') || to_str.contains('[') {
                     let from = Ident::new(from_str);
                     let to = Ident::new(to_str);
@@ -300,21 +357,14 @@ fn parse_link_offsets(
                     continue;
                 }
 
-                // Look up the LtmSyntheticVar for this link score to get
-                // its dimensions. If found and dimensions are non-empty,
-                // this is an A2A link score that needs expansion.
-                let var_dims = ltm_var_map
-                    .get(name_str)
-                    .map(|v| &v.dimensions[..])
-                    .unwrap_or(&[]);
-
                 if var_dims.is_empty() {
                     // Scalar link score: one entry at the base offset.
                     let from = Ident::new(from_str);
                     let to = Ident::new(to_str);
                     link_offsets.push(((from, to), offset));
                 } else {
-                    // A2A link score: expand to N element-level edges.
+                    // Bare A2A link score: expand to N element-level
+                    // edges with the source AND target both subscripted.
                     expand_a2a_link_offsets(
                         from_str,
                         to_str,
@@ -329,6 +379,20 @@ fn parse_link_offsets(
     }
 
     link_offsets
+}
+
+/// Strip a trailing shape suffix (`⁚wildcard` or `⁚dynamic`) from a
+/// link score's to-name. Returns the unchanged input if no known suffix
+/// is present. Mirrors the suffix appended by
+/// `ltm_augment::link_score_var_name` for non-Bare, non-FixedIndex
+/// reference shapes.
+fn strip_to_shape_suffix(to_raw: &str) -> &str {
+    for suffix in LTM_TO_SHAPE_SUFFIXES {
+        if let Some(stripped) = to_raw.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    to_raw
 }
 
 /// Expand an A2A link score into per-element `LinkOffset` entries.
@@ -348,8 +412,69 @@ fn expand_a2a_link_offsets(
     dims: &[datamodel::Dimension],
     link_offsets: &mut Vec<LinkOffset>,
 ) {
-    // Resolve dimension element names. For each dimension name in
-    // var_dims, look up the datamodel::Dimension to get element names.
+    let Some(tuples) = resolve_dim_element_tuples(var_dims, dims) else {
+        // Dimension resolution failed; fall back to a single scalar
+        // entry so the link is at least registered (consistent with the
+        // pre-Phase-3 behavior on misconfigured dims).
+        let from = Ident::new(from_var);
+        let to = Ident::new(to_var);
+        link_offsets.push(((from, to), base_offset));
+        return;
+    };
+
+    for (idx, elems) in tuples.iter().enumerate() {
+        let subscript = subscript_from_elements(elems);
+        let from = Ident::new(&format!("{from_var}[{subscript}]"));
+        let to = Ident::new(&format!("{to_var}[{subscript}]"));
+        link_offsets.push(((from, to), base_offset + idx));
+    }
+}
+
+/// Expand a FixedIndex A2A link score into per-element `LinkOffset`
+/// entries. Used when the source side is a fixed `from[elem]` reference
+/// and the target side is array-valued, so each result slot is the link
+/// score for the edge `(from[elem], to[d])` at target element `d`.
+///
+/// The from-name (`from[elem]`) is reused unchanged for every slot;
+/// only the to-name receives the per-element subscript. The slot order
+/// follows the same row-major cartesian-product convention used for
+/// Bare A2A expansion to stay aligned with how the VM lays out the
+/// underlying array.
+fn expand_fixed_from_a2a_link_offsets(
+    from_with_index: &str,
+    to_var: &str,
+    base_offset: usize,
+    var_dims: &[String],
+    dims: &[datamodel::Dimension],
+    link_offsets: &mut Vec<LinkOffset>,
+) {
+    let Some(tuples) = resolve_dim_element_tuples(var_dims, dims) else {
+        // Dimension resolution failed; preserve the source-side
+        // subscript and emit a single pass-through entry. Without
+        // expansion the downstream graph still has the FixedIndex edge
+        // available, even if not per-element.
+        let from = Ident::new(from_with_index);
+        let to = Ident::new(to_var);
+        link_offsets.push(((from, to), base_offset));
+        return;
+    };
+
+    for (idx, elems) in tuples.iter().enumerate() {
+        let subscript = subscript_from_elements(elems);
+        let from = Ident::new(from_with_index);
+        let to = Ident::new(&format!("{to_var}[{subscript}]"));
+        link_offsets.push(((from, to), base_offset + idx));
+    }
+}
+
+/// Resolve a list of dimension names into the cartesian product of
+/// their element names (row-major). Returns `None` if any dimension is
+/// missing from `dims`; callers fall back to a non-expanded entry in
+/// that case.
+fn resolve_dim_element_tuples(
+    var_dims: &[String],
+    dims: &[datamodel::Dimension],
+) -> Option<Vec<Vec<String>>> {
     let dim_elements: Vec<Vec<String>> = var_dims
         .iter()
         .filter_map(|dim_name| {
@@ -363,36 +488,33 @@ fn expand_a2a_link_offsets(
         .collect();
 
     if dim_elements.len() != var_dims.len() {
-        // Dimension resolution failed; fall back to a single scalar entry.
-        let from = Ident::new(from_var);
-        let to = Ident::new(to_var);
-        link_offsets.push(((from, to), base_offset));
-        return;
+        return None;
     }
 
-    // Compute cartesian product of element names (row-major order).
-    let mut tuples: Vec<Vec<&str>> = vec![vec![]];
+    // Cartesian product, row-major: the first dimension cycles slowest.
+    let mut tuples: Vec<Vec<String>> = vec![vec![]];
     for elements in &dim_elements {
         let mut new_tuples = Vec::with_capacity(tuples.len() * elements.len());
         for existing in &tuples {
             for elem in elements {
                 let mut extended = existing.clone();
-                extended.push(elem.as_str());
+                extended.push(elem.clone());
                 new_tuples.push(extended);
             }
         }
         tuples = new_tuples;
     }
+    Some(tuples)
+}
 
-    for (idx, elems) in tuples.iter().enumerate() {
-        let subscript = if elems.len() == 1 {
-            elems[0].to_string()
-        } else {
-            elems.join(",")
-        };
-        let from = Ident::new(&format!("{from_var}[{subscript}]"));
-        let to = Ident::new(&format!("{to_var}[{subscript}]"));
-        link_offsets.push(((from, to), base_offset + idx));
+/// Render a list of element names as a subscript body (no surrounding
+/// brackets). Single-dimension subscripts are emitted bare (`nyc`);
+/// multi-dimension subscripts are comma-joined (`nyc,q1`).
+fn subscript_from_elements(elems: &[String]) -> String {
+    if elems.len() == 1 {
+        elems[0].clone()
+    } else {
+        elems.join(",")
     }
 }
 
@@ -1218,6 +1340,234 @@ mod tests {
         assert_eq!(from.as_str(), "population[nyc]");
         assert_eq!(to.as_str(), "total_pop");
         assert_eq!(*offset, 5);
+    }
+
+    /// Helper: build a single-step Results object with the given offsets.
+    /// Tests in this module only care about the variable->offset mapping
+    /// (parse_link_offsets does not read data values), so the data buffer
+    /// is sized generously and zeroed.
+    fn make_results_with_offsets(
+        offsets: HashMap<Ident<Canonical>, usize>,
+        step_size: usize,
+    ) -> Results {
+        Results {
+            offsets,
+            data: vec![0.0; step_size].into_boxed_slice(),
+            step_size,
+            step_count: 1,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: 0.0,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: 1,
+            },
+            is_vensim: false,
+        }
+    }
+
+    /// Test 2: A wildcard-suffixed scalar link score (`pop→share⁚wildcard`
+    /// with empty dimensions) should yield a single LinkOffset with the
+    /// suffix stripped from `to`. The wildcard suffix marks the shape of
+    /// the original reference for collision-free naming, but for offset
+    /// resolution the canonical `to` ident is suffix-stripped.
+    #[test]
+    fn test_parse_link_offsets_wildcard_suffix_scalar() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"),
+            7usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 10);
+
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
+                .to_string(),
+            equation: String::new(),
+            dimensions: vec![],
+        }];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
+
+        assert_eq!(
+            parsed.len(),
+            1,
+            "Wildcard-suffixed scalar should produce a single LinkOffset"
+        );
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(from.as_str(), "pop");
+        assert_eq!(
+            to.as_str(),
+            "share",
+            "to-name should have wildcard suffix stripped"
+        );
+        assert_eq!(*offset, 7);
+    }
+
+    /// Test 3: A wildcard-suffixed A2A link score (`pop→share⁚wildcard`
+    /// with non-empty dimensions) should expand to N per-element entries
+    /// using the suffix-stripped `to` name. Each element-level entry pairs
+    /// `(pop[d], share[d])` at `base + element_index`.
+    #[test]
+    fn test_parse_link_offsets_wildcard_suffix_a2a_expansion() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"),
+            20usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 30);
+
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
+                .to_string(),
+            equation: String::new(),
+            dimensions: vec!["Region".to_string()],
+        }];
+        let dims = vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec![
+                "NYC".to_string(),
+                "Boston".to_string(),
+                "Chicago".to_string(),
+            ],
+        )];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+
+        assert_eq!(
+            parsed.len(),
+            3,
+            "Wildcard-suffixed A2A should expand to 3 per-element entries"
+        );
+
+        let nyc = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "share[nyc]");
+        assert!(
+            nyc.is_some(),
+            "Should have pop[nyc]->share[nyc] (suffix stripped)"
+        );
+        assert_eq!(nyc.unwrap().1, 20);
+
+        let boston = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[boston]" && t.as_str() == "share[boston]");
+        assert!(
+            boston.is_some(),
+            "Should have pop[boston]->share[boston] (suffix stripped)"
+        );
+        assert_eq!(boston.unwrap().1, 21);
+
+        let chicago = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[chicago]" && t.as_str() == "share[chicago]");
+        assert!(
+            chicago.is_some(),
+            "Should have pop[chicago]->share[chicago] (suffix stripped)"
+        );
+        assert_eq!(chicago.unwrap().1, 22);
+    }
+
+    /// Test 4: A FixedIndex A2A link score (`pop[nyc]→rel_pop` with
+    /// non-empty dimensions). The `from_str` already carries the source
+    /// element subscript; the per-slot expansion runs over the *target*
+    /// dimension. Each slot represents the link score for `(pop[nyc],
+    /// rel_pop[d])` at element `d`.
+    #[test]
+    fn test_parse_link_offsets_fixed_index_from_a2a_expansion() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop"),
+            100usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 110);
+
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop".to_string(),
+            equation: String::new(),
+            dimensions: vec!["Region".to_string()],
+        }];
+        let dims = vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec![
+                "NYC".to_string(),
+                "Boston".to_string(),
+                "Chicago".to_string(),
+            ],
+        )];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
+
+        assert_eq!(
+            parsed.len(),
+            3,
+            "FixedIndex A2A should expand into one entry per target element"
+        );
+
+        // The from-name is fixed as `pop[nyc]` for all entries; only the
+        // to-name varies per element, with the offset incrementing by 1.
+        let nyc = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "rel_pop[nyc]");
+        assert!(
+            nyc.is_some(),
+            "Should have pop[nyc]->rel_pop[nyc] at base offset"
+        );
+        assert_eq!(nyc.unwrap().1, 100);
+
+        let boston = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "rel_pop[boston]");
+        assert!(
+            boston.is_some(),
+            "Should have pop[nyc]->rel_pop[boston] at base+1"
+        );
+        assert_eq!(boston.unwrap().1, 101);
+
+        let chicago = parsed
+            .iter()
+            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "rel_pop[chicago]");
+        assert!(
+            chicago.is_some(),
+            "Should have pop[nyc]->rel_pop[chicago] at base+2"
+        );
+        assert_eq!(chicago.unwrap().1, 102);
+    }
+
+    /// Test 5: A FixedIndex scalar link score (`pop[nyc]→total` with empty
+    /// dimensions) is element-level on the source side and scalar on the
+    /// target side. It should yield a single LinkOffset with no expansion.
+    #[test]
+    fn test_parse_link_offsets_fixed_index_from_scalar() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total"),
+            42usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 50);
+
+        let ltm_vars = vec![crate::db::LtmSyntheticVar {
+            name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string(),
+            equation: String::new(),
+            dimensions: vec![],
+        }];
+
+        let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
+
+        assert_eq!(
+            parsed.len(),
+            1,
+            "FixedIndex scalar should produce a single LinkOffset"
+        );
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(from.as_str(), "pop[nyc]");
+        assert_eq!(to.as_str(), "total");
+        assert_eq!(*offset, 42);
     }
 
     #[test]
