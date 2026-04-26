@@ -42,7 +42,7 @@ use simlin_engine::db::{
     model_element_loop_circuits, model_ltm_variables, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_engine::{json, open_vensim, open_xmile};
 
 fn read_proc_status_kb(key: &str) -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;
@@ -183,13 +183,17 @@ fn main() {
     let mut tracker = Tracker::new(initial, abort_peak_mib);
     let run_start = Instant::now();
 
-    // Stage 1: parse model file.  MDL and XMILE (.stmx/.xmile) are both
-    // supported so the bench can profile non-Vensim test models without
-    // needing per-format driver scripts.
+    // Stage 1: parse model file.  MDL, XMILE (.stmx/.xmile), and the
+    // Simlin JSON format (.sd.json) are all supported so the bench can
+    // profile non-Vensim test models without needing per-format driver
+    // scripts.
     let t0 = Instant::now();
     let contents = fs::read_to_string(&mdl_path).expect("read model file");
     let datamodel = if mdl_path.ends_with(".mdl") {
         open_vensim(&contents).expect("parse MDL")
+    } else if mdl_path.ends_with(".sd.json") {
+        let json_proj: json::Project = serde_json::from_str(&contents).expect("parse Simlin JSON");
+        json_proj.into()
     } else {
         let mut reader = contents.as_bytes();
         open_xmile(&mut reader).expect("parse XMILE")
