@@ -260,6 +260,318 @@ pub struct SaveResponse {
 /// `diagnostics::compute_diagnostic_set` without a conversion step.
 pub use crate::events::ValidationError;
 
+/// Wire shape for a `POST /api/projects/new` request.
+///
+/// `name` is the bare filename without an extension; the server appends
+/// the extension implied by `format`.  `parent_dir` is an optional
+/// forward-slash relative path under the scan root; when omitted the
+/// file lands at the root.  `format` is validated by hand (rather than
+/// via a serde-typed enum) so the handler can return a clean `400 Bad
+/// Request` for `mdl`/`xmile` instead of axum's `422 Unprocessable
+/// Entity` for unknown variants — Mdl is read-only and Xmile is
+/// preserved for existing files only, so they are explicitly rejected
+/// with a useful message.
+#[derive(Debug, Deserialize)]
+pub struct NewProjectRequest {
+    pub name: String,
+    pub format: String,
+    #[serde(default)]
+    pub parent_dir: Option<String>,
+}
+
+/// The subset of `ProjectFormat` accepted for new-file creation.  Mdl
+/// and Xmile are intentionally absent: Mdl is read-only (saves go to a
+/// `.sd.json` sidecar instead) and Xmile is preserved only for files
+/// already on disk.  Stmx is the canonical native XMILE format and
+/// SdJson is the canonical AI/SD-AI format.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum NewProjectFormat {
+    Stmx,
+    SdJson,
+}
+
+impl NewProjectFormat {
+    fn parse(raw: &str) -> Result<Self, NewProjectError> {
+        match raw {
+            "stmx" => Ok(NewProjectFormat::Stmx),
+            "sd_json" => Ok(NewProjectFormat::SdJson),
+            "mdl" | "xmile" => Err(NewProjectError::InvalidFormat(format!(
+                "format `{raw}` is not allowed for new files; use `stmx` or `sd_json`"
+            ))),
+            other => Err(NewProjectError::InvalidFormat(format!(
+                "unknown format `{other}`; expected `stmx` or `sd_json`"
+            ))),
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            NewProjectFormat::Stmx => "stmx",
+            NewProjectFormat::SdJson => "sd.json",
+        }
+    }
+
+    fn project_format(self) -> ProjectFormat {
+        match self {
+            NewProjectFormat::Stmx => ProjectFormat::Stmx,
+            NewProjectFormat::SdJson => ProjectFormat::SdJson,
+        }
+    }
+}
+
+/// Wire shape for a `POST /api/projects/new` response.
+///
+/// `path` is the forward-slash relative path of the freshly-created
+/// file (so the SPA can immediately select it); `version` is always
+/// `0` for fresh files.
+#[derive(Debug, Serialize)]
+pub struct NewProjectResponse {
+    pub path: String,
+    pub version: u64,
+}
+
+/// Errors surfaced from `POST /api/projects/new`.  Status mapping lives
+/// entirely in the `IntoResponse` impl; handler code constructs
+/// variants and lets Axum render them.
+#[derive(Debug)]
+pub enum NewProjectError {
+    /// Caller-supplied `name` failed sanitisation (illegal character,
+    /// leading dot, traversal segment, or empty).
+    InvalidName(String),
+    /// Caller-supplied `format` was unrecognised or one of the
+    /// disallowed `mdl`/`xmile` formats.
+    InvalidFormat(String),
+    /// Caller-supplied `parent_dir` failed sanitisation or escaped the
+    /// scan root.
+    InvalidParentDir(String),
+    /// A file already exists at the resolved path.
+    Conflict,
+    /// Path canonicalisation rejected the resolved location (escapes
+    /// the root, parent unreachable, etc.).
+    Forbidden,
+    /// I/O failure while writing the new file.
+    Internal(String),
+}
+
+impl IntoResponse for NewProjectError {
+    fn into_response(self) -> Response {
+        match self {
+            NewProjectError::InvalidName(msg) => {
+                let body = serde_json::json!({ "error": format!("invalid name: {msg}") });
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            NewProjectError::InvalidFormat(msg) => {
+                let body = serde_json::json!({ "error": format!("invalid format: {msg}") });
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            NewProjectError::InvalidParentDir(msg) => {
+                let body = serde_json::json!({ "error": format!("invalid parent_dir: {msg}") });
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            NewProjectError::Conflict => {
+                let body = serde_json::json!({ "error": "already_exists" });
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            NewProjectError::Forbidden => {
+                let body = serde_json::json!({ "error": "forbidden" });
+                (StatusCode::FORBIDDEN, Json(body)).into_response()
+            }
+            NewProjectError::Internal(msg) => {
+                tracing::error!(error = %msg, "create_new_project internal error");
+                let body = serde_json::json!({ "error": "internal server error" });
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+            }
+        }
+    }
+}
+
+/// Maximum allowed length for a sanitised `name`.  Most filesystems allow
+/// far longer, but capping at 64 chars keeps URLs short and avoids
+/// pathological project names that the SPA's listing UI cannot display.
+const MAX_NEW_PROJECT_NAME_LEN: usize = 64;
+
+/// Validate a caller-supplied filename (no extension).
+///
+/// The rules: non-empty, ≤64 chars, no leading dot (avoids hidden
+/// files), and only `[A-Za-z0-9_-]`.  Slashes, backslashes, and `..`
+/// segments are caught implicitly by the alphanumeric+`_-` allowlist
+/// but the explicit checks come first so error messages are clearer.
+fn sanitize_new_project_name(raw: &str) -> Result<&str, NewProjectError> {
+    if raw.is_empty() {
+        return Err(NewProjectError::InvalidName("name is empty".to_string()));
+    }
+    if raw.len() > MAX_NEW_PROJECT_NAME_LEN {
+        return Err(NewProjectError::InvalidName(format!(
+            "name exceeds {MAX_NEW_PROJECT_NAME_LEN} characters"
+        )));
+    }
+    if raw.contains('/') || raw.contains('\\') {
+        return Err(NewProjectError::InvalidName(
+            "name may not contain path separators".to_string(),
+        ));
+    }
+    if raw.contains("..") {
+        return Err(NewProjectError::InvalidName(
+            "name may not contain `..`".to_string(),
+        ));
+    }
+    if raw.starts_with('.') {
+        return Err(NewProjectError::InvalidName(
+            "name may not start with a dot".to_string(),
+        ));
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(NewProjectError::InvalidName(
+            "name may contain only ASCII letters, digits, `_`, and `-`".to_string(),
+        ));
+    }
+    Ok(raw)
+}
+
+/// Validate a caller-supplied `parent_dir` (forward-slash separated).
+///
+/// Reuses `sanitize_rel_path` for the no-traversal/no-absolute checks
+/// and additionally rejects empty path components so a trailing or
+/// leading slash never creates a `<root>/<name>.<ext>` path that the
+/// caller didn't request.
+fn sanitize_new_project_parent_dir(raw: &str) -> Result<PathBuf, NewProjectError> {
+    if raw.is_empty() {
+        return Err(NewProjectError::InvalidParentDir(
+            "parent_dir is empty".to_string(),
+        ));
+    }
+    sanitize_rel_path(raw).map_err(|e| match e {
+        ApiError::BadRequest(msg) => NewProjectError::InvalidParentDir(msg),
+        // sanitize_rel_path only returns BadRequest variants today; the
+        // remaining arms are unreachable in practice but mapped
+        // defensively.
+        _ => NewProjectError::InvalidParentDir("unsupported parent_dir".to_string()),
+    })
+}
+
+/// `POST /api/projects/new` — create a new empty model file.
+///
+/// Validates the request, builds an empty `datamodel::Project` via the
+/// shared [`simlin_mcp_core::types::build_empty_project`] helper, then
+/// delegates to the same [`crate::mcp::access::RegistryAccess::create`]
+/// path the MCP `create_model` tool uses so both surfaces produce
+/// byte-identical files when called with default inputs.  The
+/// resulting `ProjectChanged` event is rewritten to `source: User`
+/// after the fact so a browser sees its own creation as a user action,
+/// not an agent action.
+pub async fn create_new_project(
+    State(state): State<AppState>,
+    Json(req): Json<NewProjectRequest>,
+) -> Result<Json<NewProjectResponse>, NewProjectError> {
+    let format = NewProjectFormat::parse(&req.format)?;
+    let name = sanitize_new_project_name(&req.name)?;
+    let parent_rel: Option<PathBuf> = match req.parent_dir.as_deref() {
+        Some(p) => Some(sanitize_new_project_parent_dir(p)?),
+        None => None,
+    };
+
+    let filename = format!("{}.{}", name, format.extension());
+    let abs_path: PathBuf = match parent_rel {
+        Some(parent) => state.root.join(parent).join(&filename),
+        None => state.root.join(&filename),
+    };
+
+    if abs_path.exists() {
+        return Err(NewProjectError::Conflict);
+    }
+
+    let mut project = simlin_mcp_core::types::build_empty_project();
+    project.name = name.to_string();
+
+    let project_format = format.project_format();
+
+    // Re-use the existing format-aware writer plumbing so the bytes the
+    // HTTP create path lands match what a save against the same file
+    // would produce.  resolve_save_target dispatches by format; for
+    // Stmx/SdJson the result is "in place at this absolute path".
+    let target = resolve_save_target(&abs_path, project_format);
+    let outcome = serialize_project(&project, &target)
+        .map_err(|e| NewProjectError::Internal(format!("serialize: {e}")))?;
+
+    if let Some(parent) = outcome.path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.is_dir()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| NewProjectError::Internal(format!("create parent dir: {e}")))?;
+    }
+
+    commit_write(&outcome).map_err(|e| NewProjectError::Internal(format!("commit_write: {e}")))?;
+
+    // Defense in depth: confirm the freshly-written file actually lives
+    // under the canonicalized scan root.  resolve_save_target trusted
+    // the request path, but the canonicalize-after-write step rejects
+    // symlinks that pointed out of the tree (`<root>/escape -> /tmp/...`).
+    let written_canonical = outcome.path.canonicalize().map_err(|e| {
+        NewProjectError::Internal(format!("canonicalize {}: {e}", outcome.path.display()))
+    })?;
+    let root_canonical = state
+        .root
+        .canonicalize()
+        .map_err(|e| NewProjectError::Internal(format!("canonicalize root: {e}")))?;
+    if !written_canonical.starts_with(&root_canonical) {
+        // Best-effort cleanup of the file we just wrote outside the
+        // root.  If removal fails we still surface the error; the
+        // caller will see Forbidden either way.
+        let _ = std::fs::remove_file(&written_canonical);
+        return Err(NewProjectError::Forbidden);
+    }
+
+    let written_hash = crate::hashing::content_hash(&outcome.bytes);
+    let (mtime, size) = match std::fs::metadata(&written_canonical) {
+        Ok(m) => (
+            m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            m.len(),
+        ),
+        Err(_) => (
+            std::time::SystemTime::UNIX_EPOCH,
+            outcome.bytes.len() as u64,
+        ),
+    };
+
+    state.registry.upsert_max_version(
+        written_canonical.clone(),
+        ProjectMeta {
+            path: PathBuf::new(),
+            format: project_format,
+            mtime,
+            size,
+            git: GitState::Untracked,
+            version: 0,
+            doc: Default::default(),
+            last_disk_hash: written_hash,
+            last_diagnostic_keys: std::collections::BTreeSet::new(),
+        },
+    );
+
+    let rel_for_wire: PathBuf = written_canonical
+        .strip_prefix(&root_canonical)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| written_canonical.clone());
+    let response_path = path_to_forward_slash(&rel_for_wire);
+
+    state.events.publish(WsMessage::ProjectChanged {
+        path: response_path.clone(),
+        version: 0,
+        source: ChangeSource::User,
+    });
+
+    crate::diagnostics::maybe_emit_diagnostics_changed(&state, &written_canonical, &project);
+
+    Ok(Json(NewProjectResponse {
+        path: response_path,
+        version: 0,
+    }))
+}
+
 /// Errors surfaced from the save handler. Status mapping lives entirely in
 /// the `IntoResponse` impl; handler code only constructs variants and lets
 /// Axum render them.

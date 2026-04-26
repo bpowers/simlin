@@ -12,6 +12,7 @@
 //! wire-format choices preserved from the pre-refactor `simlin-mcp`.
 
 use serde::Serialize;
+use simlin_engine::{datamodel, json as ejson};
 
 /// Identifies how a model file was parsed so write-back can use the same
 /// format.  `Xmile` covers `.stmx`, `.xmile`, `.xml`, and (read-only)
@@ -22,6 +23,64 @@ pub enum SourceFormat {
     Xmile,
     NativeJson,
     SdaiJson,
+}
+
+/// Sim-spec defaults used by [`build_empty_project`].
+///
+/// Matches the design plan's Phase 8 Note 5: an empty project gets a
+/// sensible end-time, a small dt for accuracy, save-step that aligns with
+/// dt boundaries, and the most universally accepted integrator (Euler).
+/// Callers that need different defaults pass a custom `SimSpecs` to
+/// `build_empty_project_with_specs`.
+fn default_empty_sim_specs() -> ejson::SimSpecs {
+    ejson::SimSpecs {
+        start_time: 0.0,
+        end_time: 100.0,
+        dt: "0.25".to_string(),
+        save_step: 1.0,
+        method: "euler".to_string(),
+        time_units: String::new(),
+    }
+}
+
+/// Build a minimal valid `datamodel::Project` with default sim-specs and
+/// one empty model named `main`.
+///
+/// Shared between the MCP `create_model` tool and the HTTP
+/// `POST /api/projects/new` endpoint so both paths produce byte-identical
+/// files when called with default inputs.  See `simlin-serve`'s parity
+/// test for the byte-for-byte verification.
+pub fn build_empty_project() -> datamodel::Project {
+    build_empty_project_with_specs(default_empty_sim_specs())
+}
+
+/// Variant of [`build_empty_project`] that accepts a caller-supplied
+/// `SimSpecs` so the MCP `create_model` tool can honour an
+/// `sim_specs` override on the input without reimplementing the rest of
+/// the project shape.  Default callers go through `build_empty_project`.
+pub fn build_empty_project_with_specs(sim_specs: ejson::SimSpecs) -> datamodel::Project {
+    let json_models = vec![ejson::Model {
+        name: "main".to_string(),
+        stocks: vec![],
+        flows: vec![],
+        auxiliaries: vec![],
+        modules: vec![],
+        sim_specs: None,
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+    }];
+
+    let json_project = ejson::Project {
+        name: String::new(),
+        sim_specs,
+        models: json_models,
+        dimensions: vec![],
+        units: vec![],
+        source: None,
+    };
+
+    json_project.into()
 }
 
 /// Rounds a float to 3 significant figures via scientific-notation round-trip.
@@ -131,6 +190,54 @@ impl From<&simlin_engine::errors::FormattedError> for ErrorOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_empty_project_has_one_model_named_main_with_no_variables() {
+        let project = build_empty_project();
+        assert_eq!(
+            project.models.len(),
+            1,
+            "empty project must contain exactly one model"
+        );
+        let main = &project.models[0];
+        assert_eq!(main.name.as_str(), "main");
+        assert!(main.variables.is_empty(), "main must have no variables");
+        assert!(main.views.is_empty(), "main must have no views");
+    }
+
+    #[test]
+    fn build_empty_project_uses_canonical_default_sim_specs() {
+        // Locking the defaults so the parity test (HTTP create vs MCP
+        // create_model) keeps producing byte-identical files.
+        let project = build_empty_project();
+        let specs = &project.sim_specs;
+        assert_eq!(specs.start, 0.0);
+        assert_eq!(specs.stop, 100.0);
+        assert_eq!(specs.dt, simlin_engine::datamodel::Dt::Dt(0.25));
+        assert_eq!(specs.save_step, Some(simlin_engine::datamodel::Dt::Dt(1.0)));
+        assert_eq!(specs.sim_method, simlin_engine::datamodel::SimMethod::Euler);
+    }
+
+    #[test]
+    fn build_empty_project_with_specs_carries_caller_overrides() {
+        let custom = ejson::SimSpecs {
+            start_time: 5.0,
+            end_time: 50.0,
+            dt: "0.5".to_string(),
+            save_step: 2.0,
+            method: "rk4".to_string(),
+            time_units: "weeks".to_string(),
+        };
+        let project = build_empty_project_with_specs(custom);
+        assert_eq!(project.sim_specs.start, 5.0);
+        assert_eq!(project.sim_specs.stop, 50.0);
+        assert_eq!(project.sim_specs.dt, simlin_engine::datamodel::Dt::Dt(0.5));
+        assert_eq!(
+            project.sim_specs.sim_method,
+            simlin_engine::datamodel::SimMethod::RungeKutta4
+        );
+        assert_eq!(project.sim_specs.time_units.as_deref(), Some("weeks"));
+    }
 
     #[test]
     fn round_sig_figs_3_basic() {

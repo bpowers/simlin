@@ -16,12 +16,11 @@ use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use simlin_engine::datamodel;
 use simlin_engine::json as ejson;
 
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
-use crate::types::SourceFormat;
+use crate::types::{SourceFormat, build_empty_project_with_specs};
 
 /// Input for the `CreateModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -31,7 +30,7 @@ pub struct CreateModelInput {
     pub project_path: String,
 
     /// Optional simulation specifications.  If omitted, defaults are
-    /// used (start=0, end=100, dt=1, euler method).
+    /// used (start=0, end=100, dt=0.25, save_step=1, euler method).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sim_specs: Option<ejson::SimSpecs>,
 }
@@ -43,18 +42,6 @@ pub struct CreateModelOutput {
     pub project_path: String,
     pub sim_specs: ejson::SimSpecs,
     pub model_name: String,
-}
-
-/// Default sim-specs applied when the caller omits `sim_specs`.
-fn default_sim_specs() -> ejson::SimSpecs {
-    ejson::SimSpecs {
-        start_time: 0.0,
-        end_time: 100.0,
-        dt: "1".to_string(),
-        save_step: 1.0,
-        method: "euler".to_string(),
-        time_units: String::new(),
-    }
 }
 
 /// Derive the project name from the filename stem, stripping the
@@ -70,6 +57,19 @@ fn project_name_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "project".to_string())
 }
 
+/// Sim-spec defaults shared with the HTTP `POST /api/projects/new`
+/// endpoint via [`crate::types::build_empty_project`].
+fn default_sim_specs_for_create() -> ejson::SimSpecs {
+    ejson::SimSpecs {
+        start_time: 0.0,
+        end_time: 100.0,
+        dt: "0.25".to_string(),
+        save_step: 1.0,
+        method: "euler".to_string(),
+        time_units: String::new(),
+    }
+}
+
 /// Create an empty model at the given path.
 ///
 /// CreateModel always produces a single `main` model with the requested
@@ -77,40 +77,25 @@ fn project_name_from_path(path: &Path) -> String {
 /// impl is responsible for refusing to overwrite an existing project
 /// and for writing in the SourceFormat we tell it (NativeJson — the
 /// default for `.sd.json` files).
+///
+/// The empty project body is built via
+/// [`crate::types::build_empty_project_with_specs`], the same helper the
+/// HTTP `POST /api/projects/new` endpoint goes through.  Both paths
+/// produce byte-identical files when invoked with default sim-specs and
+/// matching path stems; Phase 8's parity test locks that property.
 pub async fn create_model<A: ProjectAccess>(
     access: &A,
     input: CreateModelInput,
 ) -> Result<CreateModelOutput, AccessError> {
     let path = Path::new(&input.project_path);
 
-    let sim_specs = input.sim_specs.unwrap_or_else(default_sim_specs);
+    let sim_specs = input.sim_specs.unwrap_or_else(default_sim_specs_for_create);
     let project_name = project_name_from_path(path);
     let model_name = "main".to_string();
 
-    let json_models = vec![ejson::Model {
-        name: model_name.clone(),
-        stocks: vec![],
-        flows: vec![],
-        auxiliaries: vec![],
-        modules: vec![],
-        sim_specs: None,
-        views: vec![],
-        loop_metadata: vec![],
-        groups: vec![],
-    }];
+    let mut project = build_empty_project_with_specs(sim_specs.clone());
+    project.name = project_name;
 
-    let json_project = ejson::Project {
-        name: project_name,
-        sim_specs: sim_specs.clone(),
-        models: json_models,
-        dimensions: vec![],
-        units: vec![],
-        source: None,
-    };
-
-    // The access impl owns serialisation per its backing store, so we
-    // hand it the canonical datamodel form.
-    let project: datamodel::Project = json_project.into();
     access
         .create(path, &project, SourceFormat::NativeJson)
         .await?;

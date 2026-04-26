@@ -755,6 +755,190 @@ async fn two_saves_modifying_different_stocks_both_persist() {
     }
 }
 
+/// `POST /api/projects/new` happy path: creates a new `.stmx` file with
+/// an empty `main` model, returns the relative path + version 0, and
+/// publishes a ProjectChanged{User} event.
+#[tokio::test]
+async fn create_new_stmx_writes_empty_project_file() {
+    use simlin_serve::events::{ChangeSource, WsMessage};
+
+    let dir = TempDir::new().unwrap();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    let mut rx = state.events.subscribe();
+
+    let body = serde_json::json!({"name": "fresh", "format": "stmx"}).to_string();
+    let (status, response_bytes) =
+        fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["path"].as_str(), Some("fresh.stmx"));
+    assert_eq!(response["version"].as_u64(), Some(0));
+
+    let abs_path = canonical_root.join("fresh.stmx");
+    assert!(abs_path.is_file(), "file must exist on disk");
+    let bytes = fs::read(&abs_path).unwrap();
+    let mut reader = std::io::Cursor::new(&bytes[..]);
+    let project = simlin_engine::open_xmile(&mut reader).expect("written file parses");
+    assert_eq!(project.models.len(), 1);
+    assert_eq!(project.models[0].name, "main");
+    assert!(project.models[0].variables.is_empty());
+
+    // Registry has the entry at version 0.
+    let meta = state.registry.get(&abs_path).expect("registry entry");
+    assert_eq!(meta.version, 0);
+    assert_eq!(meta.format, ProjectFormat::Stmx);
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("event published")
+        .expect("recv");
+    match event {
+        WsMessage::ProjectChanged {
+            path,
+            version,
+            source,
+        } => {
+            assert_eq!(path, "fresh.stmx");
+            assert_eq!(version, 0);
+            assert_eq!(source, ChangeSource::User);
+        }
+        other => panic!("expected ProjectChanged, got {other:?}"),
+    }
+}
+
+/// `POST /api/projects/new` with an existing file conflicts with 409.
+#[tokio::test]
+async fn create_new_returns_409_when_file_exists() {
+    let dir = TempDir::new().unwrap();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+
+    // First request succeeds.
+    let body = serde_json::json!({"name": "dup", "format": "stmx"}).to_string();
+    let (status, _) = fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Second request collides with the same name.
+    let body = serde_json::json!({"name": "dup", "format": "stmx"}).to_string();
+    let (status, _) = fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// `POST /api/projects/new` rejects path-traversal-style names.
+#[tokio::test]
+async fn create_new_rejects_traversal_name() {
+    let dir = TempDir::new().unwrap();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+
+    for bad in &[
+        "../etc/passwd",
+        "/abs",
+        "..",
+        ".hidden",
+        "has/slash",
+        "has\\slash",
+        "weird name",
+        "",
+    ] {
+        let body = serde_json::json!({"name": bad, "format": "stmx"}).to_string();
+        let (status, response_bytes) =
+            fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "name {:?} should be rejected; body: {}",
+            bad,
+            String::from_utf8_lossy(&response_bytes)
+        );
+    }
+}
+
+/// `POST /api/projects/new` enforces the design's "Mdl/Xmile are not
+/// formats for fresh files" rule. Mdl is read-only; Xmile is preserved
+/// for existing files only.
+#[tokio::test]
+async fn create_new_rejects_mdl_and_xmile_formats() {
+    let dir = TempDir::new().unwrap();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+
+    for bad_format in &["mdl", "xmile"] {
+        let body = serde_json::json!({"name": "x", "format": bad_format}).to_string();
+        let (status, _) = fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "format {bad_format} must be rejected for new-project creation"
+        );
+    }
+}
+
+/// `POST /api/projects/new` with `format: sd_json` writes a `.sd.json`
+/// file containing valid native JSON.
+#[tokio::test]
+async fn create_new_sd_json_writes_native_json_file() {
+    let dir = TempDir::new().unwrap();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+
+    let body = serde_json::json!({"name": "json-model", "format": "sd_json"}).to_string();
+    let (status, response_bytes) =
+        fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["path"].as_str(), Some("json-model.sd.json"));
+
+    let abs_path = canonical_root.join("json-model.sd.json");
+    assert!(abs_path.is_file());
+    let contents = fs::read_to_string(&abs_path).unwrap();
+    let project: simlin_engine::json::Project =
+        serde_json::from_str(&contents).expect("file parses as native json");
+    assert_eq!(project.models.len(), 1);
+    assert_eq!(project.models[0].name, "main");
+    // Pretty-printed JSON contains newlines.
+    assert!(contents.contains('\n'), "sd_json must be pretty-printed");
+}
+
+/// `POST /api/projects/new` honours the optional `parent_dir` field by
+/// creating the file in a subdirectory under the scan root.
+#[tokio::test]
+async fn create_new_honours_parent_dir() {
+    let dir = TempDir::new().unwrap();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(canonical_root.join("models")).unwrap();
+    let state = build_state(canonical_root.clone());
+
+    let body =
+        serde_json::json!({"name": "nested", "format": "stmx", "parent_dir": "models"}).to_string();
+    let (status, response_bytes) =
+        fetch(state.clone(), "POST", "/api/projects/new", Body::from(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    let response = parse_body(&response_bytes);
+    let returned = response["path"].as_str().unwrap();
+    assert!(
+        returned == "models/nested.stmx" || returned == "models\\nested.stmx",
+        "expected path under models/, got {returned}"
+    );
+    assert!(canonical_root.join("models/nested.stmx").is_file());
+}
+
 /// Saves no longer rely on `invalidate_doc`: the post-save GET returns
 /// the merged in-memory state (which is identical to the on-disk state
 /// because we serialize from the doc). Verifies that without the

@@ -26,11 +26,13 @@ pub mod writer;
 
 use axum::Router;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::handlers::{AppState, get_project, list_projects, save_project, updates_ws_handler};
+use crate::handlers::{
+    AppState, create_new_project, get_project, list_projects, save_project, updates_ws_handler,
+};
 use crate::static_assets::static_handler;
 
 /// Maximum accepted request body size. POST bodies carry the full
@@ -54,6 +56,12 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/projects", get(list_projects))
+        // The `/api/projects/new` route must precede the wildcard
+        // `/api/projects/{*rel_path}` route so a POST to `new` reaches
+        // the create handler instead of being interpreted as a save
+        // against a file literally named `new`. Axum's matcher walks
+        // routes in the order they were registered.
+        .route("/api/projects/new", post(create_new_project))
         .route(
             "/api/projects/{*rel_path}",
             get(get_project).post(save_project),
