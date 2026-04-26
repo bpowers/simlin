@@ -14,7 +14,6 @@
 
 use std::path::Path;
 
-use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -26,6 +25,45 @@ use simlin_engine::json as ejson;
 use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::tools::edit_model::{EditOperation, build_patch};
+
+/// Failure modes for the `Simulate` tool.
+///
+/// `Access` mirrors `AccessError` so the rmcp wrapper can surface it via
+/// the same `Ok(call_tool_error(&err))` path every other tool uses; that
+/// preserves the wire-shape parity called out in the
+/// "byte-identical tool wire shape" contract. `Engine` covers
+/// simulation-pipeline failures (compile / VM / patch) which are not
+/// `AccessError`s but still belong in a structured tool-level error
+/// payload rather than a JSON-RPC protocol error.
+#[derive(Debug)]
+pub enum SimulateError {
+    Access(AccessError),
+    Engine(String),
+}
+
+impl From<AccessError> for SimulateError {
+    fn from(err: AccessError) -> Self {
+        SimulateError::Access(err)
+    }
+}
+
+impl std::fmt::Display for SimulateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SimulateError::Access(err) => write!(f, "{err}"),
+            SimulateError::Engine(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SimulateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SimulateError::Access(err) => Some(err),
+            SimulateError::Engine(_) => None,
+        }
+    }
+}
 
 /// Input for the `Simulate` tool.
 #[derive(Deserialize, JsonSchema)]
@@ -75,13 +113,17 @@ pub struct SimulateOutput {
 }
 
 /// Run the simulation, returning either the structured output or a
-/// translated `McpError` for the rmcp tool wrapper.
+/// `SimulateError` the rmcp wrapper translates into a structured
+/// `CallToolResult`. Access-layer failures (NotFound, VersionMismatch)
+/// flow through `?` from `access.open()` so the wrapper can surface them
+/// via the shared `call_tool_error` helper; engine-pipeline failures
+/// surface as `Engine(msg)`.
 pub async fn run<A: ProjectAccess>(
     access: &A,
     input: SimulateInput,
-) -> Result<SimulateOutput, McpError> {
+) -> Result<SimulateOutput, SimulateError> {
     let path = Path::new(&input.project_path);
-    let opened = access.open(path).await.map_err(access_error_to_mcp)?;
+    let opened = access.open(path).await?;
 
     let mut project: datamodel::Project = opened.project;
     let model_name = input
@@ -92,7 +134,7 @@ pub async fn run<A: ProjectAccess>(
     if let Some(overrides) = input.overrides {
         let patch = build_patch(&model_name, None, Some(overrides));
         simlin_engine::apply_patch(&mut project, patch)
-            .map_err(|e| McpError::invalid_params(format!("apply override patch: {e:?}"), None))?;
+            .map_err(|e| SimulateError::Engine(format!("apply override patch: {e:?}")))?;
     }
 
     if let Some(ss_override) = input.sim_specs_override {
@@ -124,7 +166,7 @@ pub async fn run<A: ProjectAccess>(
     // time.
     let output = tokio::task::spawn_blocking(move || simulate_sync(project, &model_name, filter))
         .await
-        .map_err(|e| McpError::internal_error(format!("blocking task panicked: {e}"), None))??;
+        .map_err(|e| SimulateError::Engine(format!("blocking task panicked: {e}")))??;
 
     Ok(output)
 }
@@ -135,15 +177,14 @@ fn simulate_sync(
     project: datamodel::Project,
     model_name: &str,
     filter: Option<std::collections::HashSet<String>>,
-) -> Result<SimulateOutput, McpError> {
+) -> Result<SimulateOutput, SimulateError> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let compiled = compile_project_incremental(&db, sync.project, model_name)
-        .map_err(|e| McpError::internal_error(format!("compile error: {e}"), None))?;
-    let mut vm =
-        Vm::new(compiled).map_err(|e| McpError::internal_error(format!("vm error: {e}"), None))?;
+        .map_err(|e| SimulateError::Engine(format!("compile error: {e}")))?;
+    let mut vm = Vm::new(compiled).map_err(|e| SimulateError::Engine(format!("vm error: {e}")))?;
     vm.run_to_end()
-        .map_err(|e| McpError::internal_error(format!("sim error: {e}"), None))?;
+        .map_err(|e| SimulateError::Engine(format!("sim error: {e}")))?;
     let results = vm.into_results();
 
     // The engine stores the time column under the key "time" (offset 0).
@@ -160,9 +201,7 @@ fn simulate_sync(
                 None
             }
         })
-        .ok_or_else(|| {
-            McpError::internal_error("simulation results missing 'time' column", None)
-        })?;
+        .ok_or_else(|| SimulateError::Engine("simulation results missing 'time' column".into()))?;
 
     let mut time: Vec<f64> = Vec::with_capacity(results.step_count);
     for row in results.iter() {
@@ -203,21 +242,6 @@ fn simulate_sync(
     }
 
     Ok(SimulateOutput { time, variables })
-}
-
-/// Translate `AccessError` to `McpError`. NotFound becomes a client
-/// error (invalid params); everything else is internal.
-fn access_error_to_mcp(err: AccessError) -> McpError {
-    match err {
-        AccessError::NotFound { path } => {
-            McpError::invalid_params(format!("project not found: {}", path.display()), None)
-        }
-        AccessError::VersionMismatch { expected, actual } => McpError::invalid_params(
-            format!("project version mismatch: expected {expected}, actual {actual}"),
-            None,
-        ),
-        other => McpError::internal_error(other.to_string(), None),
-    }
 }
 
 #[cfg(test)]
@@ -320,7 +344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_reports_invalid_params_when_path_missing() {
+    async fn run_surfaces_access_error_when_path_missing() {
         let temp = TempDir::new().expect("tempdir");
         let canonical = temp.path().canonicalize().expect("canon");
         let state = build_state(canonical);
@@ -333,8 +357,14 @@ mod tests {
             sim_specs_override: None,
             variables: None,
         };
+        // `run` returns the raw `AccessError` so the rmcp wrapper can
+        // route it through `call_tool_error` for wire-shape parity with
+        // the other tools. Engine-pipeline failures take the `Engine`
+        // arm; access failures take `Access`.
         let err = run(&access, input).await.expect_err("missing path errors");
-        // NotFound from RegistryAccess maps to invalid_params (-32602).
-        assert_eq!(err.code.0, -32602);
+        match err {
+            SimulateError::Access(AccessError::NotFound { .. }) => {}
+            other => panic!("expected Access(NotFound), got {other:?}"),
+        }
     }
 }

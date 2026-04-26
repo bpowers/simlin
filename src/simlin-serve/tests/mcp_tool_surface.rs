@@ -459,6 +459,52 @@ async fn simulate_overrides_change_initial_stock_value() {
 }
 
 #[tokio::test]
+async fn simulate_missing_path_returns_is_error_true_with_structured_content() {
+    // Every other tool surfaces NotFound / VersionMismatch through
+    // `Ok(call_tool_error(&err))` so the response carries
+    // `is_error: true` and a structured `error` payload. Simulate must
+    // match that wire shape; otherwise MCP clients that only render
+    // is_error see a generic JSON-RPC -32602 with no useful body.
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    let arguments = serde_json::json!({ "projectPath": "/does/not/exist.xmile" });
+    let arguments_obj = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        _ => unreachable!("arguments is constructed as an object literal"),
+    };
+    let mut params = CallToolRequestParams::new("Simulate");
+    if let Some(args) = arguments_obj {
+        params = params.with_arguments(args);
+    }
+
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("call_tool must return a CallToolResult, not a transport error");
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "missing-path Simulate must set is_error: true (parity with ReadModel/EditModel)"
+    );
+    let structured = result
+        .structured_content
+        .expect("missing-path error must include structured content");
+    assert!(
+        structured.get("error").and_then(|v| v.as_str()).is_some(),
+        "structured content must carry an error string: {structured}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
 async fn get_info_includes_workspace_dir_in_instructions() {
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");

@@ -38,7 +38,7 @@ use crate::handlers::AppState;
 use crate::mcp::access::RegistryAccess;
 use crate::mcp::list_projects::{ListProjectsInput, run as run_list_projects};
 use crate::mcp::notifications::forward_events_to_peer;
-use crate::mcp::simulate::{SimulateInput, run as run_simulate};
+use crate::mcp::simulate::{SimulateError, SimulateInput, run as run_simulate};
 
 /// rmcp `ServerHandler` impl exposing the simlin-serve tool surface.
 ///
@@ -196,9 +196,15 @@ impl<A: ProjectAccess> SimlinServeMcpServer<A> {
         &self,
         Parameters(input): Parameters<SimulateInput>,
     ) -> Result<CallToolResult, McpError> {
+        // Wire-shape parity with ReadModel/EditModel/CreateModel:
+        // access failures route through `call_tool_error` so MCP clients
+        // see `is_error: true` with a structured payload, not a raw
+        // JSON-RPC -32602/-32603. Engine-pipeline failures take the
+        // same shape via the plain-string error helper.
         match run_simulate(&*self.access, input).await {
             Ok(output) => call_tool_success(&output),
-            Err(err) => Err(err),
+            Err(SimulateError::Access(err)) => Ok(call_tool_error(&err)),
+            Err(SimulateError::Engine(msg)) => Ok(call_tool_engine_error(&msg)),
         }
     }
 }
@@ -304,6 +310,15 @@ fn call_tool_error(err: &AccessError) -> CallToolResult {
             CallToolResult::structured_error(value)
         }
     }
+}
+
+/// Build a `CallToolResult` for an engine-pipeline failure that does not
+/// fit `AccessError` (compile / VM / patch failures inside `Simulate`).
+/// Same wire shape as `call_tool_error`'s plain-string arm so clients
+/// only need to inspect `error`.
+fn call_tool_engine_error(msg: &str) -> CallToolResult {
+    let value = serde_json::json!({ "error": msg });
+    CallToolResult::structured_error(value)
 }
 
 #[cfg(test)]
