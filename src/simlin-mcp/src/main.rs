@@ -4,9 +4,11 @@
 
 //! MCP server binary for Simlin.
 //!
-//! Exposes the Simlin simulation engine as MCP tools over stdio,
-//! allowing AI assistants to read, create, and edit system dynamics
-//! models.
+//! Composes the rmcp `ServerHandler` from `simlin-mcp-core` with a
+//! stateless [`FileSystemAccess`] and the OUT_DIR-substituted resource
+//! content embedded at build time, then hands the result to rmcp's
+//! stdio transport.  Everything reusable lives in the library half of
+//! this crate (see [`simlin_mcp::access`]) or in `simlin-mcp-core`.
 //!
 //! # Usage
 //!
@@ -15,43 +17,83 @@
 //! simlin-mcp --version    # print version
 //! ```
 
-mod protocol;
-mod resource;
-mod tool;
-mod tools;
-mod transport;
+use rmcp::{ServiceExt, transport::stdio};
+use simlin_mcp::access::FileSystemAccess;
+use simlin_mcp_core::server::{ResourceContent, SimlinMcpServer};
 
-use transport::StdioTransport;
+/// Instructions content embedded at build time.  `build.rs` substitutes
+/// `{PYSIMLIN_VERSION}` from `pysimlin.version` into the source
+/// `src/instructions.md` and writes the processed file to `OUT_DIR`.
+const INSTRUCTIONS: &str = include_str!(concat!(env!("OUT_DIR"), "/instructions.md"));
+
+/// Skill resources exposed via MCP `resources/list` and `resources/read`.
+///
+/// Three of the four skills are included verbatim from source.  Only
+/// `pysimlin-basics.md` goes through `build.rs`'s `{PYSIMLIN_VERSION}`
+/// substitution and lives in `OUT_DIR`.  Bundling the bytes at compile
+/// time avoids any runtime file I/O.
+fn build_resources() -> Vec<ResourceContent> {
+    vec![
+        ResourceContent {
+            uri: "simlin://skills/pysimlin-basics".into(),
+            name: "pysimlin-basics".into(),
+            description:
+                "Loading models, running simulations, DataFrame access, matplotlib basics, error handling"
+                    .into(),
+            mime_type: "text/markdown".into(),
+            body: include_str!(concat!(env!("OUT_DIR"), "/pysimlin-basics.md")).to_string(),
+        },
+        ResourceContent {
+            uri: "simlin://skills/scenario-analysis".into(),
+            name: "scenario-analysis".into(),
+            description: "Parameter sweeps with overrides, intervention analysis, comparing scenarios"
+                .into(),
+            mime_type: "text/markdown".into(),
+            body: include_str!("skills/scenario-analysis.md").to_string(),
+        },
+        ResourceContent {
+            uri: "simlin://skills/loop-dominance".into(),
+            name: "loop-dominance".into(),
+            description:
+                "Plotting behavior_time_series, annotating dominant_periods on charts, interpreting importance values"
+                    .into(),
+            mime_type: "text/markdown".into(),
+            body: include_str!("skills/loop-dominance.md").to_string(),
+        },
+        ResourceContent {
+            uri: "simlin://skills/vensim-equation-syntax".into(),
+            name: "vensim-equation-syntax".into(),
+            description:
+                "Vensim-specific names, logical operators, IF THEN ELSE function form, complete MDL-to-XMILE mapping table"
+                    .into(),
+            mime_type: "text/markdown".into(),
+            body: include_str!("skills/vensim-equation-syntax.md").to_string(),
+        },
+    ]
+}
 
 #[tokio::main]
-async fn main() {
-    // Handle --version
+async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("simlin-mcp {}", env!("CARGO_PKG_VERSION"));
-        return;
+        return Ok(());
     }
 
-    let config = protocol::ServerConfig {
-        name: "simlin-mcp".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        instructions: Some(include_str!(concat!(env!("OUT_DIR"), "/instructions.md")).to_string()),
-    };
+    let server = SimlinMcpServer::new(
+        FileSystemAccess::new(),
+        INSTRUCTIONS.to_string(),
+        build_resources(),
+    );
 
-    let mut registry = tool::Registry::new();
-    tools::register_all(&mut registry);
-
-    let mut transport = StdioTransport::new();
-
-    let result = protocol::serve_async(&mut transport, &config, &registry).await;
-    // Wait for the stdout writer to drain all queued responses before exiting.
-    // Without this, a client that closes stdin immediately after sending a
-    // request may not receive the response.
-    transport.shutdown().await;
-    if let Err(e) = result {
-        eprintln!("simlin-mcp: fatal error: {e}");
-        std::process::exit(1);
-    }
+    // `serve(stdio())` performs the MCP `initialize` handshake on the
+    // current task, then hands ongoing message dispatch to a background
+    // task held by `RunningService`.  `waiting()` blocks the main task
+    // until that background task finishes (typically when the MCP host
+    // closes stdin), at which point we exit cleanly.
+    let service = server.serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
 }
 
 #[cfg(test)]

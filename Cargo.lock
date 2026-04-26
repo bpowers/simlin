@@ -3617,8 +3617,6 @@ version = "0.1.4"
 dependencies = [
  "anyhow",
  "rmcp",
- "schemars",
- "serde",
  "serde_json",
  "serde_yaml",
  "simlin-engine",
