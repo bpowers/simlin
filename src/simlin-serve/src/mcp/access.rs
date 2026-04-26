@@ -188,6 +188,27 @@ fn resolve_create_path_within_root(
     Ok(resolved)
 }
 
+/// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Same rule
+/// `handlers::sidecar_for_mdl` and `writer::resolve_save_target` use;
+/// duplicated locally to avoid a cross-module dep just for this two-line
+/// helper (matches `watcher.rs`'s justification).
+fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
+    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    parent.join(format!("{stem}.sd.json"))
+}
+
+/// True when `path`'s file name ends with `.mdl` (case-insensitive). Used
+/// only by `open` to decide whether to apply the sidecar-preference rule;
+/// the heavier `format_for_path` helper in `handlers.rs` also handles
+/// `.sd.json`/`.stmx`/`.xmile` and is overkill here.
+fn is_mdl_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("mdl"))
+        .unwrap_or(false)
+}
+
 /// Pick the on-disk `ProjectFormat` for a fresh file based on its
 /// extension. This is the writer-side analogue of the reader-side
 /// `format_for_path` in `handlers.rs`. We dispatch on extension rather
@@ -256,10 +277,36 @@ impl ProjectAccess for RegistryAccess {
     async fn open(&self, abs_path: &Path) -> Result<OpenedProject, AccessError> {
         let canonical = canonicalize_within_root(&self.state, abs_path)?;
 
+        // Sidecar preference for `.mdl` reads: when a sibling `.sd.json`
+        // exists, route the open to the sidecar so MCP and HTTP return
+        // the same content for the same path. Without this, an MCP
+        // `ReadModel` of `foo.mdl` after a save returns either NotFound
+        // (when redirect_to_sidecar removed the .mdl entry) or stale
+        // .mdl bytes (when a scan re-inserted the entry); HTTP
+        // `get_project` always follows the sidecar via `sidecar.is_file()`.
+        // The disk check is the single source of truth — even if a stale
+        // .mdl-keyed entry lingers in the registry, the sidecar wins.
+        let resolved = if is_mdl_extension(&canonical) {
+            let sidecar = sidecar_for_mdl(&canonical);
+            if sidecar.is_file() {
+                // Canonicalize the sidecar path as well; symlinks within
+                // the watched tree must resolve to the same key the
+                // save handler / scanner / watcher would use.
+                match sidecar.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => canonical.clone(),
+                }
+            } else {
+                canonical.clone()
+            }
+        } else {
+            canonical.clone()
+        };
+
         let doc = self
             .state
             .registry
-            .get_or_init_doc(&canonical)
+            .get_or_init_doc(&resolved)
             .map_err(|e| -> AccessError {
                 match e {
                     RegistryError::NotFound => AccessError::NotFound {
@@ -291,7 +338,7 @@ impl ProjectAccess for RegistryAccess {
         let meta = self
             .state
             .registry
-            .get(&canonical)
+            .get(&resolved)
             .ok_or_else(|| AccessError::NotFound {
                 path: canonical.clone(),
             })?;
@@ -767,6 +814,72 @@ mod tests {
             Err(other) => panic!("expected NotFound for path outside root, got {other:?}"),
             Ok(_) => panic!("expected NotFound for path outside root, got Ok"),
         }
+    }
+
+    #[tokio::test]
+    async fn open_mdl_with_sidecar_returns_sidecar_content() {
+        // HTTP `get_project` swaps a `.mdl` request to its `.sd.json`
+        // sidecar when the sidecar exists on disk; MCP `open` must do
+        // the same so an AI agent reading `foo.mdl` sees the same
+        // content the user's editor sees. Without the swap, MCP either
+        // returns NotFound (when the .mdl entry has been redirected
+        // away) or the stale .mdl bytes (when a scan re-inserted the
+        // .mdl entry between save and read), diverging from HTTP.
+        let temp = TempDir::new().expect("tempdir");
+        let canonical_root = temp.path().canonicalize().expect("canon root");
+        let mdl = canonical_root.join("teacup.mdl");
+        let sidecar = canonical_root.join("teacup.sd.json");
+        fs::write(&mdl, b"{UTF-8}\n\nplaceholder=1\n  ~\n  ~|\n").expect("write mdl");
+        let sidecar_json = r#"{"name":"sidecar-marker","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        fs::write(&sidecar, sidecar_json).expect("write sidecar");
+
+        let state = build_state(canonical_root.clone());
+        // Mirror the post-save state: the registry tracks the sidecar
+        // (the .mdl entry was redirected away by the previous save).
+        seed_registry(&state, &sidecar, ProjectFormat::SdJson);
+
+        let access = RegistryAccess::new(state);
+        let opened = access
+            .open(&mdl)
+            .await
+            .expect("open must follow sidecar preference, parity with HTTP get_project");
+
+        assert_eq!(
+            opened.source_format,
+            SourceFormat::NativeJson,
+            "sidecar's source_format wins over the .mdl extension"
+        );
+        assert_eq!(
+            opened.project.name, "sidecar-marker",
+            "open must return the sidecar's content, not the .mdl bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_mdl_with_sidecar_prefers_sidecar_even_when_mdl_entry_present() {
+        // Race-tolerant variant: even if a scan has re-inserted a
+        // .mdl-keyed entry between save and read, HTTP would still
+        // prefer the sidecar (its sidecar.is_file() check runs against
+        // disk, not the registry). MCP must match.
+        let temp = TempDir::new().expect("tempdir");
+        let canonical_root = temp.path().canonicalize().expect("canon root");
+        let mdl = canonical_root.join("teacup.mdl");
+        let sidecar = canonical_root.join("teacup.sd.json");
+        fs::write(&mdl, b"{UTF-8}\n\nplaceholder=1\n  ~\n  ~|\n").expect("write mdl");
+        let sidecar_json = r#"{"name":"sidecar-marker","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        fs::write(&sidecar, sidecar_json).expect("write sidecar");
+
+        let state = build_state(canonical_root.clone());
+        // Both entries present. The .mdl entry has stale on-disk content.
+        seed_registry(&state, &mdl, ProjectFormat::Mdl);
+        seed_registry(&state, &sidecar, ProjectFormat::SdJson);
+
+        let access = RegistryAccess::new(state);
+        let opened = access.open(&mdl).await.expect("open succeeds");
+        assert_eq!(
+            opened.project.name, "sidecar-marker",
+            "sidecar wins over a stale .mdl entry, parity with HTTP"
+        );
     }
 
     #[tokio::test]
