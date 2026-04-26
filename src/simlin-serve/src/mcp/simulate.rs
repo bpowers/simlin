@@ -99,9 +99,46 @@ pub async fn run<A: ProjectAccess>(
         project.sim_specs = ss_override.into();
     }
 
+    // Build the canonical filter set before moving `project` into the
+    // blocking task. The engine's `Results::offsets` keys come from
+    // `simlin_engine::common::canonicalize`, so we must apply the same
+    // transform to user-supplied variable names — plain `to_lowercase`
+    // would miss whitespace-to-underscore substitution and other rules.
+    let filter: Option<std::collections::HashSet<String>> = input.variables.map(|names| {
+        names
+            .into_iter()
+            .map(|n| simlin_engine::canonicalize(&n).into_owned())
+            .collect::<std::collections::HashSet<_>>()
+    });
+
+    // The compile/run/extract pipeline is CPU-bound and synchronous.
+    // Running it directly on the tokio executor would block the thread
+    // for the duration of the simulation, starving other async tasks on
+    // the same worker. `spawn_blocking` moves the work onto tokio's
+    // dedicated blocking-thread pool.
+    //
+    // Trade-off: `project` must be cloned into the closure because
+    // `datamodel::Project` does not implement `Send + 'static` lazily —
+    // the owned value is moved in. For typical SD models (< 1 MB of
+    // project data) the clone cost is negligible compared to simulation
+    // time.
+    let output = tokio::task::spawn_blocking(move || simulate_sync(project, &model_name, filter))
+        .await
+        .map_err(|e| McpError::internal_error(format!("blocking task panicked: {e}"), None))??;
+
+    Ok(output)
+}
+
+/// Synchronous compile-run-extract pipeline, suitable for
+/// `tokio::task::spawn_blocking`.
+fn simulate_sync(
+    project: datamodel::Project,
+    model_name: &str,
+    filter: Option<std::collections::HashSet<String>>,
+) -> Result<SimulateOutput, McpError> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, &model_name)
+    let compiled = compile_project_incremental(&db, sync.project, model_name)
         .map_err(|e| McpError::internal_error(format!("compile error: {e}"), None))?;
     let mut vm =
         Vm::new(compiled).map_err(|e| McpError::internal_error(format!("vm error: {e}"), None))?;
@@ -109,16 +146,10 @@ pub async fn run<A: ProjectAccess>(
         .map_err(|e| McpError::internal_error(format!("sim error: {e}"), None))?;
     let results = vm.into_results();
 
-    let filter: Option<std::collections::HashSet<String>> = input.variables.map(|names| {
-        names
-            .into_iter()
-            .map(|n| n.to_lowercase())
-            .collect::<std::collections::HashSet<_>>()
-    });
-
-    // Time is at the canonical "time" offset (always 0 in the engine but
-    // we go through `offsets` to stay decoupled from that internal
-    // constant — `Results::offsets` is the public surface we control).
+    // The engine stores the time column under the key "time" (offset 0).
+    // We look it up through `offsets` rather than hard-coding index 0 so
+    // this code stays correct if the engine ever reorders slots.
+    // See src/simlin-engine/src/results.rs (TIME_OFF) for the engine side.
     let time_offset = results
         .offsets
         .iter()

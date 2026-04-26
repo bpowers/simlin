@@ -88,10 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state_arc = Arc::new(state.clone());
 
-    // Spawn the file watcher (Phase 4). The shutdown notifier is shared
-    // with the Ctrl-C path below: a single signal stops both servers
-    // (via axum's with_graceful_shutdown) and the watcher actor (via
-    // the Notify).
+    // Spawn the file watcher (Phase 4). The watcher shutdown fires after
+    // the axum servers drain (see the try_join! below), so the watcher
+    // actor stops after all in-flight HTTP/MCP requests complete.
     let watcher_shutdown: ShutdownSignal = Arc::new(tokio::sync::Notify::new());
     let watcher_handle = match spawn_watcher(state.clone(), watcher_shutdown.clone()) {
         Ok(h) => Some(h),
@@ -105,26 +104,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Both axum servers share a single Ctrl-C signal via a `Notify`
-    // fan-out: ctrl_c() is consumed once in a small task that publishes
-    // to the Notify, and each `with_graceful_shutdown` future waits on
-    // its own `notified()` slot. This keeps the teardown deterministic
-    // (both servers begin draining at the same time) and avoids racing
-    // two ctrl_c handlers against each other.
+    // Both axum servers share a single Ctrl-C signal via a `watch` channel.
+    // `watch::Sender::send(true)` is snapshot-based: any receiver that
+    // calls `changed().await` after the send always sees the new value,
+    // eliminating the wakeup-loss race that `Notify::notify_waiters` has
+    // when a SIGINT arrives before the first `.notified()` poll.
     //
     // Order of teardown on Ctrl-C:
-    //   1. ctrl_c() resolves -> notify_waiters() fires both shutdown
-    //      futures simultaneously, so axum stops accepting new
-    //      connections on each port and drains in-flight requests.
+    //   1. ctrl_c() resolves -> tx.send(true) marks the channel as changed
+    //      so both shutdown futures (waiting on rx.changed()) fire
+    //      simultaneously, and axum stops accepting new connections on
+    //      each port and drains in-flight requests.
     //   2. After both axum::serve futures return (joined via
     //      tokio::try_join!), fire the watcher shutdown so the actor
     //      breaks out of its select! loop and drops the Debouncer
     //      (which releases the OS-level watch).
     //   3. Await the watcher's JoinHandle so the binary doesn't exit
     //      while the actor is mid-shutdown.
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     {
-        let shutdown_notify = shutdown_notify.clone();
         tokio::spawn(async move {
             match tokio::signal::ctrl_c().await {
                 Ok(()) => {
@@ -139,20 +137,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             }
-            shutdown_notify.notify_waiters();
+            let _ = shutdown_tx.send(true);
         });
     }
 
     let ui_shutdown = {
-        let n = shutdown_notify.clone();
+        let mut rx = shutdown_rx.clone();
         async move {
-            n.notified().await;
+            let _ = rx.changed().await;
         }
     };
     let mcp_shutdown = {
-        let n = shutdown_notify.clone();
+        let mut rx = shutdown_rx.clone();
         async move {
-            n.notified().await;
+            let _ = rx.changed().await;
         }
     };
 
