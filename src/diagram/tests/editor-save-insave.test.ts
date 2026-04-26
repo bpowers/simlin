@@ -7,115 +7,129 @@
  */
 
 // Regression tests for the Editor.save() inSave gate. These tests exercise
-// the inSave / saveQueued state machine directly on an Editor instance
-// (bypassing React rendering) to verify the critical invariant:
+// the real Editor.prototype.save method (bypassing React construction) to
+// verify the critical invariant:
 //
 //   After any onSave outcome (success, undefined-return, or thrown error),
 //   inSave is always reset to false so subsequent saves are never silently
 //   dropped.
 //
-// Note: we cannot import React components in @jest-environment node without
-// jsdom, so we access the save() behavior through a lightweight shim that
-// reproduces the state machine extracted from Editor.tsx. This is
-// intentionally coupled to the implementation so a future refactor that
-// breaks the invariant will break this test first.
+// We use Object.create(Editor.prototype) to bypass the constructor (which
+// would spin up async WASM initialisation and React internals). Only the
+// fields that save() actually touches are seeded. Any production refactor
+// that breaks the try/finally gate will cause these tests to fail.
 
-// --- Minimal shim reproducing the Editor.save() state machine ---
-// If the implementation of save() diverges from this shim, the shim test
-// will likely diverge too; that divergence is the intended signal to update
-// both. The shim is not a copy-paste: it re-implements only the gate logic
-// and calls the injected onSave, so any change to the gate logic that
-// accidentally skips the finally block will be caught here.
+import { Editor } from '../Editor';
 
-type MockOnSave = (currVersion: number) => Promise<number | undefined>;
+function makeEditor(onSave: (project: unknown, currVersion: number) => Promise<number | undefined>): InstanceType<typeof Editor> {
+  const editor = Object.create(Editor.prototype) as InstanceType<typeof Editor>;
 
-class SaveGate {
-  inSave = false;
-  saveQueued = false;
-  readonly errors: Error[] = [];
-  readonly invocations: number[] = [];
+  editor.inSave = false;
+  editor.saveQueued = false;
 
-  constructor(private readonly onSave: MockOnSave) {}
+  editor.state = {
+    modelErrors: [],
+    projectVersion: 1,
+  } as unknown as InstanceType<typeof Editor>['state'];
 
-  async save(currVersion: number): Promise<void> {
-    if (this.inSave) {
-      this.saveQueued = true;
-      return;
-    }
+  editor.props = {
+    inputFormat: 'json',
+    onSave,
+  } as unknown as InstanceType<typeof Editor>['props'];
 
-    this.inSave = true;
+  editor.engineProject = {
+    serializeJson: async () => '{}',
+  } as unknown as InstanceType<typeof Editor>['engineProject'];
 
-    let version: number | undefined;
-    try {
-      this.invocations.push(currVersion);
-      version = await this.onSave(currVersion);
-    } catch (err) {
-      this.errors.push(err as Error);
-    } finally {
-      this.inSave = false;
-      if (this.saveQueued) {
-        this.saveQueued = false;
-        await this.save(version ?? currVersion);
-      }
-    }
-  }
+  editor.setState = (updater: unknown) => {
+    const next = typeof updater === 'function' ? updater(editor.state) : updater;
+    Object.assign(editor.state, next);
+  };
+
+  return editor;
 }
 
-// --- Tests ---
-
-describe('Editor save() inSave gate', () => {
+describe('Editor.save() inSave gate (real Editor.prototype.save)', () => {
   it('resets inSave after a successful save so subsequent saves proceed', async () => {
-    const gate = new SaveGate(async () => 1);
-    await gate.save(0);
-    expect(gate.inSave).toBe(false);
-    // A second call must invoke onSave (not get stuck).
-    await gate.save(1);
-    expect(gate.invocations).toHaveLength(2);
+    let callCount = 0;
+    const editor = makeEditor(async () => {
+      callCount++;
+      return 2;
+    });
+
+    await editor.save(1);
+    expect(editor.inSave).toBe(false);
+    expect(callCount).toBe(1);
+
+    await editor.save(2);
+    expect(callCount).toBe(2);
   });
 
-  it('resets inSave after a thrown error so subsequent saves proceed', async () => {
+  it('resets inSave after onSave throws so subsequent saves proceed', async () => {
     let callCount = 0;
-    const gate = new SaveGate(async () => {
+    const editor = makeEditor(async () => {
       callCount++;
       if (callCount === 1) {
         throw new Error('network failure');
       }
-      return 1;
+      return 2;
     });
 
-    await gate.save(0);
+    await editor.save(0);
 
-    // The first save threw, but inSave must be false now.
-    expect(gate.inSave).toBe(false);
-    expect(gate.errors).toHaveLength(1);
+    expect(editor.inSave).toBe(false);
+    expect(callCount).toBe(1);
 
     // A second save must invoke onSave (not be silently dropped).
-    await gate.save(0);
+    await editor.save(0);
     expect(callCount).toBe(2);
   });
 
-  it('flushes a queued save after a thrown error', async () => {
+  it('flushes a queued save after onSave throws', async () => {
     let callCount = 0;
-    const gate = new SaveGate(async () => {
+    const editor = makeEditor(async () => {
       callCount++;
       if (callCount === 1) {
-        // Block long enough to allow save(1) to queue.
         await new Promise<void>((resolve) => setImmediate(resolve));
         throw new Error('transient error');
       }
       return 2;
     });
 
-    // Start the first save (it will block on the promise above), then
-    // immediately call save(1) — which should queue rather than execute.
-    const firstSave = gate.save(0);
-    // At this point the first save is in-flight (awaiting the promise).
-    gate.save(1); // intentionally not awaited: queues saveQueued = true
+    const firstSave = editor.save(0);
+    // At this point the first save is in-flight; queue a second.
+    void editor.save(1);
 
     await firstSave;
 
     // The queued save must have been flushed by the finally block.
     expect(callCount).toBe(2);
-    expect(gate.errors).toHaveLength(1);
+  });
+
+  it('queues a concurrent save when a save is already in flight', async () => {
+    let callCount = 0;
+    // serializeJson resolves after a microtask so save() is truly async from
+    // the very first await, giving us a window to observe inSave = true before
+    // the second save() call runs.
+    const editor = makeEditor(async () => {
+      callCount++;
+      return 2;
+    });
+
+    // Manually enter the in-flight state before the second call.
+    editor.inSave = true;
+    void editor.save(0);
+    // save() must have returned immediately (queued, not dispatched).
+    expect(editor.saveQueued).toBe(true);
+    expect(callCount).toBe(0);
+
+    // Reset inSave so the queued save can flush; simulate what the finally
+    // block would do. In production this happens inside the first save's
+    // finally; here we drive it manually.
+    editor.inSave = false;
+    editor.saveQueued = false;
+    // The real scenario: start a fresh save that flushes normally.
+    await editor.save(0);
+    expect(callCount).toBe(1);
   });
 });
