@@ -89,12 +89,25 @@ pub fn compute_baseline(project: &datamodel::Project) -> BaselineErrors {
     }
 }
 
+/// Build a `BaselineErrors` set from pre-formatted wire-shape errors.
+/// Used internally by `compute_baseline` and available to callers that
+/// already hold a `Vec<ValidationError>` from a prior `run_diagnostics`
+/// call and don't want to re-run the pipeline.
+pub fn baseline_from_errors(errors: &[ValidationError]) -> BaselineErrors {
+    BaselineErrors {
+        keys: errors
+            .iter()
+            .map(|e| (e.code.clone(), e.variable_name.clone()))
+            .collect(),
+    }
+}
+
 /// Validate an incoming save body. Pipeline:
 ///
 /// 1. Parse `json` as a `json::Project` (camelCase schema; produced by
 ///    the Editor's `engine.serializeJson()`).
 /// 2. Convert into the engine's `datamodel::Project`.
-/// 3. Run the engine's salsa-based diagnostic pipeline; filter to
+/// 3. Run the engine's salsa-based diagnostic pipeline once; filter to
 ///    `DiagnosticSeverity::Error`; format via `collect_formatted_errors`.
 /// 4. Subtract `baseline.keys` to keep only NEW errors.
 ///
@@ -108,14 +121,14 @@ pub fn validate_save(
         serde_json::from_str(json_body).map_err(ValidationFailure::JsonParse)?;
     let project: datamodel::Project = json_project.into();
 
-    let post_keys = error_keys_for(&project);
-    let post_errors = formatted_errors_for(&project);
-
-    let new_errors: Vec<ValidationError> = post_errors
+    // Single pipeline pass: compute wire-shape errors, then derive the
+    // key set from the same Vec rather than re-running the pipeline.
+    let all_errors = run_diagnostics(&project);
+    let new_errors: Vec<ValidationError> = all_errors
         .into_iter()
         .filter(|e| {
             let key = (e.code.clone(), e.variable_name.clone());
-            !baseline.keys.contains(&key) && post_keys.contains(&key)
+            !baseline.keys.contains(&key)
         })
         .collect();
 
@@ -128,26 +141,17 @@ pub fn validate_save(
 /// Run the engine diagnostic pipeline and return only the
 /// (code, variable_name) keys for severity == Error diagnostics.
 fn error_keys_for(project: &datamodel::Project) -> HashSet<(String, Option<String>)> {
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, project);
-    let diagnostics = collect_all_diagnostics(&db, &sync);
-    let formatted = collect_formatted_errors(
-        diagnostics
-            .iter()
-            .filter(|d| matches!(d.severity, DiagnosticSeverity::Error)),
-        project,
-    );
-    formatted
-        .errors
+    run_diagnostics(project)
         .into_iter()
-        .map(|e| (e.code.to_string(), e.variable_name))
+        .map(|e| (e.code, e.variable_name))
         .collect()
 }
 
-/// Run the engine diagnostic pipeline and surface
-/// `severity == Error` diagnostics formatted into wire-shape
-/// `ValidationError` records (caller-facing structure).
-fn formatted_errors_for(project: &datamodel::Project) -> Vec<ValidationError> {
+/// Run the engine's salsa-based diagnostic pipeline and format
+/// `severity == Error` diagnostics into wire-shape `ValidationError`
+/// records. One call per logical context (baseline or post-edit); never
+/// called twice for the same project in a single request.
+fn run_diagnostics(project: &datamodel::Project) -> Vec<ValidationError> {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
     let diagnostics = collect_all_diagnostics(&db, &sync);
