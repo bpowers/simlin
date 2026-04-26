@@ -12,6 +12,20 @@ import { ProjectList } from './components/ProjectList';
 
 const GIT_HINT_DISMISSED_KEY = 'simlin-serve-git-hint-dismissed';
 
+// Reads the dismissed flag from sessionStorage without throwing: some browsers
+// (notably in private/incognito mode) throw on any sessionStorage access rather
+// than returning null. The pattern mirrors readLaunchToken in launch-token.ts.
+function readDismissedFlag(): boolean {
+  if (typeof sessionStorage === 'undefined') {
+    return false;
+  }
+  try {
+    return sessionStorage.getItem(GIT_HINT_DISMISSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 type AppState = {
   projects: ReadonlyArray<ProjectMeta> | null;
   gitAvailable: boolean;
@@ -28,7 +42,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
     // Persist across reloads of the same browser tab so the AC2.5 hint stays
     // dismissed for the duration of the session, but reappears in fresh tabs
     // (matches the design's "one-time hint" wording).
-    gitHintDismissed: typeof sessionStorage !== 'undefined' && sessionStorage.getItem(GIT_HINT_DISMISSED_KEY) === '1',
+    gitHintDismissed: readDismissedFlag(),
     loadError: null,
   };
 
