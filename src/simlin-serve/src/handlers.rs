@@ -536,8 +536,11 @@ pub async fn create_new_project(
         .open(&outcome.path)
     {
         Ok(mut file) => {
-            file.write_all(&outcome.bytes)
-                .map_err(|e| NewProjectError::Internal(format!("write: {e}")))?;
+            if let Err(write_err) = file.write_all(&outcome.bytes) {
+                drop(file);
+                let _ = std::fs::remove_file(&outcome.path);
+                return Err(NewProjectError::Internal(format!("write: {write_err}")));
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(NewProjectError::Conflict);

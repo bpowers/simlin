@@ -754,12 +754,17 @@ impl WatcherActor {
                 return;
             }
             Err(RegistryError::AlreadyExists) => {
-                // The destination is already tracked (e.g. `mv a.stmx b.stmx`
-                // when b.stmx is also being watched). Explicitly remove the
-                // destination entry so the SPA drops its stale sidebar row,
-                // then re-apply the source state as a fresh Created at the
-                // destination. This preserves the source's doc and version
-                // while giving the SPA a clean signal to refresh its view.
+                // Both source and destination are tracked. `rename_entry`
+                // left neither entry mutated. Discard both stale in-memory
+                // states: the source no longer exists on disk, and the
+                // destination's content has been replaced by the incoming
+                // file. Both clients receive `ProjectRemoved`, then the
+                // destination is re-hydrated from the freshly renamed file
+                // via `handle_model_change`.
+                let from_display = match from.strip_prefix(state.root.as_ref()) {
+                    Ok(rel) => path_to_forward_slash(rel),
+                    Err(_) => path_to_forward_slash(&from),
+                };
                 let to_display = match to_key.strip_prefix(state.root.as_ref()) {
                     Ok(rel) => path_to_forward_slash(rel),
                     Err(_) => path_to_forward_slash(&to_key),
@@ -767,8 +772,12 @@ impl WatcherActor {
                 tracing::debug!(
                     from = %from.display(),
                     to = %to.display(),
-                    "watcher: rename destination already tracked; removing it then re-keying"
+                    "watcher: rename destination already tracked; removing both then re-hydrating destination"
                 );
+                state.registry.remove(&from_key);
+                state
+                    .events
+                    .publish(WsMessage::ProjectRemoved { path: from_display });
                 state.registry.remove(&to_key);
                 state
                     .events

@@ -759,6 +759,127 @@ async fn external_rename_re_keys_registry_and_emits_project_renamed() {
     shutdown.notify_waiters();
 }
 
+/// Rename-collision: when `mv a.sd.json b.sd.json` occurs and both files
+/// are already tracked, the watcher must drop the source entry, broadcast
+/// `ProjectRemoved` for both paths, then re-hydrate the destination from
+/// the freshly renamed file.
+///
+/// Before the fix for I1.b, the `AlreadyExists` arm only removed and
+/// broadcast for the destination, leaving the source (`a.sd.json`) as a
+/// phantom entry in the registry — clicks on it from the SPA would return
+/// 404 because the file no longer exists on disk.
+#[tokio::test]
+async fn rename_over_tracked_destination_removes_both_and_rehydrates() {
+    let dir = TempDir::new().expect("tempdir");
+    let a_abs = dir.path().join("a.sd.json");
+    let b_abs = dir.path().join("b.sd.json");
+    let a_content = sd_json("project-a");
+    let b_content = sd_json("project-b");
+    std::fs::write(&a_abs, &a_content).expect("write a");
+    std::fs::write(&b_abs, &b_content).expect("write b");
+    let a_canonical = a_abs.canonicalize().expect("canonicalize a");
+    let b_canonical = b_abs.canonicalize().expect("canonicalize b");
+
+    let state = build_state(dir.path());
+    seed_registry(
+        &state,
+        &a_canonical,
+        ProjectFormat::SdJson,
+        content_hash(a_content.as_bytes()),
+    );
+    seed_registry(
+        &state,
+        &b_canonical,
+        ProjectFormat::SdJson,
+        content_hash(b_content.as_bytes()),
+    );
+
+    let mut rx = state.events.subscribe();
+
+    let shutdown: ShutdownSignal = Arc::new(Notify::new());
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Rename a.sd.json -> b.sd.json (overwrites b on disk).
+    tokio::fs::rename(&a_abs, &b_abs)
+        .await
+        .expect("rename a -> b");
+
+    // Collect events until we see both ProjectRemoved paths and a
+    // ProjectChanged for the destination. Use a generous timeout so the
+    // test is reliable on slow CI machines.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut removed_paths: Vec<String> = Vec::new();
+    let mut saw_b_changed = false;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(WsMessage::ProjectRemoved { path })) => {
+                removed_paths.push(path);
+                if removed_paths.len() == 2 && saw_b_changed {
+                    break;
+                }
+            }
+            Ok(Ok(WsMessage::ProjectChanged {
+                source: ChangeSource::Disk,
+                path,
+                ..
+            })) if path == "b.sd.json" => {
+                saw_b_changed = true;
+                if removed_paths.len() == 2 {
+                    break;
+                }
+            }
+            Ok(Ok(_other)) => continue,
+            Ok(Err(RecvError::Lagged(_))) => continue,
+            Ok(Err(RecvError::Closed)) => break,
+            Err(_) => break,
+        }
+    }
+
+    // Both ProjectRemoved events must have fired.
+    let mut sorted = removed_paths.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["a.sd.json", "b.sd.json"],
+        "ProjectRemoved must fire for both source and destination; got: {removed_paths:?}"
+    );
+
+    // The destination must have been re-hydrated with the renamed file's content.
+    assert!(
+        saw_b_changed,
+        "watcher must emit ProjectChanged{{source: Disk}} for b.sd.json after re-hydration"
+    );
+
+    // Source is gone from the registry.
+    assert!(
+        state.registry.get(&a_canonical).is_none(),
+        "source a.sd.json must be removed from registry after rename-collision"
+    );
+
+    // Destination is present with fresh content (project-a, since the file
+    // that was renamed onto b.sd.json came from a.sd.json).
+    let b_canonical_new = b_abs.canonicalize().expect("canonicalize b post-rename");
+    let doc = state
+        .registry
+        .get_or_init_doc(&b_canonical_new)
+        .expect("destination must be in registry");
+    let exported = doc.export_canonical_json().expect("export");
+    assert_eq!(
+        exported["name"].as_str(),
+        Some("project-a"),
+        "destination doc must reflect the renamed file's content"
+    );
+
+    shutdown.notify_waiters();
+}
+
 /// Edge case: a paired-rename event lands for a path the registry never
 /// knew about (e.g. the source extension was outside our denylist when we
 /// scanned, or the file was created and renamed before discovery caught
