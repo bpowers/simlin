@@ -638,13 +638,6 @@ impl ProjectAccess for RegistryAccess {
         // any `..` segment that would escape the tree.
         let resolved = resolve_create_path_within_root(&self.state, abs_path)?;
 
-        if resolved.exists() {
-            return Err(AccessError::WriteError(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("file already exists: {}", resolved.display()),
-            )));
-        }
-
         let project_format = project_format_for_create(&resolved)?;
 
         if let Some(parent) = resolved.parent()
@@ -656,7 +649,46 @@ impl ProjectAccess for RegistryAccess {
         }
 
         let bytes = serialize_for_create(project, project_format)?;
-        simlin_engine::io::atomic_write(&resolved, &bytes).map_err(AccessError::WriteError)?;
+
+        // Atomic exclusive create: the kernel guarantees that at most one
+        // concurrent caller can pass the create_new check, so two MCP
+        // CreateModel calls racing on the same path produce exactly one
+        // winner and (N-1) AlreadyExists failures. The previous
+        // exists()-then-atomic_write pattern was non-atomic — any racer
+        // that passed exists() before another's rename completed would
+        // silently overwrite the first writer's content. Same primitive
+        // and crash-safety trade-off (mid-write crash leaves a partial
+        // file) the HTTP `POST /api/projects/new` path uses.
+        use std::io::Write as _;
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&resolved)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(AccessError::WriteError(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("file already exists: {}", resolved.display()),
+                )));
+            }
+            Err(e) => return Err(AccessError::WriteError(e)),
+        };
+        if let Err(write_err) = file.write_all(&bytes) {
+            // Best-effort cleanup of the partial file so subsequent
+            // creates aren't blocked by an empty-or-truncated leftover.
+            drop(file);
+            let _ = std::fs::remove_file(&resolved);
+            return Err(AccessError::WriteError(write_err));
+        }
+        // Sync before drop so the file's contents are durable before any
+        // subsequent reader (including the watcher) sees it.
+        if let Err(sync_err) = file.sync_all() {
+            drop(file);
+            let _ = std::fs::remove_file(&resolved);
+            return Err(AccessError::WriteError(sync_err));
+        }
+        drop(file);
         let written_hash = content_hash(&bytes);
 
         // Stat the freshly-written file so the registry entry carries the
@@ -947,5 +979,72 @@ mod tests {
         let opened = access.open(&abs).await.expect("open after merge");
         assert_eq!(opened.version, 1);
         assert_eq!(opened.project.name, "renamed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn create_is_collision_safe_under_concurrent_calls() {
+        // Eight concurrent CreateModel calls targeting the same path. The
+        // existing exists()-then-atomic_write pattern is non-atomic: any
+        // racer that passes exists() before another's rename completes
+        // overwrites the first writer's content. Exactly one create
+        // must succeed; the others must surface AlreadyExists so the
+        // caller can either retry with a different name or accept that
+        // the file already exists.
+        let temp = TempDir::new().expect("tempdir");
+        let canonical_root = temp.path().canonicalize().expect("canon root");
+        let target = canonical_root.join("racing.sd.json");
+        let state = build_state(canonical_root.clone());
+        let access = Arc::new(RegistryAccess::new(state));
+
+        let racer_count = 8;
+        let barrier = Arc::new(tokio::sync::Barrier::new(racer_count));
+
+        let mut handles = Vec::with_capacity(racer_count);
+        for i in 0..racer_count {
+            let access = access.clone();
+            let target = target.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let mut project = simlin_mcp_core::types::build_empty_project();
+                project.name = format!("project_{i}");
+                // All racers wait at the barrier so they enter `create`
+                // simultaneously, maximising the chance the buggy
+                // exists()-then-write pattern shows up. With the atomic
+                // create-or-fail fix exactly one passes the kernel-side
+                // create_new check.
+                barrier.wait().await;
+                access
+                    .create(&target, &project, SourceFormat::NativeJson)
+                    .await
+            }));
+        }
+
+        let mut successes = 0;
+        let mut already_exists = 0;
+        let mut other = Vec::new();
+        for h in handles {
+            match h.await.expect("task panicked") {
+                Ok(()) => successes += 1,
+                Err(AccessError::WriteError(e))
+                    if e.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    already_exists += 1;
+                }
+                Err(other_err) => other.push(other_err),
+            }
+        }
+        assert!(
+            other.is_empty(),
+            "no racer should fail with anything other than AlreadyExists; got {other:?}"
+        );
+        assert_eq!(
+            successes, 1,
+            "exactly one racer must win the create; successes={successes}, already_exists={already_exists}"
+        );
+        assert_eq!(
+            already_exists,
+            racer_count - 1,
+            "all losers must surface AlreadyExists"
+        );
     }
 }
