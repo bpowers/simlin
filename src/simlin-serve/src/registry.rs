@@ -200,6 +200,22 @@ impl ProjectRegistry {
         Ok(entry.version)
     }
 
+    /// Update the entry's `mtime` to `mtime`. No-op if the path is not in
+    /// the registry. Used by the save handler after a successful disk
+    /// write so a subsequent listing reflects the new modification time.
+    /// Task 7 extends this with size refresh; for Task 5 the mtime alone
+    /// is enough to keep the SPA's stale-data heuristics in sync with
+    /// disk reality.
+    pub fn refresh_meta_mtime(&self, abs_path: &Path, mtime: SystemTime) {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if let Some(entry) = guard.get_mut(abs_path) {
+            entry.mtime = mtime;
+        }
+    }
+
     /// Number of entries currently in the registry.
     pub fn len(&self) -> usize {
         let guard = self
@@ -426,6 +442,31 @@ mod tests {
         );
         // The registry must not have incremented further on the failed attempt.
         assert_eq!(reg.get(&abs).expect("entry").version, 6);
+    }
+
+    #[test]
+    fn refresh_meta_mtime_updates_existing_entry() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx),
+        );
+        let updated_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_500);
+        reg.refresh_meta_mtime(&abs, updated_mtime);
+        assert_eq!(reg.get(&abs).expect("entry").mtime, updated_mtime);
+    }
+
+    #[test]
+    fn refresh_meta_mtime_is_noop_for_missing_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let nonexistent = PathBuf::from("/tmp/root/missing.stmx");
+        reg.refresh_meta_mtime(
+            &nonexistent,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(42),
+        );
+        assert!(reg.is_empty());
     }
 
     #[test]

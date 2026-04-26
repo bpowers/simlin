@@ -22,6 +22,7 @@ use crate::parse::{ParseError, datamodel_to_canonical_json, parse_to_datamodel};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
+use crate::writer::{SaveTarget, resolve_save_target, save_to_disk};
 
 /// Process-wide state injected into every handler. Cloning is cheap because
 /// each field is `Arc`-shared; the inner data is never copied per-request.
@@ -383,10 +384,44 @@ pub async fn save_project(
         });
     }
 
-    // Stub success: subcomponent B replaces this with the disk write.
+    // Resolve the target shape from the request URL's source format
+    // (not the post-sidecar `effective_format` — for `.mdl` we always
+    // want the SidecarJson arm even if the sidecar already exists, and
+    // for `.sd.json` standalone we want the SdJson arm). Subcomponent B
+    // owns the actual SidecarJson + SdJson writing; Task 5 only wires
+    // the InPlaceXmile path.
+    let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
+    let written_path = save_to_disk(&outcome.project, &target)
+        .map_err(|e| SaveError::Internal(anyhow::anyhow!("save_to_disk: {e}")))?;
+
+    // Refresh the registry's mtime from the freshly-written file so a
+    // subsequent listing reflects the new modification time.
+    if let Ok(metadata) = std::fs::metadata(&written_path)
+        && let Ok(mtime) = metadata.modified()
+    {
+        state
+            .registry
+            .refresh_meta_mtime(&resolved.canonical, mtime);
+    }
+
+    // The relative path returned to the client is unchanged for
+    // InPlaceXmile/SdJson. Subcomponent B's SidecarJson arm rewrites
+    // this when the sidecar redirect happens.
+    let response_path = match &target {
+        SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => {
+            path_to_forward_slash(&resolved.relative_path)
+        }
+        SaveTarget::SidecarJson { .. } => {
+            // Task 6 wires this; for now the in-place path is the safe
+            // fallback (won't be reached because Task 6 lands before any
+            // .mdl request hits this code in production).
+            path_to_forward_slash(&resolved.relative_path)
+        }
+    };
+
     Ok(Json(SaveResponse {
         version: new_version,
-        path: path_to_forward_slash(&resolved.relative_path),
+        path: response_path,
     }))
 }
 

@@ -106,15 +106,13 @@ async fn ok_with_matching_version_increments_registry() {
     let state = build_state(canonical_root);
     seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
 
-    let pre_mtime = fs::metadata(&abs_canonical).unwrap().modified().unwrap();
-    let pre_bytes = fs::read(&abs_canonical).unwrap();
-
     // Read the current state to obtain a valid canonical-JSON body.
     let (version, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
     assert_eq!(version, 0);
 
-    // POST it back unchanged. The validation must pass and the registry
-    // version increment to 1; the file on disk is NOT yet written.
+    // POST it back unchanged. Validation passes and the registry version
+    // increments to 1. Subcomponent B also rewrites the file in XMILE
+    // form; the new bytes parse back to the same project.
     let body = serde_json::json!({"json": json_body, "version": 0}).to_string();
     let (status, response_bytes) = fetch(
         state.clone(),
@@ -133,14 +131,56 @@ async fn ok_with_matching_version_increments_registry() {
     assert_eq!(response["version"].as_u64(), Some(1));
     assert_eq!(response["path"].as_str(), Some("teacup.stmx"));
 
-    // Disk must be unchanged at this stage (Subcomponent B writes).
-    let post_mtime = fs::metadata(&abs_canonical).unwrap().modified().unwrap();
+    // The XMILE file has been overwritten in place. The new content must
+    // parse back to a Project semantically equivalent to the input.
     let post_bytes = fs::read(&abs_canonical).unwrap();
-    assert_eq!(pre_mtime, post_mtime, "mtime must not change in Task 4");
+    let mut reader = std::io::Cursor::new(&post_bytes[..]);
+    let post_project = simlin_engine::open_xmile(&mut reader).expect("rewritten file parses");
+    assert_eq!(post_project.name, "teacup-modern");
+}
+
+/// AC3.2: Saving an edit to a `.stmx` file writes the new content back
+/// to the original file in XMILE format. We round-trip the canonical
+/// JSON through a small mutation (rename a variable) and verify the
+/// rewritten file reflects the change.
+#[tokio::test]
+async fn save_xmile_writes_back_in_place_with_edits() {
+    let dir = TempDir::new().unwrap();
+    let abs = copy_fixture("teacup.stmx", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let abs_canonical = abs.canonicalize().unwrap();
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
+
+    // Get the canonical JSON, then apply a trivial mutation by replacing
+    // the project name. This exercises the full pipeline: parse incoming
+    // JSON -> validate -> write.
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(&json_body).expect("parse canonical json");
+    json_value["name"] = serde_json::Value::String("renamed-project".to_string());
+    let mutated_json = serde_json::to_string(&json_value).expect("reserialize");
+
+    let body = serde_json::json!({"json": mutated_json, "version": 0}).to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body),
+    )
+    .await;
     assert_eq!(
-        pre_bytes, post_bytes,
-        "file contents must not change in Task 4"
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
     );
+
+    // Read the file back and verify the rename made it through.
+    let post_bytes = fs::read(&abs_canonical).unwrap();
+    let mut reader = std::io::Cursor::new(&post_bytes[..]);
+    let post_project = simlin_engine::open_xmile(&mut reader).expect("rewritten file parses");
+    assert_eq!(post_project.name, "renamed-project");
 }
 
 #[tokio::test]
