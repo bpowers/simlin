@@ -88,6 +88,140 @@ Edits made through `EditModel` and `CreateModel` flow through the same
 merge primitive as browser saves, so concurrent edits from both sides
 converge instead of clobbering each other.
 
+## Notifications
+
+`simlin-serve` pushes JSON-RPC notifications to every active MCP session
+whenever the underlying state changes. Five notification methods are
+defined, each in the `simlin/` namespace to avoid collision with future
+MCP-standard methods:
+
+| Method                       | When it fires                                                                            |
+| ---------------------------- | ---------------------------------------------------------------------------------------- |
+| `simlin/projectChanged`      | A project moved to a new version (browser save, MCP edit, or filesystem change).         |
+| `simlin/projectRemoved`      | A project file was deleted from disk.                                                    |
+| `simlin/projectFocused`      | The browser opened or switched to a project.                                             |
+| `simlin/selectionChanged`    | The browser's variable selection changed inside the focused project.                     |
+| `simlin/diagnosticsChanged`  | The set of validation errors for a project changed (errors introduced, fixed, or both).  |
+
+### Payload shapes
+
+`simlin/projectChanged`:
+
+```json
+{
+  "path": "models/teacup.xmile",
+  "version": 3,
+  "source": "user"
+}
+```
+
+`source` is `"user"` for browser saves, `"agent"` for MCP edits, or
+`"disk"` for filesystem-watcher reloads. `version` is the new
+optimistic-lock version (monotonic per project). Note that `source:
+"agent"` notifications fan out to *all* connected MCP clients, including
+the one that triggered the edit — your client receives an echo of its
+own write.
+
+`simlin/projectRemoved`:
+
+```json
+{ "path": "models/teacup.xmile" }
+```
+
+`simlin/projectFocused`:
+
+```json
+{ "path": "models/teacup.xmile" }
+```
+
+`simlin/selectionChanged`:
+
+```json
+{
+  "path": "models/teacup.xmile",
+  "variableIdents": ["teacup_temperature", "ambient_temperature"]
+}
+```
+
+`variableIdents` is the list of canonical idents currently selected.
+An empty array means nothing is selected. The browser debounces these
+events (150ms) so rapid selection changes coalesce into a single frame.
+
+`simlin/diagnosticsChanged`:
+
+```json
+{
+  "path": "models/teacup.xmile",
+  "errors": [
+    {
+      "code": "unknown_dependency",
+      "message": "variable 'x' references unknown 'bogus'",
+      "modelName": "main",
+      "variableName": "x",
+      "kind": "variable"
+    }
+  ]
+}
+```
+
+The full error list is sent on every change (not a delta), so an empty
+`errors` array means all previously known errors are now fixed. `kind`
+is one of `"project"`, `"model"`, `"variable"`, `"units"`, or
+`"simulation"`. `modelName` and `variableName` are omitted (rather than
+sent as `null`) when the diagnostic isn't bound to a specific model or
+variable.
+
+### Example wire frame
+
+A complete notification on the wire looks like:
+
+```json
+{"jsonrpc":"2.0","method":"simlin/projectChanged","params":{"path":"models/teacup.xmile","version":3,"source":"user"}}
+```
+
+There is no `id` field — JSON-RPC notifications are fire-and-forget by
+spec, and `simlin-serve` doesn't expect a reply.
+
+### Ordering and delivery semantics
+
+**Notifications are advisory and may arrive before or after a tool
+response that triggered them.** The MCP transport delivers tool
+responses and notifications on parallel paths; on Streamable HTTP the
+client may observe a `simlin/projectChanged` notification *before* the
+response to the `EditModel` call that produced it. AI clients should
+treat each notification as a hint to optionally re-fetch latest state,
+not as authoritative delivery of the new state itself. Concretely, when
+a notification matters for your next action, follow it with a fresh
+`ReadModel` (or whichever tool reads the data you need) rather than
+trusting the notification payload as the canonical view.
+
+This is the same design the browser frontend uses: it treats
+`projectChanged` over the WebSocket as a remount trigger, then
+re-reads the project state via the HTTP API.
+
+`simlin/diagnosticsChanged` always follows the corresponding
+`simlin/projectChanged` for the same path, because both are published
+sequentially from the same task after a successful merge.
+
+### Subscribing
+
+No subscription action is needed: every successfully `initialize`-d MCP
+session automatically receives all five notification kinds for the
+lifetime of the connection. When the session closes, the server's
+per-session forwarder exits cleanly and releases its bus subscription.
+
+### Claude Desktop via `mcp-remote`
+
+The [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) proxy
+forwards every server message — including custom-method notifications
+— to the stdio client unchanged, so Claude Desktop sessions do receive
+these frames on the wire. As of April 2026, however, Claude Desktop's
+UI surfaces only the standard MCP notification methods; `simlin/*`
+custom methods arrive at the client but aren't visibly rendered.
+Programmatic access (logs, debugging tools) still sees them, and a
+future Desktop release that surfaces custom notifications will pick
+them up automatically without server-side changes.
+
 ## WebSocket Protocol
 
 The server exposes a single WebSocket endpoint for live updates:
