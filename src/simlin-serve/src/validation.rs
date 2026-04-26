@@ -83,6 +83,9 @@ impl std::error::Error for ValidationFailure {}
 /// Phase 2 the cost is acceptable (single-process, single-user, model
 /// sizes in the kilobytes); Phase 3's Loro doc cache eliminates the
 /// re-parse by keeping the parsed project resident.
+///
+/// If you already have a `Vec<ValidationError>` from a previous validation
+/// pass, prefer [`baseline_from_errors`] to avoid a redundant pipeline run.
 pub fn compute_baseline(project: &datamodel::Project) -> BaselineErrors {
     BaselineErrors {
         keys: error_keys_for(project),

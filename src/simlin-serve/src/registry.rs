@@ -178,6 +178,28 @@ impl ProjectRegistry {
         guard.insert(absolute_path, meta);
     }
 
+    /// Insert or update the entry keyed by `absolute_path`, taking the
+    /// **maximum of the incoming version and the existing version**.
+    ///
+    /// Used in error-recovery paths where the incoming `meta.version` carries
+    /// a just-incremented version but the registry may already have a newer
+    /// entry (e.g. from a concurrent scan that found a pre-existing sidecar).
+    /// Taking the max ensures the optimistic-lock counter never rolls backward
+    /// regardless of which write wins the race.
+    ///
+    /// `meta.path` is overwritten with the relativized form (same as `upsert`).
+    pub fn upsert_max_version(&self, absolute_path: PathBuf, mut meta: ProjectMeta) {
+        meta.path = relativize(&self.root, &absolute_path);
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if let Some(existing) = guard.get(&absolute_path) {
+            meta.version = meta.version.max(existing.version);
+        }
+        guard.insert(absolute_path, meta);
+    }
+
     /// Get the entry for `absolute_path`, inserting a default if absent.
     ///
     /// The get-or-insert runs under a single write-lock acquisition so
@@ -708,5 +730,173 @@ mod tests {
         let entry = reg.get(&sidecar_abs).expect("sidecar entry");
         assert_eq!(entry.version, 7);
         assert_eq!(entry.format, ProjectFormat::SdJson);
+    }
+
+    #[test]
+    fn redirect_to_sidecar_preserves_max_version_when_mdl_greater_than_sidecar() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl_abs = root.join("model.mdl");
+        let sidecar_abs = root.join("model.sd.json");
+
+        let mut mdl_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
+        mdl_meta.version = 7;
+        reg.upsert(mdl_abs.clone(), mdl_meta);
+
+        let mut sidecar_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        sidecar_meta.version = 4;
+        reg.upsert(sidecar_abs.clone(), sidecar_meta);
+
+        reg.redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
+            .expect("redirect succeeds");
+
+        assert!(reg.get(&mdl_abs).is_none());
+        // Sidecar gets max(7, 4) = 7.
+        let entry = reg.get(&sidecar_abs).expect("sidecar entry");
+        assert_eq!(entry.version, 7);
+        assert_eq!(entry.format, ProjectFormat::SdJson);
+    }
+
+    #[test]
+    fn upsert_max_version_takes_max_of_incoming_and_existing() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.sd.json");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        meta.version = 10;
+        reg.upsert(abs.clone(), meta);
+
+        // Incoming version is lower: existing (10) must be kept.
+        let mut lower_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        lower_meta.version = 5;
+        reg.upsert_max_version(abs.clone(), lower_meta);
+        assert_eq!(reg.get(&abs).expect("entry").version, 10);
+
+        // Incoming version is higher: new version (15) must be kept.
+        let mut higher_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        higher_meta.version = 15;
+        reg.upsert_max_version(abs.clone(), higher_meta);
+        assert_eq!(reg.get(&abs).expect("entry").version, 15);
+    }
+
+    #[test]
+    fn upsert_max_version_inserts_with_incoming_version_when_new() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("new.sd.json");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        meta.version = 3;
+        reg.upsert_max_version(abs.clone(), meta);
+
+        assert_eq!(reg.get(&abs).expect("entry").version, 3);
+    }
+
+    // The next two tests model the save handler's redirect_to_sidecar success
+    // and failure paths (handlers.rs lines ~408-444).
+
+    #[test]
+    fn handler_redirect_success_path_version_carries_over() {
+        // Simulate: .mdl entry exists at version 5; post-write redirect succeeds.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl_abs = root.join("model.mdl");
+        let sidecar_abs = root.join("model.sd.json");
+
+        let mut mdl_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
+        mdl_meta.version = 5;
+        reg.upsert(mdl_abs.clone(), mdl_meta);
+
+        let result = reg.redirect_to_sidecar(&mdl_abs, sidecar_abs.clone());
+        assert!(
+            result.is_ok(),
+            "redirect must succeed when .mdl entry exists"
+        );
+
+        assert!(reg.get(&mdl_abs).is_none(), ".mdl entry must be removed");
+        let entry = reg.get(&sidecar_abs).expect("sidecar entry created");
+        assert_eq!(entry.version, 5, "version must carry over from .mdl");
+        assert_eq!(entry.format, ProjectFormat::SdJson);
+    }
+
+    #[test]
+    fn handler_redirect_failure_path_fallback_upsert_max_version() {
+        // Simulate: the .mdl entry was removed by a concurrent scan between the
+        // version-lock release and the post-write redirect call. The handler
+        // catches the NotFound error and falls back to upsert_max_version with
+        // the just-incremented version so the sidecar is tracked.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl_abs = root.join("model.mdl");
+        let sidecar_abs = root.join("model.sd.json");
+
+        // The .mdl entry is gone by the time redirect_to_sidecar runs.
+        let err = reg
+            .redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
+            .unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+
+        // Handler fallback: upsert_max_version with the new (just-incremented)
+        // version. This must make the sidecar visible in the registry.
+        let new_version = 6u64;
+        reg.upsert_max_version(
+            sidecar_abs.clone(),
+            ProjectMeta {
+                path: PathBuf::new(),
+                format: ProjectFormat::SdJson,
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                size: 0,
+                git: GitState::Untracked,
+                version: new_version,
+            },
+        );
+
+        let entry = reg
+            .get(&sidecar_abs)
+            .expect("sidecar entry must exist after fallback");
+        assert_eq!(entry.version, new_version);
+        assert_eq!(entry.format, ProjectFormat::SdJson);
+    }
+
+    #[test]
+    fn handler_redirect_failure_fallback_preserves_higher_concurrent_version() {
+        // Edge case: redirect_to_sidecar fails (no .mdl), but a concurrent scan
+        // already inserted a sidecar entry with a higher version. The fallback
+        // upsert_max_version must not roll the version backward.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl_abs = root.join("model.mdl");
+        let sidecar_abs = root.join("model.sd.json");
+
+        // Scanner pre-inserted a sidecar at version 20.
+        let mut sidecar_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        sidecar_meta.version = 20;
+        reg.upsert(sidecar_abs.clone(), sidecar_meta);
+
+        // redirect_to_sidecar fails because .mdl is absent.
+        let err = reg
+            .redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
+            .unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+
+        // Fallback: new_version = 7 (the just-incremented value from
+        // check_and_increment), but the existing sidecar is already at 20.
+        let new_version = 7u64;
+        reg.upsert_max_version(
+            sidecar_abs.clone(),
+            ProjectMeta {
+                path: PathBuf::new(),
+                format: ProjectFormat::SdJson,
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                size: 0,
+                git: GitState::Untracked,
+                version: new_version,
+            },
+        );
+
+        // Version must remain 20 (max(7, 20)), not roll back to 7.
+        let entry = reg.get(&sidecar_abs).expect("sidecar entry");
+        assert_eq!(entry.version, 20, "version must not roll backward");
     }
 }

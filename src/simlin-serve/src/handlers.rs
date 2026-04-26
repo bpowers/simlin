@@ -428,7 +428,7 @@ pub async fn save_project(
                         error = %e,
                         "registry redirect_to_sidecar failed; re-inserting sidecar entry"
                     );
-                    state.registry.upsert(
+                    state.registry.upsert_max_version(
                         sidecar_path.clone(),
                         ProjectMeta {
                             path: PathBuf::new(),
