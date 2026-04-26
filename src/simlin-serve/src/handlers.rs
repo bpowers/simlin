@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
-use crate::events::{ChangeSource, EventBus, WsMessage};
+use crate::events::{ChangeSource, ClientWsMessage, EventBus, WsMessage};
 use crate::git::GitProbe;
 use crate::parse::ParseError;
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
@@ -834,11 +834,11 @@ pub struct WsParams {
 /// or value -> 401. Missing token -> 400 (Axum's `Query` extractor
 /// rejects the request before the handler runs).
 ///
-/// Phase 3 doesn't consume any client-to-server messages; future phases
-/// will add a `selectionChanged` upstream variant for collaborative
-/// awareness. We still drain `socket.recv()` so axum's auto-pong reply
-/// path keeps the connection alive on browser pings, and so the server
-/// task exits promptly when the client closes.
+/// Inbound (client → server) frames carry [`ClientWsMessage`] variants
+/// (`projectFocused` and `selectionChanged`). Server-computed events
+/// (`projectChanged`, `projectRemoved`, `diagnosticsChanged`) have no
+/// inbound counterpart — a client attempting to forge them parses as
+/// an error and is logged + ignored without breaking the connection.
 pub async fn updates_ws_handler(
     State(state): State<AppState>,
     Query(params): Query<WsParams>,
@@ -849,8 +849,9 @@ pub async fn updates_ws_handler(
     }
 
     let rx = state.events.subscribe();
+    let events = state.events.clone();
     tracing::info!("ws: client accepted on /api/updates");
-    ws.on_upgrade(move |socket| handle_socket(socket, rx))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, events))
 }
 
 /// Constant-time token comparison.
@@ -869,13 +870,20 @@ fn tokens_match(presented: &str, expected: &str) -> bool {
 /// Per-connection WebSocket loop. Multiplexes between:
 /// 1. `rx.recv()` — broadcast events from the bus, serialized + sent as
 ///    text frames.
-/// 2. `socket.recv()` — incoming client frames (Phase 3 ignores all but
-///    Close/error, which terminate the loop).
+/// 2. `socket.recv()` — incoming client frames. Text frames are parsed
+///    as [`ClientWsMessage`] and republished on the EventBus so server-
+///    side subscribers (the MCP notifications router in Phase 7's
+///    Subcomponent D) see them. Malformed JSON is logged at warn and
+///    discarded; the connection stays open.
 ///
 /// Lagged subscribers see `RecvError::Lagged(n)` once and resume; we log
 /// at warn so ops can spot a slow client. Connection close, send errors,
 /// and bus closure all break out cleanly so the spawned task drops.
-async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<WsMessage>) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<WsMessage>,
+    events: Arc<EventBus>,
+) {
     use broadcast::error::RecvError;
 
     loop {
@@ -925,9 +933,36 @@ async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<WsMess
                         // axum auto-pongs; nothing to do here. Logged at
                         // debug because pings are routine.
                     }
+                    Some(Ok(Message::Text(text))) => {
+                        // The WS channel is one-way for `DiagnosticsChanged`,
+                        // `ProjectChanged`, and `ProjectRemoved` (those are
+                        // server-internal); only `ProjectFocused` and
+                        // `SelectionChanged` are accepted from the client.
+                        // Auth was validated at upgrade time, so any frame
+                        // arriving here is from a trusted (loopback) origin.
+                        match serde_json::from_str::<ClientWsMessage>(&text) {
+                            Ok(ClientWsMessage::ProjectFocused { path }) => {
+                                events.publish(WsMessage::ProjectFocused { path });
+                            }
+                            Ok(ClientWsMessage::SelectionChanged { path, variable_idents }) => {
+                                events.publish(WsMessage::SelectionChanged {
+                                    path,
+                                    variable_idents,
+                                });
+                            }
+                            Err(err) => {
+                                // Malformed or unrecognized inbound frame.
+                                // Logged + dropped; the connection stays
+                                // open so a subsequent valid frame is
+                                // processed normally (a buggy client
+                                // shouldn't be able to evict itself).
+                                tracing::warn!(error = %err, "ws: malformed inbound frame");
+                            }
+                        }
+                    }
                     Some(Ok(_)) => {
-                        // Phase 3 doesn't accept client-to-server data;
-                        // Phase 7 will dispatch on the variant.
+                        // Binary or other non-text frames are not part of the
+                        // protocol; ignore without disconnecting.
                     }
                     Some(Err(err)) => {
                         tracing::debug!(error = %err, "ws: client recv error; closing");

@@ -191,3 +191,141 @@ async fn client_close_terminates_server_task_cleanly() {
         Some(Ok(other)) => panic!("expected Close or end-of-stream, got {other:?}"),
     }
 }
+
+/// Helper that drains a broadcast receiver until it sees a non-Lagged
+/// frame or the deadline expires. Tests use this to read events
+/// published as a side-effect of the WebSocket handler — we don't care
+/// if a few tracing-related messages slipped in first, only that the
+/// expected variant arrives within the timeout.
+async fn await_published(
+    rx: &mut tokio::sync::broadcast::Receiver<WsMessage>,
+    timeout: std::time::Duration,
+) -> Option<WsMessage> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(msg)) => return Some(msg),
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+            Err(_) => return None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn inbound_project_focused_is_published_on_eventbus() {
+    let (state, addr, _dir) = spawn_server("k").await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+    let mut bus_rx = state.events.subscribe();
+
+    let (mut ws, _) = connect_async(&url).await.expect("connect");
+    let frame = r#"{"type":"projectFocused","path":"models/teacup.xmile"}"#;
+    ws.send(Message::Text(frame.into()))
+        .await
+        .expect("send text");
+
+    let msg = await_published(&mut bus_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("server must publish ProjectFocused within 2s");
+    match msg {
+        WsMessage::ProjectFocused { path } => {
+            assert_eq!(path, "models/teacup.xmile");
+        }
+        other => panic!("expected ProjectFocused, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn inbound_selection_changed_is_published_on_eventbus() {
+    let (state, addr, _dir) = spawn_server("k").await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+    let mut bus_rx = state.events.subscribe();
+
+    let (mut ws, _) = connect_async(&url).await.expect("connect");
+    let frame = r#"{"type":"selectionChanged","path":"a.stmx","variableIdents":["x","y"]}"#;
+    ws.send(Message::Text(frame.into()))
+        .await
+        .expect("send text");
+
+    let msg = await_published(&mut bus_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("server must publish SelectionChanged within 2s");
+    match msg {
+        WsMessage::SelectionChanged {
+            path,
+            variable_idents,
+        } => {
+            assert_eq!(path, "a.stmx");
+            assert_eq!(variable_idents, vec!["x".to_string(), "y".to_string()]);
+        }
+        other => panic!("expected SelectionChanged, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn malformed_inbound_frame_does_not_close_connection() {
+    // The server must log and continue serving — a buggy client should not
+    // be able to terminate the WebSocket session by sending garbage. After
+    // the malformed frame we send a valid one and verify the bus saw it.
+    let (state, addr, _dir) = spawn_server("k").await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+    let mut bus_rx = state.events.subscribe();
+
+    let (mut ws, _) = connect_async(&url).await.expect("connect");
+    ws.send(Message::Text("not valid json".into()))
+        .await
+        .expect("send garbage");
+
+    // Connection still alive: send a valid frame and observe it.
+    let frame = r#"{"type":"projectFocused","path":"survived.stmx"}"#;
+    ws.send(Message::Text(frame.into()))
+        .await
+        .expect("send text after garbage");
+
+    let msg = await_published(&mut bus_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("server must publish after recovering from garbage");
+    match msg {
+        WsMessage::ProjectFocused { path } => assert_eq!(path, "survived.stmx"),
+        other => panic!("expected ProjectFocused, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unknown_inbound_variant_is_logged_and_ignored() {
+    // diagnosticsChanged is server-only (no inbound counterpart). A client
+    // attempting to push it should be ignored at the parse layer; the
+    // connection stays open and a follow-up valid frame is processed.
+    let (state, addr, _dir) = spawn_server("k").await;
+    let url = format!("ws://{}/api/updates?token=k", addr);
+    let mut bus_rx = state.events.subscribe();
+
+    let (mut ws, _) = connect_async(&url).await.expect("connect");
+    let bogus = r#"{"type":"diagnosticsChanged","path":"a.stmx","errors":[]}"#;
+    ws.send(Message::Text(bogus.into()))
+        .await
+        .expect("send bogus");
+
+    // Bus must NOT see DiagnosticsChanged from this client. We probe by
+    // sending a follow-up valid frame and checking the next bus event is
+    // the valid one (not a slipped-in DiagnosticsChanged).
+    let frame = r#"{"type":"projectFocused","path":"after_bogus.stmx"}"#;
+    ws.send(Message::Text(frame.into()))
+        .await
+        .expect("send follow-up");
+
+    let msg = await_published(&mut bus_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("follow-up frame must be published");
+    match msg {
+        WsMessage::ProjectFocused { path } => assert_eq!(path, "after_bogus.stmx"),
+        WsMessage::DiagnosticsChanged { .. } => {
+            panic!("client must not be able to inject DiagnosticsChanged")
+        }
+        other => panic!("expected ProjectFocused, got {other:?}"),
+    }
+}

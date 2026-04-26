@@ -23,7 +23,7 @@
 //! see `RecvError::Lagged(n)` (logged + ignored by the WS handler) and
 //! auto-resume from the oldest retained message.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 /// Wire-shape for a single validation diagnostic carried inside
@@ -148,6 +148,41 @@ pub enum WsMessage {
         /// Full formatted error list for the project (not just the
         /// delta). An empty vector signals "all errors fixed".
         errors: Vec<ValidationError>,
+    },
+}
+
+/// Inbound (browser → server) message envelope. A separate enum from
+/// [`WsMessage`] because the inbound and outbound surfaces don't share
+/// every variant: `DiagnosticsChanged` and `ProjectChanged` are server-
+/// computed and intentionally have no inbound counterpart.
+///
+/// The wire shape mirrors `WsMessage` (same `type` discriminator, same
+/// camelCase field names) so a single JSON `type` field disambiguates
+/// the variant in both directions.
+///
+/// `Deserialize` enforces this asymmetry at parse time: a frame with
+/// `"type":"diagnosticsChanged"` will fail to deserialize as
+/// `ClientWsMessage`, and `handle_socket` logs and continues serving
+/// rather than break the connection.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ClientWsMessage {
+    /// The browser focused (or switched to) a project. Mirrors
+    /// `WsMessage::ProjectFocused`.
+    ProjectFocused {
+        /// Forward-slash relative path of the focused project.
+        path: String,
+    },
+    /// The browser's variable selection changed. Mirrors
+    /// `WsMessage::SelectionChanged`.
+    #[serde(rename_all = "camelCase")]
+    SelectionChanged {
+        /// Forward-slash relative path of the project whose selection
+        /// changed.
+        path: String,
+        /// Canonical idents of the currently selected named view
+        /// elements.
+        variable_idents: Vec<String>,
     },
 }
 
@@ -413,5 +448,58 @@ mod tests {
 
         let got = rx.recv().await.expect("recv");
         assert_eq!(got, msg);
+    }
+
+    #[test]
+    fn client_ws_message_parses_project_focused() {
+        let json = r#"{"type":"projectFocused","path":"models/teacup.xmile"}"#;
+        let parsed: ClientWsMessage = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            parsed,
+            ClientWsMessage::ProjectFocused {
+                path: "models/teacup.xmile".into()
+            }
+        );
+    }
+
+    #[test]
+    fn client_ws_message_parses_selection_changed() {
+        let json = r#"{"type":"selectionChanged","path":"a.stmx","variableIdents":["x","y"]}"#;
+        let parsed: ClientWsMessage = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            parsed,
+            ClientWsMessage::SelectionChanged {
+                path: "a.stmx".into(),
+                variable_idents: vec!["x".into(), "y".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn client_ws_message_rejects_unknown_type() {
+        let json = r#"{"type":"diagnosticsChanged","path":"a.stmx","errors":[]}"#;
+        // diagnosticsChanged is server-only; clients aren't allowed to push it.
+        let result: Result<ClientWsMessage, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "diagnosticsChanged must not be accepted as an inbound frame"
+        );
+    }
+
+    #[test]
+    fn client_ws_message_rejects_malformed_json() {
+        let result: Result<ClientWsMessage, _> = serde_json::from_str("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn client_ws_message_rejects_missing_required_field() {
+        // SelectionChanged requires variableIdents.
+        let json = r#"{"type":"selectionChanged","path":"a.stmx"}"#;
+        let result: Result<ClientWsMessage, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "missing variableIdents field must produce a parse error"
+        );
     }
 }
