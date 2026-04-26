@@ -31,6 +31,13 @@ struct RepoCache {
     /// `None` means "no index file existed when we last looked" — fresh
     /// repos with no commits hit this case and we treat the cache as
     /// always-stale.
+    ///
+    /// There is a narrow TOCTOU window: `status_for` reads the mtime before
+    /// `build_repo_cache` runs `git status` and `git ls-files`. If the index
+    /// is rewritten between those two points, the stored mtime will be stale
+    /// by one generation — the *next* call will miss the cache and recompute,
+    /// so at worst we serve one response that reflects slightly-earlier state.
+    /// Phase 4's inotify/FSEvents watcher closes this window entirely (AC2.4).
     index_mtime: Option<SystemTime>,
     /// Map from absolute path to "is dirty" (true => `Tracked { dirty: true }`).
     /// Files not in this map but in `tracked` are `Tracked { dirty: false }`.
@@ -177,12 +184,24 @@ fn index_mtime(repo_root: &Path) -> Option<SystemTime> {
 /// Run `git status --porcelain --untracked-files=all` + `git ls-files` and
 /// build the per-repo cache. Errors propagate to the caller, which downgrades
 /// the result to `Unavailable` (better to admit ignorance than to lie).
+///
+/// We pass `-c core.quotePath=false` to both commands so that paths containing
+/// non-ASCII characters (e.g. `réservoir.stmx`) are emitted as raw UTF-8
+/// rather than C-escaped octal sequences. Without this flag, git's default
+/// `core.quotePath=true` would quote such filenames and the path strings would
+/// not match the raw-byte paths from `ls-files` or our internal registry.
 fn build_repo_cache(repo_root: &Path) -> std::io::Result<RepoCache> {
     let porcelain = run_git(
         repo_root,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &[
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
     )?;
-    let ls_files = run_git(repo_root, &["ls-files"])?;
+    let ls_files = run_git(repo_root, &["-c", "core.quotePath=false", "ls-files"])?;
 
     let mut dirty: HashMap<PathBuf, bool> = HashMap::new();
     for line in porcelain.lines() {
