@@ -1077,16 +1077,25 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
     // A2A branch sets Bare for every link (matched source/target
     // subscripts). This pins the documented under-counting behavior.
     //
-    // Switch back to exhaustive mode so loops are constructed.
+    // Switch back to exhaustive mode (same db and project, no rebuild)
+    // so build_element_level_loops runs and populates Link.shape.
     source_project.set_ltm_discovery_mode(&mut db).to(false);
-    let loops = build_loops_for_test(
-        &TestProject::new("aliasing")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_stock("pop[Region]", "100", &["update"], &[], None)
-            .array_aux("share[Region]", "pop + pop[NYC]")
-            .array_flow("update[Region]", "share * 0.001", None),
-    );
+    let circuits = model_element_loop_circuits(&db, model, source_project);
+    let loops = if circuits.is_empty() {
+        vec![]
+    } else {
+        let var_graph = causal_graph_with_modules(&db, model, source_project);
+        let source_vars = model.variables(&db);
+        let dm_dims = project_datamodel_dims(&db, source_project);
+        build_element_level_loops(
+            circuits,
+            &var_graph,
+            source_vars,
+            &db,
+            source_project,
+            dm_dims.as_slice(),
+        )
+    };
     assert!(
         !loops.is_empty(),
         "expected at least one loop in the aliasing fixture"
