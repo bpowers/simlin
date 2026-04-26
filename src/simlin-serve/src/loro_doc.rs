@@ -105,7 +105,6 @@ pub struct ProjectDoc {
 /// Root container key for the project tree. Kept as a single named map so
 /// the doc's persistence layer (whenever we add it) has a stable container
 /// id to anchor against.
-#[allow(dead_code)] // wired up in Task 2's apply_canonical_json
 const ROOT_MAP_KEY: &str = "project";
 
 impl ProjectDoc {
@@ -119,24 +118,46 @@ impl ProjectDoc {
     }
 
     /// Diff `new_json` against the current state and emit the minimal op-set.
-    /// Single `commit()` per call so subscribe_root callbacks fire once.
+    /// `new_json` must be a JSON object (the project root). Returns
+    /// `ShapeError` otherwise.
     ///
-    /// Phase 3 stub: real implementation lands in Tasks 2-4.
-    pub fn apply_canonical_json(&self, _new_json: &Value) -> Result<(), MergeError> {
-        // Stub: Tasks 2-4 implement scalar/nested-map/list/project-shape merge.
-        // The commit at the end of the real impl is what lets subscribers
-        // observe the full op batch as one logical change.
+    /// One `commit()` per call: Loro batches the inserts/deletes between
+    /// commits, so subscribe_root callbacks (Phase 4) fire once per logical
+    /// merge regardless of how deep the tree is.
+    pub fn apply_canonical_json(&self, new_json: &Value) -> Result<(), MergeError> {
+        let json_obj = new_json.as_object().ok_or_else(|| MergeError::ShapeError {
+            path: "$".into(),
+            expected: "object",
+            actual: json_value_kind(new_json),
+        })?;
+        let root = self.doc.get_map(ROOT_MAP_KEY);
+        merge_map(&root, json_obj, "$")?;
+        self.doc.commit();
         Ok(())
     }
 
-    /// Inverse of `apply_canonical_json`: snapshot the doc's current deep
-    /// value as a `serde_json::Value`. Tasks 2-4 progressively round-trip
-    /// scalar/nested-map/list/project-shape; for now we expose the raw
-    /// LoroValue->serde_json conversion so the wrapper's plumbing is
-    /// testable.
+    /// Inverse of `apply_canonical_json`: snapshot the doc's current
+    /// project state as a `serde_json::Value`. The returned value matches
+    /// the shape that was last applied — i.e. the project object directly,
+    /// not wrapped under a `"project"` key.
     pub fn export_canonical_json(&self) -> Result<Value, MergeError> {
-        let loro_value = self.doc.get_deep_value();
-        Ok(loro_value_to_json(&loro_value))
+        let deep = self.doc.get_deep_value();
+        // The doc's deep value is `{ "project": {...} }`; we strip the
+        // `project` wrapper so callers see the same shape they applied.
+        // An empty doc (no apply_canonical_json yet) has no `project` key,
+        // so we return an empty object as the "no project loaded yet"
+        // signal — matches the empty-input case for round-tripping.
+        match loro_value_to_json(&deep) {
+            Value::Object(mut map) => match map.remove(ROOT_MAP_KEY) {
+                Some(project) => Ok(project),
+                None => Ok(Value::Object(JsonMap::new())),
+            },
+            other => Err(MergeError::ShapeError {
+                path: "$".into(),
+                expected: "object",
+                actual: json_value_kind(&other),
+            }),
+        }
     }
 
     /// Convenience: serialize `export_canonical_json` to a JSON string.
@@ -232,20 +253,159 @@ fn json_to_loro_value(value: &Value) -> LoroValue {
     }
 }
 
-/// Suppress unused-warnings while Tasks 2-4 are landing. Once the merge
-/// primitive uses these helpers they'll be wired in directly.
-#[allow(dead_code)]
-fn _phase3_task1_helpers_keepalive(
-    map: &LoroMap,
-    list: &LoroList,
-    json: &JsonMap<String, Value>,
-    val: &Value,
-    voc: ValueOrContainer,
-    _container: Container,
-) -> Result<HashSet<String>, MergeError> {
-    let _ = (map, list, json, val, voc);
-    let _ = json_to_loro_value;
-    Ok(HashSet::new())
+/// Reconcile a `LoroMap` against an incoming JSON object.
+///
+/// Algorithm:
+/// 1. Collect the live key set so iteration order doesn't matter (and so
+///    we can mutate during the second pass without invalidating an
+///    iterator).
+/// 2. Delete any live key the incoming JSON doesn't have. JSON `null`
+///    values are also treated as deletions, matching the design's
+///    "explicit absence" semantics.
+/// 3. For each remaining incoming key:
+///    - **Scalar** (bool/number/string): if the live entry equals the new
+///      value, skip (no-op suppression keeps the doc's op-log lean).
+///      Otherwise insert.
+///    - **Object**: if the live entry is already a sub-`LoroMap`, recurse
+///      into it. Otherwise (missing, or wrong type) `insert_container`
+///      a fresh `LoroMap` and recurse into the new one.
+///    - **Array**: delegate to `merge_list` (Task 3 — currently lands
+///      arrays via `insert` of a `LoroValue::List`, which materializes
+///      as an inline list rather than a `LoroList` container; Task 3
+///      replaces this with proper container-backed list handling).
+///
+/// The `path` parameter is appended-only so `ShapeError` messages can
+/// point at the offending location (`.models[2].stocks` etc.).
+fn merge_map(map: &LoroMap, json: &JsonMap<String, Value>, path: &str) -> Result<(), MergeError> {
+    let incoming_keys: HashSet<&str> = json
+        .iter()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, _)| k.as_str())
+        .collect();
+
+    let live_keys: Vec<String> = {
+        let mut keys = Vec::new();
+        // for_each must not mutate the map under the same iterator;
+        // collect first, mutate after.
+        map.for_each(|k, _| keys.push(k.to_string()));
+        keys
+    };
+    for key in live_keys {
+        if !incoming_keys.contains(key.as_str()) {
+            map.delete(&key)?;
+        }
+    }
+
+    for (key, value) in json {
+        if value.is_null() {
+            // `null` was already filtered out of `incoming_keys`, but the
+            // live-side delete pass only removed it if it was actually
+            // there. Issue an explicit delete so callers using `null` to
+            // unset a key see consistent behavior whether or not the key
+            // was previously present.
+            // delete returns Err for missing keys in some Loro versions;
+            // ignore that failure mode since the post-condition (key
+            // absent) holds either way.
+            let _ = map.delete(key);
+            continue;
+        }
+
+        match value {
+            Value::Object(child_obj) => {
+                let child_map = match map.get(key) {
+                    Some(ValueOrContainer::Container(Container::Map(existing))) => existing,
+                    Some(_) | None => {
+                        // Replace any non-map entry (or freshly insert) so
+                        // we always have a sub-map to recurse into. Loro
+                        // overwrites the prior value transparently.
+                        map.insert_container(key, LoroMap::new())?
+                    }
+                };
+                let child_path = append_path(path, key);
+                merge_map(&child_map, child_obj, &child_path)?;
+            }
+            Value::Array(child_arr) => {
+                let child_list = match map.get(key) {
+                    Some(ValueOrContainer::Container(Container::List(existing))) => existing,
+                    Some(_) | None => map.insert_container(key, LoroList::new())?,
+                };
+                let child_path = append_path(path, key);
+                merge_list(&child_list, child_arr, &child_path)?;
+            }
+            // Scalar branch.
+            Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                let new_val = json_to_loro_value(value);
+                let same = match map.get(key) {
+                    Some(ValueOrContainer::Value(existing)) => existing == new_val,
+                    _ => false,
+                };
+                if !same {
+                    map.insert(key, new_val)?;
+                }
+            }
+            // Null was handled above; `Value` has no other variants.
+            Value::Null => unreachable!("null filtered above"),
+        }
+    }
+
+    Ok(())
+}
+
+/// Phase 3 trade-off: lists use replace-semantics; reorderings show as
+/// full-list rewrites against the CRDT op-log. Acceptable because (a)
+/// the only top-level lists in the project shape are `views`/`dimensions`/
+/// `units`/`groups`, all small and edited infrequently relative to
+/// variables, and (b) preserving uid-based identity through a
+/// `LoroMovableList` is significant complexity for a benefit (per-element
+/// LWW on view layout) we don't need yet. Task 4 puts variables in
+/// name-keyed maps to recover the per-variable LWW property where it
+/// actually matters.
+///
+/// `merge_list` truncates the live list to zero, then re-pushes the
+/// incoming elements. Container elements (objects, nested arrays) are
+/// pushed via `push_container` and recursed into.
+fn merge_list(list: &LoroList, json: &[Value], path: &str) -> Result<(), MergeError> {
+    let len = list.len();
+    if len > 0 {
+        list.delete(0, len)?;
+    }
+    for (idx, value) in json.iter().enumerate() {
+        match value {
+            Value::Object(child_obj) => {
+                let child_map = list.push_container(LoroMap::new())?;
+                let child_path = format!("{path}[{idx}]");
+                merge_map(&child_map, child_obj, &child_path)?;
+            }
+            Value::Array(child_arr) => {
+                let child_list = list.push_container(LoroList::new())?;
+                let child_path = format!("{path}[{idx}]");
+                merge_list(&child_list, child_arr, &child_path)?;
+            }
+            _ => {
+                list.push(json_to_loro_value(value))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_path(path: &str, key: &str) -> String {
+    if path == "$" {
+        format!(".{key}")
+    } else {
+        format!("{path}.{key}")
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[cfg(test)]
@@ -272,9 +432,11 @@ mod tests {
 
     #[test]
     fn manually_inserted_root_key_round_trips_through_export() {
-        // Bypass apply_canonical_json (still a stub in Task 1) and write
-        // directly through the inner LoroDoc to prove the export plumbing
-        // works end-to-end before we tackle the diff logic in Tasks 2-4.
+        // Bypass apply_canonical_json and write directly through the inner
+        // LoroDoc to prove the export plumbing works end-to-end. The
+        // exported value should be the inner project content (not wrapped
+        // under a `"project"` key) since `export_canonical_json` strips
+        // that wrapper to mirror the apply input shape.
         let doc = ProjectDoc::new();
         let root = doc.inner_doc().get_map(ROOT_MAP_KEY);
         root.insert("name", "demo")
@@ -282,13 +444,8 @@ mod tests {
         doc.inner_doc().commit();
 
         let exported = doc.export_canonical_json().expect("export");
-        // The doc now has one root container `project` with key "name".
-        let project = exported
-            .as_object()
-            .and_then(|m| m.get(ROOT_MAP_KEY))
-            .and_then(|v| v.as_object())
-            .expect("project map present");
-        assert_eq!(project.get("name").and_then(|v| v.as_str()), Some("demo"));
+        let obj = exported.as_object().expect("object root");
+        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("demo"));
     }
 
     #[test]
@@ -302,5 +459,173 @@ mod tests {
         assert!(msg.contains(".models[0].stocks"));
         assert!(msg.contains("expected object"));
         assert!(msg.contains("got string"));
+    }
+
+    #[test]
+    fn apply_canonical_json_rejects_non_object_root() {
+        let doc = ProjectDoc::new();
+        let err = doc
+            .apply_canonical_json(&serde_json::json!("a string, not an object"))
+            .unwrap_err();
+        match err {
+            MergeError::ShapeError {
+                path,
+                expected,
+                actual,
+            } => {
+                assert_eq!(path, "$");
+                assert_eq!(expected, "object");
+                assert_eq!(actual, "string");
+            }
+            other => panic!("expected ShapeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_canonical_json_writes_top_level_scalars() {
+        let doc = ProjectDoc::new();
+        let input = serde_json::json!({ "name": "foo", "version": 1 });
+        doc.apply_canonical_json(&input).expect("apply");
+        let exported = doc.export_canonical_json().expect("export");
+        // The export shape should match the input: top-level scalars only.
+        assert_eq!(exported, input);
+    }
+
+    #[test]
+    fn apply_canonical_json_removes_keys_no_longer_present() {
+        let doc = ProjectDoc::new();
+        let initial = serde_json::json!({ "name": "foo", "version": 1 });
+        doc.apply_canonical_json(&initial).expect("first apply");
+        let updated = serde_json::json!({ "name": "bar" });
+        doc.apply_canonical_json(&updated).expect("second apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, updated);
+    }
+
+    #[test]
+    fn apply_canonical_json_treats_null_as_deletion() {
+        // Explicit `null` should remove a previously-present key, matching
+        // the design's "null = absent" convention. We test the round-trip:
+        // first apply leaves the key set; second apply with `null` removes it.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({ "name": "foo", "tag": "old" }))
+            .expect("first apply");
+        doc.apply_canonical_json(&serde_json::json!({ "name": "foo", "tag": null }))
+            .expect("second apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, serde_json::json!({ "name": "foo" }));
+    }
+
+    #[test]
+    fn apply_canonical_json_handles_nested_objects() {
+        let doc = ProjectDoc::new();
+        let input = serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "alice", "year": 2026 },
+        });
+        doc.apply_canonical_json(&input).expect("apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, input);
+    }
+
+    #[test]
+    fn apply_canonical_json_updates_nested_scalar() {
+        // Two applies that differ only in a deeply-nested scalar should
+        // round-trip. This exercises the recursion path.
+        let doc = ProjectDoc::new();
+        let first = serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "alice", "year": 2026 },
+        });
+        doc.apply_canonical_json(&first).expect("first apply");
+
+        let second = serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "bob", "year": 2026 },
+        });
+        doc.apply_canonical_json(&second).expect("second apply");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, second);
+    }
+
+    #[test]
+    fn apply_canonical_json_idempotent_for_same_input() {
+        // Two applies of the same JSON should leave the export byte-equal.
+        // No-op suppression for unchanged scalars helps keep the op log
+        // clean; we verify behavior by content-comparing the export. (Loro
+        // 1.11 records empty commits even when no ops were emitted, so a
+        // version-frontiers comparison is not a reliable purity check —
+        // the design's content-equality fallback applies.)
+        let doc = ProjectDoc::new();
+        let input = serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "alice" },
+        });
+        doc.apply_canonical_json(&input).expect("first");
+        let after_first = doc.export_canonical_json().expect("export 1");
+        doc.apply_canonical_json(&input).expect("second");
+        let after_second = doc.export_canonical_json().expect("export 2");
+        assert_eq!(after_first, after_second);
+        assert_eq!(after_second, input);
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_object_with_scalar() {
+        // A field that was an object becomes a scalar in the next apply.
+        // We must successfully overwrite the prior LoroMap with a scalar
+        // rather than failing on the type mismatch.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "alice" },
+        }))
+        .expect("first");
+        doc.apply_canonical_json(&serde_json::json!({
+            "name": "foo",
+            "meta": "string-now",
+        }))
+        .expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(
+            exported,
+            serde_json::json!({ "name": "foo", "meta": "string-now" })
+        );
+    }
+
+    #[test]
+    fn apply_canonical_json_removes_nested_object_key() {
+        // A whole sub-object disappears between applies. Loro must
+        // delete the sub-container cleanly, not leave it dangling.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "alice" },
+        }))
+        .expect("first");
+        doc.apply_canonical_json(&serde_json::json!({ "name": "foo" }))
+            .expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported, serde_json::json!({ "name": "foo" }));
+    }
+
+    #[test]
+    fn apply_canonical_json_replaces_scalar_with_object() {
+        // Inverse of the above: a scalar becomes an object.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&serde_json::json!({
+            "name": "foo",
+            "meta": "scalar",
+        }))
+        .expect("first");
+        doc.apply_canonical_json(&serde_json::json!({
+            "name": "foo",
+            "meta": { "author": "alice" },
+        }))
+        .expect("second");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(
+            exported,
+            serde_json::json!({ "name": "foo", "meta": { "author": "alice" } })
+        );
     }
 }
