@@ -262,6 +262,221 @@ describe('App shell', () => {
     expect(remaining[0].getAttribute('aria-current')).toBe('true');
   });
 
+  test('updates the projects list and selectedPath in place when projectRenamed arrives for the selected path', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    // Three fetches: list, GET for selected path's editor, and a GET for
+    // the renamed path's editor (because EditorHost re-mounts on path change).
+    // After the rename, the editor uses the new path name when refetching.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            {
+              path: 'a.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+            {
+              path: 'c.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+          ],
+          git_available: true,
+        }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(2));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(JSON.stringify({ type: 'projectRenamed', from: 'a.stmx', to: 'b.stmx' }));
+    });
+
+    // Sidebar swapped a.stmx for b.stmx; c.stmx untouched.
+    await waitFor(() => expect(screen.queryByText('a.stmx')).toBeNull());
+    expect(screen.queryByText('b.stmx')).not.toBeNull();
+    expect(screen.queryByText('c.stmx')).not.toBeNull();
+
+    // The renamed entry is still selected (carried via path swap).
+    const items = screen.getAllByRole('listitem');
+    const selected = items.filter((item) => item.getAttribute('aria-current') === 'true');
+    expect(selected).toHaveLength(1);
+    expect(selected[0].textContent).toMatch(/b\.stmx/);
+  });
+
+  test('updates the projects list and keeps the unaffected selection when projectRenamed targets a different path', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            {
+              path: 'a.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+            {
+              path: 'c.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+          ],
+          git_available: true,
+        }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(2));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(JSON.stringify({ type: 'projectRenamed', from: 'c.stmx', to: 'd.stmx' }));
+    });
+
+    // The non-selected entry was renamed.
+    await waitFor(() => expect(screen.queryByText('c.stmx')).toBeNull());
+    expect(screen.queryByText('d.stmx')).not.toBeNull();
+    expect(screen.queryByText('a.stmx')).not.toBeNull();
+
+    // a.stmx is still selected.
+    const items = screen.getAllByRole('listitem');
+    const selected = items.filter((item) => item.getAttribute('aria-current') === 'true');
+    expect(selected).toHaveLength(1);
+    expect(selected[0].textContent).toMatch(/a\.stmx/);
+  });
+
+  test('carries the live version forward across a projectRenamed for the active path', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    // Two fetches expected at steady state: list, then GET for the
+    // selected path's editor. After the disk advance bumps liveVersion
+    // beyond serverVersion, a third refetch fires. After the rename
+    // (which carries liveVersion forward under the new key), no
+    // additional refetch should fire.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            {
+              path: 'a.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+          ],
+          git_available: true,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":3}',
+          version: 3,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(1));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    // Bump the live version beyond the initial GET's version=0; this
+    // forces a refetch and lands the editor on version=3 with a recorded
+    // liveVersion of 3.
+    await act(async () => {
+      ws.emitMessage(
+        JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 3, source: 'disk' }),
+      );
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const fetchCallsBeforeRename = fetchMock.mock.calls.length;
+
+    await act(async () => {
+      ws.emitMessage(JSON.stringify({ type: 'projectRenamed', from: 'a.stmx', to: 'b.stmx' }));
+    });
+
+    // The list and selection updated.
+    await waitFor(() => expect(screen.queryByText('a.stmx')).toBeNull());
+    expect(screen.queryByText('b.stmx')).not.toBeNull();
+
+    // Allow any stray refetch to settle.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // No additional GET should have fired: the liveVersion was carried
+    // across, so EditorHost's refetch gate (live > server) does not trip.
+    expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeRename);
+  });
+
   test('falls back to the empty state when the last remaining selected project is removed', async () => {
     sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     globalThis.fetch = makeListFetch({

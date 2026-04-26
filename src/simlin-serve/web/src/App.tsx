@@ -136,6 +136,43 @@ export class App extends React.Component<Record<string, never>, AppState> {
           liveSources: nextLiveSources,
         };
       });
+      return;
+    }
+    if (msg.type === 'projectRenamed') {
+      this.setState((prev) => {
+        const projects = prev.projects;
+        if (projects === null) {
+          return null;
+        }
+        // Replace the entry whose path matches `from` with one keyed on
+        // `to`. The doc / version / hash are unchanged server-side, so
+        // we carry the cached liveVersion forward under the new key —
+        // EditorHost's refetch gate then sees `liveVersion === serverVersion`
+        // and stays mounted on the same payload. Clearing `liveVersions[from]`
+        // avoids leaking stale entries if the path is later re-used.
+        const swapped = projects.map((p) =>
+          p.path === msg.from ? { ...p, path: msg.to } : p,
+        );
+        const carriedVersion = prev.liveVersions[msg.from];
+        const carriedSource = prev.liveSources[msg.from];
+        const nextLiveVersions = { ...prev.liveVersions };
+        delete nextLiveVersions[msg.from];
+        if (carriedVersion !== undefined) {
+          nextLiveVersions[msg.to] = carriedVersion;
+        }
+        const nextLiveSources = { ...prev.liveSources };
+        delete nextLiveSources[msg.from];
+        if (carriedSource !== undefined) {
+          nextLiveSources[msg.to] = carriedSource;
+        }
+        const nextSelected = prev.selectedPath === msg.from ? msg.to : prev.selectedPath;
+        return {
+          projects: swapped,
+          selectedPath: nextSelected,
+          liveVersions: nextLiveVersions,
+          liveSources: nextLiveSources,
+        };
+      });
     }
   };
 

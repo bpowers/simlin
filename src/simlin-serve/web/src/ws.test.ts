@@ -154,6 +154,43 @@ describe('UpdatesSocket', () => {
     socket.close();
   });
 
+  test('parses projectRenamed frames and forwards them to onMessage', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket('t', onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'projectRenamed',
+        from: 'a.stmx',
+        to: 'b.stmx',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'projectRenamed',
+      from: 'a.stmx',
+      to: 'b.stmx',
+    });
+    socket.close();
+  });
+
+  test('drops projectRenamed frames missing required fields', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket('t', onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(JSON.stringify({ type: 'projectRenamed', from: 'a.stmx' }));
+    ws.emitMessage(JSON.stringify({ type: 'projectRenamed', to: 'b.stmx' }));
+    ws.emitMessage(JSON.stringify({ type: 'projectRenamed' }));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    socket.close();
+  });
+
   test('ignores message frames whose body is not valid JSON without throwing', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
     const socket = new UpdatesSocket('t', onMessage);

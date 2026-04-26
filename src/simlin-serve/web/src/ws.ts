@@ -29,6 +29,11 @@ export type WsMessage =
   | {
       readonly type: 'projectRemoved';
       readonly path: string;
+    }
+  | {
+      readonly type: 'projectRenamed';
+      readonly from: string;
+      readonly to: string;
     };
 
 // Browser-originated frames sent over the same channel. Mirrors
@@ -248,11 +253,8 @@ function isWsMessage(value: unknown): value is WsMessage {
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (typeof v.path !== 'string') {
-    return false;
-  }
   if (v.type === 'projectChanged') {
-    if (typeof v.version !== 'number') {
+    if (typeof v.path !== 'string' || typeof v.version !== 'number') {
       return false;
     }
     if (v.source !== 'user' && v.source !== 'agent' && v.source !== 'disk') {
@@ -261,7 +263,10 @@ function isWsMessage(value: unknown): value is WsMessage {
     return true;
   }
   if (v.type === 'projectRemoved') {
-    return true;
+    return typeof v.path === 'string';
+  }
+  if (v.type === 'projectRenamed') {
+    return typeof v.from === 'string' && typeof v.to === 'string';
   }
   return false;
 }

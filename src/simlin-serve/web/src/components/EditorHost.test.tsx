@@ -753,6 +753,69 @@ describe('EditorHost', () => {
     ]);
   });
 
+  test('skips refetch when path changes but liveVersion equals serverVersion (rename)', async () => {
+    // When the server emits ProjectRenamed, App.tsx swaps `selectedPath`
+    // from the old key to the new one but does NOT bump liveVersion (the
+    // doc state is identical, just at a new key). EditorHost must
+    // recognize the path-change case where liveVersion already matches
+    // the version the host is holding, and skip the refetch — otherwise
+    // the editor remounts unnecessarily and loses in-flight state.
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ json: '{"v":0}', version: 0, source_format: 'stmx' }),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="a.stmx" liveVersion={0} />);
+
+    // Wait for the initial GET to resolve so state.serverVersion = 0
+    // matches the loaded payload's version.
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    rerender(<EditorHost path="b.stmx" liveVersion={0} />);
+
+    // Allow React to flush the path-change effect.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // No new GET fired. The Editor stays mounted with the same payload;
+    // the underlying doc state hasn't changed. Only the display name
+    // (passed to the Editor mock) reflects the new path.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(EditorMock.lastProps?.name).toBe('b.stmx');
+  });
+
+  test('refetches normally when path changes and liveVersion is higher than current', async () => {
+    // Sanity check the symmetric case: a real path swap to a path with a
+    // newer live version triggers the refetch as before. Without this,
+    // the rename optimization could mask broken refetch behavior.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":0}', version: 0, source_format: 'stmx' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ json: '{"v":7}', version: 7, source_format: 'stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="a.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    rerender(<EditorHost path="b.stmx" liveVersion={7} />);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/projects/b.stmx');
+  });
+
   test('does not re-emit projectFocused when an unrelated prop changes', async () => {
     globalThis.fetch = makeFetchResolving({
       json: '{}',

@@ -158,11 +158,30 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
         this.setState(INITIAL_STATE);
         return;
       }
+      // Rename path: when the server emits ProjectRenamed, App swaps
+      // selectedPath in place but keeps liveVersion identical to the
+      // version we already hold (the doc state is the same, just keyed
+      // differently). Detect that case by comparing props.liveVersion
+      // against state.serverVersion; if they match and a payload is
+      // loaded, the underlying state hasn't changed — update the
+      // displayed name without refetching or remounting the Editor.
+      const liveVersion = this.props.liveVersion ?? 0;
+      const sameUnderlyingState =
+        this.state.payload !== null && liveVersion === this.state.serverVersion;
+      if (sameUnderlyingState) {
+        this.setState({ loadedPath: this.props.path });
+        this.emitProjectFocused(this.props.path);
+        return;
+      }
       // Switching to a different path drops any in-flight toast — it
       // belonged to the old path and would be confusing in context of
-      // the new one.
+      // the new one. Pre-set serverVersion to the new path's
+      // liveVersion (or 0 when missing) so the subsequent
+      // setState({pending: true}) inside loadProject doesn't re-enter
+      // this method's path-unchanged refetch arm before the GET
+      // resolves.
       this.clearDiskNoticeTimer();
-      this.setState({ diskNoticeVisible: false });
+      this.setState({ diskNoticeVisible: false, serverVersion: liveVersion });
       void this.loadProject(this.props.path);
       this.emitProjectFocused(this.props.path);
       return;
