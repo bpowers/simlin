@@ -17,10 +17,11 @@
 //! one of the four loopback entries we expect, we close that gap
 //! before any handler runs.
 //!
-//! The validator does NOT replace the bearer-token gate on `/api/*`
-//! or the WebSocket upgrade — the layers compose: the token gate
-//! defeats CSRF-style attacks, the host check defeats rebinding-style
-//! attacks. Either layer alone is incomplete.
+//! The host check is the primary protection for HTTP `/api/*` routes.
+//! The `/api/updates` WebSocket upgrade adds a bearer-token check on
+//! top of it: browsers cannot set custom headers on a WebSocket
+//! handshake, so the token rides as `?token=...` and is validated
+//! inside the upgrade handler (see `handlers::updates_ws_handler`).
 
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};

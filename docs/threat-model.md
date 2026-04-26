@@ -53,8 +53,14 @@ startup using the OS CSPRNG (`getrandom`). The token is:
   (`http://127.0.0.1:<port>/?token=...`)
 - Stored by the SPA in `sessionStorage` after first load (the URL is
   rewritten to remove the query parameter)
-- Required as a bearer on every `/api/*` request and as a
-  `?token=...` query parameter on the `/api/updates` WebSocket upgrade
+- Required as a `?token=...` query parameter on the `/api/updates`
+  WebSocket upgrade
+
+The HTTP `/api/*` routes do not check the bearer because the loopback
+bind and the Host allowlist (§1 and §3) are the primary defenses there.
+Browsers cannot set custom headers on a WebSocket handshake, so the
+token rides as a query parameter on the WS upgrade instead; that is the
+one case where the bearer is both necessary and enforced.
 
 The token rotates on every `npx @simlin/serve` invocation. Killing
 and restarting the server invalidates every prior URL the user had
@@ -164,7 +170,6 @@ The defenses above are exercised by these tests:
 
 | Defense | Test |
 |---|---|
-| Bearer token gate (HTTP) | `tests/api_*.rs` (Authorization header missing/wrong) |
 | Bearer token gate (WS) | `tests/ws_updates.rs::wrong_token_is_rejected_with_401` |
 | Host allowlist (UI router) | `tests/middleware_host.rs::*` |
 | Host allowlist (MCP router) | `tests/middleware_host.rs::mcp_router_*` |
