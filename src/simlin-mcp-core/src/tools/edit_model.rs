@@ -398,7 +398,11 @@ fn sync_diagram(
 ///
 /// `simSpecs` changes become a project-level operation applied first,
 /// then variable operations are added as model-level operations.
-fn build_patch(
+///
+/// Public so `simulate` can reuse the same translation rules: any rule
+/// drift between `EditModel` and `Simulate` would surface as confusing
+/// "the same operation behaves differently in simulate" bugs.
+pub fn build_patch(
     model_name: &str,
     sim_specs: Option<ejson::SimSpecs>,
     operations: Option<Vec<EditOperation>>,

@@ -16,6 +16,7 @@
 pub mod access;
 pub mod list_projects;
 pub mod server;
+pub mod simulate;
 
 pub use access::RegistryAccess;
 pub use server::SimlinServeMcpServer;

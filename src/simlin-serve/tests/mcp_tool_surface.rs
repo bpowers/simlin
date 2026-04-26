@@ -260,6 +260,197 @@ async fn list_projects_advertised_in_tools_list() {
 }
 
 #[tokio::test]
+async fn simulate_returns_time_series_for_teacup_fixture() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = copy_fixture("teacup.xmile", &canonical_root);
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs, ProjectFormat::Xmile);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    let arguments = serde_json::json!({
+        "projectPath": abs.to_str().unwrap(),
+    });
+    let arguments_obj = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        _ => unreachable!("arguments is constructed as an object literal"),
+    };
+    let mut params = CallToolRequestParams::new("Simulate");
+    if let Some(args) = arguments_obj {
+        params = params.with_arguments(args);
+    }
+
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("Simulate call_tool succeeds");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "successful Simulate must not set is_error: response: {:?}",
+        result.structured_content
+    );
+    let structured = result
+        .structured_content
+        .expect("Simulate must return structured content");
+
+    let time = structured
+        .get("time")
+        .and_then(|v| v.as_array())
+        .expect("time field must be an array");
+    assert!(time.len() > 1, "expected multiple time steps");
+    assert_eq!(
+        time.first().and_then(|v| v.as_f64()),
+        Some(0.0),
+        "time series starts at start_time = 0.0"
+    );
+
+    let variables = structured
+        .get("variables")
+        .and_then(|v| v.as_object())
+        .expect("variables field must be a map");
+    let teacup_series = variables
+        .get("teacup_temperature")
+        .and_then(|v| v.as_array())
+        .expect("teacup_temperature column must be present");
+    assert_eq!(
+        teacup_series.len(),
+        time.len(),
+        "every variable column has the same length as time"
+    );
+    let initial = teacup_series.first().and_then(|v| v.as_f64()).unwrap();
+    let final_val = teacup_series.last().and_then(|v| v.as_f64()).unwrap();
+    assert!(
+        initial > final_val,
+        "teacup cools toward room temperature: initial={initial}, final={final_val}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn simulate_filters_variables_when_requested() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = copy_fixture("teacup.xmile", &canonical_root);
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs, ProjectFormat::Xmile);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    let arguments = serde_json::json!({
+        "projectPath": abs.to_str().unwrap(),
+        "variables": ["teacup_temperature"],
+    });
+    let arguments_obj = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        _ => unreachable!("arguments is constructed as an object literal"),
+    };
+    let mut params = CallToolRequestParams::new("Simulate");
+    if let Some(args) = arguments_obj {
+        params = params.with_arguments(args);
+    }
+
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("Simulate call succeeds");
+    let structured = result.structured_content.expect("structured content");
+    let variables = structured
+        .get("variables")
+        .and_then(|v| v.as_object())
+        .expect("variables map");
+    assert_eq!(variables.len(), 1, "filter narrows the response to one var");
+    assert!(variables.contains_key("teacup_temperature"));
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn simulate_advertised_in_tools_list() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    let result = client
+        .peer()
+        .list_tools(None)
+        .await
+        .expect("tools/list must succeed");
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        names.contains(&"Simulate"),
+        "tools/list must advertise Simulate; got: {names:?}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn simulate_overrides_change_initial_stock_value() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = copy_fixture("teacup.xmile", &canonical_root);
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs, ProjectFormat::Xmile);
+
+    let (client, server) = spawn_server_pair(state).await;
+
+    // Override the teacup stock with a wildly different initial. The
+    // overridden series must differ from the baseline at t=0.
+    let arguments = serde_json::json!({
+        "projectPath": abs.to_str().unwrap(),
+        "overrides": [{
+            "upsertStock": {
+                "name": "Teacup Temperature",
+                "initialEquation": "10",
+                "outflows": ["Heat Loss to Room"],
+            }
+        }],
+        "variables": ["teacup_temperature"],
+    });
+    let arguments_obj = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        _ => unreachable!(),
+    };
+    let mut params = CallToolRequestParams::new("Simulate");
+    if let Some(args) = arguments_obj {
+        params = params.with_arguments(args);
+    }
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("Simulate call succeeds");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "override must not error: {:?}",
+        result.structured_content
+    );
+    let structured = result.structured_content.expect("structured content");
+    let teacup_series = structured["variables"]["teacup_temperature"]
+        .as_array()
+        .expect("teacup series");
+    let initial = teacup_series[0].as_f64().expect("initial");
+    assert!(
+        (initial - 10.0).abs() < 1e-9,
+        "overridden initial must be 10.0, got {initial}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
 async fn get_info_includes_workspace_dir_in_instructions() {
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");

@@ -24,7 +24,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ignore = "0.4"
-simlin-engine = { path = "../simlin-engine" }
+simlin-engine = { path = "../simlin-engine", features = ["schema"] }
 simlin-mcp-core = { path = "../simlin-mcp-core" }
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 schemars = { version = "1", features = ["preserve_order"] }

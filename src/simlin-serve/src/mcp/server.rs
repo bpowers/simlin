@@ -36,6 +36,7 @@ use simlin_mcp_core::tools::read_model::{ReadModelInput, read_model};
 use crate::handlers::AppState;
 use crate::mcp::access::RegistryAccess;
 use crate::mcp::list_projects::{ListProjectsInput, run as run_list_projects};
+use crate::mcp::simulate::{SimulateInput, run as run_simulate};
 
 /// rmcp `ServerHandler` impl exposing the simlin-serve tool surface.
 ///
@@ -177,6 +178,26 @@ impl<A: ProjectAccess> SimlinServeMcpServer<A> {
     ) -> Result<CallToolResult, McpError> {
         let output = run_list_projects(&self.state);
         call_tool_success(&output)
+    }
+
+    #[tool(
+        name = "Simulate",
+        description = "Run a system-dynamics simulation and return the \
+            time series for every (or selected) variable. \
+            Supports optional `overrides` (the same EditOperation enum as \
+            edit_model -- applied to a clone, not persisted) and \
+            `simSpecsOverride` for exploring scenarios without touching \
+            on-disk state. The `variables` whitelist keeps responses \
+            small for large models."
+    )]
+    async fn simulate(
+        &self,
+        Parameters(input): Parameters<SimulateInput>,
+    ) -> Result<CallToolResult, McpError> {
+        match run_simulate(&*self.access, input).await {
+            Ok(output) => call_tool_success(&output),
+            Err(err) => Err(err),
+        }
     }
 }
 

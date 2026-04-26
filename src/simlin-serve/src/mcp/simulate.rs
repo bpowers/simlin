@@ -1,0 +1,305 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+// pattern: Imperative Shell
+
+//! `Simulate` MCP tool — runs a simulation and returns time-series JSON.
+//!
+//! Simulations are stateless: every call constructs a fresh `SimlinDb`,
+//! syncs the project, compiles, and runs to completion. The `overrides`
+//! and `sim_specs_override` inputs let an AI explore different scenarios
+//! without persisting any changes — overrides are applied to a cloned
+//! project so the in-memory `LoroDoc` stays untouched.
+
+use std::path::Path;
+
+use rmcp::ErrorData as McpError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use simlin_engine::Vm;
+use simlin_engine::datamodel;
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::json as ejson;
+use simlin_mcp_core::access::ProjectAccess;
+use simlin_mcp_core::errors::AccessError;
+use simlin_mcp_core::tools::edit_model::{EditOperation, build_patch};
+
+/// Input for the `Simulate` tool.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulateInput {
+    /// Absolute or relative path to the model file (XMILE .stmx/.xmile,
+    /// Vensim .mdl, or Simlin .sd.json).
+    pub project_path: String,
+
+    /// Name of the model within the project to simulate. Defaults to
+    /// `"main"` when omitted.
+    #[serde(default)]
+    pub model_name: Option<String>,
+
+    /// Optional list of operations applied to the project before running
+    /// the simulation. Reuses `EditOperation` so the schema is identical
+    /// across `edit_model` and `simulate`. Overrides are *not* persisted
+    /// — the in-memory `LoroDoc` is unaffected.
+    #[serde(default)]
+    pub overrides: Option<Vec<EditOperation>>,
+
+    /// Optional simulation-spec override. Applied after `overrides` so
+    /// callers can test a model with both edits and different time
+    /// bounds without affecting on-disk state.
+    #[serde(default)]
+    pub sim_specs_override: Option<ejson::SimSpecs>,
+
+    /// Optional whitelist of variable names to include in the response.
+    /// Useful for keeping responses small when simulating large models;
+    /// when `None`, every variable is returned.
+    #[serde(default)]
+    pub variables: Option<Vec<String>>,
+}
+
+/// Output of the `Simulate` tool.
+///
+/// `time` is the time column extracted from the results buffer; every
+/// entry in `variables` is a `Vec<f64>` of the same length. Using
+/// `serde_json::Map` rather than a typed `BTreeMap<String, Vec<f64>>`
+/// because the rmcp pipeline serialises through `serde_json::Value`
+/// anyway — going via `Map` saves a round-trip through serde.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulateOutput {
+    pub time: Vec<f64>,
+    pub variables: Map<String, Value>,
+}
+
+/// Run the simulation, returning either the structured output or a
+/// translated `McpError` for the rmcp tool wrapper.
+pub async fn run<A: ProjectAccess>(
+    access: &A,
+    input: SimulateInput,
+) -> Result<SimulateOutput, McpError> {
+    let path = Path::new(&input.project_path);
+    let opened = access.open(path).await.map_err(access_error_to_mcp)?;
+
+    let mut project: datamodel::Project = opened.project;
+    let model_name = input
+        .model_name
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
+
+    if let Some(overrides) = input.overrides {
+        let patch = build_patch(&model_name, None, Some(overrides));
+        simlin_engine::apply_patch(&mut project, patch)
+            .map_err(|e| McpError::invalid_params(format!("apply override patch: {e:?}"), None))?;
+    }
+
+    if let Some(ss_override) = input.sim_specs_override {
+        project.sim_specs = ss_override.into();
+    }
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = compile_project_incremental(&db, sync.project, &model_name)
+        .map_err(|e| McpError::internal_error(format!("compile error: {e}"), None))?;
+    let mut vm =
+        Vm::new(compiled).map_err(|e| McpError::internal_error(format!("vm error: {e}"), None))?;
+    vm.run_to_end()
+        .map_err(|e| McpError::internal_error(format!("sim error: {e}"), None))?;
+    let results = vm.into_results();
+
+    let filter: Option<std::collections::HashSet<String>> = input.variables.map(|names| {
+        names
+            .into_iter()
+            .map(|n| n.to_lowercase())
+            .collect::<std::collections::HashSet<_>>()
+    });
+
+    // Time is at the canonical "time" offset (always 0 in the engine but
+    // we go through `offsets` to stay decoupled from that internal
+    // constant — `Results::offsets` is the public surface we control).
+    let time_offset = results
+        .offsets
+        .iter()
+        .find_map(|(name, off)| {
+            if name.as_str() == "time" {
+                Some(*off)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            McpError::internal_error("simulation results missing 'time' column", None)
+        })?;
+
+    let mut time: Vec<f64> = Vec::with_capacity(results.step_count);
+    for row in results.iter() {
+        time.push(row[time_offset]);
+    }
+
+    let mut variables = Map::new();
+    // Sort by name so the wire output is deterministic across runs —
+    // helps tests and debugging without affecting correctness.
+    let mut sorted_offsets: Vec<(
+        &simlin_engine::common::Ident<simlin_engine::common::Canonical>,
+        &usize,
+    )> = results.offsets.iter().collect();
+    sorted_offsets.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+
+    for (name, offset) in sorted_offsets {
+        let name_str = name.as_str();
+        if let Some(filter) = filter.as_ref()
+            && !filter.contains(name_str)
+        {
+            continue;
+        }
+        let mut col: Vec<f64> = Vec::with_capacity(results.step_count);
+        for row in results.iter() {
+            col.push(row[*offset]);
+        }
+        let json_array: Vec<Value> = col
+            .into_iter()
+            .map(|v| {
+                serde_json::Number::from_f64(v)
+                    .map(Value::Number)
+                    // NaN/Inf are not representable in JSON; emit null
+                    // so the response stays well-formed.
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        variables.insert(name_str.to_string(), Value::Array(json_array));
+    }
+
+    Ok(SimulateOutput { time, variables })
+}
+
+/// Translate `AccessError` to `McpError`. NotFound becomes a client
+/// error (invalid params); everything else is internal.
+fn access_error_to_mcp(err: AccessError) -> McpError {
+    match err {
+        AccessError::NotFound { path } => {
+            McpError::invalid_params(format!("project not found: {}", path.display()), None)
+        }
+        AccessError::VersionMismatch { expected, actual } => McpError::invalid_params(
+            format!("project version mismatch: expected {expected}, actual {actual}"),
+            None,
+        ),
+        other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use tempfile::TempDir;
+
+    use crate::events::EventBus;
+    use crate::git::GitProbe;
+    use crate::handlers::AppState;
+    use crate::mcp::access::RegistryAccess;
+    use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
+
+    fn build_state(root: PathBuf) -> Arc<AppState> {
+        Arc::new(AppState {
+            registry: Arc::new(ProjectRegistry::new(root.clone())),
+            git: Arc::new(GitProbe::unavailable_for_tests()),
+            root: Arc::new(root),
+            events: Arc::new(EventBus::new()),
+            launch_token: Arc::new(String::new()),
+        })
+    }
+
+    fn seed_registry(state: &AppState, abs_path: &Path, format: ProjectFormat) {
+        let metadata = std::fs::metadata(abs_path).expect("file exists");
+        let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        state.registry.upsert(
+            abs_path.to_path_buf(),
+            ProjectMeta {
+                path: PathBuf::new(),
+                format,
+                mtime,
+                size: metadata.len(),
+                git: GitState::Untracked,
+                version: 0,
+                doc: Default::default(),
+                last_disk_hash: 0,
+            },
+        );
+    }
+
+    const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+
+    fn copy_fixture(name: &str, dest_dir: &Path) -> PathBuf {
+        let src = PathBuf::from(FIXTURES_DIR).join(name);
+        let dest = dest_dir.join(name);
+        std::fs::copy(&src, &dest).expect("copy fixture");
+        dest
+    }
+
+    #[tokio::test]
+    async fn run_returns_time_and_variables_for_teacup() {
+        let temp = TempDir::new().expect("tempdir");
+        let canonical = temp.path().canonicalize().expect("canon");
+        let abs = copy_fixture("teacup.xmile", &canonical);
+        let state = build_state(canonical);
+        seed_registry(&state, &abs, ProjectFormat::Xmile);
+
+        let access = RegistryAccess::new(state);
+        let input = SimulateInput {
+            project_path: abs.display().to_string(),
+            model_name: None,
+            overrides: None,
+            sim_specs_override: None,
+            variables: None,
+        };
+        let out = run(&access, input).await.expect("simulate succeeds");
+        assert!(out.time.len() > 1);
+        assert!(out.variables.contains_key("teacup_temperature"));
+    }
+
+    #[tokio::test]
+    async fn run_filters_variables_by_name() {
+        let temp = TempDir::new().expect("tempdir");
+        let canonical = temp.path().canonicalize().expect("canon");
+        let abs = copy_fixture("teacup.xmile", &canonical);
+        let state = build_state(canonical);
+        seed_registry(&state, &abs, ProjectFormat::Xmile);
+
+        let access = RegistryAccess::new(state);
+        let input = SimulateInput {
+            project_path: abs.display().to_string(),
+            model_name: None,
+            overrides: None,
+            sim_specs_override: None,
+            variables: Some(vec!["teacup_temperature".into()]),
+        };
+        let out = run(&access, input).await.expect("simulate succeeds");
+        assert_eq!(out.variables.len(), 1);
+        assert!(out.variables.contains_key("teacup_temperature"));
+    }
+
+    #[tokio::test]
+    async fn run_reports_invalid_params_when_path_missing() {
+        let temp = TempDir::new().expect("tempdir");
+        let canonical = temp.path().canonicalize().expect("canon");
+        let state = build_state(canonical);
+        let access = RegistryAccess::new(state);
+
+        let input = SimulateInput {
+            project_path: "/does/not/exist.xmile".to_string(),
+            model_name: None,
+            overrides: None,
+            sim_specs_override: None,
+            variables: None,
+        };
+        let err = run(&access, input).await.expect_err("missing path errors");
+        // NotFound from RegistryAccess maps to invalid_params (-32602).
+        assert_eq!(err.code.0, -32602);
+    }
+}
