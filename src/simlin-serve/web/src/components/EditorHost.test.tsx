@@ -783,4 +783,159 @@ describe('EditorHost', () => {
     rerender(<EditorHost path="a.stmx" socket={socket} />);
     expect(sent).toEqual([{ type: 'projectFocused', path: 'a.stmx' }]);
   });
+
+  test('passes an onSelectionChanged callback to the Editor', async () => {
+    globalThis.fetch = makeFetchResolving({
+      json: '{}',
+      version: 0,
+      source_format: 'stmx',
+    }) as unknown as typeof globalThis.fetch;
+
+    const { socket } = makeFakeSocket();
+    render(<EditorHost path="a.stmx" socket={socket} />);
+
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(typeof EditorMock.lastProps?.onSelectionChanged).toBe('function');
+  });
+
+  test('debounces selectionChanged frames and emits the latest idents (AC6.2)', async () => {
+    jest.useFakeTimers();
+    try {
+      globalThis.fetch = makeFetchResolving({
+        json: '{}',
+        version: 0,
+        source_format: 'stmx',
+      }) as unknown as typeof globalThis.fetch;
+
+      const { socket, sent } = makeFakeSocket();
+      render(<EditorHost path="a.stmx" socket={socket} />);
+
+      // Drain the initial mount: clears the projectFocused frame so the
+      // subsequent assertions see only selection events.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      sent.length = 0;
+
+      const onSelectionChanged = EditorMock.lastProps?.onSelectionChanged;
+      expect(onSelectionChanged).toBeDefined();
+
+      onSelectionChanged?.(['a']);
+      // Second selection arrives 50ms later; the in-flight timer should
+      // be cancelled and rescheduled with the newer idents.
+      act(() => {
+        jest.advanceTimersByTime(50);
+      });
+      onSelectionChanged?.(['a', 'b']);
+
+      // 150ms after the SECOND call (so 200ms total) the debounce fires
+      // exactly once with the latest payload.
+      act(() => {
+        jest.advanceTimersByTime(149);
+      });
+      expect(sent).toEqual([]);
+      act(() => {
+        jest.advanceTimersByTime(1);
+      });
+
+      expect(sent).toEqual([
+        { type: 'selectionChanged', path: 'a.stmx', variableIdents: ['a', 'b'] },
+      ]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('cancels pending selectionChanged on unmount', async () => {
+    jest.useFakeTimers();
+    try {
+      globalThis.fetch = makeFetchResolving({
+        json: '{}',
+        version: 0,
+        source_format: 'stmx',
+      }) as unknown as typeof globalThis.fetch;
+
+      const { socket, sent } = makeFakeSocket();
+      const { unmount } = render(<EditorHost path="a.stmx" socket={socket} />);
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      sent.length = 0;
+
+      const onSelectionChanged = EditorMock.lastProps?.onSelectionChanged;
+      onSelectionChanged?.(['a']);
+
+      // Tear down before the 150ms debounce fires; the timer must be
+      // cleared so no stale send() lands after the host is gone.
+      unmount();
+      act(() => {
+        jest.advanceTimersByTime(500);
+      });
+
+      expect(sent).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('selectionChanged uses the current path when emitted', async () => {
+    jest.useFakeTimers();
+    try {
+      globalThis.fetch = makeFetchResolving({
+        json: '{}',
+        version: 0,
+        source_format: 'stmx',
+      }) as unknown as typeof globalThis.fetch;
+
+      const { socket, sent } = makeFakeSocket();
+      render(<EditorHost path="models/teacup.xmile" socket={socket} />);
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      sent.length = 0;
+
+      EditorMock.lastProps?.onSelectionChanged?.(['teacup_temperature']);
+      act(() => {
+        jest.advanceTimersByTime(150);
+      });
+
+      expect(sent).toEqual([
+        {
+          type: 'selectionChanged',
+          path: 'models/teacup.xmile',
+          variableIdents: ['teacup_temperature'],
+        },
+      ]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('does not crash when onSelectionChanged fires without a socket', async () => {
+    jest.useFakeTimers();
+    try {
+      globalThis.fetch = makeFetchResolving({
+        json: '{}',
+        version: 0,
+        source_format: 'stmx',
+      }) as unknown as typeof globalThis.fetch;
+
+      render(<EditorHost path="a.stmx" />);
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      EditorMock.lastProps?.onSelectionChanged?.(['a']);
+      act(() => {
+        jest.advanceTimersByTime(150);
+      });
+      // No assertion required — the test passes if no exception is
+      // thrown when the optional socket is absent.
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

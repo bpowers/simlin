@@ -92,6 +92,13 @@ const INITIAL_STATE: EditorHostState = {
 // session that writes on every change).
 const DISK_NOTICE_TIMEOUT_MS = 5000;
 
+// Coalesce rapid selection changes into a single WS frame. The Editor
+// fires onSelectionChanged on every click/drag during a multi-element
+// box-select; bundling them avoids flooding the MCP fan-out with
+// transient intermediate states. 150ms keeps point-and-click feel
+// responsive while smoothing drags.
+const SELECTION_DEBOUNCE_MS = 150;
+
 // Format the server's per-error validation details into a single
 // human-readable message for the Editor's toast surface. Each error
 // becomes a bullet line of "<code>: <variable>: <message>" so the user
@@ -117,6 +124,11 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
   // before the first one expires (otherwise the second toast would be
   // dismissed early by the first timer's callback).
   private diskNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Pending debounce timer for the next selection-changed frame. We
+  // hold the handle so a rapid sequence of selection changes can
+  // collapse into one outbound frame: each new event clears the
+  // previous timer and schedules a fresh one. Cleared on unmount.
+  private selectionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   state: EditorHostState = INITIAL_STATE;
 
@@ -131,6 +143,10 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     if (this.diskNoticeTimer !== null) {
       clearTimeout(this.diskNoticeTimer);
       this.diskNoticeTimer = null;
+    }
+    if (this.selectionDebounceTimer !== null) {
+      clearTimeout(this.selectionDebounceTimer);
+      this.selectionDebounceTimer = null;
     }
   }
 
@@ -180,6 +196,29 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
   private emitProjectFocused(path: string): void {
     this.props.socket?.send({ type: 'projectFocused', path });
   }
+
+  // Coalesce a burst of selection changes into one WS frame. Each new
+  // call replaces any pending frame so only the latest selection set
+  // is sent. The path is read from props at flush time to ensure a
+  // selection event that happens to arrive across a path swap targets
+  // the project the user actually has selected.
+  private handleSelectionChanged = (idents: ReadonlyArray<string>): void => {
+    if (this.selectionDebounceTimer !== null) {
+      clearTimeout(this.selectionDebounceTimer);
+    }
+    this.selectionDebounceTimer = setTimeout(() => {
+      this.selectionDebounceTimer = null;
+      const path = this.props.path;
+      if (!path) {
+        return;
+      }
+      this.props.socket?.send({
+        type: 'selectionChanged',
+        path,
+        variableIdents: idents,
+      });
+    }, SELECTION_DEBOUNCE_MS);
+  };
 
   private showDiskNotice(): void {
     this.clearDiskNoticeTimer();
@@ -327,6 +366,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
           initialProjectVersion={payload.version}
           name={path}
           onSave={this.handleSave}
+          onSelectionChanged={this.handleSelectionChanged}
         />
       </div>
     );

@@ -17,6 +17,7 @@ type EditorMockProps = Readonly<{
   embedded?: boolean;
   readOnlyMode?: boolean;
   onSave: (...args: ReadonlyArray<unknown>) => Promise<number | undefined>;
+  onSelectionChanged?: (idents: ReadonlyArray<string>) => void;
 }>;
 
 export class Editor extends React.Component<EditorMockProps> {
