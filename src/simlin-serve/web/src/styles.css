@@ -156,3 +156,11 @@ body,
   border-bottom: 1px solid var(--serve-border);
   font-size: 13px;
 }
+
+.serve-disk-notice {
+  background: rgba(46, 125, 50, 0.08);
+  color: var(--serve-success);
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--serve-border);
+  font-size: 13px;
+}

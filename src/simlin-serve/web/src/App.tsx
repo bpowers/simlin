@@ -11,7 +11,7 @@ import { EmptyState } from './components/EmptyState';
 import { ProjectList } from './components/ProjectList';
 import { readLaunchToken } from './launch-token';
 import { UpdatesSocket } from './ws';
-import type { WsMessage } from './ws';
+import type { ChangeSource, WsMessage } from './ws';
 
 const GIT_HINT_DISMISSED_KEY = 'simlin-serve-git-hint-dismissed';
 
@@ -43,6 +43,11 @@ type AppState = {
   // version-equality check (`liveVersion <= state.version`) prevents
   // a refetch loop when the echoed version equals what we already have.
   liveVersions: Readonly<Record<string, number>>;
+  // Provenance of the most recent live-version advance per path. Tracked
+  // alongside liveVersions so the EditorHost can surface a "this model
+  // was updated on disk" toast for `disk` source events without showing
+  // anything for the user's own saves echoed back over the WS.
+  liveSources: Readonly<Record<string, ChangeSource>>;
 };
 
 export class App extends React.Component<Record<string, never>, AppState> {
@@ -56,6 +61,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
     gitHintDismissed: readDismissedFlag(),
     loadError: null,
     liveVersions: {},
+    liveSources: {},
   };
 
   // Held so componentWillUnmount can dispose the connection. Not in
@@ -98,6 +104,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
         }
         return {
           liveVersions: { ...prev.liveVersions, [msg.path]: msg.version },
+          liveSources: { ...prev.liveSources, [msg.path]: msg.source },
         };
       });
       return;
@@ -109,11 +116,14 @@ export class App extends React.Component<Record<string, never>, AppState> {
           return null;
         }
         const filtered = projects.filter((p) => p.path !== msg.path);
-        // Drop the path from liveVersions so a future re-creation under
-        // the same path starts from a clean slate (fresh registry entries
-        // begin at version 0).
+        // Drop the path from liveVersions/liveSources so a future
+        // re-creation under the same path starts from a clean slate
+        // (fresh registry entries begin at version 0 with no recorded
+        // source).
         const nextLiveVersions = { ...prev.liveVersions };
         delete nextLiveVersions[msg.path];
+        const nextLiveSources = { ...prev.liveSources };
+        delete nextLiveSources[msg.path];
         // Phase 4 lays the wiring for delete; Phase 8 polishes the
         // "this model was deleted on disk" message. Falling back to
         // selectedPath = null is the sane default — render either the
@@ -123,6 +133,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
           projects: filtered,
           selectedPath: nextSelected,
           liveVersions: nextLiveVersions,
+          liveSources: nextLiveSources,
         };
       });
     }
@@ -166,7 +177,8 @@ export class App extends React.Component<Record<string, never>, AppState> {
   };
 
   render(): React.ReactNode {
-    const { projects, gitAvailable, selectedPath, gitHintDismissed, loadError, liveVersions } = this.state;
+    const { projects, gitAvailable, selectedPath, gitHintDismissed, loadError, liveVersions, liveSources } =
+      this.state;
 
     const showHint = !gitAvailable && !gitHintDismissed;
     const ready = projects !== null;
@@ -176,6 +188,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
     // missing entry maps to 0 (no live update yet), which the host's
     // refetch gate treats as "no advance".
     const liveVersion = selectedPath !== null ? (liveVersions[selectedPath] ?? 0) : 0;
+    const liveSource = selectedPath !== null ? liveSources[selectedPath] : undefined;
 
     return (
       <div className="serve-app">
@@ -202,6 +215,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
             <EditorHost
               path={selectedPath}
               liveVersion={liveVersion}
+              liveSource={liveSource}
               onPathRedirect={this.handlePathRedirect}
             />
           </div>

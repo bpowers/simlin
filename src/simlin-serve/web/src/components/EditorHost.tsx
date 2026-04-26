@@ -8,6 +8,7 @@ import { Editor } from '@simlin/diagram';
 
 import { fetchProject, saveProject, ValidationError, VersionConflictError } from '../api';
 import type { GetProjectResponse, JsonProjectData, ServerValidationError } from '../api';
+import type { ChangeSource } from '../ws';
 
 type EditorHostProps = Readonly<{
   path: string | null;
@@ -18,6 +19,12 @@ type EditorHostProps = Readonly<{
   // (Phase 3 Task 11). The default of 0 is "no live version observed
   // yet"; the gate in componentDidUpdate compares strictly greater.
   liveVersion?: number;
+  // Provenance of the most recent live-version advance. When `disk`,
+  // EditorHost surfaces a transient toast so the user understands the
+  // remount was triggered by an external editor (e.g. a save in vim).
+  // Other sources (`user`/`agent`) are silent — the user already knows
+  // their own save happened.
+  liveSource?: ChangeSource;
   // Invoked when a `.mdl` save creates a sidecar so the parent can update
   // its selectedPath state and refresh the project list. Optional because
   // not every host needs to track the redirect (e.g. tests that only
@@ -55,6 +62,11 @@ type EditorHostState = {
   // for a version we already know about (e.g., the echo of our own
   // save) arrives, we skip the refetch.
   serverVersion: number;
+  // True while a transient "this model was updated on disk" notice is
+  // visible. Set when a disk-source live advance is observed; cleared
+  // either by the auto-dismiss timer or when a different path/source
+  // takes over.
+  diskNoticeVisible: boolean;
 };
 
 const INITIAL_STATE: EditorHostState = {
@@ -64,7 +76,14 @@ const INITIAL_STATE: EditorHostState = {
   pending: false,
   loadGeneration: 0,
   serverVersion: 0,
+  diskNoticeVisible: false,
 };
+
+// How long the disk-update toast lingers before auto-dismissing. Long
+// enough to read the message, short enough that it doesn't pile up if
+// the user is editing a file with frequent external saves (e.g. a vim
+// session that writes on every change).
+const DISK_NOTICE_TIMEOUT_MS = 5000;
 
 // Format the server's per-error validation details into a single
 // human-readable message for the Editor's toast surface. Each error
@@ -86,6 +105,11 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
   // Track the in-flight request so that switching paths quickly doesn't paint
   // a stale model after the slow fetch finally resolves.
   private currentLoadKey: number = 0;
+  // Pending auto-dismiss timer for the disk-update toast. Held so we
+  // can clear a previous timer when a second disk advance arrives
+  // before the first one expires (otherwise the second toast would be
+  // dismissed early by the first timer's callback).
+  private diskNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   state: EditorHostState = INITIAL_STATE;
 
@@ -95,13 +119,26 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     }
   }
 
+  componentWillUnmount(): void {
+    if (this.diskNoticeTimer !== null) {
+      clearTimeout(this.diskNoticeTimer);
+      this.diskNoticeTimer = null;
+    }
+  }
+
   componentDidUpdate(prev: EditorHostProps): void {
     if (prev.path !== this.props.path) {
       if (!this.props.path) {
         this.currentLoadKey += 1;
+        this.clearDiskNoticeTimer();
         this.setState(INITIAL_STATE);
         return;
       }
+      // Switching to a different path drops any in-flight toast — it
+      // belonged to the old path and would be confusing in context of
+      // the new one.
+      this.clearDiskNoticeTimer();
+      this.setState({ diskNoticeVisible: false });
       void this.loadProject(this.props.path);
       return;
     }
@@ -120,7 +157,26 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     const liveVersion = this.props.liveVersion ?? 0;
     if (path && liveVersion > this.state.serverVersion) {
       this.setState({ serverVersion: liveVersion });
+      if (this.props.liveSource === 'disk') {
+        this.showDiskNotice();
+      }
       void this.loadProject(path);
+    }
+  }
+
+  private showDiskNotice(): void {
+    this.clearDiskNoticeTimer();
+    this.setState({ diskNoticeVisible: true });
+    this.diskNoticeTimer = setTimeout(() => {
+      this.diskNoticeTimer = null;
+      this.setState({ diskNoticeVisible: false });
+    }, DISK_NOTICE_TIMEOUT_MS);
+  }
+
+  private clearDiskNoticeTimer(): void {
+    if (this.diskNoticeTimer !== null) {
+      clearTimeout(this.diskNoticeTimer);
+      this.diskNoticeTimer = null;
     }
   }
 
@@ -215,7 +271,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
 
   render(): React.ReactNode {
     const { path } = this.props;
-    const { payload, error, loadedPath, loadGeneration } = this.state;
+    const { payload, error, loadedPath, loadGeneration, diskNoticeVisible } = this.state;
 
     if (!path) {
       return null;
@@ -240,6 +296,11 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
         {showMdlBanner ? (
           <div className="serve-mdl-banner" role="note">
             Vensim MDL — saves will be written to a <code>.sd.json</code> sidecar.
+          </div>
+        ) : null}
+        {diskNoticeVisible ? (
+          <div className="serve-disk-notice" role="status" aria-live="polite">
+            This model was updated on disk.
           </div>
         ) : null}
         <Editor

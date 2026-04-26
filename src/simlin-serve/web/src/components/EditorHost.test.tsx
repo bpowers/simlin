@@ -515,4 +515,121 @@ describe('EditorHost', () => {
     rerender(<EditorHost path={null} liveVersion={5} />);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  test('shows a "model was updated on disk" toast when liveSource is disk', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":1}',
+          version: 1,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="teacup.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    // Simulate a disk-source advance: the watcher saw an external edit
+    // and pushed a new version. EditorHost should refetch and surface
+    // the disk-update toast.
+    rerender(<EditorHost path="teacup.stmx" liveVersion={1} liveSource="disk" />);
+
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectVersion).toBe(1));
+    expect(screen.getByRole('status').textContent).toMatch(/updated on disk/i);
+  });
+
+  test('does not show the disk toast when liveSource is user', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":1}',
+          version: 1,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="teacup.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    rerender(<EditorHost path="teacup.stmx" liveVersion={1} liveSource="user" />);
+
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectVersion).toBe(1));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  test('disk toast auto-dismisses after the timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            json: '{"v":0}',
+            version: 0,
+            source_format: 'stmx',
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            json: '{"v":1}',
+            version: 1,
+            source_format: 'stmx',
+          }),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      const { rerender } = render(<EditorHost path="teacup.stmx" liveVersion={0} />);
+      // Drain the initial GET.
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      rerender(<EditorHost path="teacup.stmx" liveVersion={1} liveSource="disk" />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByRole('status')).not.toBeNull();
+
+      // Advance past the 5s auto-dismiss window. Use act so React flushes
+      // the resulting state update synchronously.
+      act(() => {
+        jest.advanceTimersByTime(5000);
+      });
+
+      expect(screen.queryByRole('status')).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

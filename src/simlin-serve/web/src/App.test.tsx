@@ -292,4 +292,126 @@ describe('App shell', () => {
 
     await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
   });
+
+  test('surfaces a disk-update toast when the selected project advances via disk', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    // First fetch is the project list. Second is the GET for the
+    // selected project (initial mount). Third is the GET refetch
+    // triggered by the disk-source live advance.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            {
+              path: 'a.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+          ],
+          git_available: true,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":1}',
+          version: 1,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(1));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(
+        JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 1, source: 'disk' }),
+      );
+    });
+
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeNull());
+    expect(screen.getByRole('status').textContent).toMatch(/updated on disk/i);
+  });
+
+  test('does not show the disk toast when the change came from the user', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            {
+              path: 'a.stmx',
+              format: 'stmx',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+          ],
+          git_available: true,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":1}',
+          version: 1,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(1));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(
+        JSON.stringify({ type: 'projectChanged', path: 'a.stmx', version: 1, source: 'user' }),
+      );
+    });
+
+    // Allow the refetch to settle.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
 });
