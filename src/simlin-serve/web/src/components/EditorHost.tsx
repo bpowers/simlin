@@ -6,8 +6,8 @@ import * as React from 'react';
 
 import { Editor } from '@simlin/diagram';
 
-import { fetchProject, saveProject, VersionConflictError } from '../api';
-import type { GetProjectResponse, JsonProjectData } from '../api';
+import { fetchProject, saveProject, ValidationError, VersionConflictError } from '../api';
+import type { GetProjectResponse, JsonProjectData, ServerValidationError } from '../api';
 
 type EditorHostProps = Readonly<{
   path: string | null;
@@ -46,6 +46,22 @@ const INITIAL_STATE: EditorHostState = {
   pending: false,
   loadGeneration: 0,
 };
+
+// Format the server's per-error validation details into a single
+// human-readable message for the Editor's toast surface. Each error
+// becomes a bullet line of "<code>: <variable>: <message>" so the user
+// can see all newly-introduced errors at once. Phase 2 does not try to
+// highlight the offending variables in-canvas; that's a later polish.
+function formatValidationErrors(errors: ReadonlyArray<ServerValidationError>): string {
+  if (errors.length === 0) {
+    return 'Save failed: validation rejected the edit but the server returned no details.';
+  }
+  const lines = errors.map((e) => {
+    const variable = e.variableName ?? '(unknown)';
+    return ` - ${e.code}: ${variable}: ${e.message}`;
+  });
+  return `Save failed:\n${lines.join('\n')}`;
+}
 
 export class EditorHost extends React.Component<EditorHostProps, EditorHostState> {
   // Track the in-flight request so that switching paths quickly doesn't paint
@@ -125,6 +141,9 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
         throw new Error(
           'Your edit conflicted with another save. The latest version has been loaded — please re-apply your changes.',
         );
+      }
+      if (err instanceof ValidationError) {
+        throw new Error(formatValidationErrors(err.errors));
       }
       throw err;
     }

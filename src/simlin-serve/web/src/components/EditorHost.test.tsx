@@ -260,6 +260,91 @@ describe('EditorHost', () => {
     expect(fetchMock.mock.calls[2][0]).toBe('/api/projects/teacup.stmx');
   });
 
+  test('on 422, throws a formatted error containing each validation detail', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          error: 'validation_failed',
+          details: [
+            {
+              code: 'unknown_dependency',
+              message: 'undefined identifier: bogus',
+              modelName: 'main',
+              variableName: 'bad',
+              kind: 'equation',
+            },
+            {
+              code: 'circular_dependency',
+              message: 'depends on itself',
+              modelName: 'main',
+              variableName: 'loop',
+              kind: 'equation',
+            },
+          ],
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<EditorHost path="teacup.stmx" />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    const onSave = EditorMock.lastProps?.onSave;
+
+    let captured: Error | null = null;
+    try {
+      await onSave?.({ format: 'json', data: '{}' }, 0);
+    } catch (err) {
+      captured = err as Error;
+    }
+    expect(captured).not.toBeNull();
+    const msg = captured?.message ?? '';
+    expect(msg).toMatch(/save failed/i);
+    expect(msg).toContain('unknown_dependency');
+    expect(msg).toContain('bad');
+    expect(msg).toContain('undefined identifier: bogus');
+    expect(msg).toContain('circular_dependency');
+    expect(msg).toContain('loop');
+    expect(msg).toContain('depends on itself');
+  });
+
+  test('on 422 with no details, throws a generic save-failed error', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({ error: 'validation_failed', details: [] }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<EditorHost path="teacup.stmx" />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    const onSave = EditorMock.lastProps?.onSave;
+    await expect(onSave?.({ format: 'json', data: '{}' }, 0)).rejects.toThrow(/save failed/i);
+  });
+
   test('on 409 without an onConflict callback, EditorHost re-renders with the latest payload', async () => {
     const fetchMock = jest
       .fn()
