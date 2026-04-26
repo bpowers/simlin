@@ -19,10 +19,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::mcp::build_mcp_router;
 use simlin_serve::registry::ProjectRegistry;
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -34,7 +34,7 @@ fn build_state() -> (AppState, TempDir) {
     let canonical = dir.path().canonicalize().expect("canonicalize");
     let state = AppState {
         registry: Arc::new(ProjectRegistry::new(canonical.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),

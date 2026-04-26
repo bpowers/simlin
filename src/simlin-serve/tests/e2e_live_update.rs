@@ -25,9 +25,9 @@ use std::time::SystemTime;
 use futures_util::StreamExt;
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -77,7 +77,7 @@ async fn spawn_server(fixture: &str) -> (AppState, String, TempDir) {
 
     let state = AppState {
         registry: Arc::new(ProjectRegistry::new(canonical_root.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical_root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(TOKEN.to_string()),

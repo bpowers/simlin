@@ -16,6 +16,7 @@ use simlin_serve::events::EventBus;
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -75,7 +76,7 @@ async fn ac1_1_lists_all_three_format_types() {
     touch(dir.path(), "model_c.mdl", b"contents");
 
     let canonical = dir.path().canonicalize().unwrap();
-    let state = build_state(canonical, GitProbe::unavailable_for_tests());
+    let state = build_state(canonical, unavailable_git_probe());
 
     let body = fetch_projects(state).await;
     let projects = body["projects"].as_array().expect("projects array");
@@ -97,7 +98,7 @@ async fn ac1_2_relative_paths_use_forward_slashes() {
     touch(dir.path(), "deep/nested/e.xmile", b"<root/>\n");
 
     let canonical = dir.path().canonicalize().unwrap();
-    let state = build_state(canonical, GitProbe::unavailable_for_tests());
+    let state = build_state(canonical, unavailable_git_probe());
 
     let body = fetch_projects(state).await;
     let projects = body["projects"].as_array().expect("projects array");
@@ -127,7 +128,7 @@ async fn ac2_5_unavailable_git_propagates_to_response() {
     touch(dir.path(), "model.stmx", b"<root/>\n");
 
     let canonical = dir.path().canonicalize().unwrap();
-    let state = build_state(canonical, GitProbe::unavailable_for_tests());
+    let state = build_state(canonical, unavailable_git_probe());
 
     let body = fetch_projects(state).await;
     assert_eq!(
@@ -154,7 +155,7 @@ async fn snapshot_is_sorted_alphabetically_by_path() {
     touch(dir.path(), "middle/banana.xmile", b"<root/>\n");
 
     let canonical = dir.path().canonicalize().unwrap();
-    let state = build_state(canonical, GitProbe::unavailable_for_tests());
+    let state = build_state(canonical, unavailable_git_probe());
 
     let body = fetch_projects(state).await;
     let projects = body["projects"].as_array().expect("projects array");

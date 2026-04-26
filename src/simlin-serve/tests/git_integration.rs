@@ -15,6 +15,7 @@ use std::process::Command;
 
 use simlin_serve::git::{GitProbe, enclosing_git_root};
 use simlin_serve::registry::GitState;
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 
 fn git_available() -> bool {
@@ -45,7 +46,7 @@ fn init_repo(dir: &Path) {
 
 #[test]
 fn ac2_5_unavailable_probe_reports_every_file_as_unavailable() {
-    let probe = GitProbe::unavailable_for_tests();
+    let probe = unavailable_git_probe();
     let dir = TempDir::new().unwrap();
     let f = dir.path().join("any.stmx");
     std::fs::write(&f, "").unwrap();

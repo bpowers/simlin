@@ -20,10 +20,10 @@ use rmcp::model::{CallToolRequestParams, CustomNotification};
 use rmcp::service::NotificationContext;
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use simlin_serve::events::{ChangeSource, EventBus, ValidationError, WsMessage};
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::mcp::{RegistryAccess, SimlinServeMcpServer};
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -39,7 +39,7 @@ fn copy_fixture(name: &str, dest_dir: &Path) -> PathBuf {
 fn build_state(root: PathBuf) -> Arc<AppState> {
     Arc::new(AppState {
         registry: Arc::new(ProjectRegistry::new(root.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),
@@ -232,7 +232,7 @@ async fn list_projects_returns_registry_snapshot() {
     assert_eq!(
         structured.get("gitAvailable").and_then(|v| v.as_bool()),
         Some(false),
-        "test GitProbe is unavailable_for_tests"
+        "test uses unavailable_git_probe so gitAvailable must be false"
     );
     let root = structured
         .get("root")

@@ -21,9 +21,9 @@ use axum::http::{Request, StatusCode, header};
 use serde_json::Value;
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -48,7 +48,7 @@ fn copy_fixture(name: &str, dest_dir: &std::path::Path) -> PathBuf {
 fn build_state(root: PathBuf) -> AppState {
     AppState {
         registry: Arc::new(ProjectRegistry::new(root.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),

@@ -23,12 +23,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use simlin_serve::build_router;
 use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::hashing::content_hash;
 use simlin_serve::registry::{
     GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError,
 };
+use simlin_serve::test_support::unavailable_git_probe;
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -46,7 +46,7 @@ fn build_state(dir: &Path) -> AppState {
     let canonical = dir.canonicalize().expect("canonicalize");
     AppState {
         registry: Arc::new(ProjectRegistry::new(canonical.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new("watcher-merge-token".to_string()),

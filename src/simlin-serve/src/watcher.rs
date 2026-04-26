@@ -1048,7 +1048,7 @@ mod tests {
         let canonical = dir.canonicalize().expect("canonicalize");
         AppState {
             registry: Arc::new(ProjectRegistry::new(canonical.clone())),
-            git: Arc::new(GitProbe::unavailable_for_tests()),
+            git: Arc::new(GitProbe::new_unavailable()),
             root: Arc::new(canonical),
             events: Arc::new(EventBus::new()),
             launch_token: Arc::new("test-token".to_string()),

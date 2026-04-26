@@ -74,12 +74,10 @@ impl GitProbe {
         }
     }
 
-    /// Construct a probe that pretends git is unavailable. Exposed for tests
-    /// (including integration tests in the `tests/` directory) so AC2.5 can
-    /// be verified without uninstalling git from the host. Production code
-    /// should use [`GitProbe::detect`] instead.
-    #[doc(hidden)]
-    pub fn unavailable_for_tests() -> Self {
+    /// Construct a probe that pretends git is unavailable. Only called from
+    /// `test_support::unavailable_git_probe` and from unit tests inside this
+    /// crate; never from production paths.
+    pub(crate) fn new_unavailable() -> Self {
         Self {
             git_available: false,
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -330,7 +328,7 @@ mod tests {
 
     #[test]
     fn unavailable_probe_returns_unavailable_for_every_path() {
-        let probe = GitProbe::unavailable_for_tests();
+        let probe = GitProbe::new_unavailable();
         assert!(!probe.git_available());
         assert_eq!(
             probe.status_for(Path::new("/tmp/missing")),
@@ -391,7 +389,7 @@ mod tests {
 
     #[test]
     fn invalidate_repo_cache_is_noop_for_unknown_repo() {
-        let probe = GitProbe::unavailable_for_tests();
+        let probe = GitProbe::new_unavailable();
         // No panic, no error; just a quiet no-op.
         probe.invalidate_repo_cache(Path::new("/nope/not/a/real/repo"));
     }

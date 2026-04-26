@@ -166,7 +166,7 @@ mod tests {
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         let inserted = scan_into_registry(dir.path(), &registry, &git).unwrap();
         assert_eq!(inserted, 4);
@@ -179,7 +179,7 @@ mod tests {
         assert!(formats.contains(&ProjectFormat::Mdl));
         assert!(formats.contains(&ProjectFormat::SdJson));
 
-        // With unavailable_for_tests every file should report Unavailable.
+        // With new_unavailable() every file should report Unavailable.
         for entry in &snap {
             assert_eq!(entry.git, GitState::Unavailable);
         }
@@ -192,7 +192,7 @@ mod tests {
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         scan_into_registry(dir.path(), &registry, &git).unwrap();
 
@@ -210,7 +210,7 @@ mod tests {
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         let inserted = scan_into_registry(dir.path(), &registry, &git).unwrap();
         assert_eq!(inserted, 0);
@@ -221,7 +221,7 @@ mod tests {
     fn scan_with_missing_root_returns_root_error() {
         let canonical = Path::new("/this/should/not/exist/scanroot");
         let registry = ProjectRegistry::new(PathBuf::from("/tmp"));
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         let err = scan_into_registry(canonical, &registry, &git).unwrap_err();
         assert!(matches!(err, ScanError::Root(_, _)));
@@ -234,7 +234,7 @@ mod tests {
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         scan_into_registry(dir.path(), &registry, &git).unwrap();
         let first = registry.snapshot().pop().unwrap();
@@ -257,7 +257,7 @@ mod tests {
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         // Initial scan: version is 0.
         scan_into_registry(dir.path(), &registry, &git).unwrap();
@@ -287,7 +287,7 @@ mod tests {
 
         let canonical = dir.path().canonicalize().unwrap();
         let registry = ProjectRegistry::new(canonical.clone());
-        let git = GitProbe::unavailable_for_tests();
+        let git = GitProbe::new_unavailable();
 
         scan_into_registry(dir.path(), &registry, &git).unwrap();
         assert_eq!(registry.len(), 2);

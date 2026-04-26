@@ -31,9 +31,9 @@ use simlin_mcp_core::test_support::TestFileSystemAccess;
 use simlin_mcp_core::tools::create_model::{CreateModelInput, create_model};
 use simlin_serve::build_router;
 use simlin_serve::events::EventBus;
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -44,7 +44,7 @@ const TEST_MCP_PORT: u16 = 12346;
 fn build_state(root: PathBuf) -> AppState {
     AppState {
         registry: Arc::new(ProjectRegistry::new(root.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(String::new()),

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use simlin_serve::build_router;
 use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
-use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::ProjectRegistry;
+use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
@@ -51,7 +51,7 @@ async fn spawn_server_with_strict_origin(
 
     let state = AppState {
         registry: Arc::new(ProjectRegistry::new(canonical.clone())),
-        git: Arc::new(GitProbe::unavailable_for_tests()),
+        git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
         launch_token: Arc::new(token.to_string()),

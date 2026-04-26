@@ -150,7 +150,7 @@ mod tests {
     fn build_state(root: PathBuf) -> Arc<AppState> {
         Arc::new(AppState {
             registry: Arc::new(ProjectRegistry::new(root.clone())),
-            git: Arc::new(GitProbe::unavailable_for_tests()),
+            git: Arc::new(GitProbe::new_unavailable()),
             root: Arc::new(root),
             events: Arc::new(EventBus::new()),
             launch_token: Arc::new(String::new()),
