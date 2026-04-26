@@ -19,12 +19,17 @@ export type ChangeSource = 'user' | 'agent' | 'disk';
 // `serde(tag = "type", rename_all = "camelCase")`). Future variants will be
 // added here as they ship server-side; the union keeps the parse path
 // strongly typed at the call site.
-export type WsMessage = {
-  readonly type: 'projectChanged';
-  readonly path: string;
-  readonly version: number;
-  readonly source: ChangeSource;
-};
+export type WsMessage =
+  | {
+      readonly type: 'projectChanged';
+      readonly path: string;
+      readonly version: number;
+      readonly source: ChangeSource;
+    }
+  | {
+      readonly type: 'projectRemoved';
+      readonly path: string;
+    };
 
 type OnMessageFn = (msg: WsMessage) => void;
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'dead';
@@ -184,17 +189,20 @@ function isWsMessage(value: unknown): value is WsMessage {
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (v.type !== 'projectChanged') {
-    return false;
-  }
   if (typeof v.path !== 'string') {
     return false;
   }
-  if (typeof v.version !== 'number') {
-    return false;
+  if (v.type === 'projectChanged') {
+    if (typeof v.version !== 'number') {
+      return false;
+    }
+    if (v.source !== 'user' && v.source !== 'agent' && v.source !== 'disk') {
+      return false;
+    }
+    return true;
   }
-  if (v.source !== 'user' && v.source !== 'agent' && v.source !== 'disk') {
-    return false;
+  if (v.type === 'projectRemoved') {
+    return true;
   }
-  return true;
+  return false;
 }

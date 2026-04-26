@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 import { App } from './App';
 import type { ListProjectsResponse } from './api';
@@ -169,5 +169,127 @@ describe('App shell', () => {
 
     unmount();
     expect(ws.closeArgs).not.toBeNull();
+  });
+
+  test('drops the entry and clears selection when projectRemoved arrives for the selected path', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    globalThis.fetch = makeListFetch({
+      projects: [
+        {
+          path: 'a.stmx',
+          format: 'stmx',
+          mtime: new Date(0).toISOString(),
+          size: 0,
+          git: { kind: 'untracked' },
+          version: 0,
+        },
+        {
+          path: 'b.stmx',
+          format: 'stmx',
+          mtime: new Date(0).toISOString(),
+          size: 0,
+          git: { kind: 'untracked' },
+          version: 0,
+        },
+      ],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(2));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(JSON.stringify({ type: 'projectRemoved', path: 'a.stmx' }));
+    });
+
+    // The deleted entry is gone from the sidebar.
+    await waitFor(() => expect(screen.queryByText('a.stmx')).toBeNull());
+    expect(screen.queryByText('b.stmx')).not.toBeNull();
+    // Selection cleared, so the editor host renders nothing for selected path.
+    // The remaining "b.stmx" entry is unselected (no aria-current).
+    const items = screen.getAllByRole('listitem');
+    for (const item of items) {
+      expect(item.getAttribute('aria-current')).toBeNull();
+    }
+  });
+
+  test('drops the entry and keeps selection when projectRemoved arrives for a different path', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    globalThis.fetch = makeListFetch({
+      projects: [
+        {
+          path: 'a.stmx',
+          format: 'stmx',
+          mtime: new Date(0).toISOString(),
+          size: 0,
+          git: { kind: 'untracked' },
+          version: 0,
+        },
+        {
+          path: 'b.stmx',
+          format: 'stmx',
+          mtime: new Date(0).toISOString(),
+          size: 0,
+          git: { kind: 'untracked' },
+          version: 0,
+        },
+      ],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(2));
+    fireEvent.click(screen.getByText('a.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(JSON.stringify({ type: 'projectRemoved', path: 'b.stmx' }));
+    });
+
+    await waitFor(() => expect(screen.queryByText('b.stmx')).toBeNull());
+    expect(screen.queryByText('a.stmx')).not.toBeNull();
+    // a.stmx remains selected.
+    const remaining = screen.getAllByRole('listitem');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].getAttribute('aria-current')).toBe('true');
+  });
+
+  test('falls back to the empty state when the last remaining selected project is removed', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    globalThis.fetch = makeListFetch({
+      projects: [
+        {
+          path: 'only.stmx',
+          format: 'stmx',
+          mtime: new Date(0).toISOString(),
+          size: 0,
+          git: { kind: 'untracked' },
+          version: 0,
+        },
+      ],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(1));
+    fireEvent.click(screen.getByText('only.stmx'));
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    await act(async () => {
+      ws.emitMessage(JSON.stringify({ type: 'projectRemoved', path: 'only.stmx' }));
+    });
+
+    await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
   });
 });

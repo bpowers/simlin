@@ -113,6 +113,39 @@ describe('UpdatesSocket', () => {
     socket.close();
   });
 
+  test('parses projectRemoved frames and forwards them to onMessage', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket('t', onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'projectRemoved',
+        path: 'a.stmx',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'projectRemoved',
+      path: 'a.stmx',
+    });
+    socket.close();
+  });
+
+  test('drops projectRemoved frames missing the path field', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket('t', onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(JSON.stringify({ type: 'projectRemoved' }));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    socket.close();
+  });
+
   test('ignores message frames whose body is not valid JSON without throwing', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
     const socket = new UpdatesSocket('t', onMessage);

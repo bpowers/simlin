@@ -87,21 +87,45 @@ export class App extends React.Component<Record<string, never>, AppState> {
   }
 
   private handleLiveMessage = (msg: WsMessage): void => {
-    if (msg.type !== 'projectChanged') {
+    if (msg.type === 'projectChanged') {
+      this.setState((prev) => {
+        const previous = prev.liveVersions[msg.path] ?? 0;
+        // Versions are monotonically increasing per path; if a stale
+        // event arrives (e.g. due to broadcast ordering races), keep the
+        // higher value so the EditorHost refetch gate doesn't oscillate.
+        if (msg.version <= previous) {
+          return null;
+        }
+        return {
+          liveVersions: { ...prev.liveVersions, [msg.path]: msg.version },
+        };
+      });
       return;
     }
-    this.setState((prev) => {
-      const previous = prev.liveVersions[msg.path] ?? 0;
-      // Versions are monotonically increasing per path; if a stale
-      // event arrives (e.g. due to broadcast ordering races), keep the
-      // higher value so the EditorHost refetch gate doesn't oscillate.
-      if (msg.version <= previous) {
-        return null;
-      }
-      return {
-        liveVersions: { ...prev.liveVersions, [msg.path]: msg.version },
-      };
-    });
+    if (msg.type === 'projectRemoved') {
+      this.setState((prev) => {
+        const projects = prev.projects;
+        if (projects === null) {
+          return null;
+        }
+        const filtered = projects.filter((p) => p.path !== msg.path);
+        // Drop the path from liveVersions so a future re-creation under
+        // the same path starts from a clean slate (fresh registry entries
+        // begin at version 0).
+        const nextLiveVersions = { ...prev.liveVersions };
+        delete nextLiveVersions[msg.path];
+        // Phase 4 lays the wiring for delete; Phase 8 polishes the
+        // "this model was deleted on disk" message. Falling back to
+        // selectedPath = null is the sane default — render either the
+        // empty state (when no projects remain) or no editor selection.
+        const nextSelected = prev.selectedPath === msg.path ? null : prev.selectedPath;
+        return {
+          projects: filtered,
+          selectedPath: nextSelected,
+          liveVersions: nextLiveVersions,
+        };
+      });
+    }
   };
 
   private async loadProjects(): Promise<void> {
