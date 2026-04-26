@@ -216,6 +216,42 @@ impl ProjectRegistry {
         }
     }
 
+    /// Move a `.mdl` entry to its `.sd.json` sidecar key after the
+    /// sidecar is created on disk. Carries the version forward (so an
+    /// in-flight optimistic-lock conversation isn't broken by the
+    /// sidecar transition) and switches the format to `SdJson`. The
+    /// `.mdl` key is dropped from the registry.
+    ///
+    /// This rule encodes the design's "sidecar becomes source of truth
+    /// once it exists" semantics at the registry layer: subsequent
+    /// reads (via the GET handler's preference rule, or via the
+    /// registry directly) will see the sidecar, not the `.mdl`.
+    ///
+    /// Returns `RegistryError::NotFound` when no entry exists at
+    /// `mdl_path`. The whole transition runs under the write lock so
+    /// it's atomic w.r.t. concurrent saves.
+    pub fn redirect_to_sidecar(
+        &self,
+        mdl_path: &Path,
+        sidecar_path: PathBuf,
+    ) -> Result<(), RegistryError> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let prev = guard.remove(mdl_path).ok_or(RegistryError::NotFound)?;
+        let new_meta = ProjectMeta {
+            path: relativize(&self.root, &sidecar_path),
+            format: ProjectFormat::SdJson,
+            mtime: prev.mtime,
+            size: prev.size,
+            git: prev.git,
+            version: prev.version,
+        };
+        guard.insert(sidecar_path, new_meta);
+        Ok(())
+    }
+
     /// Number of entries currently in the registry.
     pub fn len(&self) -> usize {
         let guard = self
@@ -467,6 +503,39 @@ mod tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(42),
         );
         assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn redirect_to_sidecar_moves_entry_and_carries_version() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl_abs = root.join("model.mdl");
+        let sidecar_abs = root.join("model.sd.json");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
+        meta.version = 7;
+        reg.upsert(mdl_abs.clone(), meta);
+
+        reg.redirect_to_sidecar(&mdl_abs, sidecar_abs.clone())
+            .expect("redirect succeeds");
+
+        // The .mdl key is gone.
+        assert!(reg.get(&mdl_abs).is_none());
+        // The sidecar key holds the new format with version carried over.
+        let entry = reg.get(&sidecar_abs).expect("sidecar entry");
+        assert_eq!(entry.format, ProjectFormat::SdJson);
+        assert_eq!(entry.version, 7);
+        // The display path is relativized against the registry root.
+        assert_eq!(entry.path, PathBuf::from("model.sd.json"));
+    }
+
+    #[test]
+    fn redirect_to_sidecar_returns_not_found_for_unknown_mdl() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let mdl = PathBuf::from("/tmp/root/missing.mdl");
+        let sidecar = PathBuf::from("/tmp/root/missing.sd.json");
+        let err = reg.redirect_to_sidecar(&mdl, sidecar).unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
     }
 
     #[test]

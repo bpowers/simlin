@@ -91,6 +91,10 @@ pub fn resolve_save_target(absolute_path: &Path, source_format: ProjectFormat) -
 /// Serialize `project` into the format implied by `target`, then write
 /// it atomically. Returns the path that was written so the caller can
 /// stat it for the registry metadata refresh.
+///
+/// `SidecarJson` writes only the sidecar; the `.mdl` is never modified
+/// (the design's "sidecar becomes the new source of truth once it
+/// exists" rule, codified at the writer layer).
 pub fn save_to_disk(
     project: &datamodel::Project,
     target: &SaveTarget,
@@ -101,10 +105,15 @@ pub fn save_to_disk(
             atomic_write_to(path, xmile.as_bytes())?;
             Ok(path.clone())
         }
-        SaveTarget::SidecarJson { .. } | SaveTarget::SdJson(_) => {
-            // Task 6 implements the JSON write paths (sidecar + standalone).
-            // For Task 5 we only land the XMILE in-place path.
-            unimplemented!("Task 6 implements SidecarJson and SdJson")
+        SaveTarget::SidecarJson { sidecar_path, .. } => {
+            let json_str = render_pretty_json(project)?;
+            atomic_write_to(sidecar_path, json_str.as_bytes())?;
+            Ok(sidecar_path.clone())
+        }
+        SaveTarget::SdJson(path) => {
+            let json_str = render_pretty_json(project)?;
+            atomic_write_to(path, json_str.as_bytes())?;
+            Ok(path.clone())
         }
     }
 }
@@ -114,6 +123,13 @@ fn atomic_write_to(path: &Path, bytes: &[u8]) -> Result<(), SaveDiskError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Pretty-printed JSON is chosen for git-friendliness (line-oriented
+/// diffs); we can switch to compact later if file size becomes an issue.
+fn render_pretty_json(project: &datamodel::Project) -> Result<String, SaveDiskError> {
+    let json_project = simlin_engine::json::Project::from(project);
+    serde_json::to_string_pretty(&json_project).map_err(SaveDiskError::JsonSerialize)
 }
 
 /// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Mirrors the
@@ -259,5 +275,100 @@ mod tests {
             SaveDiskError::Io { path, .. } => assert_eq!(path, bogus),
             _ => panic!("expected SaveDiskError::Io, got {err:?}"),
         }
+    }
+
+    #[test]
+    fn save_sidecar_json_writes_to_sidecar_and_leaves_mdl_alone() {
+        let dir = TempDir::new().unwrap();
+        let mdl_path = dir.path().join("model.mdl");
+        let sidecar_path = dir.path().join("model.sd.json");
+
+        // Write a stub .mdl content; the writer must not touch it.
+        let original_mdl_bytes = b"{UTF-8}\n\nplaceholder=1\n  ~\n  ~|\n";
+        fs::write(&mdl_path, original_mdl_bytes).unwrap();
+
+        let target = SaveTarget::SidecarJson {
+            mdl_path: mdl_path.clone(),
+            sidecar_path: sidecar_path.clone(),
+        };
+        let project = empty_project();
+        let written = save_to_disk(&project, &target).expect("write succeeds");
+        assert_eq!(written, sidecar_path, "writer must return the sidecar path");
+
+        // The .mdl file must be byte-identical to what we wrote.
+        let post_mdl = fs::read(&mdl_path).unwrap();
+        assert_eq!(
+            post_mdl,
+            original_mdl_bytes.as_ref(),
+            ".mdl file must not be modified by a sidecar write"
+        );
+
+        // The sidecar must contain valid JSON that round-trips back to the
+        // input project.
+        let sidecar_bytes = fs::read(&sidecar_path).unwrap();
+        let json_project: simlin_engine::json::Project =
+            serde_json::from_slice(&sidecar_bytes).expect("sidecar parses");
+        let reparsed: datamodel::Project = json_project.into();
+        assert_eq!(reparsed.name, project.name);
+        assert_eq!(reparsed.models.len(), project.models.len());
+    }
+
+    #[test]
+    fn save_sidecar_json_writes_pretty_printed_content() {
+        // Pretty-print is the design choice for git-friendliness; if it
+        // ever silently switches to compact, this test catches the drift.
+        let dir = TempDir::new().unwrap();
+        let mdl_path = dir.path().join("model.mdl");
+        let sidecar_path = dir.path().join("model.sd.json");
+        fs::write(&mdl_path, b"placeholder").unwrap();
+
+        let target = SaveTarget::SidecarJson {
+            mdl_path,
+            sidecar_path: sidecar_path.clone(),
+        };
+        let project = empty_project();
+        save_to_disk(&project, &target).unwrap();
+
+        let bytes = fs::read(&sidecar_path).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        // Pretty JSON contains newlines + indentation; compact would not.
+        assert!(s.contains('\n'), "sidecar must be pretty-printed");
+    }
+
+    #[test]
+    fn save_sd_json_writes_in_place() {
+        let dir = TempDir::new().unwrap();
+        let target_path = dir.path().join("model.sd.json");
+        let target = SaveTarget::SdJson(target_path.clone());
+        let project = empty_project();
+
+        let written = save_to_disk(&project, &target).expect("write succeeds");
+        assert_eq!(written, target_path);
+
+        let bytes = fs::read(&target_path).unwrap();
+        let json_project: simlin_engine::json::Project =
+            serde_json::from_slice(&bytes).expect("sd.json parses back");
+        let reparsed: datamodel::Project = json_project.into();
+        assert_eq!(reparsed.name, project.name);
+    }
+
+    #[test]
+    fn save_sd_json_overwrites_existing_file_idempotently() {
+        // Saving twice must produce identical bytes (writer is byte-stable
+        // for the same input regardless of prior state).
+        let dir = TempDir::new().unwrap();
+        let target_path = dir.path().join("model.sd.json");
+        // Pre-seed with arbitrary stale bytes to confirm overwrite works.
+        fs::write(&target_path, b"stale").unwrap();
+        let project = empty_project();
+
+        save_to_disk(&project, &SaveTarget::SdJson(target_path.clone())).unwrap();
+        let bytes_first = fs::read(&target_path).unwrap();
+        save_to_disk(&project, &SaveTarget::SdJson(target_path.clone())).unwrap();
+        let bytes_second = fs::read(&target_path).unwrap();
+        assert_eq!(
+            bytes_first, bytes_second,
+            "JSON serialization must be byte-stable for the same input"
+        );
     }
 }

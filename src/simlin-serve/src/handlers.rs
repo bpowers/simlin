@@ -384,37 +384,72 @@ pub async fn save_project(
         });
     }
 
-    // Resolve the target shape from the request URL's source format
-    // (not the post-sidecar `effective_format` — for `.mdl` we always
-    // want the SidecarJson arm even if the sidecar already exists, and
-    // for `.sd.json` standalone we want the SdJson arm). Subcomponent B
-    // owns the actual SidecarJson + SdJson writing; Task 5 only wires
-    // the InPlaceXmile path.
+    // Resolve the target shape from the request URL's source format.
+    // For `.mdl` we always pick the SidecarJson arm; the registry-side
+    // redirect happens after the write so the new entry replaces the
+    // `.mdl` key with the sidecar key. For `.sd.json` requests
+    // (including ones following an earlier redirect where the frontend
+    // updated its URL state) we use the SdJson arm.
     let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
     let written_path = save_to_disk(&outcome.project, &target)
         .map_err(|e| SaveError::Internal(anyhow::anyhow!("save_to_disk: {e}")))?;
+
+    // For SidecarJson, redirect the registry's `.mdl` key to the new
+    // sidecar key (carrying the just-incremented version forward) so
+    // subsequent reads via either path see the sidecar content. For the
+    // other arms the registry key is unchanged.
+    let registry_key: PathBuf = match &target {
+        SaveTarget::SidecarJson {
+            mdl_path,
+            sidecar_path,
+        } => {
+            // Best-effort: a NotFound here means the entry was concurrently
+            // removed (we just held the write lock for the version check,
+            // so this is unlikely but possible if scan_into_registry ran
+            // between the lock release and here). Log and continue with
+            // the original key; the next list/scan will reconcile.
+            if let Err(e) = state
+                .registry
+                .redirect_to_sidecar(mdl_path, sidecar_path.clone())
+            {
+                tracing::warn!(
+                    error = %e,
+                    "registry redirect_to_sidecar failed; meta refresh may be stale"
+                );
+                resolved.canonical.clone()
+            } else {
+                sidecar_path.clone()
+            }
+        }
+        SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => resolved.canonical.clone(),
+    };
 
     // Refresh the registry's mtime from the freshly-written file so a
     // subsequent listing reflects the new modification time.
     if let Ok(metadata) = std::fs::metadata(&written_path)
         && let Ok(mtime) = metadata.modified()
     {
-        state
-            .registry
-            .refresh_meta_mtime(&resolved.canonical, mtime);
+        state.registry.refresh_meta_mtime(&registry_key, mtime);
     }
 
-    // The relative path returned to the client is unchanged for
-    // InPlaceXmile/SdJson. Subcomponent B's SidecarJson arm rewrites
-    // this when the sidecar redirect happens.
+    // For SidecarJson the response path points at the freshly-created
+    // sidecar so the SPA can update its URL state to follow the
+    // redirect. For the other arms the path is unchanged.
     let response_path = match &target {
-        SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => {
-            path_to_forward_slash(&resolved.relative_path)
+        SaveTarget::SidecarJson { sidecar_path, .. } => {
+            let root_canonical = state.root.canonicalize().map_err(|e| {
+                SaveError::Internal(anyhow::anyhow!(
+                    "canonicalize root {}: {e}",
+                    state.root.display()
+                ))
+            })?;
+            let rel = sidecar_path
+                .strip_prefix(&root_canonical)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| sidecar_path.clone());
+            path_to_forward_slash(&rel)
         }
-        SaveTarget::SidecarJson { .. } => {
-            // Task 6 wires this; for now the in-place path is the safe
-            // fallback (won't be reached because Task 6 lands before any
-            // .mdl request hits this code in production).
+        SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => {
             path_to_forward_slash(&resolved.relative_path)
         }
     };

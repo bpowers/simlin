@@ -4,10 +4,11 @@
 
 // pattern: Imperative Shell
 
-//! Integration tests for `POST /api/projects/{*path}`. Exercises the
-//! version-check + validation portion of Subcomponent A. The actual
-//! disk-write path is covered by Subcomponent B; these tests assert
-//! that the file on disk is *not* modified at this stage.
+//! Integration tests for `POST /api/projects/{*path}`. Covers
+//! version-check + validation (Subcomponent A) plus the format-aware
+//! disk-write paths (Subcomponent B): XMILE in-place overwrite,
+//! `.sd.json` sidecar creation for `.mdl` requests, and the
+//! `.mdl`-untouched invariant.
 
 use std::fs;
 use std::path::PathBuf;
@@ -318,4 +319,163 @@ async fn missing_path_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// AC3.4: Saving an edit to a `.mdl` file writes a sibling
+/// `<basename>.sd.json` and leaves the original `.mdl` untouched.
+/// Also exercises the SaveResponse path-rewrite to the sidecar.
+#[tokio::test]
+async fn save_mdl_creates_sidecar_and_does_not_modify_mdl() {
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+
+    let pre_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+
+    // GET first so we have a canonical-JSON body to send back.
+    let (version, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    assert_eq!(version, 0);
+
+    let body = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+
+    // The response path now points at the sidecar so the SPA can update
+    // its URL state to follow the redirect.
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["version"].as_u64(), Some(1));
+    assert_eq!(response["path"].as_str(), Some("teacup.sd.json"));
+
+    // The .mdl file is byte-identical to before the save.
+    let post_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+    assert_eq!(
+        pre_mdl_bytes, post_mdl_bytes,
+        ".mdl must not be modified by a sidecar write"
+    );
+
+    // The sidecar exists alongside the .mdl with valid JSON content.
+    let sidecar_path = canonical_root.join("teacup.sd.json");
+    assert!(sidecar_path.is_file(), "sidecar must be created on save");
+    let sidecar_bytes = fs::read(&sidecar_path).unwrap();
+    let _: simlin_engine::json::Project =
+        serde_json::from_slice(&sidecar_bytes).expect("sidecar parses as json::Project");
+}
+
+/// AC3.5: After a save creates the sidecar, GET on the original `.mdl`
+/// path returns the sidecar's content (Phase 1 read-side preference,
+/// re-verified end-to-end).
+#[tokio::test]
+async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    // Mutate the project name so the second GET reflects the saved
+    // change rather than just the parsed-from-mdl baseline.
+    let mut json_value: serde_json::Value = serde_json::from_str(&json_body).expect("parse json");
+    json_value["name"] = serde_json::Value::String("post-save-name".to_string());
+    let mutated = serde_json::to_string(&json_value).unwrap();
+
+    let body = serde_json::json!({"json": mutated, "version": 0}).to_string();
+    let (status, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // GET the .mdl path: the sidecar takes precedence, so the response
+    // reflects the saved name.
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "GET",
+        "/api/projects/teacup.mdl",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let response = parse_body(&response_bytes);
+    assert_eq!(
+        response["source_format"].as_str(),
+        Some("sd_json"),
+        "after the sidecar exists, GET serves it as sd_json"
+    );
+    let inner_json: serde_json::Value =
+        serde_json::from_str(response["json"].as_str().unwrap()).unwrap();
+    assert_eq!(inner_json["name"].as_str(), Some("post-save-name"));
+}
+
+/// Idempotence: a second save (using the next version) must continue
+/// to write only to the sidecar; the .mdl stays untouched.
+#[tokio::test]
+async fn second_save_after_sidecar_writes_only_to_sidecar() {
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+
+    let pre_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+
+    // First save: creates the sidecar.
+    let body0 = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let (status0, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body0),
+    )
+    .await;
+    assert_eq!(status0, StatusCode::OK);
+
+    // Second save: the sidecar is now source-of-truth. The version is now
+    // 1 (previous response said so), and the request URL stays at the
+    // sidecar path so we don't hit a 404 — the .mdl key was redirected.
+    let (sidecar_version, sidecar_json) =
+        get_canonical_json(state.clone(), "/api/projects/teacup.sd.json").await;
+    assert_eq!(sidecar_version, 1);
+
+    let body1 = serde_json::json!({"json": sidecar_json, "version": 1}).to_string();
+    let (status1, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.sd.json",
+        Body::from(body1),
+    )
+    .await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+
+    // Final invariants: .mdl untouched, sidecar present, sidecar version 2.
+    let post_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+    assert_eq!(pre_mdl_bytes, post_mdl_bytes);
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["version"].as_u64(), Some(2));
+    assert_eq!(response["path"].as_str(), Some("teacup.sd.json"));
 }
