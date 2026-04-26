@@ -154,7 +154,7 @@ async fn git_commit_flips_registry_entry_from_dirty_to_clean() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

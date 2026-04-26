@@ -28,7 +28,7 @@ use crate::parse::ParseError;
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
-use crate::writer::{SaveTarget, resolve_save_target, save_to_disk};
+use crate::writer::{SaveTarget, commit_write, resolve_save_target, serialize_project};
 
 /// Process-wide state injected into every handler. Cloning is cheap because
 /// each field is `Arc`-shared; the inner data is never copied per-request.
@@ -496,13 +496,31 @@ pub async fn save_project(
     // (including ones following an earlier redirect where the frontend
     // updated its URL state) we use the SdJson arm.
     let target = resolve_save_target(&resolved.canonical, resolved.initial_format);
-    let write_outcome = save_to_disk(&merged_project, &target)
-        .map_err(|e| SaveError::Internal(anyhow::anyhow!("save_to_disk: {e}")))?;
+
+    // Serialize before writing so the echo-suppression hash can be stored in
+    // the registry before the bytes land on disk. Without this ordering the
+    // watcher could fire and compute the same hash while last_disk_hash is
+    // still the old value, causing a spurious Disk-source merge after every
+    // user save.
+    let write_outcome = serialize_project(&merged_project, &target)
+        .map_err(|e| SaveError::Internal(anyhow::anyhow!("serialize_project: {e}")))?;
     let written_path = write_outcome.path.clone();
-    // Compute the echo-suppression hash from the bytes we just wrote.
-    // The Phase 4 watcher uses this to recognize its own atomic-write
-    // events and skip redundant merges.
     let written_hash = crate::hashing::content_hash(&write_outcome.bytes);
+
+    // Store the hash before the OS-visible write so the watcher's echo-
+    // suppression check always sees the new hash by the time the inotify/
+    // FSEvents event fires. The only downside is a small window where the
+    // hash is "ahead" of disk if commit_write fails; in that case the next
+    // real external edit will have a different hash and will still be merged,
+    // so there is no correctness loss.
+    state
+        .registry
+        .prime_echo_hash(&resolved.canonical, written_hash);
+
+    // Commit to disk. The echo-suppression hash is already in the registry
+    // so a watcher event that arrives here will be suppressed correctly.
+    commit_write(&write_outcome)
+        .map_err(|e| SaveError::Internal(anyhow::anyhow!("commit_write: {e}")))?;
 
     // For SidecarJson, redirect the registry's `.mdl` key to the new
     // sidecar key (carrying the just-incremented version forward) so
@@ -546,7 +564,7 @@ pub async fn save_project(
                             git: GitState::Untracked,
                             version: new_version,
                             doc: Default::default(),
-                            last_disk_hash: 0,
+                            last_disk_hash: written_hash,
                         },
                     );
                     sidecar_path.clone()
@@ -558,8 +576,8 @@ pub async fn save_project(
 
     // Refresh the registry's mtime + size + hash from the freshly-written
     // file. The mtime and size feed the SPA's stale-data heuristics; the
-    // hash is the echo-suppression key the Phase 4 watcher uses when it
-    // sees the OS-level write event for the file we just wrote.
+    // hash here is the same pre-computed value already stored by prime_echo_hash
+    // above — refresh_after_write updates all three fields atomically.
     if let Ok(metadata) = std::fs::metadata(&written_path)
         && let Ok(mtime) = metadata.modified()
     {

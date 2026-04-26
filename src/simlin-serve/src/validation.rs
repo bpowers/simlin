@@ -123,10 +123,18 @@ pub fn validate_save(
     let json_project: json::Project =
         serde_json::from_str(json_body).map_err(ValidationFailure::JsonParse)?;
     let project: datamodel::Project = json_project.into();
+    Ok(validate_save_project(&project, baseline))
+}
 
-    // Single pipeline pass: compute wire-shape errors, then derive the
-    // key set from the same Vec rather than re-running the pipeline.
-    let all_errors = run_diagnostics(&project);
+/// Validate a typed `datamodel::Project` against `baseline`. Callers that
+/// already hold a parsed project (the file watcher, the MCP save path)
+/// should use this variant to avoid the serialize-then-parse roundtrip
+/// that `validate_save` performs when called with a JSON string.
+pub fn validate_save_project(
+    project: &datamodel::Project,
+    baseline: &BaselineErrors,
+) -> ValidationOutcome {
+    let all_errors = run_diagnostics(project);
     let new_errors: Vec<ValidationError> = all_errors
         .into_iter()
         .filter(|e| {
@@ -135,10 +143,10 @@ pub fn validate_save(
         })
         .collect();
 
-    Ok(ValidationOutcome {
-        project,
+    ValidationOutcome {
+        project: project.clone(),
         new_errors,
-    })
+    }
 }
 
 /// Run the engine diagnostic pipeline and return only the

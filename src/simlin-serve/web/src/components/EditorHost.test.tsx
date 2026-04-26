@@ -583,6 +583,54 @@ describe('EditorHost', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
+  test('disk event for old path does not fire toast after path switch (path-change race)', async () => {
+    // Render EditorHost with path A and no live event. Then switch to path B
+    // while simultaneously delivering a disk event whose liveVersion=1 was
+    // meant for path A. The toast must NOT appear because the event belongs
+    // to a path that is no longer active.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":"a"}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        // Fetch for path B.
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":"b"}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="a.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    // Switch to path B AND deliver a disk event for path A in the same
+    // render. The componentDidUpdate path checks `prev.path !== this.props.path`
+    // first; on a path change it clears the disk notice state and re-loads,
+    // so the liveVersion gate is never reached for the old path's event.
+    rerender(
+      <EditorHost path="b.stmx" liveVersion={1} liveSource="disk" />,
+    );
+
+    // Give React time to process the update.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // No toast: the disk event belonged to path A, which is no longer loaded.
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
   test('disk toast auto-dismisses after the timeout', async () => {
     jest.useFakeTimers();
     try {

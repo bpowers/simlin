@@ -42,7 +42,7 @@ use notify_debouncer_full::notify::event::{EventKind, ModifyKind};
 use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use tokio::sync::Notify;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{classify_extension, is_excluded_dir};
@@ -51,7 +51,7 @@ use crate::handlers::AppState;
 use crate::hashing::content_hash;
 use crate::parse::parse_to_datamodel;
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
-use crate::validation::{compute_baseline, validate_save};
+use crate::validation::{compute_baseline, validate_save_project};
 
 /// Cross-task shutdown notifier. `main()` constructs one and passes clones
 /// into long-lived actors (the watcher in Phase 4; the websocket loops can
@@ -263,25 +263,6 @@ fn path_to_forward_slash(path: &Path) -> String {
     }
 }
 
-/// Test-only side channel for observing raw debounced events.
-///
-/// The watcher's normal path is to classify and dispatch events through
-/// the actor's handlers. The smoke test (`watcher_smoke.rs`) needs to
-/// observe arrivals before the classification logic exists; rather than
-/// teach `handle_batch` about test hooks, we forward each batch to an
-/// optional `TestHook` *before* dispatching, so production code is
-/// unaffected and the test gets a deterministic observation point.
-#[derive(Clone)]
-pub struct TestHook {
-    sender: UnboundedSender<DebounceEventResult>,
-}
-
-impl TestHook {
-    pub fn new(sender: UnboundedSender<DebounceEventResult>) -> Self {
-        Self { sender }
-    }
-}
-
 /// Long-lived actor that bridges the OS filesystem watcher into tokio.
 pub struct WatcherActor {
     #[allow(dead_code)]
@@ -296,12 +277,12 @@ pub struct WatcherActor {
     /// `num_notify_waiters_calls` counter at construction time, so a
     /// notification that arrives before the first poll still wakes us.
     shutdown: tokio::sync::futures::OwnedNotified,
-    test_hook: Option<TestHook>,
     /// Hold the `Debouncer` so its OS-level watch and tick thread stay
     /// alive for the actor's lifetime. Dropping the actor drops the
     /// debouncer, which signals its background thread to stop and
     /// releases the kernel-level watch.
-    _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    #[allow(dead_code)]
+    debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
 }
 
 impl WatcherActor {
@@ -319,29 +300,12 @@ impl WatcherActor {
             state,
             mut rx,
             shutdown,
-            test_hook,
-            _debouncer,
+            debouncer: _debouncer,
         } = self;
         let mut shutdown = Box::pin(shutdown);
         loop {
             tokio::select! {
                 Some(result) = rx.recv() => {
-                    if let Some(hook) = test_hook.as_ref() {
-                        // Forward an observation copy to the test hook
-                        // before consuming `result` for dispatch. The hook
-                        // sees the success vec or a re-emitted set of
-                        // errors; the underlying `notify::Error` is not
-                        // `Clone`, so we rebuild Err entries through their
-                        // Display form.
-                        let observation: DebounceEventResult = match &result {
-                            Ok(events) => Ok(events.clone()),
-                            Err(errors) => Err(errors
-                                .iter()
-                                .map(|e| notify::Error::generic(&format!("{e}")))
-                                .collect()),
-                        };
-                        let _ = hook.sender.send(observation);
-                    }
                     Self::handle_batch(&state, result).await;
                 }
                 _ = &mut shutdown => {
@@ -438,23 +402,11 @@ impl WatcherActor {
             }
         }
 
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(b) => b,
-            Err(err) => {
-                // The file may have been removed between the event and
-                // the read; that race is an Removed event in disguise
-                // and the dispatch routes it elsewhere. Either way,
-                // there's nothing to merge here.
-                tracing::debug!(
-                    path = %path.display(),
-                    error = %err,
-                    "watcher: read failed (likely vanished); skipping merge"
-                );
-                return;
-            }
-        };
-
-        let new_hash = content_hash(&bytes);
+        // Canonicalize before reading so the bytes come from the path the
+        // registry is keyed by. When `path` and its canonical form differ
+        // (e.g. a symlink inside the watched tree), reading `path` would hash
+        // bytes that may not match the content the registry entry was seeded
+        // with, producing a spurious echo-suppression miss.
         let canonical = match path.canonicalize() {
             Ok(p) => p,
             Err(err) => {
@@ -466,6 +418,24 @@ impl WatcherActor {
                 return;
             }
         };
+
+        let bytes = match tokio::fs::read(&canonical).await {
+            Ok(b) => b,
+            Err(err) => {
+                // The file may have been removed between the event and
+                // the read; that race is a Removed event in disguise
+                // and the dispatch routes it elsewhere. Either way,
+                // there's nothing to merge here.
+                tracing::debug!(
+                    path = %canonical.display(),
+                    error = %err,
+                    "watcher: read failed (likely vanished); skipping merge"
+                );
+                return;
+            }
+        };
+
+        let new_hash = content_hash(&bytes);
 
         // Echo suppression: if the bytes hash to the same value the save
         // handler stored after its own atomic_write, we're seeing our own
@@ -552,6 +522,20 @@ impl WatcherActor {
             }
         };
 
+        let outcome = validate_save_project(&new_project, &baseline);
+        if !outcome.new_errors.is_empty() {
+            tracing::warn!(
+                path = %canonical.display(),
+                errors = ?outcome.new_errors,
+                "watcher: validation failed; preserving last-known-good"
+            );
+            return;
+        }
+
+        // Convert the validated project to canonical JSON for the merge.
+        // This goes through json::Project so the doc always sees the
+        // canonical engine shape regardless of subtle formatting in the
+        // file (case, whitespace, optional-field omission, etc.).
         let canonical_project: simlin_engine::json::Project = (&new_project).into();
         let canonical_value = match serde_json::to_value(&canonical_project) {
             Ok(v) => v,
@@ -564,26 +548,6 @@ impl WatcherActor {
                 return;
             }
         };
-        let canonical_string = canonical_value.to_string();
-        let outcome = match validate_save(&canonical_string, &baseline) {
-            Ok(o) => o,
-            Err(err) => {
-                tracing::warn!(
-                    path = %canonical.display(),
-                    error = %err,
-                    "watcher: validation parse failed; preserving last-known-good"
-                );
-                return;
-            }
-        };
-        if !outcome.new_errors.is_empty() {
-            tracing::warn!(
-                path = %canonical.display(),
-                errors = ?outcome.new_errors,
-                "watcher: validation failed; preserving last-known-good"
-            );
-            return;
-        }
 
         // For a brand-new path the registry has nothing to merge against;
         // ensure a default ProjectMeta exists (with `last_disk_hash = 0`
@@ -671,6 +635,14 @@ impl WatcherActor {
     /// exist; we use the post-strip-prefix relative path that matches
     /// the registry's display key.
     ///
+    /// On Linux, `atomic_write`'s rename generates a `Remove(Any)` event
+    /// for the destination path because the old inode is unlinked, even
+    /// though the file immediately reappears with new content (via
+    /// `IN_MOVED_TO`). We suppress the removal in that case by checking
+    /// whether the file still exists before touching the registry: if it
+    /// does, the next `Create(File)` event in the same batch will drive
+    /// the merge correctly.
+    ///
     /// Sidecar pairing on .mdl: when the .sd.json sidecar is removed the
     /// .mdl theoretically becomes the source-of-truth again. Implementing
     /// that round-trip is documented in the design plan (note 9) and
@@ -679,6 +651,19 @@ impl WatcherActor {
     /// (`remove` is a no-op for unknown keys) so this is safe even when
     /// the path was already absent.
     async fn handle_model_removal(state: &AppState, path: PathBuf, format: Option<ProjectFormat>) {
+        // If the file still exists on disk, the Remove event came from an
+        // atomic rename-over (the old inode was unlinked but the path
+        // immediately reappeared with new content). The subsequent Create
+        // event in this same batch will drive the merge; we must not drop
+        // the registry entry here or echo-suppression loses its state.
+        if path.exists() {
+            tracing::debug!(
+                path = %path.display(),
+                "watcher: Remove event for path that still exists; skipping (atomic-write rename)"
+            );
+            return;
+        }
+
         // The registry key is the canonical path; canonicalize() can't
         // run on a now-deleted file, so we strip the watcher root prefix
         // and recompose against `state.root` (which is canonicalized at
@@ -734,6 +719,12 @@ impl WatcherActor {
     /// for `.git/objects/...` or `.git/refs/...`; if a future change
     /// adds more triggers we'll just process them with the same
     /// "invalidate + re-status" logic.
+    ///
+    /// Recomputation is scoped to known registry entries. Fresh files that
+    /// exist on disk inside the affected repo but are not yet in the registry
+    /// get no update here; they come in via `handle_model_change` when their
+    /// content changes. A `.git/HEAD` event alone does not drive discovery
+    /// of new files.
     async fn handle_git_change(state: &AppState, repo_root: PathBuf) {
         // Resolve `repo_root` against `state.root` if it came in
         // relative (the classifier emits the path-as-given, so a
@@ -809,13 +800,9 @@ impl WatcherActor {
 /// hold onto it (for graceful shutdown / wait-on-exit) — dropping the
 /// handle does not abort the task. The debouncer is moved into the actor
 /// and dropped when the task exits, releasing the OS-level watch.
-///
-/// `test_hook` is `None` in production. Smoke tests pass `Some(hook)` to
-/// observe raw debounced events without depending on the merge layer.
 pub fn spawn_watcher(
     state: AppState,
     shutdown: ShutdownSignal,
-    test_hook: Option<TestHook>,
 ) -> Result<JoinHandle<()>, WatcherError> {
     let (tx, rx) = unbounded_channel::<DebounceEventResult>();
 
@@ -851,8 +838,7 @@ pub fn spawn_watcher(
         state,
         rx,
         shutdown: shutdown_future,
-        test_hook,
-        _debouncer: debouncer,
+        debouncer,
     };
 
     let handle = tokio::spawn(actor.run());
@@ -889,8 +875,7 @@ mod tests {
         let state = build_app_state(dir.path());
         let shutdown: ShutdownSignal = Arc::new(Notify::new());
 
-        let handle =
-            spawn_watcher(state, shutdown.clone(), None).expect("watcher spawns successfully");
+        let handle = spawn_watcher(state, shutdown.clone()).expect("watcher spawns successfully");
 
         shutdown.notify_waiters();
 

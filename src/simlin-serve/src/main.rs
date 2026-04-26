@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (via axum's with_graceful_shutdown) and the watcher actor (via
     // the Notify).
     let watcher_shutdown: ShutdownSignal = Arc::new(tokio::sync::Notify::new());
-    let watcher_handle = match spawn_watcher(state.clone(), watcher_shutdown.clone(), None) {
+    let watcher_handle = match spawn_watcher(state.clone(), watcher_shutdown.clone()) {
         Ok(h) => Some(h),
         Err(err) => {
             // Failing to set up the watcher is non-fatal: the server still

@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Functional Core
+
 //! Content hashing for echo suppression on the file watcher's ingestion path.
 //!
 //! When the save handler atomic-writes a file, the OS watcher (Phase 4) sees

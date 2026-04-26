@@ -87,8 +87,10 @@ pub struct ProjectMeta {
     ///
     /// Defaults to `0` and stays at `0` for entries the server has never
     /// written. A genuine on-disk hash that happens to be `0` would also
-    /// short-circuit, but the false-positive rate is `2^-64` and only
-    /// affects redundant work, not correctness.
+    /// short-circuit, but the false-positive rate is `2^-64` per write of
+    /// arbitrary content; over millions of writes the cumulative rate
+    /// remains negligible. A false positive causes redundant work, not a
+    /// correctness violation.
     #[serde(skip)]
     pub last_disk_hash: u64,
 }
@@ -339,6 +341,24 @@ impl ProjectRegistry {
         if let Some(entry) = guard.get_mut(abs_path) {
             entry.mtime = mtime;
             entry.size = size;
+        }
+    }
+
+    /// Store `hash` as the expected next on-disk fingerprint for `abs_path`
+    /// *before* the bytes are written to disk. This closes the race window
+    /// between `atomic_write` (which fires an OS watcher event) and a
+    /// subsequent `refresh_after_write` call: by the time the watcher sees
+    /// the event, `last_disk_hash` already matches, so the event is
+    /// echo-suppressed without a spurious `ProjectChanged{Disk}` broadcast.
+    ///
+    /// No-op if the path is not in the registry.
+    pub fn prime_echo_hash(&self, abs_path: &Path, hash: u64) {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if let Some(entry) = guard.get_mut(abs_path) {
+            entry.last_disk_hash = hash;
         }
     }
 

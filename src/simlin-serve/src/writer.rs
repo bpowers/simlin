@@ -100,6 +100,50 @@ pub struct WriteOutcome {
     pub bytes: Vec<u8>,
 }
 
+/// Serialize `project` to the byte representation implied by `target`
+/// without touching the filesystem. The returned `WriteOutcome` carries
+/// the target path and the serialized bytes.
+///
+/// Callers that need the hash for echo-suppression before the disk write
+/// (to close the watcher-fires-before-hash-is-stored race) should call
+/// this, record the hash, then call `commit_write` to flush the bytes.
+pub fn serialize_project(
+    project: &datamodel::Project,
+    target: &SaveTarget,
+) -> Result<WriteOutcome, SaveDiskError> {
+    match target {
+        SaveTarget::InPlaceXmile(path) => {
+            let xmile = simlin_engine::to_xmile(project).map_err(SaveDiskError::XmileSerialize)?;
+            Ok(WriteOutcome {
+                path: path.clone(),
+                bytes: xmile.into_bytes(),
+            })
+        }
+        SaveTarget::SidecarJson { sidecar_path, .. } => {
+            let json_str = render_pretty_json(project)?;
+            Ok(WriteOutcome {
+                path: sidecar_path.clone(),
+                bytes: json_str.into_bytes(),
+            })
+        }
+        SaveTarget::SdJson(path) => {
+            let json_str = render_pretty_json(project)?;
+            Ok(WriteOutcome {
+                path: path.clone(),
+                bytes: json_str.into_bytes(),
+            })
+        }
+    }
+}
+
+/// Flush a `WriteOutcome`'s bytes to disk atomically (tempfile + rename).
+/// Counterpart to `serialize_project`; together they give callers the
+/// ability to precompute the hash and update registry state before the
+/// OS-visible write event fires.
+pub fn commit_write(outcome: &WriteOutcome) -> Result<(), SaveDiskError> {
+    atomic_write_to(&outcome.path, &outcome.bytes)
+}
+
 /// Serialize `project` into the format implied by `target`, then write
 /// it atomically. Returns the path that was written and the exact bytes
 /// emitted, so the caller can both stat for registry metadata and

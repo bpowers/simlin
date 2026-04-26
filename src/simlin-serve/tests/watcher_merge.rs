@@ -19,6 +19,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use simlin_serve::build_router;
 use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
 use simlin_serve::git::GitProbe;
 use simlin_serve::handlers::AppState;
@@ -30,6 +33,7 @@ use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
+use tower::ServiceExt;
 
 /// Helper: build an `AppState` rooted at `dir` with a fresh registry, no
 /// git visibility, and an `EventBus`.
@@ -166,7 +170,7 @@ async fn external_disk_edit_triggers_disk_source_broadcast() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     // Give the OS-level watch a moment to register; otherwise the file
     // write below races the watch setup and the event never arrives.
@@ -212,7 +216,7 @@ async fn echo_suppression_skips_byte_identical_disk_writes() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -263,7 +267,7 @@ async fn browser_and_disk_edits_both_preserved_via_merge() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -357,7 +361,7 @@ async fn invalid_json_disk_write_does_not_merge() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -409,7 +413,7 @@ async fn mdl_event_ignored_when_sidecar_exists() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -439,7 +443,7 @@ async fn create_event_for_new_path_adds_registry_entry_and_broadcasts() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -489,7 +493,7 @@ async fn external_remove_drops_registry_entry_and_broadcasts_removed() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -531,7 +535,7 @@ async fn remove_of_untracked_path_is_silent() {
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
-    let _watcher = spawn_watcher(state.clone(), shutdown.clone(), None).expect("spawn watcher");
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -561,4 +565,78 @@ fn merge_disk_change_returns_not_found_when_registry_has_no_entry() {
         .merge_disk_change(&canonical.join("not-tracked.stmx"), &serde_json::json!({}))
         .unwrap_err();
     assert_eq!(err, RegistryError::NotFound);
+}
+
+/// AC4.4 (save path): a POST /api/projects save must NOT produce a
+/// `ProjectChanged { source: Disk }` event — the watcher echo-suppression
+/// must catch the atomic_write and suppress the re-merge. This tests the
+/// pre-write hash ordering fix: `prime_echo_hash` runs before
+/// `commit_write` so the hash is already in the registry when the OS
+/// event fires.
+#[tokio::test]
+async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
+    let dir = TempDir::new().expect("tempdir");
+    let abs = dir.path().join("model.sd.json");
+    let initial = sd_json("save-echo-test");
+    std::fs::write(&abs, &initial).expect("write initial");
+    let abs_canonical = abs.canonicalize().expect("canonicalize abs");
+
+    let state = build_state(dir.path());
+    seed_registry(
+        &state,
+        &abs_canonical,
+        ProjectFormat::SdJson,
+        content_hash(initial.as_bytes()),
+    );
+
+    let shutdown: ShutdownSignal = Arc::new(Notify::new());
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+
+    // Subscribe AFTER spawning the watcher so we don't pick up any startup
+    // events; the broadcast channel has no replay.
+    let mut rx = state.events.subscribe();
+
+    // Wait longer than the 100ms debounce window so any spurious events
+    // from watcher startup are flushed before the HTTP save drives the
+    // write we're actually testing against.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Drive a save via the HTTP layer; version 0 -> 1.
+    let router = build_router(state.clone());
+    let updated = sd_json("save-echo-test-renamed");
+    let body = serde_json::json!({
+        "json": updated,
+        "version": 0,
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/projects/model.sd.json")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("build request");
+    let response = router.oneshot(request).await.expect("POST save");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "save handler must return 200"
+    );
+
+    // Wait long enough for the watcher debounce window to flush (100ms)
+    // plus a generous processing budget. A Disk-source event here would
+    // indicate the echo-suppression hash was stored AFTER the OS write
+    // event fired, triggering a spurious re-merge.
+    let no_disk_event = tokio::time::timeout(
+        Duration::from_millis(800),
+        await_disk_event(&mut rx, Duration::from_millis(800)),
+    )
+    .await;
+    if let Ok(Some(ev)) = no_disk_event {
+        panic!("save handler must not produce a Disk-source event; got: {ev:?}");
+    }
+
+    // The version is 1 from the save; the watcher must not have pushed it to 2.
+    let entry = state.registry.get(&abs_canonical).expect("entry");
+    assert_eq!(entry.version, 1, "version must be exactly 1 after the save");
+
+    shutdown.notify_waiters();
 }
