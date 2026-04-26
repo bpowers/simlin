@@ -108,6 +108,150 @@ fn canonicalize_within_root(state: &AppState, abs_path: &Path) -> Result<PathBuf
     Ok(canonical)
 }
 
+/// Path-traversal check for paths whose target does not yet exist
+/// (`create`). Walks up the path parents until we find one that exists,
+/// canonicalizes it, and confirms it lives under the canonicalized
+/// registry root. Returns the absolute path with `.` and `..` segments
+/// resolved — which the caller passes to `atomic_write`.
+///
+/// We walk up rather than canonicalizing the leaf because `canonicalize`
+/// requires the path to exist; a fresh model file by definition does not.
+/// Walking up means we still defend against a `..` chain that would
+/// escape the tree even if every named directory along the chain is
+/// non-existent (since the deepest *existing* ancestor still has to be
+/// inside the root).
+fn resolve_create_path_within_root(
+    state: &AppState,
+    abs_path: &Path,
+) -> Result<PathBuf, AccessError> {
+    let root_canonical = state
+        .root
+        .canonicalize()
+        .map_err(|_| AccessError::NotFound {
+            path: abs_path.to_path_buf(),
+        })?;
+
+    // Find the deepest existing ancestor and canonicalize from there.
+    let mut existing_ancestor = abs_path;
+    while !existing_ancestor.exists() {
+        match existing_ancestor.parent() {
+            Some(parent) => existing_ancestor = parent,
+            None => {
+                return Err(AccessError::NotFound {
+                    path: abs_path.to_path_buf(),
+                });
+            }
+        }
+    }
+    let canonical_ancestor =
+        existing_ancestor
+            .canonicalize()
+            .map_err(|_| AccessError::NotFound {
+                path: abs_path.to_path_buf(),
+            })?;
+    if !canonical_ancestor.starts_with(&root_canonical) {
+        return Err(AccessError::NotFound {
+            path: abs_path.to_path_buf(),
+        });
+    }
+
+    // Compose the canonical absolute path: canonical_ancestor + the
+    // remainder of abs_path. lexically_resolve_remainder collapses any
+    // `.` components and rejects `..` (since the rest of the path was
+    // never part of the canonical ancestor).
+    let remainder = abs_path
+        .strip_prefix(existing_ancestor)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| abs_path.to_path_buf());
+    let mut resolved = canonical_ancestor;
+    for component in remainder.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+            }
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                return Err(AccessError::NotFound {
+                    path: abs_path.to_path_buf(),
+                });
+            }
+        }
+    }
+
+    if !resolved.starts_with(&root_canonical) {
+        return Err(AccessError::NotFound {
+            path: abs_path.to_path_buf(),
+        });
+    }
+    Ok(resolved)
+}
+
+/// Pick the on-disk `ProjectFormat` for a fresh file based on its
+/// extension. This is the writer-side analogue of the reader-side
+/// `format_for_path` in `handlers.rs`. We dispatch on extension rather
+/// than the caller-supplied `SourceFormat` because the caller's
+/// perception of the project's *content* shape (Xmile vs NativeJson)
+/// can disagree with how the file is stored on disk; the on-disk
+/// extension is authoritative for the registry entry.
+///
+/// `.mdl` is rejected: simlin-mcp's read-only-mdl semantics extend to
+/// `create` — agents that want to author a new model produce
+/// `.stmx`/`.xmile`/`.sd.json` files. Subsequent saves can sidecar a
+/// pre-existing `.mdl`, but agents do not introduce new ones.
+fn project_format_for_create(abs_path: &Path) -> Result<ProjectFormat, AccessError> {
+    let path_str = abs_path.to_string_lossy().to_lowercase();
+    if path_str.ends_with(".sd.json") {
+        return Ok(ProjectFormat::SdJson);
+    }
+    let ext = abs_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("stmx") => Ok(ProjectFormat::Stmx),
+        Some("xmile") | Some("xml") => Ok(ProjectFormat::Xmile),
+        Some("mdl") => Err(AccessError::WriteError(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            ".mdl files are read-only. Use .stmx, .xmile, or .sd.json for new models.",
+        ))),
+        _ => Err(AccessError::WriteError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "unrecognized file extension for create: {}",
+                abs_path.display()
+            ),
+        ))),
+    }
+}
+
+/// Serialize `project` to bytes appropriate for the on-disk `ProjectFormat`.
+/// XMILE files use the engine's `to_xmile` (the same byte-stable
+/// serializer the writer module uses for in-place saves); JSON files
+/// use pretty-printed JSON for git-friendly diffs.
+fn serialize_for_create(
+    project: &datamodel::Project,
+    format: ProjectFormat,
+) -> Result<Vec<u8>, AccessError> {
+    match format {
+        ProjectFormat::Stmx | ProjectFormat::Xmile => {
+            let xmile = simlin_engine::to_xmile(project)
+                .map_err(|e| AccessError::ParseError(anyhow::anyhow!("serialize XMILE: {e:?}")))?;
+            Ok(xmile.into_bytes())
+        }
+        ProjectFormat::SdJson => {
+            let json_project = simlin_engine::json::Project::from(project);
+            serde_json::to_vec_pretty(&json_project)
+                .map_err(|e| AccessError::ParseError(anyhow::anyhow!("serialize JSON: {e}")))
+        }
+        ProjectFormat::Mdl => Err(AccessError::WriteError(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            ".mdl write is not supported by RegistryAccess::create",
+        ))),
+    }
+}
+
 impl ProjectAccess for RegistryAccess {
     async fn open(&self, abs_path: &Path) -> Result<OpenedProject, AccessError> {
         let canonical = canonicalize_within_root(&self.state, abs_path)?;
@@ -376,15 +520,84 @@ impl ProjectAccess for RegistryAccess {
 
     async fn create(
         &self,
-        _abs_path: &Path,
-        _project: &datamodel::Project,
+        abs_path: &Path,
+        project: &datamodel::Project,
         _format: SourceFormat,
     ) -> Result<(), AccessError> {
-        // Implemented in Task 3.
-        Err(AccessError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "RegistryAccess::create not yet implemented",
-        )))
+        // The path doesn't exist yet, so we can't canonicalize it directly.
+        // resolve_create_path_within_root canonicalizes the deepest
+        // existing ancestor and rebuilds the path from there, rejecting
+        // any `..` segment that would escape the tree.
+        let resolved = resolve_create_path_within_root(&self.state, abs_path)?;
+
+        if resolved.exists() {
+            return Err(AccessError::WriteError(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("file already exists: {}", resolved.display()),
+            )));
+        }
+
+        let project_format = project_format_for_create(&resolved)?;
+
+        if let Some(parent) = resolved.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(AccessError::WriteError)?;
+        }
+
+        let bytes = serialize_for_create(project, project_format)?;
+        simlin_engine::io::atomic_write(&resolved, &bytes).map_err(AccessError::WriteError)?;
+        let written_hash = content_hash(&bytes);
+
+        // Stat the freshly-written file so the registry entry carries the
+        // real on-disk size and mtime. If stat fails (vanishingly unlikely
+        // since we just wrote the file), fall back to UNIX_EPOCH/byte-len
+        // — the next scan or save will refresh.
+        let (mtime, size) = match std::fs::metadata(&resolved) {
+            Ok(m) => (
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                m.len(),
+            ),
+            Err(_) => (std::time::SystemTime::UNIX_EPOCH, bytes.len() as u64),
+        };
+
+        // upsert_max_version is the safe choice in case a concurrent
+        // scanner already inserted an entry with a non-zero version.
+        // For a brand-new file this is effectively the same as upsert.
+        self.state.registry.upsert_max_version(
+            resolved.clone(),
+            ProjectMeta {
+                path: PathBuf::new(),
+                format: project_format,
+                mtime,
+                size,
+                git: GitState::Untracked,
+                version: 0,
+                doc: Default::default(),
+                last_disk_hash: written_hash,
+            },
+        );
+
+        let root_canonical = self.state.root.canonicalize().map_err(|e| {
+            AccessError::IoError(std::io::Error::other(format!(
+                "canonicalize root for broadcast: {e}"
+            )))
+        })?;
+        let rel = resolved
+            .strip_prefix(&root_canonical)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| resolved.clone());
+        let rel_str = path_to_forward_slash(&rel);
+
+        self.state.events.publish(WsMessage::ProjectChanged {
+            path: rel_str,
+            version: 0,
+            source: ChangeSource::Agent,
+        });
+
+        Ok(())
     }
 }
 

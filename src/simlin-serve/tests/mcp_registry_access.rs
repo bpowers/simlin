@@ -306,6 +306,130 @@ async fn browser_save_and_mcp_save_are_both_observable_in_the_loro_doc() {
     assert_eq!(mcp_aux["equation"].as_str(), Some("1234"));
 }
 
+// ---- Task 3: RegistryAccess::create ----
+
+/// Build a minimal valid native-JSON project for create tests. Uses the
+/// engine's json::Project so the conversion path is exercised end-to-end.
+fn minimal_project(name: &str) -> simlin_engine::datamodel::Project {
+    let json_body = format!(
+        r#"{{
+            "name": "{name}",
+            "simSpecs": {{"startTime": 0, "endTime": 10, "dt": "1", "method": "euler"}},
+            "models": [{{"name": "main"}}]
+        }}"#
+    );
+    let json_project: simlin_engine::json::Project =
+        serde_json::from_str(&json_body).expect("test fixture parses");
+    json_project.into()
+}
+
+#[tokio::test]
+async fn create_writes_new_sd_json_and_registers_entry() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = canonical_root.join("brand-new.sd.json");
+    let state = build_state(canonical_root.clone());
+
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("brand-new");
+    access
+        .create(&abs, &project, SourceFormat::NativeJson)
+        .await
+        .expect("create");
+
+    assert!(abs.is_file(), "create must place the file on disk");
+    let bytes = fs::read(&abs).expect("read created file");
+    let parsed: simlin_engine::json::Project =
+        serde_json::from_slice(&bytes).expect("created file parses as native JSON");
+    assert_eq!(parsed.name, "brand-new");
+
+    let meta = state
+        .registry
+        .get(&abs)
+        .expect("registry must hold an entry for the created path");
+    assert_eq!(meta.format, ProjectFormat::SdJson);
+    assert_eq!(meta.version, 0);
+    assert_eq!(meta.size, bytes.len() as u64);
+}
+
+#[tokio::test]
+async fn create_writes_xmile_for_stmx_extension() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = canonical_root.join("nested").join("model.stmx");
+    let state = build_state(canonical_root.clone());
+
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("xmile-creation");
+    access
+        .create(&abs, &project, SourceFormat::Xmile)
+        .await
+        .expect("create");
+
+    assert!(abs.is_file(), "create must mkdir-p the parent directory");
+    let bytes = fs::read(&abs).expect("read created file");
+    let mut reader = std::io::Cursor::new(&bytes[..]);
+    let parsed = simlin_engine::open_xmile(&mut reader).expect("created XMILE parses");
+    assert_eq!(parsed.name, "xmile-creation");
+
+    let meta = state.registry.get(&abs).expect("registry holds entry");
+    assert_eq!(meta.format, ProjectFormat::Stmx);
+    assert_eq!(meta.version, 0);
+}
+
+#[tokio::test]
+async fn create_rejects_existing_file() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = canonical_root.join("preexisting.sd.json");
+    fs::write(&abs, b"{}").expect("seed existing file");
+    let state = build_state(canonical_root.clone());
+
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("collision");
+    match access
+        .create(&abs, &project, SourceFormat::NativeJson)
+        .await
+    {
+        Err(simlin_mcp_core::errors::AccessError::IoError(io_err))
+        | Err(simlin_mcp_core::errors::AccessError::WriteError(io_err)) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+        Err(other) => panic!("expected AlreadyExists, got {other:?}"),
+        Ok(_) => panic!("expected AlreadyExists, got Ok"),
+    }
+}
+
+#[tokio::test]
+async fn create_broadcasts_project_changed_with_agent_source_and_version_zero() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = canonical_root.join("announce.sd.json");
+    let state = build_state(canonical_root.clone());
+
+    let access = RegistryAccess::new(state.clone());
+    let mut rx = state.events.subscribe();
+
+    access
+        .create(&abs, &minimal_project("announce"), SourceFormat::NativeJson)
+        .await
+        .expect("create");
+
+    let event = await_event(&mut rx, |_| true).await;
+    match event {
+        WsMessage::ProjectChanged {
+            path,
+            version,
+            source,
+        } => {
+            assert_eq!(version, 0, "newly-created entries are at version 0");
+            assert_eq!(source, ChangeSource::Agent);
+            assert_eq!(path, "announce.sd.json");
+        }
+        WsMessage::ProjectRemoved { .. } => panic!("did not expect ProjectRemoved"),
+    }
+}
+
 #[tokio::test]
 async fn mcp_save_for_mdl_writes_sidecar_and_leaves_mdl_unchanged() {
     let temp = TempDir::new().expect("tempdir");
