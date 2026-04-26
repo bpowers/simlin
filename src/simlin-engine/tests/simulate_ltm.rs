@@ -4282,21 +4282,18 @@ fn test_cross_element_ltm_exhaustive() {
     }
 }
 
-/// AC1.3 (Phase 1 red test): truthful per-reference element edge set
-/// for the cross-element fixture.
+/// AC1.3: truthful per-reference element edge set for the cross-element
+/// fixture.
 ///
-/// Today's element-graph builder collapses every reference to a source
-/// variable to one `ElementDependencyKind` per (source, target) pair. A
-/// fixed-index reference like `migration_pressure[Boston]` upgrades the
-/// entire edge to `CrossElement`, which then expands to all N x N edges
-/// from every `migration_pressure[*]` to every `migration_in[*]`. Two of
-/// those edges are spurious: `migration_in[NYC]` references only
-/// `migration_pressure[Boston]`, never `migration_pressure[NYC]`.
-///
-/// After Phase 2's AST-walking refactor, the truthful per-reference edges
-/// asserted below become the actual output. The two `assert_no_edge` calls
-/// are the "red" part of this test: they fail today and start passing
-/// when the refactor lands.
+/// `model_element_causal_edges` walks each target's `Expr2` AST and emits
+/// element edges per reference site, classifying each reference by its
+/// `RefShape`. A fixed-index reference like `migration_pressure[Boston]`
+/// is classified as `FixedIndex(Boston)` and emits one edge from
+/// `migration_pressure[boston]` to the target, rather than expanding to
+/// all N x N edges. The two `assert_no_edge` calls verify that
+/// `migration_in[NYC]` -- which references only
+/// `migration_pressure[Boston]` -- does not pick up a spurious
+/// `migration_pressure[NYC] -> migration_in[NYC]` edge.
 #[test]
 fn test_cross_element_ltm_edge_set_truthful() {
     let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");

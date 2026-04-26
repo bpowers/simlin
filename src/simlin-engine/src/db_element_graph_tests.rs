@@ -644,21 +644,16 @@ fn scalar_model_loops_and_partitions_identical() {
     );
 }
 
-// ---- Per-reference element-graph edge-set tests (Phase 1: red-phase) ----
+// ---- Per-reference element-graph edge-set tests ----
 //
-// The following three tests pin the desired post-refactor behavior of the
-// element-level causal graph. Today's classifier collapses every reference
-// to a source variable to one `ElementDependencyKind` per (source, target)
-// pair, which over-approximates fixed-index references as full N x N
-// expansion. After Phase 2 introduces an AST-walking element-graph
-// builder, edge emission becomes per-reference and the truthful edge sets
-// asserted below become the actual output.
-//
-// All three tests stay `#[ignore]` during Phase 1 even though AC1.2 and
-// AC1.5 already pass with today's code -- this preserves the post-refactor
-// green path under the "one-shot turn-on" convention: Phase 2 removes the
-// `#[ignore]` attribute on all three together when the new builder lands,
-// and any test that quietly regresses is caught by the same flip.
+// These tests pin the per-reference element-graph behavior implemented in
+// Phase 2. `model_element_causal_edges` walks each target's `Expr2` AST,
+// classifies each reference by its `RefShape` (`Bare`, `FixedIndex`,
+// `Wildcard`, or `DynamicIndex`), and emits edges per occurrence rather
+// than per `(source, target)` pair. The earlier classifier collapsed
+// every reference into a single kind and over-approximated fixed-index
+// references as a full N x N expansion; the asserted edge sets below
+// reflect the truthful per-reference output.
 
 /// AC1.1: Fixed-index broadcast must not be over-expanded.
 ///
