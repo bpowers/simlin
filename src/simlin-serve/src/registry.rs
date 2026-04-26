@@ -18,6 +18,9 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use crate::loro_doc::{MergeError, ProjectDoc};
+use crate::parse::{ParseError, parse_to_datamodel};
+
 /// Source-format hint for a discovered project. Lowercased on the wire so the
 /// SPA can switch on string discriminants without re-encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -66,11 +69,20 @@ pub struct ProjectMeta {
     /// increment on each successful save so the SPA can detect concurrent
     /// modification.
     pub version: u64,
+    /// Lazily-hydrated in-memory CRDT document for this project.
+    /// `None` until the first read or write; populated by
+    /// `ProjectRegistry::get_or_init_doc`. Skipped in `Serialize`
+    /// (the SPA never sees it on the wire) and lives behind an
+    /// `Arc<RwLock<Option<...>>>` so cloned `ProjectMeta` instances
+    /// share the same hydration slot — initializing through one clone
+    /// is observable through every other.
+    #[serde(skip)]
+    pub doc: Arc<RwLock<Option<Arc<ProjectDoc>>>>,
 }
 
 /// Failures produced by registry operations that need to report a
 /// distinguishable error rather than just succeed-or-do-nothing.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum RegistryError {
     /// No entry exists for the given absolute path.
     NotFound,
@@ -78,7 +90,36 @@ pub enum RegistryError {
     /// version. `actual` is the current value as observed under the lock so
     /// the caller can refetch against it.
     VersionMismatch { expected: u64, actual: u64 },
+    /// Lazy `ProjectDoc` hydration failed (file disappeared between
+    /// discovery and first access, parse failure, etc.). Carries the
+    /// underlying cause so callers can surface a useful error to the
+    /// client. Phase 4's file watcher will further mitigate the
+    /// "file disappeared" race by keeping the registry's view of
+    /// the filesystem fresh.
+    HydrationFailed(String),
 }
+
+impl PartialEq for RegistryError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RegistryError::NotFound, RegistryError::NotFound) => true,
+            (
+                RegistryError::VersionMismatch {
+                    expected: a,
+                    actual: b,
+                },
+                RegistryError::VersionMismatch {
+                    expected: c,
+                    actual: d,
+                },
+            ) => a == c && b == d,
+            (RegistryError::HydrationFailed(a), RegistryError::HydrationFailed(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RegistryError {}
 
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,6 +128,7 @@ impl std::fmt::Display for RegistryError {
             RegistryError::VersionMismatch { expected, actual } => {
                 write!(f, "version mismatch: expected {expected}, actual {actual}")
             }
+            RegistryError::HydrationFailed(msg) => write!(f, "doc hydration failed: {msg}"),
         }
     }
 }
@@ -325,9 +367,47 @@ impl ProjectRegistry {
             size: prev.size,
             git: prev.git,
             version,
+            // Drop the previous doc so the next read re-hydrates from
+            // the freshly-written sidecar. Carrying the doc forward
+            // would leak the parsed-from-`.mdl` content past the save
+            // that produced the sidecar — Phase 3 Task 8 (Subcomponent
+            // B) will replace this drop with an in-memory merge so the
+            // doc is updated alongside the disk write rather than
+            // discarded.
+            doc: Default::default(),
         };
         guard.insert(sidecar_path, new_meta);
         Ok(())
+    }
+
+    /// Drop the cached `ProjectDoc` for `abs_path` so the next read
+    /// re-hydrates from disk.
+    ///
+    /// Phase 3 stop-gap: until Task 8 (Subcomponent B) routes saves
+    /// through `apply_canonical_json` against the doc, the save handler
+    /// writes to disk without touching the doc — leaving the cache
+    /// stale. Calling this from the save handler keeps the
+    /// "next GET reflects what's on disk" invariant intact at the cost
+    /// of a re-parse on the next read. Once Task 8 lands, this becomes
+    /// unnecessary (saves merge into the doc directly) and can be
+    /// removed.
+    pub fn invalidate_doc(&self, abs_path: &Path) {
+        let guard = self
+            .inner
+            .read()
+            .expect("registry RwLock poisoned by panic in another thread");
+        if let Some(entry) = guard.get(abs_path) {
+            let doc_slot = entry.doc.clone();
+            // Release the registry read lock before taking the doc
+            // write lock to keep the order consistent with the
+            // hydration path (which only ever holds these locks in
+            // registry-then-doc order).
+            drop(guard);
+            let mut doc_guard = doc_slot
+                .write()
+                .expect("doc RwLock poisoned by panic in another thread");
+            *doc_guard = None;
+        }
     }
 
     /// Number of entries currently in the registry.
@@ -343,6 +423,101 @@ impl ProjectRegistry {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Lazily construct the in-memory `ProjectDoc` for `abs_path`.
+    ///
+    /// First call: reads the file, parses it through the existing
+    /// extension-driven dispatcher, converts to canonical JSON, then
+    /// applies that JSON into a fresh `ProjectDoc`. The result is
+    /// cached on the entry's `doc` slot and returned.
+    ///
+    /// Subsequent calls return the cached `Arc<ProjectDoc>` without
+    /// touching disk — this is the key property that makes the doc the
+    /// source of truth for reads after first access.
+    ///
+    /// Returns:
+    /// - `RegistryError::NotFound` if no entry exists for `abs_path`.
+    /// - `RegistryError::HydrationFailed(msg)` if the file is missing,
+    ///   unreadable, or parses to something that doesn't fit the
+    ///   project schema.
+    ///
+    /// The hydration path holds the entry's `doc` write lock across the
+    /// disk read + parse + apply. This is fine for first-touch (the lock
+    /// is uncontended) and for the "two callers race the first hydration"
+    /// case the second waits for the first to finish, then sees the cached
+    /// `Some` and returns immediately.
+    pub fn get_or_init_doc(&self, abs_path: &Path) -> Result<Arc<ProjectDoc>, RegistryError> {
+        // Look up the entry's doc slot. We clone the outer Arc here so
+        // the registry's HashMap lock is released before we hold the
+        // per-entry doc lock — keeps the registry-wide lock as short as
+        // possible (other reads/writes against unrelated entries can
+        // proceed concurrently).
+        let doc_slot = {
+            let guard = self
+                .inner
+                .read()
+                .expect("registry RwLock poisoned by panic in another thread");
+            let entry = guard.get(abs_path).ok_or(RegistryError::NotFound)?;
+            entry.doc.clone()
+        };
+
+        // Fast path: doc already hydrated.
+        {
+            let read_guard = doc_slot
+                .read()
+                .expect("doc RwLock poisoned by panic in another thread");
+            if let Some(existing) = read_guard.as_ref() {
+                return Ok(existing.clone());
+            }
+        }
+
+        // Slow path: hydrate under the entry's write lock. The registry
+        // lookup above only told us *whether* the doc was hydrated; once
+        // we have the write lock we re-check, since another caller may
+        // have raced us between the read-unlock and the write-acquire.
+        let mut write_guard = doc_slot
+            .write()
+            .expect("doc RwLock poisoned by panic in another thread");
+        if let Some(existing) = write_guard.as_ref() {
+            return Ok(existing.clone());
+        }
+
+        // Need the entry's format to dispatch the parser. Re-read it
+        // here because the entry's other fields (mtime, size) may have
+        // changed since the initial lookup; we want the format actually
+        // recorded right now.
+        let format = {
+            let guard = self
+                .inner
+                .read()
+                .expect("registry RwLock poisoned by panic in another thread");
+            guard.get(abs_path).ok_or(RegistryError::NotFound)?.format
+        };
+
+        let doc = hydrate_doc_from_disk(abs_path, format)?;
+        let arc_doc = Arc::new(doc);
+        *write_guard = Some(arc_doc.clone());
+        Ok(arc_doc)
+    }
+}
+
+/// Read `path`, parse it via the project format dispatcher, convert
+/// to canonical JSON, and apply that into a fresh `ProjectDoc`. Errors
+/// (file missing, parse failure, merge failure) all surface as
+/// `RegistryError::HydrationFailed` with a human-readable message.
+fn hydrate_doc_from_disk(path: &Path, format: ProjectFormat) -> Result<ProjectDoc, RegistryError> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| RegistryError::HydrationFailed(format!("read {}: {e}", path.display())))?;
+    let project = parse_to_datamodel(path, format, &contents).map_err(|e: ParseError| {
+        RegistryError::HydrationFailed(format!("parse {}: {e}", path.display()))
+    })?;
+    let json_project: simlin_engine::json::Project = (&project).into();
+    let json_value = serde_json::to_value(&json_project)
+        .map_err(|e| RegistryError::HydrationFailed(format!("serialize project: {e}")))?;
+    let doc = ProjectDoc::new();
+    doc.apply_canonical_json(&json_value)
+        .map_err(|e: MergeError| RegistryError::HydrationFailed(format!("apply: {e}")))?;
+    Ok(doc)
 }
 
 /// Compute `absolute.strip_prefix(root)`, falling back to the full absolute
@@ -369,6 +544,7 @@ mod tests {
             size: 42,
             git: GitState::Untracked,
             version: 0,
+            doc: Default::default(),
         }
     }
 
@@ -459,6 +635,7 @@ mod tests {
                 size: 1,
                 git: GitState::Untracked,
                 version: 0,
+                doc: Default::default(),
             },
         );
         reg.upsert(
@@ -470,6 +647,7 @@ mod tests {
                 size: 999,
                 git: GitState::Tracked { dirty: true },
                 version: 0,
+                doc: Default::default(),
             },
         );
 
@@ -849,6 +1027,7 @@ mod tests {
                 size: 0,
                 git: GitState::Untracked,
                 version: new_version,
+                doc: Default::default(),
             },
         );
 
@@ -892,11 +1071,104 @@ mod tests {
                 size: 0,
                 git: GitState::Untracked,
                 version: new_version,
+                doc: Default::default(),
             },
         );
 
         // Version must remain 20 (max(7, 20)), not roll back to 7.
         let entry = reg.get(&sidecar_abs).expect("sidecar entry");
         assert_eq!(entry.version, 20, "version must not roll backward");
+    }
+
+    #[test]
+    fn get_or_init_doc_returns_not_found_for_unknown_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let err = reg
+            .get_or_init_doc(Path::new("/tmp/root/missing.stmx"))
+            .unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+    }
+
+    #[test]
+    fn get_or_init_doc_hydration_fails_with_useful_message_when_file_missing() {
+        // Insert an entry pointing at a path that doesn't exist on disk.
+        // Hydration must surface HydrationFailed with a message naming
+        // the missing path so the API layer can surface it usefully.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("does-not-exist.stmx");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx),
+        );
+
+        let err = reg.get_or_init_doc(&abs).unwrap_err();
+        match err {
+            RegistryError::HydrationFailed(msg) => {
+                assert!(
+                    msg.contains(abs.to_str().unwrap()) || msg.contains("does-not-exist"),
+                    "hydration error should mention the missing path: {msg}"
+                );
+            }
+            other => panic!("expected HydrationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_or_init_doc_hydrates_a_real_file_and_caches_it() {
+        // Write a minimal sd.json to disk, register it, and hydrate.
+        // Two consecutive calls should return Arcs that point at the
+        // same underlying ProjectDoc (same allocation), demonstrating
+        // the caching property.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("model.sd.json");
+        let json = r#"{"name":"demo","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, json).expect("write file");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson),
+        );
+
+        let first = reg.get_or_init_doc(&abs).expect("first hydration");
+        let second = reg.get_or_init_doc(&abs).expect("second hydration");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second call must return the cached Arc, not re-hydrate"
+        );
+    }
+
+    #[test]
+    fn invalidate_doc_drops_the_cached_doc() {
+        // Hydrate, invalidate, then get_or_init_doc again — the new Arc
+        // should be different from the original (proving re-hydration
+        // produced a fresh ProjectDoc).
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("model.sd.json");
+        let json = r#"{"name":"demo","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, json).expect("write file");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson),
+        );
+
+        let first = reg.get_or_init_doc(&abs).expect("first hydration");
+        reg.invalidate_doc(&abs);
+        let second = reg
+            .get_or_init_doc(&abs)
+            .expect("re-hydration after invalidate");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "after invalidate, the next get_or_init_doc must re-hydrate (fresh Arc)"
+        );
+    }
+
+    #[test]
+    fn invalidate_doc_is_noop_for_unknown_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        // No panic, no error — just nothing to do.
+        reg.invalidate_doc(Path::new("/tmp/root/nope.stmx"));
+        assert!(reg.is_empty());
     }
 }

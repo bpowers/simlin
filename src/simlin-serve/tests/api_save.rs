@@ -54,6 +54,7 @@ fn seed_registry(state: &AppState, abs_path: &std::path::Path, format: ProjectFo
             size: metadata.len(),
             git: GitState::Untracked,
             version: 0,
+            doc: Default::default(),
         },
     );
 }

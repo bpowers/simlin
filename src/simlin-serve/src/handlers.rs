@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::git::GitProbe;
-use crate::parse::{ParseError, datamodel_to_canonical_json, parse_to_datamodel};
+use crate::parse::{ParseError, parse_to_datamodel};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
@@ -96,7 +96,8 @@ pub struct GetProjectResponse {
 }
 
 /// `GET /api/projects/{*rel_path}` — resolve a single file under the scan
-/// root, parse it, and return the canonical JSON form.
+/// root and return its canonical JSON form, sourced from the in-memory
+/// `ProjectDoc`.
 ///
 /// Path traversal is rejected before any filesystem access: `..` segments,
 /// absolute paths, drive prefixes, and null bytes all produce 400 Bad Request.
@@ -105,8 +106,14 @@ pub struct GetProjectResponse {
 /// pointing out of the tree); a violation is 403 Forbidden.
 ///
 /// `.mdl` requests check for a sibling `<basename>.sd.json` first: when the
-/// sidecar exists, it becomes source-of-truth (Phase 2 will create it on
-/// save; Phase 1 only implements the read side).
+/// sidecar exists, it becomes source-of-truth.
+///
+/// Phase 3: the response no longer comes from re-reading and re-parsing the
+/// file each call. Instead the registry's lazy `ProjectDoc` is hydrated on
+/// first access (reading from disk once) and every subsequent GET reads from
+/// memory. This is what lets the doc absorb writes (browser saves, MCP
+/// edits, file-watcher reloads in Phase 4) and serve the merged state
+/// without round-tripping through disk.
 pub async fn get_project(
     State(state): State<AppState>,
     AxumPath(rel_path): AxumPath<String>,
@@ -152,18 +159,52 @@ pub async fn get_project(
         (canonical.clone(), initial_format)
     };
 
-    let contents = std::fs::read_to_string(&effective_path)
-        .map_err(|e| ApiError::Internal(format!("read {}: {e}", effective_path.display())))?;
+    // Ensure the registry has an entry for the effective path so
+    // `get_or_init_doc` has somewhere to cache the hydrated `ProjectDoc`.
+    // First-touch races are absorbed by `ensure_or_get`'s atomic insert.
+    state.registry.ensure_or_get(effective_path.clone(), || {
+        let metadata = std::fs::metadata(&effective_path);
+        let (mtime, size) = match metadata {
+            Ok(m) => (
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                m.len(),
+            ),
+            Err(_) => (std::time::SystemTime::UNIX_EPOCH, 0),
+        };
+        ProjectMeta {
+            path: PathBuf::new(),
+            format: effective_format,
+            mtime,
+            size,
+            git: GitState::Untracked,
+            version: 0,
+            doc: Default::default(),
+        }
+    });
 
-    let project = parse_to_datamodel(&effective_path, effective_format, &contents)?;
-    let json = datamodel_to_canonical_json(&project)
-        .map_err(|e| ApiError::Internal(format!("serialize: {e}")))?;
+    // Hydrate (on first call) or look up (on subsequent calls) the
+    // ProjectDoc. Hydration reads from disk; subsequent calls don't.
+    let doc = state
+        .registry
+        .get_or_init_doc(&effective_path)
+        .map_err(|e| match e {
+            RegistryError::NotFound => ApiError::NotFound,
+            RegistryError::HydrationFailed(msg) => ApiError::BadRequest(msg),
+            RegistryError::VersionMismatch { .. } => ApiError::Internal(format!(
+                "unexpected version mismatch from get_or_init_doc: {e}"
+            )),
+        })?;
 
-    // Phase 1 always reports version 0; Phase 2 increments it on save so the
-    // SPA can detect concurrent modification via optimistic locking.
+    let json = doc
+        .current_state_as_json_string()
+        .map_err(|e| ApiError::Internal(format!("export project: {e}")))?;
+
+    // Version comes from the registry entry, not from the doc itself.
+    // The doc and the registry advance in lockstep on writes; reads never
+    // advance the registry version.
     let version = state
         .registry
-        .get(&canonical)
+        .get(&effective_path)
         .map(|m| m.version)
         .unwrap_or(0);
 
@@ -347,6 +388,7 @@ pub async fn save_project(
                 size,
                 git: GitState::Untracked,
                 version: 0,
+                doc: Default::default(),
             }
         });
     }
@@ -369,6 +411,14 @@ pub async fn save_project(
             // but worth being defensive about).
             return Err(SaveError::Internal(anyhow::anyhow!(
                 "registry entry vanished between upsert and version check"
+            )));
+        }
+        Err(e @ RegistryError::HydrationFailed(_)) => {
+            // `check_and_increment` doesn't trigger doc hydration, so we
+            // shouldn't see this variant here; surface as Internal if we
+            // somehow do.
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "unexpected hydration failure: {e}"
             )));
         }
     };
@@ -437,6 +487,7 @@ pub async fn save_project(
                             size: 0,
                             git: GitState::Untracked,
                             version: new_version,
+                            doc: Default::default(),
                         },
                     );
                     sidecar_path.clone()
@@ -456,6 +507,14 @@ pub async fn save_project(
             .registry
             .refresh_meta(&registry_key, mtime, metadata.len());
     }
+
+    // Invalidate the cached ProjectDoc so the next GET re-hydrates
+    // from the just-written disk content. This is a Phase 3 stop-gap
+    // documented on `ProjectRegistry::invalidate_doc`; Task 8 in
+    // Subcomponent B will replace it by routing the save through
+    // `apply_canonical_json` against the doc, keeping the in-memory
+    // state coherent with disk without a cache flush.
+    state.registry.invalidate_doc(&registry_key);
 
     // For SidecarJson the response path points at the freshly-created
     // sidecar so the SPA can update its URL state to follow the

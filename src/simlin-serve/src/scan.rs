@@ -107,6 +107,7 @@ pub fn scan_into_registry(
             size: metadata.len(),
             git: git_state,
             version: 0,
+            doc: Default::default(),
         };
 
         visited.insert(abs_path.clone());

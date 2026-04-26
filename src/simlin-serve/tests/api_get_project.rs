@@ -303,3 +303,68 @@ async fn sidecar_with_wrong_shape_returns_400() {
         String::from_utf8_lossy(&body)
     );
 }
+
+// Phase 3 Task 5: after the first GET, the registry's ProjectMeta.doc
+// is populated and serves as the source of truth on subsequent reads.
+// Two consecutive GETs must yield byte-identical canonical JSON.
+//
+// The "delete file between GETs" technique the plan suggests for proving
+// the cache hit doesn't survive the path-resolution canonicalize() call
+// (which requires the file to exist for the security check). So we
+// verify the property by mutating the on-disk file between calls and
+// asserting the second call returns the *cached* (unchanged) content
+// rather than the disk-edited content.
+#[tokio::test]
+async fn second_get_returns_cached_content_after_external_disk_edit() {
+    let dir = TempDir::new().unwrap();
+    let file_path = copy_fixture("teacup.stmx", dir.path());
+    let canonical = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical);
+
+    // First GET: hydrates the doc from disk.
+    let (status, body1) = fetch(state.clone(), "/api/projects/teacup.stmx").await;
+    assert_eq!(status, StatusCode::OK);
+    let value1 = parse_body(&body1);
+    let json1 = value1["json"].as_str().expect("json string").to_owned();
+
+    // External edit: replace the on-disk file with completely different
+    // (still-parseable) XMILE. If the GET re-read disk on every call,
+    // the second response would reflect this change.
+    let unrelated = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0"><header><name>changed-after-first-get</name></header><sim_specs><start>0</start><stop>10</stop><dt>1</dt></sim_specs><model><variables/></model></xmile>"#;
+    fs::write(&file_path, unrelated).expect("rewrite file");
+
+    let (status, body2) = fetch(state.clone(), "/api/projects/teacup.stmx").await;
+    assert_eq!(status, StatusCode::OK);
+    let value2 = parse_body(&body2);
+    assert_eq!(
+        value2["json"].as_str(),
+        Some(json1.as_str()),
+        "second GET should return the cached doc state, not the disk-edited content"
+    );
+}
+
+// Sanity check Task 5's response shape: the wire shape must remain
+// `{ json, version, source_format }` — doc-sourcing changes the source
+// of truth but not the response schema.
+#[tokio::test]
+async fn doc_sourced_response_keeps_phase1_shape() {
+    let dir = TempDir::new().unwrap();
+    copy_fixture("teacup.stmx", dir.path());
+    let canonical = dir.path().canonicalize().unwrap();
+    let state = build_state(canonical);
+
+    let (status, body) = fetch(state, "/api/projects/teacup.stmx").await;
+    assert_eq!(status, StatusCode::OK);
+    let value = parse_body(&body);
+
+    assert!(value.get("json").is_some(), "json field present");
+    assert!(value.get("version").is_some(), "version field present");
+    assert!(
+        value.get("source_format").is_some(),
+        "source_format field present"
+    );
+    assert!(value["json"].is_string(), "json is a string");
+    assert!(value["version"].is_number(), "version is a number");
+    assert_eq!(value["source_format"].as_str(), Some("stmx"));
+}
