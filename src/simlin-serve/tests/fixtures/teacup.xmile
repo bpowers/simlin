@@ -11,32 +11,11 @@
         <dt>0.125000</dt>
     </sim_specs>
     <model_units>
-        <unit name="Dollar">
-            <eqn>$</eqn>
-            <alias>Dollars</alias>
-            <alias>$s</alias>
+        <unit name="Degree Fahrenheit">
+            <alias>Degrees Fahrenheit</alias>
         </unit>
-        <unit name="Hour">
-            <alias>Hours</alias>
-        </unit>
-        <unit name="Month">
-            <alias>Months</alias>
-        </unit>
-        <unit name="Person">
-            <alias>People</alias>
-            <alias>Persons</alias>
-        </unit>
-        <unit name="Unit">
-            <alias>Units</alias>
-        </unit>
-        <unit name="Week">
-            <alias>Weeks</alias>
-        </unit>
-        <unit name="Year">
-            <alias>Years</alias>
-        </unit>
-        <unit name="Day">
-            <alias>Days</alias>
+        <unit name="Minute">
+            <alias>Minutes</alias>
         </unit>
     </model_units>
     <dimensions/>

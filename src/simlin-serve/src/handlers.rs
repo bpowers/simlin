@@ -252,22 +252,13 @@ pub struct SaveResponse {
     pub path: String,
 }
 
-/// Structured detail attached to 422 responses. Mirrors
-/// `simlin-mcp::tools::types::ErrorOutput` field-for-field; we duplicate
-/// the structure here rather than depending on `simlin-mcp` to keep crate
-/// boundaries clean (`simlin-serve` and `simlin-mcp` are sibling consumers
-/// of the same engine error types).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ValidationError {
-    pub code: String,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub variable_name: Option<String>,
-    pub kind: String,
-}
+/// Structured detail attached to 422 responses. This is the same type
+/// that `events::ValidationError` and `diagnostics::compute_diagnostic_set`
+/// use, which is `simlin_mcp_core::ErrorOutput`. The alias unifies the
+/// type across the save handler, the diagnostic pipeline, and the
+/// WebSocket surface so validation.rs can delegate to
+/// `diagnostics::compute_diagnostic_set` without a conversion step.
+pub use crate::events::ValidationError;
 
 /// Errors surfaced from the save handler. Status mapping lives entirely in
 /// the `IntoResponse` impl; handler code only constructs variants and lets

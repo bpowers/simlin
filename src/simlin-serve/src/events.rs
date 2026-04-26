@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn client_ws_message_rejects_unknown_type() {
+    fn client_ws_message_rejects_diagnostics_changed_as_inbound() {
         let json = r#"{"type":"diagnosticsChanged","path":"a.stmx","errors":[]}"#;
         // diagnosticsChanged is server-only; clients aren't allowed to push it.
         let result: Result<ClientWsMessage, _> = serde_json::from_str(json);

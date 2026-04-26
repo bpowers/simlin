@@ -24,12 +24,9 @@
 use std::collections::HashSet;
 
 use simlin_engine::datamodel;
-use simlin_engine::db::{
-    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
-};
-use simlin_engine::errors::collect_formatted_errors;
 use simlin_engine::json;
 
+use crate::diagnostics::compute_diagnostic_set;
 use crate::handlers::ValidationError;
 
 /// Successful validation outcome. `new_errors` is empty when the save
@@ -160,39 +157,15 @@ fn error_keys_for(project: &datamodel::Project) -> HashSet<(String, Option<Strin
 
 /// Run the engine's salsa-based diagnostic pipeline and format
 /// `severity == Error` diagnostics into wire-shape `ValidationError`
-/// records. One call per logical context (baseline or post-edit); never
-/// called twice for the same project in a single request.
+/// records.
+///
+/// Delegates to `diagnostics::compute_diagnostic_set` so the two modules
+/// share one pipeline implementation. The keys returned by that function
+/// are discarded here; only the formatted errors are needed for the
+/// baseline/post-edit diff in `validate_save`.
 fn run_diagnostics(project: &datamodel::Project) -> Vec<ValidationError> {
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, project);
-    let diagnostics = collect_all_diagnostics(&db, &sync);
-    let formatted = collect_formatted_errors(
-        diagnostics
-            .iter()
-            .filter(|d| matches!(d.severity, DiagnosticSeverity::Error)),
-        project,
-    );
-    formatted
-        .errors
-        .into_iter()
-        .map(|fe| {
-            use simlin_engine::errors::FormattedErrorKind;
-            let kind = match fe.kind {
-                FormattedErrorKind::Project => "project",
-                FormattedErrorKind::Model => "model",
-                FormattedErrorKind::Variable => "variable",
-                FormattedErrorKind::Units => "units",
-                FormattedErrorKind::Simulation => "simulation",
-            };
-            ValidationError {
-                code: fe.code.to_string(),
-                message: fe.message.unwrap_or_default(),
-                model_name: fe.model_name,
-                variable_name: fe.variable_name,
-                kind: kind.to_string(),
-            }
-        })
-        .collect()
+    let (_keys, errors) = compute_diagnostic_set(project);
+    errors
 }
 
 #[cfg(test)]

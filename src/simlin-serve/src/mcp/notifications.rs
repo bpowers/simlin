@@ -41,14 +41,26 @@ use crate::events::WsMessage;
 /// - `Err(broadcast::error::RecvError::Closed)` — the EventBus was
 ///   dropped (process shutdown).
 /// - `Err(ServiceError::TransportClosed)` — the MCP session ended.
+/// - A non-`TransportClosed` peer error when `peer.is_transport_closed()`
+///   is true — guards against variants such as `TransportSend` that can
+///   surface on a broken transport while the inner mpsc channel is still
+///   open, which would otherwise cause the loop to spin burning CPU.
 ///
-/// Other branches log and continue: a `Lagged(n)` receiver auto-resumes
-/// from the oldest retained message, and non-`TransportClosed` peer
-/// errors are advisory (the next notification may still go through).
+/// Other non-fatal branches log and continue: a `Lagged(n)` receiver
+/// auto-resumes from the oldest retained message, and non-`TransportClosed`
+/// peer errors where the transport is still alive are advisory (the next
+/// notification may still go through).
+///
+/// Note: idle disconnects (sessions that go quiet before TransportClosed
+/// surfaces) are detected only on the next recv() wake-up. Idle sessions
+/// hold their broadcast subscription until the bus publishes again or the
+/// process shuts down. Phase 8 may add a periodic poll if this proves
+/// noticeable in practice.
 pub async fn forward_events_to_peer(
     peer: Peer<RoleServer>,
     mut rx: broadcast::Receiver<WsMessage>,
 ) {
+    tracing::info!("mcp notification forwarder: started");
     loop {
         match rx.recv().await {
             Ok(msg) => {
@@ -59,8 +71,18 @@ pub async fn forward_events_to_peer(
                     .await
                 {
                     Ok(()) => {}
-                    Err(ServiceError::TransportClosed) => break,
+                    Err(ServiceError::TransportClosed) => {
+                        tracing::info!("mcp notification forwarder: exiting (transport closed)");
+                        break;
+                    }
                     Err(err) => {
+                        if peer.is_transport_closed() {
+                            tracing::info!(
+                                ?err,
+                                "mcp notification forwarder: exiting (transport closed after send error)"
+                            );
+                            break;
+                        }
                         tracing::warn!(
                             error = %err,
                             "mcp notification forwarder: send failed (continuing)"
@@ -74,7 +96,10 @@ pub async fn forward_events_to_peer(
                 // operators can spot a backlogged session.
                 tracing::warn!(lagged = n, "mcp notification forwarder lagged");
             }
-            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::info!("mcp notification forwarder: exiting (event bus closed)");
+                break;
+            }
         }
     }
 }
