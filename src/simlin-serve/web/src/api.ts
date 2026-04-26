@@ -33,12 +33,57 @@ export type GetProjectResponse = {
 };
 
 // Mirror of the Editor's `JsonProjectData` shape so EditorHost can type its
-// no-op onSave handler without re-importing from @simlin/diagram (which would
-// make the test mock leak into the Imperative Shell).
+// onSave handler without re-importing from @simlin/diagram (which would make
+// the test mock leak into the Imperative Shell).
 export type JsonProjectData = {
   format: 'json';
   data: string;
 };
+
+export type SaveResponse = {
+  version: number;
+  path: string;
+};
+
+// Mirror of `simlin-serve::handlers::ValidationError` (camelCase via serde).
+export type ServerValidationError = {
+  code: string;
+  message: string;
+  modelName?: string;
+  variableName?: string;
+  kind: string;
+};
+
+/**
+ * Thrown when a save POST returns 409 Conflict because the client's
+ * `version` is stale relative to the server's current version. The
+ * `actualVersion` field carries the current server version so the caller
+ * can refetch and present the up-to-date state.
+ */
+export class VersionConflictError extends Error {
+  readonly actualVersion: number;
+
+  constructor(actualVersion: number) {
+    super(`version conflict: server has version ${actualVersion}`);
+    this.name = 'VersionConflictError';
+    this.actualVersion = actualVersion;
+  }
+}
+
+/**
+ * Thrown when a save POST returns 422 Unprocessable Entity because the
+ * incoming JSON would introduce new validation errors not present in the
+ * pre-edit baseline. `errors` is the list of *new* errors only.
+ */
+export class ValidationError extends Error {
+  readonly errors: ReadonlyArray<ServerValidationError>;
+
+  constructor(errors: ReadonlyArray<ServerValidationError>) {
+    super(`validation failed: ${errors.length} error(s)`);
+    this.name = 'ValidationError';
+    this.errors = errors;
+  }
+}
 
 /**
  * Encode a forward-slashed relative path into a URL path while preserving the
@@ -83,4 +128,51 @@ export async function fetchProject(path: string): Promise<GetProjectResponse> {
     throw new Error(message);
   }
   return (await response.json()) as GetProjectResponse;
+}
+
+/**
+ * POST a saved model state to the server. The server holds the registry
+ * write lock across the optimistic version check + increment, so two
+ * concurrent saves with the same `version` cannot both win; the loser
+ * receives a 409 and must refetch.
+ *
+ * @throws VersionConflictError on 409 (stale version).
+ * @throws ValidationError on 422 (new validation errors introduced).
+ * @throws Error on other non-OK responses (carrying the HTTP status).
+ */
+export async function saveProject(path: string, json: string, version: number): Promise<SaveResponse> {
+  const response = await fetch(`/api/projects/${encodeProjectPath(path)}`, {
+    method: 'POST',
+    headers: {
+      ...buildAuthHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ json, version }),
+  });
+
+  if (response.status === 409) {
+    const body = (await response.json().catch(() => ({}))) as { actual?: number };
+    const actualVersion = typeof body.actual === 'number' ? body.actual : version;
+    throw new VersionConflictError(actualVersion);
+  }
+  if (response.status === 422) {
+    const body = (await response.json().catch(() => ({}))) as {
+      details?: ReadonlyArray<ServerValidationError>;
+    };
+    throw new ValidationError(body.details ?? []);
+  }
+  if (!response.ok) {
+    let message = `failed to save ${path}: HTTP ${response.status}`;
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (body && body.error) {
+        message = `${body.error} (HTTP ${response.status})`;
+      }
+    } catch {
+      // The body wasn't JSON; fall through to the generic message above.
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as SaveResponse;
 }

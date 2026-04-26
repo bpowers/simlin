@@ -71,6 +71,15 @@ export class App extends React.Component<Record<string, never>, AppState> {
     this.setState({ selectedPath: path });
   };
 
+  // After a .mdl save creates a sibling .sd.json sidecar the registry
+  // swaps the .mdl entry for the sidecar entry. Update the active
+  // selection to the new path and re-fetch the project list so the
+  // sidebar reflects the rename without a full reload.
+  private handlePathRedirect = (newPath: string): void => {
+    this.setState({ selectedPath: newPath });
+    void this.loadProjects();
+  };
+
   private handleDismissGitHint = (): void => {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.setItem(GIT_HINT_DISMISSED_KEY, '1');
@@ -107,7 +116,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
         ) : (
           <div className="serve-layout">
             <ProjectList projects={projects} selectedPath={selectedPath} onSelect={this.handleSelect} />
-            <EditorHost path={selectedPath} />
+            <EditorHost path={selectedPath} onPathRedirect={this.handlePathRedirect} />
           </div>
         )}
       </div>

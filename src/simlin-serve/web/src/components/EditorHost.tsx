@@ -6,11 +6,16 @@ import * as React from 'react';
 
 import { Editor } from '@simlin/diagram';
 
-import { fetchProject } from '../api';
+import { fetchProject, saveProject } from '../api';
 import type { GetProjectResponse, JsonProjectData } from '../api';
 
 type EditorHostProps = Readonly<{
   path: string | null;
+  // Invoked when a `.mdl` save creates a sidecar so the parent can update
+  // its selectedPath state and refresh the project list. Optional because
+  // not every host needs to track the redirect (e.g. tests that only
+  // verify the wire format).
+  onPathRedirect?: (newPath: string) => void;
 }>;
 
 type EditorHostState = {
@@ -73,11 +78,23 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     }
   }
 
-  // Phase 1 is read-only. The Editor's `onSave` prop is required by the
-  // TypeScript types, so we satisfy it with a no-op that returns `undefined`
-  // (signaling "no new version assigned"). Phase 2 wires the real save.
-  private handleSave = async (_project: JsonProjectData, _currVersion: number): Promise<number | undefined> => {
-    return undefined;
+  private handleSave = async (project: JsonProjectData, currVersion: number): Promise<number | undefined> => {
+    // Defensive: the Editor only feeds us the protobuf format when
+    // `inputFormat="protobuf"`, but the union allows it. We always use
+    // JSON in serve so a mismatch indicates a bug we'd rather skip
+    // silently than POST garbage.
+    if (project.format !== 'json') {
+      return undefined;
+    }
+    const path = this.props.path;
+    if (!path) {
+      return undefined;
+    }
+    const result = await saveProject(path, project.data, currVersion);
+    if (result.path !== path) {
+      this.props.onPathRedirect?.(result.path);
+    }
+    return result.version;
   };
 
   render(): React.ReactNode {
@@ -114,8 +131,6 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
           initialProjectJson={payload.json}
           initialProjectVersion={payload.version}
           name={path}
-          embedded={true}
-          readOnlyMode={true}
           onSave={this.handleSave}
         />
       </div>

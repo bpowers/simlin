@@ -6,7 +6,7 @@ import * as React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 
 import { EditorHost } from './EditorHost';
-import type { GetProjectResponse } from '../api';
+import type { GetProjectResponse, JsonProjectData } from '../api';
 import { Editor as EditorMock } from '../test-utils/diagram-mock';
 
 function makeFetchResolving(response: GetProjectResponse, status = 200): jest.Mock {
@@ -55,8 +55,9 @@ describe('EditorHost', () => {
     expect(props?.inputFormat).toBe('json');
     expect(props?.initialProjectJson).toBe('{"models":[]}');
     expect(props?.initialProjectVersion).toBe(7);
-    expect(props?.embedded).toBe(true);
-    expect(props?.readOnlyMode).toBe(true);
+    // Phase 2 drops embedded + readOnlyMode so the Editor accepts edits.
+    expect(props?.embedded).toBeUndefined();
+    expect(props?.readOnlyMode).toBeUndefined();
     expect(props?.name).toBe('teacup.stmx');
     expect(typeof props?.onSave).toBe('function');
 
@@ -104,5 +105,108 @@ describe('EditorHost', () => {
 
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeNull());
     expect(screen.getByRole('alert').textContent).toMatch(/not found|failed/i);
+  });
+
+  test('onSave POSTs the project JSON and resolves with the new version', async () => {
+    // First call (GET): the initial fetch. Second call (POST): the save.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"models":[]}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: 1, path: 'teacup.stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<EditorHost path="teacup.stmx" />);
+
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    const onSave = EditorMock.lastProps?.onSave;
+    expect(onSave).toBeDefined();
+
+    const projectData: JsonProjectData = { format: 'json', data: '{"updated":true}' };
+    const result = await onSave?.(projectData, 0);
+    expect(result).toBe(1);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('/api/projects/teacup.stmx');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({
+      json: '{"updated":true}',
+      version: 0,
+    });
+  });
+
+  test('onSave invokes onPathRedirect when the server returns a different path', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{}',
+          version: 0,
+          source_format: 'mdl',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: 1, path: 'population.sd.json' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const onPathRedirect = jest.fn();
+    render(<EditorHost path="population.mdl" onPathRedirect={onPathRedirect} />);
+
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    const onSave = EditorMock.lastProps?.onSave;
+    const projectData: JsonProjectData = { format: 'json', data: '{}' };
+    await onSave?.(projectData, 0);
+
+    expect(onPathRedirect).toHaveBeenCalledTimes(1);
+    expect(onPathRedirect).toHaveBeenCalledWith('population.sd.json');
+  });
+
+  test('onSave does not invoke onPathRedirect when the server keeps the same path', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: 1, path: 'teacup.stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const onPathRedirect = jest.fn();
+    render(<EditorHost path="teacup.stmx" onPathRedirect={onPathRedirect} />);
+
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    const onSave = EditorMock.lastProps?.onSave;
+    await onSave?.({ format: 'json', data: '{}' }, 0);
+
+    expect(onPathRedirect).not.toHaveBeenCalled();
   });
 });
