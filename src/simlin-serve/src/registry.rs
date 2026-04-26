@@ -590,24 +590,35 @@ impl ProjectRegistry {
         Ok(())
     }
 
-    /// Move the entry at `from` to `to` without re-hydrating its doc or
-    /// resetting any path-independent state. The optimistic-lock version,
-    /// echo-suppression hash, cached diagnostic keys, and `Arc<ProjectDoc>`
-    /// are all preserved verbatim across the re-key. Only the relativized
-    /// display path is recomputed against the registry root.
+    /// Move the entry at `from` to `to`, applying `new_format` as the
+    /// destination's recorded format. The optimistic-lock version,
+    /// echo-suppression hash, cached diagnostic keys, and
+    /// `Arc<ProjectDoc>` are all preserved verbatim across the re-key;
+    /// only the relativized display path and the `format` are
+    /// recomputed.
+    ///
+    /// Why `new_format` is required: a rename across extensions
+    /// (`foo.xmile` → `foo.stmx`, `foo.stmx` → `foo.mdl`) must update
+    /// the registry's recorded format atomically with the re-key, or
+    /// subsequent `parse_to_datamodel` calls would dispatch to the
+    /// wrong parser. The watcher's `classify` already determined the
+    /// destination format from the new path's extension; this primitive
+    /// just plumbs it through.
     ///
     /// Returns `RegistryError::NotFound` if no entry exists at `from`.
-    /// Returns `RegistryError::AlreadyExists` if an entry is already tracked
-    /// at `to`: the caller is responsible for deciding whether to displace
-    /// the existing entry (e.g. by removing it and broadcasting
-    /// `ProjectRemoved` first) rather than silently overwriting its state.
-    /// The whole transition runs under the write lock so it's atomic
-    /// w.r.t. concurrent saves and watcher events.
-    ///
-    /// The `format` field is also preserved as-is — a rename across
-    /// extensions does not re-classify; callers that intend to switch
-    /// formats should `upsert` the new meta directly.
-    pub fn rename_entry(&self, from: &Path, to: &Path) -> Result<(), RegistryError> {
+    /// Returns `RegistryError::AlreadyExists` if an entry is already
+    /// tracked at `to`: the caller is responsible for deciding whether
+    /// to displace the existing entry (e.g. by removing it and
+    /// broadcasting `ProjectRemoved` first) rather than silently
+    /// overwriting its state. The whole transition runs under the
+    /// write lock so it's atomic w.r.t. concurrent saves and watcher
+    /// events.
+    pub fn rename_entry(
+        &self,
+        from: &Path,
+        to: &Path,
+        new_format: ProjectFormat,
+    ) -> Result<(), RegistryError> {
         let mut guard = self
             .inner
             .write()
@@ -617,6 +628,7 @@ impl ProjectRegistry {
         }
         let mut entry = guard.remove(from).ok_or(RegistryError::NotFound)?;
         entry.path = relativize(&self.root, to);
+        entry.format = new_format;
         guard.insert(to.to_path_buf(), entry);
         Ok(())
     }
@@ -1887,7 +1899,9 @@ mod tests {
         let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
         let from = PathBuf::from("/tmp/root/missing.stmx");
         let to = PathBuf::from("/tmp/root/elsewhere.stmx");
-        let err = reg.rename_entry(&from, &to).unwrap_err();
+        let err = reg
+            .rename_entry(&from, &to, ProjectFormat::Stmx)
+            .unwrap_err();
         assert_eq!(err, RegistryError::NotFound);
     }
 
@@ -1911,7 +1925,7 @@ mod tests {
         b_meta.version = 9;
         reg.upsert(b.clone(), b_meta);
 
-        let err = reg.rename_entry(&a, &b).unwrap_err();
+        let err = reg.rename_entry(&a, &b, ProjectFormat::Stmx).unwrap_err();
         assert_eq!(err, RegistryError::AlreadyExists);
 
         // Both entries must remain unchanged after the failed rename.
@@ -1944,7 +1958,8 @@ mod tests {
 
         let pre_doc_arc = reg.get(&from).expect("from exists").doc;
 
-        reg.rename_entry(&from, &to).expect("rename succeeds");
+        reg.rename_entry(&from, &to, ProjectFormat::Stmx)
+            .expect("rename succeeds");
 
         assert!(reg.get(&from).is_none(), "old key dropped");
         let entry = reg.get(&to).expect("new key present");
@@ -1969,12 +1984,14 @@ mod tests {
     }
 
     #[test]
-    fn rename_entry_keeps_format_from_pre_existing_meta() {
+    fn rename_entry_applies_destination_format_atomically() {
         // The destination's extension may differ from the source's
-        // (.xmile -> .stmx). The registry stores the format the caller
-        // already knows about; re-keying does not re-classify by
-        // extension. (Callers that want to switch the format should
-        // upsert the new meta directly.)
+        // (.xmile -> .stmx, .stmx -> .mdl, etc.). The watcher's
+        // `classify` already determined the destination format; the
+        // re-key takes that format atomically so the entry's stored
+        // format always matches the on-disk extension. Without this,
+        // subsequent `parse_to_datamodel` calls would dispatch to the
+        // wrong parser and either fail or produce nonsense.
         let root = PathBuf::from("/tmp/root");
         let reg = ProjectRegistry::new(root.clone());
         let from = root.join("model.xmile");
@@ -1983,12 +2000,13 @@ mod tests {
         let meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Xmile);
         reg.upsert(from.clone(), meta);
 
-        reg.rename_entry(&from, &to).expect("rename succeeds");
+        reg.rename_entry(&from, &to, ProjectFormat::Stmx)
+            .expect("rename succeeds");
         let entry = reg.get(&to).expect("new key present");
         assert_eq!(
             entry.format,
-            ProjectFormat::Xmile,
-            "rename_entry preserves the recorded format"
+            ProjectFormat::Stmx,
+            "rename_entry applies the destination format atomically"
         );
     }
 

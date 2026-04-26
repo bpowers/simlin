@@ -742,7 +742,7 @@ impl WatcherActor {
             },
         };
 
-        match state.registry.rename_entry(&from_key, &to_key) {
+        match state.registry.rename_entry(&from_key, &to_key, format) {
             Ok(()) => {}
             Err(RegistryError::NotFound) => {
                 tracing::debug!(
