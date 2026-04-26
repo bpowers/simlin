@@ -17,6 +17,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+const PROTOCOL_VERSION: &str = "2025-11-25";
+const BINARY_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const BINARY: &str = env!("CARGO_BIN_EXE_simlin-mcp");
 
 /// Format a single JSON-RPC line.  rmcp's stdio transport reads
@@ -118,11 +121,22 @@ fn initialize_returns_expected_server_info_and_capabilities() {
         result["capabilities"]
     );
 
-    // The protocol version echoes the spec version simlin-mcp targets.
-    assert!(
-        result["protocolVersion"].as_str().is_some(),
-        "protocolVersion must be a non-empty string, got: {}",
+    // The protocol version must exactly match the spec date simlin-mcp
+    // targets, ensuring the binary's rmcp dependency is current.
+    assert_eq!(
+        result["protocolVersion"].as_str().unwrap_or(""),
+        PROTOCOL_VERSION,
+        "protocolVersion must be exactly {PROTOCOL_VERSION}, got: {}",
         result["protocolVersion"]
+    );
+
+    // serverInfo.version must match the binary's Cargo.toml version, not
+    // the library crate version.
+    assert_eq!(
+        result["serverInfo"]["version"].as_str().unwrap_or(""),
+        BINARY_VERSION,
+        "serverInfo.version must be the binary version {BINARY_VERSION}, got: {}",
+        result["serverInfo"]["version"]
     );
 
     // Instructions are non-empty: this is the OUT_DIR-substituted
@@ -136,14 +150,71 @@ fn initialize_returns_expected_server_info_and_capabilities() {
         "instructions should mention ReadModel: {instructions:?}"
     );
 
-    // Send a `notifications/initialized` to complete the handshake,
-    // then close stdin so the server exits cleanly.
+    // Complete the handshake.
     let initialized = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
     });
-    let _ = stdin.write_all(rpc_line(initialized).as_bytes());
-    drop(stdin);
+    stdin
+        .write_all(rpc_line(initialized).as_bytes())
+        .expect("failed to write initialized notification");
+    stdin.flush().expect("flush");
 
+    // tools/list: assert exactly three PascalCase tool names.
+    let tools_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    });
+    stdin
+        .write_all(rpc_line(tools_req).as_bytes())
+        .expect("failed to write tools/list request");
+    stdin.flush().expect("flush");
+
+    let tools_resp = read_response_with_id(&mut reader, 2, deadline);
+    let tools = tools_resp["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list result must include a tools array: {tools_resp}"));
+    let mut tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    tool_names.sort_unstable();
+    assert_eq!(
+        tool_names,
+        vec!["CreateModel", "EditModel", "ReadModel"],
+        "tools/list must return exactly three PascalCase tool names"
+    );
+
+    // resources/list: assert exactly four skill URIs.
+    let resources_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/list",
+        "params": {}
+    });
+    stdin
+        .write_all(rpc_line(resources_req).as_bytes())
+        .expect("failed to write resources/list request");
+    stdin.flush().expect("flush");
+
+    let resources_resp = read_response_with_id(&mut reader, 3, deadline);
+    let resources = resources_resp["result"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("resources/list result must include a resources array: {resources_resp}")
+        });
+    let mut uris: Vec<&str> = resources.iter().filter_map(|r| r["uri"].as_str()).collect();
+    uris.sort_unstable();
+    assert_eq!(
+        uris,
+        vec![
+            "simlin://skills/loop-dominance",
+            "simlin://skills/pysimlin-basics",
+            "simlin://skills/scenario-analysis",
+            "simlin://skills/vensim-equation-syntax",
+        ],
+        "resources/list must return exactly the four production skill URIs"
+    );
+
+    drop(stdin);
     let _ = child.wait();
 }

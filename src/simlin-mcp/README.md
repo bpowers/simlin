@@ -96,9 +96,9 @@ After making changes to `simlin-mcp` or `simlin-mcp-core`, exercise the rebuilt 
     - `serverInfo.name: "simlin-mcp"`
     - `capabilities.tools` and `capabilities.resources` both present
 
-4. Switch to the **Tools** tab and click **List Tools**. You should see exactly three entries: `read_model`, `edit_model`, `create_model`.
+4. Switch to the **Tools** tab and click **List Tools**. You should see exactly three entries: `ReadModel`, `EditModel`, `CreateModel`.
 
-5. Select `read_model` and call it with the absolute path to the teacup fixture, e.g.:
+5. Select `ReadModel` and call it with the absolute path to the teacup fixture, e.g.:
 
     ```json
     { "project_path": "/absolute/path/to/simlin/test/test-models/samples/teacup/teacup.xmile" }

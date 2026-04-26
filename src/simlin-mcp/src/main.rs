@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Imperative Shell
+//
 //! MCP server binary for Simlin.
 //!
 //! Composes the rmcp `ServerHandler` from `simlin-mcp-core` with a
@@ -84,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         FileSystemAccess::new(),
         INSTRUCTIONS.to_string(),
         build_resources(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
 
     // `serve(stdio())` performs the MCP `initialize` handshake on the
