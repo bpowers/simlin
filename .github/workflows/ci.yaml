@@ -261,3 +261,70 @@ jobs:
 
       - name: Run project lint rules
         run: bash scripts/lint-project.sh
+
+  serve-smoke:
+    name: simlin-serve smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # 15-minute cap covers macos-latest's slower binary spawn + the
+    # release build itself; the actual smoke test runs in well under
+    # one minute on every platform we ship.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors the @simlin/serve npm matrix shipped from
+        # serve-release.yml (darwin-arm64, linux-x64, win32-x64) so
+        # CI proves end-to-end behaviour on every platform we publish
+        # binaries for. linux-arm64 isn't a GitHub-hosted runner
+        # option; we cover that target via cross-compilation and
+        # rely on linux-x64 for runtime smoke coverage.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-serve-smoke-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-serve-smoke-${{ matrix.os }}-
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build embedded SPA
+        working-directory: src/simlin-serve/web
+        run: pnpm build
+
+      # SIMLIN_SERVE_BUILD_WEB=1 is set as defense-in-depth: the
+      # "Build embedded SPA" step above already populates web/dist/,
+      # so build.rs has nothing new to do, but the explicit env var
+      # guards against a future refactor that drops the explicit
+      # frontend step without noticing the embed went stale.
+      - name: Build simlin-serve binary
+        env:
+          SIMLIN_SERVE_BUILD_WEB: "1"
+        run: cargo build -p simlin-serve --release
+
+      - name: Run smoke test
+        run: cargo test -p simlin-serve --release --test smoke -- --ignored --nocapture
