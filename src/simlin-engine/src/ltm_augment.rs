@@ -809,20 +809,24 @@ fn generate_stock_to_flow_equation(
     )
 }
 
-/// Generate the equation for a loop score variable
+/// Generate the equation for a loop score variable.
+///
+/// The loop score is the product of all per-shape link scores in the
+/// loop. Each link's `shape` field selects which `(from, to, shape)`
+/// tuple to reference -- the canonical name is computed via
+/// `link_score_var_name`. Phase 3 leaves `link.shape` as `None` for
+/// every link constructor (Phase 4 fills in real shapes); the unwrap to
+/// `RefShape::Bare` here preserves the legacy single-shape link-score
+/// references until then.
 fn generate_loop_score_equation(loop_item: &Loop) -> String {
-    // Product of all link scores in the loop
-    // Use double quotes around variable names with $ to make them parseable
     let link_score_names: Vec<String> = loop_item
         .links
         .iter()
         .map(|link| {
+            let shape = link.shape.clone().unwrap_or(RefShape::Bare);
+            let name = link_score_var_name(link.from.as_str(), link.to.as_str(), &shape);
             // Double-quote the variable name so it can be parsed
-            format!(
-                "\"$⁚ltm⁚link_score⁚{}→{}\"",
-                link.from.as_str(),
-                link.to.as_str()
-            )
+            format!("\"{name}\"")
         })
         .collect();
 
@@ -1928,5 +1932,52 @@ mod tests {
             link_score_var_name("pop", "tgt", &RefShape::DynamicIndex),
             "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}tgt\u{205A}dynamic"
         );
+    }
+
+    // -- generate_loop_score_equation: shape-resolved link score names --
+    //
+    // The loop-score equation references each link's per-shape link
+    // score. Phase 6 will fill in real `Link.shape` values; for now,
+    // each link can carry an explicit shape so the test can pin the
+    // FixedIndex naming convention.
+    #[test]
+    fn loop_score_equation_references_fixed_index_link_score() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "r1".to_string(),
+            links: vec![
+                Link {
+                    from: Ident::<Canonical>::new("pop"),
+                    to: Ident::<Canonical>::new("rel_pop"),
+                    polarity: LinkPolarity::Positive,
+                    shape: Some(RefShape::FixedIndex(vec!["nyc".to_string()])),
+                },
+                Link {
+                    from: Ident::<Canonical>::new("rel_pop"),
+                    to: Ident::<Canonical>::new("pop"),
+                    polarity: LinkPolarity::Positive,
+                    shape: None,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+        };
+
+        let eq = generate_loop_score_equation(&loop_item);
+
+        // FixedIndex link score uses the bracketed prefixed-from form.
+        assert!(
+            eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop\""),
+            "expected FixedIndex link-score reference; got: {eq}"
+        );
+        // The closing link has no shape -> Bare canonical name.
+        assert!(
+            eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}rel_pop\u{2192}pop\""),
+            "expected Bare link-score reference (closing link); got: {eq}"
+        );
+        // Loop score is the product of the two references.
+        assert!(eq.contains(" * "), "expected product join; got: {eq}");
     }
 }
