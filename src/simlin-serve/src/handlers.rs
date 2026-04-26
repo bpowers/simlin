@@ -504,18 +504,17 @@ pub async fn create_new_project(
         .root
         .canonicalize()
         .map_err(|e| NewProjectError::Internal(format!("canonicalize root: {e}")))?;
-    let resolved_path =
-        match crate::path_resolution::resolve_create_target(&abs_path, &root_canonical) {
-            Ok(p) => p,
-            Err(crate::path_resolution::CreatePathError::OutOfRoot) => {
-                return Err(NewProjectError::Forbidden);
-            }
-            Err(crate::path_resolution::CreatePathError::IoError(err)) => {
-                return Err(NewProjectError::Internal(format!(
-                    "resolve create target: {err}"
-                )));
-            }
-        };
+    let resolved_path = match path_resolution::resolve_create_target(&abs_path, &root_canonical) {
+        Ok(p) => p,
+        Err(path_resolution::CreatePathError::OutOfRoot) => {
+            return Err(NewProjectError::Forbidden);
+        }
+        Err(path_resolution::CreatePathError::IoError(err)) => {
+            return Err(NewProjectError::Internal(format!(
+                "resolve create target: {err}"
+            )));
+        }
+    };
 
     let mut project = simlin_mcp_core::types::build_empty_project();
     project.name = name.to_string();
