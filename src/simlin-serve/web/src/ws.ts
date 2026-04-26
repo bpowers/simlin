@@ -91,6 +91,14 @@ export class UpdatesSocket {
   // when it finally drops.
   private consecutiveFailures: number = 0;
   private closed: boolean = false;
+  // At most one pending projectFocused frame queued while the socket is
+  // still opening. Only projectFocused is buffered: it carries persistent
+  // intent (which project is the user looking at) that must reach the
+  // server even when the first send() call races with the WS handshake.
+  // selectionChanged frames issued before open are stale by the time the
+  // socket recovers and are intentionally dropped. Each new projectFocused
+  // replaces any previously buffered one (only the latest focus matters).
+  private pendingFocusedFrame: ClientWsMessage | null = null;
 
   constructor(token: string, onMessage: OnMessageFn, onStatus?: OnStatusFn) {
     this.token = token;
@@ -101,6 +109,7 @@ export class UpdatesSocket {
 
   close(): void {
     this.closed = true;
+    this.pendingFocusedFrame = null;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -112,18 +121,23 @@ export class UpdatesSocket {
   }
 
   // Sends a client-originated frame (focus, selection) over the active
-  // WebSocket. Frames issued before the connection finishes opening or
-  // after `close()` are dropped silently rather than queued: a focus or
-  // selection event from a torn-down editor is stale by the time the
-  // socket recovers, and the next mount will emit a fresh one. Replays
-  // would also race with the server's view of which session "owns"
-  // these intent signals.
+  // WebSocket. If the socket is not yet OPEN:
+  // - projectFocused frames are queued (at most one; a newer one replaces
+  //   any prior pending one) and flushed when onopen fires. This handles
+  //   the race between App.componentDidMount opening the socket and
+  //   EditorHost.componentDidMount emitting the initial projectFocused.
+  // - selectionChanged frames are dropped silently; a selection during
+  //   a reconnect window is stale by the time the socket recovers.
+  // Frames after close() are always dropped.
   send(msg: ClientWsMessage): void {
     if (this.closed) {
       return;
     }
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      if (msg.type === 'projectFocused') {
+        this.pendingFocusedFrame = msg;
+      }
       return;
     }
     socket.send(JSON.stringify(msg));
@@ -146,9 +160,21 @@ export class UpdatesSocket {
       return;
     }
     this.socket = socket;
+    socket.onopen = () => this.handleOpen();
     socket.onmessage = (event) => this.handleMessage(event);
     socket.onclose = () => this.handleClose();
     socket.onerror = () => this.handleError();
+  }
+
+  private handleOpen(): void {
+    const pending = this.pendingFocusedFrame;
+    if (pending !== null) {
+      this.pendingFocusedFrame = null;
+      const socket = this.socket;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(pending));
+      }
+    }
   }
 
   private handleMessage(event: MessageEvent): void {

@@ -312,11 +312,12 @@ describe('UpdatesSocket', () => {
     socket.close();
   });
 
-  test('send() drops frames when the socket is not yet open', () => {
-    // The socket is in CONNECTING state until `open()` is invoked. Sending
-    // before the connection is up would throw on a real WebSocket; the
-    // public contract here is to drop silently so transient timing windows
-    // around mount/unmount don't tear down the app.
+  test('send() queues a projectFocused frame when the socket is not yet open, and flushes on open', () => {
+    // The socket is in CONNECTING state until `open()` is invoked.
+    // projectFocused carries persistent intent (which project is focused)
+    // and must survive the CONNECTING → OPEN transition so the server
+    // sees the focus even when EditorHost.componentDidMount races with
+    // the WS handshake.
     const socket = new UpdatesSocket('t', () => {
       // unused
     });
@@ -324,7 +325,50 @@ describe('UpdatesSocket', () => {
 
     socket.send({ type: 'projectFocused', path: 'a.stmx' });
 
+    // Not yet sent — socket is still CONNECTING.
     expect(ws.sentFrames).toHaveLength(0);
+
+    // Opening the socket must flush the pending frame.
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({ type: 'projectFocused', path: 'a.stmx' });
+
+    socket.close();
+  });
+
+  test('send() drops selectionChanged frames when the socket is not yet open', () => {
+    // selectionChanged events during the CONNECTING window are stale once
+    // the socket opens; the next explicit selection will arrive after open.
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['x'] });
+
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(0);
+    socket.close();
+  });
+
+  test('send() replaces a pending projectFocused with a newer one before open', () => {
+    // Only the latest focus frame matters; if two arrive before the
+    // socket opens, only the second should be sent.
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'projectFocused', path: 'first.stmx' });
+    socket.send({ type: 'projectFocused', path: 'second.stmx' });
+
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({ type: 'projectFocused', path: 'second.stmx' });
+
     socket.close();
   });
 
@@ -337,6 +381,22 @@ describe('UpdatesSocket', () => {
     socket.close();
 
     socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    expect(ws.sentFrames).toHaveLength(0);
+  });
+
+  test('pending projectFocused is discarded when close() is called before open', () => {
+    const socket = new UpdatesSocket('t', () => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+    socket.close();
+
+    // Simulating the socket opening after close() — the pending frame
+    // must not be sent because the socket has been explicitly torn down.
+    ws.open();
 
     expect(ws.sentFrames).toHaveLength(0);
   });

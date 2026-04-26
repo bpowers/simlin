@@ -938,4 +938,51 @@ describe('EditorHost', () => {
       jest.useRealTimers();
     }
   });
+
+  test('sustained burst of 5 events over 500ms emits exactly one frame with the latest idents', async () => {
+    // Five selection events arrive at 100ms intervals. The debounce window
+    // is 150ms so each event resets the timer. After 500ms total only one
+    // frame should be sent, carrying the idents from the final event.
+    jest.useFakeTimers();
+    try {
+      globalThis.fetch = makeFetchResolving({
+        json: '{}',
+        version: 0,
+        source_format: 'stmx',
+      }) as unknown as typeof globalThis.fetch;
+
+      const { socket, sent } = makeFakeSocket();
+      render(<EditorHost path="a.stmx" socket={socket} />);
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      sent.length = 0;
+
+      const onSelectionChanged = EditorMock.lastProps?.onSelectionChanged;
+      expect(onSelectionChanged).toBeDefined();
+
+      // Fire 5 events at 100ms intervals.
+      for (let i = 1; i <= 5; i++) {
+        onSelectionChanged?.([`v${i}`]);
+        act(() => {
+          jest.advanceTimersByTime(100);
+        });
+      }
+
+      // At this point 500ms have elapsed since the first event and 100ms
+      // since the last. The debounce timer (150ms) has not yet fired.
+      expect(sent).toEqual([]);
+
+      // Advance past the 150ms debounce window from the last event.
+      act(() => {
+        jest.advanceTimersByTime(50);
+      });
+
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toEqual({ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['v5'] });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
