@@ -1138,3 +1138,61 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
         );
     }
 }
+
+// -- Partition-lookup regression test (cycle 2 fix) --
+//
+// The mixed/scalar branch in build_element_level_loops previously stripped
+// subscripts from element-level node names when building Loop.stocks. This
+// caused partition_for_loop to return None for every mixed/scalar loop because
+// model_element_cycle_partitions keys its stock_partition map on element-level
+// names (e.g. "pop[nyc]"), not variable-level names (e.g. "pop"). Silently
+// returning None from every lookup corrupts per-loop normalization in
+// compute_rel_loop_scores.
+//
+// This test verifies that loop_partitions contains at least one Some(N) value
+// for the mixed_scalar_roundtrip fixture, which has mixed loops that cross
+// through a scalar node (total_pop) and arrayed stocks (pop[nyc], pop[boston]).
+
+#[test]
+fn mixed_scalar_loop_partitions_resolve_to_some() {
+    // Same fixture used in mixed_scalar_loop_score_refs_resolve_to_emitted_names:
+    //   pop[Region] (stock, inflow=births)
+    //   total_pop = SUM(pop[*])           (scalar aux, cross-element)
+    //   births[Region] = total_pop * 0.005 + pop * 0.05  (mixed inputs)
+    //
+    // The loops pop[nyc] -> total_pop -> births[nyc] -> pop[nyc] and
+    // pop[boston] -> total_pop -> births[boston] -> pop[boston] both pass
+    // through a scalar node, so they land in the mixed/scalar branch.
+    // Their stocks (pop[nyc], pop[boston]) must appear in the element-level
+    // cycle-partition map, yielding Some(N) for each loop.
+    let project = TestProject::new("mixed_scalar_roundtrip")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .scalar_aux("total_pop", "SUM(pop[*])")
+        .array_flow("births[Region]", "total_pop * 0.005 + pop * 0.05", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    // Only exhaustive mode populates loop_partitions.
+    assert!(
+        !ltm.loop_partitions.is_empty(),
+        "expected loop_partitions to be non-empty for a model with feedback loops"
+    );
+
+    // At least one mixed/scalar loop must resolve to Some(N), not None.
+    // Before the fix every mixed/scalar loop returned None because Loop.stocks
+    // held variable-level names ("pop") but stock_partition holds element-level
+    // keys ("pop[nyc]").
+    let any_some = ltm.loop_partitions.values().any(|v| v.is_some());
+    assert!(
+        any_some,
+        "all loop_partitions values are None, meaning partition_for_loop \
+         returned None for every loop; this indicates the element-level \
+         Loop.stocks regression has recurred. loop_partitions: {:?}",
+        ltm.loop_partitions
+    );
+}

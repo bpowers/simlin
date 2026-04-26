@@ -2258,14 +2258,17 @@ pub(crate) fn build_element_level_loops(
 
                 // Find stocks among element-level nodes. We check the
                 // variable-level stock set by stripping subscripts from
-                // the circuit's original element-level names.
+                // the circuit's element-level names, but preserve the
+                // element-level form in the result so partition_for_loop
+                // (which uses element-level keys from
+                // model_element_cycle_partitions) can resolve them.
                 let stocks: Vec<Ident<Canonical>> = element_nodes
                     .iter()
                     .filter(|n| {
                         let var_name = strip_subscript(n);
                         var_graph.stocks.contains(&Ident::new(var_name))
                     })
-                    .map(|n| Ident::new(strip_subscript(n)))
+                    .map(|n| Ident::new(n))
                     .collect();
 
                 all_loops.push(Loop {
