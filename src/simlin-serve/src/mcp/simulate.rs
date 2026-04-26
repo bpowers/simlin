@@ -24,6 +24,7 @@ use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamod
 use simlin_engine::json as ejson;
 use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
+use simlin_mcp_core::open::resolve_model_name;
 use simlin_mcp_core::tools::edit_model::{EditOperation, build_patch};
 
 /// Failure modes for the `Simulate` tool.
@@ -126,10 +127,16 @@ pub async fn run<A: ProjectAccess>(
     let opened = access.open(path).await?;
 
     let mut project: datamodel::Project = opened.project;
-    let model_name = input
+    // Same fallback ReadModel/EditModel use: a literal "main" request
+    // resolves to the project's first model when no model is actually
+    // named "main". This makes single-model XMILE/Vensim projects
+    // (where the model name is e.g. "Population") work for AI clients
+    // that omit `model_name`.
+    let requested = input
         .model_name
         .clone()
         .unwrap_or_else(|| "main".to_string());
+    let model_name = resolve_model_name(&project, &requested).to_string();
 
     if let Some(overrides) = input.overrides {
         let patch = build_patch(&model_name, None, Some(overrides));
@@ -340,6 +347,42 @@ mod tests {
         let out = run(&access, input).await.expect("simulate succeeds");
         assert_eq!(out.variables.len(), 1);
         assert!(out.variables.contains_key("teacup_temperature"));
+    }
+
+    #[tokio::test]
+    async fn run_falls_back_to_first_model_when_none_named_main() {
+        // Single-model projects from XMILE/Vensim often have a model
+        // named something other than literally "main" (e.g. "Population").
+        // ReadModel and EditModel use simlin_mcp_core::open::resolve_model_name
+        // to fall back to the first model when the requested name is not
+        // present; Simulate must do the same so an AI client that omits
+        // model_name doesn't get a confusing engine-level "model not
+        // found" error on a project that ReadModel just read.
+        let temp = TempDir::new().expect("tempdir");
+        let canonical = temp.path().canonicalize().expect("canon");
+        let abs = canonical.join("renamed.sd.json");
+        // sd.json with a single model named "Population" — no "main".
+        let json = r#"{
+            "name": "renamed",
+            "simSpecs": {"startTime": 0, "endTime": 10, "dt": "1", "method": "euler"},
+            "models": [{"name": "Population"}]
+        }"#;
+        std::fs::write(&abs, json).expect("write sd.json");
+        let state = build_state(canonical);
+        seed_registry(&state, &abs, ProjectFormat::SdJson);
+
+        let access = RegistryAccess::new(state);
+        let input = SimulateInput {
+            project_path: abs.display().to_string(),
+            model_name: None,
+            overrides: None,
+            sim_specs_override: None,
+            variables: None,
+        };
+        let out = run(&access, input)
+            .await
+            .expect("simulate falls back to the first (only) model");
+        assert!(out.time.len() > 1);
     }
 
     #[tokio::test]
