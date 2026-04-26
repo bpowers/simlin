@@ -25,7 +25,7 @@ use axum::routing::get;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::handlers::{AppState, get_project, list_projects, save_project};
+use crate::handlers::{AppState, get_project, list_projects, save_project, updates_ws_handler};
 use crate::static_assets::static_handler;
 
 /// Maximum accepted request body size. POST bodies carry the full
@@ -53,6 +53,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/projects/{*rel_path}",
             get(get_project).post(save_project),
         )
+        // WebSocket upgrade lives under /api/updates so it shares the
+        // /api/* prefix that frontends use to distinguish data-plane
+        // calls from SPA assets. The Query<WsParams> extractor enforces
+        // a present `?token=...` query param ahead of the handler body.
+        .route("/api/updates", get(updates_ws_handler))
         .fallback(static_handler)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())

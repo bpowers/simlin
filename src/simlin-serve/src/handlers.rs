@@ -14,12 +14,15 @@ use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+use tokio::sync::broadcast;
 
-use crate::events::EventBus;
+use crate::events::{EventBus, WsMessage};
 use crate::git::GitProbe;
 use crate::parse::{ParseError, parse_to_datamodel};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
@@ -759,6 +762,124 @@ fn path_to_forward_slash(path: &Path) -> String {
     } else {
         display.replace(MAIN_SEPARATOR, "/")
     }
+}
+
+/// Query-string carrier for the WebSocket upgrade. Browser-native
+/// `WebSocket` cannot set custom headers on the handshake, so the bearer
+/// rides as a query parameter; the launcher embeds the same token in the
+/// initial URL the user opens.
+#[derive(Debug, Deserialize)]
+pub struct WsParams {
+    pub token: String,
+}
+
+/// `GET /api/updates` — WebSocket endpoint that streams `WsMessage`
+/// frames to the connected browser. Each connection subscribes to the
+/// process's `EventBus`; messages are JSON-encoded and sent as text
+/// frames.
+///
+/// Auth: the `?token=...` query parameter is compared against
+/// `state.launch_token` with a constant-time compare. Mismatched length
+/// or value -> 401. Missing token -> 400 (Axum's `Query` extractor
+/// rejects the request before the handler runs).
+///
+/// Phase 3 doesn't consume any client-to-server messages; future phases
+/// will add a `selectionChanged` upstream variant for collaborative
+/// awareness. We still drain `socket.recv()` so axum's auto-pong reply
+/// path keeps the connection alive on browser pings, and so the server
+/// task exits promptly when the client closes.
+pub async fn updates_ws_handler(
+    State(state): State<AppState>,
+    Query(params): Query<WsParams>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !tokens_match(&params.token, &state.launch_token) {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
+
+    let rx = state.events.subscribe();
+    tracing::info!("ws: client accepted on /api/updates");
+    ws.on_upgrade(move |socket| handle_socket(socket, rx))
+}
+
+/// Constant-time token comparison.
+///
+/// `subtle::ConstantTimeEq::ct_eq` returns `Choice` (a wrapper around
+/// `u8`); `.into()` converts to `bool`. We compare byte slices directly;
+/// `ct_eq` short-circuits the early-exit-on-mismatch leak that a naive
+/// `==` could expose. Token lengths in this build are always 43 bytes
+/// (32 random bytes -> URL-safe base64, no pad), but the compare also
+/// handles the empty-launch-token case (used by tests that don't care
+/// about auth) by falling through to `ct_eq`'s length-mismatch path.
+fn tokens_match(presented: &str, expected: &str) -> bool {
+    presented.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+/// Per-connection WebSocket loop. Multiplexes between:
+/// 1. `rx.recv()` — broadcast events from the bus, serialized + sent as
+///    text frames.
+/// 2. `socket.recv()` — incoming client frames (Phase 3 ignores all but
+///    Close/error, which terminate the loop).
+///
+/// Lagged subscribers see `RecvError::Lagged(n)` once and resume; we log
+/// at warn so ops can spot a slow client. Connection close, send errors,
+/// and bus closure all break out cleanly so the spawned task drops.
+async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<WsMessage>) {
+    use broadcast::error::RecvError;
+
+    loop {
+        tokio::select! {
+            recv_result = rx.recv() => {
+                match recv_result {
+                    Ok(msg) => {
+                        let json = match serde_json::to_string(&msg) {
+                            Ok(s) => s,
+                            Err(err) => {
+                                tracing::error!(error = %err, "ws: serialize WsMessage failed; closing");
+                                break;
+                            }
+                        };
+                        tracing::debug!(target: "simlin_serve::ws", "ws: send {} bytes", json.len());
+                        if let Err(err) = socket.send(Message::Text(json.into())).await {
+                            tracing::debug!(error = %err, "ws: send failed; closing");
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            "ws: lagged by {n}; client may have missed events"
+                        );
+                        // continue: receiver auto-advances to the oldest
+                        // retained message on the next recv().
+                    }
+                    Err(RecvError::Closed) => {
+                        // Bus shut down (process is exiting). Close cleanly.
+                        break;
+                    }
+                }
+            }
+            client_frame = socket.recv() => {
+                match client_frame {
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(_))) => {
+                        // axum auto-pongs; nothing to do here. Logged at
+                        // debug because pings are routine.
+                    }
+                    Some(Ok(_)) => {
+                        // Phase 3 doesn't accept client-to-server data;
+                        // Phase 7 will dispatch on the variant.
+                    }
+                    Some(Err(err)) => {
+                        tracing::debug!(error = %err, "ws: client recv error; closing");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    tracing::info!("ws: client disconnected");
 }
 
 #[cfg(test)]
