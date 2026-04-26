@@ -21,8 +21,10 @@ pub use db_ltm::{
 
 #[path = "db_analysis.rs"]
 mod db_analysis;
+pub use db_analysis::RefShape;
 pub use db_analysis::causal_graph_from_edges;
 pub use db_analysis::causal_graph_from_element_edges;
+pub(crate) use db_analysis::collect_reference_shapes;
 pub(crate) use db_analysis::reconstruct_model_variables;
 use db_analysis::*;
 pub use db_analysis::{
@@ -31,11 +33,6 @@ pub use db_analysis::{
     model_causal_edges, model_cycle_partitions, model_detected_loops, model_element_causal_edges,
     model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
 };
-// ReferenceSite is consumed by Task 2's walker tests; production
-// consumption lands with Task 4's pivot of model_element_causal_edges.
-pub use db_analysis::RefShape;
-#[allow(unused_imports)]
-pub(crate) use db_analysis::{ReferenceSite, collect_reference_shapes};
 
 #[path = "db_implicit_deps.rs"]
 mod db_implicit_deps;
