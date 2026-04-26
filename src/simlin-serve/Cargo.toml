@@ -49,3 +49,7 @@ serde_yaml = "0.9"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server", "client", "transport-async-rw"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
