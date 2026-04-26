@@ -569,3 +569,70 @@ gates.
   `partition_for_loop` keying. Should be fixed separately; the test
   fixture from this work may exercise it but the fix is local to
   partition resolution.
+
+## Measurement Postscript
+
+Captured 2026-04-25 on commit `d0ad3924` (pre-Phase-2 baseline) and
+commit `eba8fd5f` (post-Phase-4 branch tip). Numbers are produced by
+`cargo run --release --example ltm_full_bench -- <fixture>`; the bench
+was extended in Phase 5 to report element-level largest-SCC size and
+to load `.sd.json` fixtures.
+
+For the "before" measurements the bench changes (commits `54b0cb9d`
+and `eba8fd5f`) were cherry-picked onto a detached `d0ad3924` so that
+both runs report the same set of stage notes. The cherry-picks touch
+only `examples/ltm_full_bench.rs`, leaving the production LTM
+pipeline at the pre-Phase-2 baseline.
+
+| Fixture | Pre var-edges | Pre elem-edges | Pre elem-SCC | Post elem-edges | Post elem-SCC | Auto-flip pre / post |
+|---------|--------------:|---------------:|-------------:|----------------:|--------------:|---------------------|
+| cross_element_ltm | 8 | 20 | 10 | 18 | 10 | no / no |
+| arrayed_population_ltm | 6 | 18 | 3 | 18 | 3 | no / no |
+| hero_culture_ltm | 41 | 41 | 15 | 41 | 15 | no / no |
+| WRLD3-03 | 483 | 483 | 166 | 483 | 166 | yes / yes |
+
+Notes per fixture:
+
+- **cross_element_ltm**: element-edge count drops from 20 to 18 (-2)
+  and the element-level circuit count drops from 12 to 8 because the
+  per-reference walker no longer emits the spurious cross-element
+  edges that FixedIndex broadcasts produced under the old
+  `ElementDependencyKind::CrossElement` classification. The largest
+  SCC is unchanged at 10 -- the removed edges sat inside an
+  already-strongly-connected stock cluster, so they trimmed cycles
+  without splitting the SCC. Auto-flip is unaffected (10 << 50 in
+  both runs).
+- **arrayed_population_ltm**: identical structural numbers in both
+  runs. This fixture's loops are purely intra-element population
+  flows (Bare references between same-shape arrayed variables); the
+  per-reference walker emits the same edge set as the pre-refactor
+  classification did. Auto-flip is unaffected (3 << 50).
+- **hero_culture_ltm**: identical numbers in both runs. The model is
+  fully scalar (27 vars, no arrayed dimensions), so the
+  variable-level and element-level graphs collapse to the same shape
+  and the FixedIndex path is never exercised. Auto-flip is unaffected
+  (15 << 50). Included in the table now that the Phase-5 bench can
+  load `.sd.json` projects.
+- **WRLD3-03**: identical numbers in both runs. WRLD3 is scalar, so
+  per-element expansion is again a no-op and the 166-node SCC comes
+  entirely from variable-level feedback structure (population,
+  capital, agriculture, persistent-pollution, non-renewable
+  resources). Auto-flip fires in both runs (166 > 50), and stage 7
+  reports `loop=0` for the synthetic-variable counts -- discovery
+  mode bypasses loop-score generation as designed.
+
+Threshold decision: `MAX_LTM_SCC_NODES = 50` is retained. The
+post-refactor data shows that the per-reference rewrite shrinks edge
+counts and circuit counts on FixedIndex models without shrinking the
+underlying SCC sizes, and it leaves scalar/A2A models entirely
+unchanged. WRLD3 still trips the gate for the same structural reason
+it did before, and the smaller fixtures continue to fit comfortably
+under the threshold with element-SCCs of 3, 10, and 15. Because no
+fixture moved closer to or across the threshold, there is no data
+justifying a change.
+
+Because element-graph SCC sizes did not shrink materially on the
+FixedIndex fixture (cross_element's elem-SCC stayed at 10), Phase 5's
+optional `MAX_LTM_SCC_NODES` doc-comment update was skipped -- the
+edge-count and circuit-count savings are real but they don't change
+the auto-flip story the existing comment tells.
