@@ -141,6 +141,21 @@ impl GitProbe {
         let mut guard = self.cache.write().expect("cache RwLock poisoned");
         guard.insert(repo_root, cache);
     }
+
+    /// Drop any cached `RepoCache` for `repo_root`. The next `status_for`
+    /// call against any path inside that repo will rebuild the cache from
+    /// fresh git output. Used by Phase 4's file watcher to close the
+    /// race window where a `.git/index` mtime hasn't budged but the
+    /// underlying status has changed (e.g., a `git reset` that rewinds
+    /// to the pre-edit state and rewrites the index in-place with the
+    /// same mtime).
+    ///
+    /// No-op when no entry exists for `repo_root`. Cheap to call: one
+    /// `RwLock` write acquire + a `HashMap::remove`.
+    pub fn invalidate_repo_cache(&self, repo_root: &Path) {
+        let mut guard = self.cache.write().expect("cache RwLock poisoned");
+        guard.remove(repo_root);
+    }
 }
 
 /// Walk upward from `file.parent()` looking for the first ancestor that
@@ -281,6 +296,37 @@ fn classify(cache: &RepoCache, abs_path: &Path) -> GitState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    /// Run `git` in `cwd` with `args`. Asserts success; returns stdout as String.
+    fn must_git(cwd: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
+        if !out.status.success() {
+            panic!(
+                "git {} exited {:?}: {}",
+                args.join(" "),
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Check whether `git` is available on the host. Tests that exercise
+    /// real git workflows skip when this returns false (CI runs with git
+    /// installed, but in case a sandbox doesn't have it, we degrade
+    /// gracefully rather than fail).
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 
     #[test]
     fn unavailable_probe_returns_unavailable_for_every_path() {
@@ -309,6 +355,45 @@ mod tests {
         if let Some(root) = result {
             assert!(root.join(".git").exists());
         }
+    }
+
+    #[test]
+    fn invalidate_repo_cache_removes_cached_entries_for_that_repo() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path();
+        must_git(repo, &["init", "-q"]);
+        must_git(repo, &["config", "user.email", "test@example.com"]);
+        must_git(repo, &["config", "user.name", "test"]);
+        let model = repo.join("model.stmx");
+        std::fs::write(&model, b"<root/>").unwrap();
+        must_git(repo, &["add", "model.stmx"]);
+        must_git(repo, &["commit", "-q", "-m", "initial"]);
+
+        let probe = GitProbe::detect();
+        // First call populates the cache.
+        let _ = probe.status_for(&model);
+        // Cache must now contain an entry for this repo.
+        assert!(
+            probe.cache.read().unwrap().contains_key(repo),
+            "cache should hold a RepoCache after status_for"
+        );
+
+        probe.invalidate_repo_cache(repo);
+        assert!(
+            !probe.cache.read().unwrap().contains_key(repo),
+            "invalidate_repo_cache must remove the entry"
+        );
+    }
+
+    #[test]
+    fn invalidate_repo_cache_is_noop_for_unknown_repo() {
+        let probe = GitProbe::unavailable_for_tests();
+        // No panic, no error; just a quiet no-op.
+        probe.invalidate_repo_cache(Path::new("/nope/not/a/real/repo"));
     }
 
     #[test]

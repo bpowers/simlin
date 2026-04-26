@@ -722,14 +722,84 @@ impl WatcherActor {
             .publish(WsMessage::ProjectRemoved { path: display_path });
     }
 
-    /// Stub for Subcomponent A. Task 7 replaces this with
-    /// `state.git.invalidate_repo_cache(&repo_root)` plus a re-status
-    /// pass over registry entries living inside the repo.
-    async fn handle_git_change(_state: &AppState, repo_root: PathBuf) {
-        tracing::debug!(
-            repo_root = %repo_root.display(),
-            "watcher actor: .git/HEAD or .git/index change (stub)"
-        );
+    /// React to a `.git/HEAD`/`.git/index` mutation by invalidating
+    /// the `GitProbe`'s per-repo cache for `repo_root`, then re-running
+    /// `status_for` on every registry entry inside the repo. Each
+    /// entry whose git state actually changed is updated in place and
+    /// gets a `ProjectChanged { source: Disk }` broadcast (the model
+    /// itself didn't change, but its sidebar indicator did, and the
+    /// frontend uses the same broadcast channel to refresh).
+    ///
+    /// Per plan note 8 the watcher only fires for HEAD/index, never
+    /// for `.git/objects/...` or `.git/refs/...`; if a future change
+    /// adds more triggers we'll just process them with the same
+    /// "invalidate + re-status" logic.
+    async fn handle_git_change(state: &AppState, repo_root: PathBuf) {
+        // Resolve `repo_root` against `state.root` if it came in
+        // relative (the classifier emits the path-as-given, so a
+        // top-level `.git` at the watcher root produces an empty
+        // PathBuf). For inner repos we still get an absolute path.
+        let canonical_repo = if repo_root.as_os_str().is_empty() {
+            state.root.as_ref().clone()
+        } else if repo_root.is_absolute() {
+            repo_root.clone()
+        } else {
+            state.root.as_ref().join(&repo_root)
+        };
+
+        state.git.invalidate_repo_cache(&canonical_repo);
+
+        let snapshot = state.registry.snapshot();
+        for entry in snapshot {
+            // The snapshot's path is relative-to-root; rebuild the
+            // absolute key the same way the registry does internally.
+            let abs = state.root.as_ref().join(&entry.path);
+            // Skip files outside the affected repo. enclosing_git_root
+            // walks upward until it finds a `.git`; if that root
+            // doesn't match the affected repo, this entry's git
+            // status didn't change.
+            let entry_repo = match crate::git::enclosing_git_root(&abs) {
+                Some(r) => r,
+                None => continue,
+            };
+            if entry_repo != canonical_repo {
+                continue;
+            }
+            let new_git = state.git.status_for(&abs);
+            if new_git == entry.git {
+                continue;
+            }
+            // Update the registry entry's git field in place. We
+            // rebuild a fresh ProjectMeta because the registry's
+            // upsert overwrites the whole entry; preserve every
+            // non-git field.
+            let updated = ProjectMeta {
+                path: PathBuf::new(),
+                format: entry.format,
+                mtime: entry.mtime,
+                size: entry.size,
+                git: new_git,
+                version: entry.version,
+                doc: entry.doc.clone(),
+                last_disk_hash: entry.last_disk_hash,
+            };
+            state.registry.upsert_preserve_version(abs.clone(), updated);
+
+            let display_path = match abs.strip_prefix(state.root.as_ref()) {
+                Ok(rel) => path_to_forward_slash(rel),
+                Err(_) => path_to_forward_slash(&abs),
+            };
+            tracing::debug!(
+                path = %display_path,
+                version = entry.version,
+                "watcher: git status changed; broadcasting ProjectChanged"
+            );
+            state.events.publish(WsMessage::ProjectChanged {
+                path: display_path,
+                version: entry.version,
+                source: ChangeSource::Disk,
+            });
+        }
     }
 }
 
