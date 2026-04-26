@@ -206,6 +206,17 @@ export class App extends React.Component<Record<string, never>, AppState> {
     void this.loadProjects();
   };
 
+  // The NewProjectButton calls this with the freshly-created file's
+  // relative path. Selecting the new path opens the editor on it; the
+  // server-side `ProjectChanged` broadcast already refreshed the list
+  // for any other open tabs, but the originating tab also benefits
+  // from a refetch here so the sidebar shows the new entry immediately
+  // even before the WS event arrives.
+  private handleProjectCreated = (newPath: string): void => {
+    this.setState({ selectedPath: newPath });
+    void this.loadProjects();
+  };
+
   private handleDismissGitHint = (): void => {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.setItem(GIT_HINT_DISMISSED_KEY, '1');
@@ -245,10 +256,15 @@ export class App extends React.Component<Record<string, never>, AppState> {
         {!ready ? (
           <div className="serve-loading">Loading projects…</div>
         ) : empty ? (
-          <EmptyState />
+          <EmptyState onCreated={this.handleProjectCreated} />
         ) : (
           <div className="serve-layout">
-            <ProjectList projects={projects} selectedPath={selectedPath} onSelect={this.handleSelect} />
+            <ProjectList
+              projects={projects}
+              selectedPath={selectedPath}
+              onSelect={this.handleSelect}
+              onCreated={this.handleProjectCreated}
+            />
             <EditorHost
               path={selectedPath}
               liveVersion={liveVersion}

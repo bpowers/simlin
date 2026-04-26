@@ -82,8 +82,32 @@ describe('App shell', () => {
     render(<App />);
 
     await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
-    // Phase 1 explicitly does NOT render a "Create new model" button — that's Phase 8.
-    expect(screen.queryByRole('button', { name: /create new model/i })).toBeNull();
+    // Phase 8 adds the "Create new model" affordance to the empty state
+    // so users don't have to leave the UI to bootstrap a directory.
+    expect(screen.queryByRole('button', { name: /create new model/i })).not.toBeNull();
+  });
+
+  test('renders the Create new model button at the top of the project list (AC1.4)', async () => {
+    globalThis.fetch = makeListFetch({
+      projects: [
+        {
+          path: 'a.stmx',
+          format: 'stmx',
+          mtime: new Date(0).toISOString(),
+          size: 0,
+          git: { kind: 'untracked' },
+          version: 0,
+        },
+      ],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryByText('a.stmx')).not.toBeNull());
+    // The affordance is always visible "from any state" (per the
+    // design plan's wording), not just when the directory is empty.
+    expect(screen.queryByRole('button', { name: /create new model/i })).not.toBeNull();
   });
 
   test('renders the git-unavailable banner when git is missing (AC2.5)', async () => {

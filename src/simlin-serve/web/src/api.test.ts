@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import {
+  createProject,
   encodeProjectPath,
   fetchProject,
   fetchProjects,
@@ -222,5 +223,61 @@ describe('saveProject', () => {
     ) as unknown as typeof globalThis.fetch;
 
     await expect(saveProject('a.stmx', '{}', 0)).rejects.toThrow(/403/);
+  });
+});
+
+describe('createProject', () => {
+  test('POSTs JSON body with name+format and returns the response', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ path: 'foo.stmx', version: 0 }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const result = await createProject('foo', 'stmx');
+
+    expect(result).toEqual({ path: 'foo.stmx', version: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/projects/new');
+    expect(init.method).toBe('POST');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'foo', format: 'stmx' });
+  });
+
+  test('forwards the optional parent_dir to the server', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ path: 'sub/foo.stmx', version: 0 }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    await createProject('foo', 'stmx', 'sub');
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: 'foo',
+      format: 'stmx',
+      parent_dir: 'sub',
+    });
+  });
+
+  test('includes the bearer token when one is stored', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok-create');
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(jsonResponse({ path: 'a.stmx', version: 0 }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    await createProject('a', 'stmx');
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer tok-create');
+  });
+
+  test('throws an Error carrying the server message on non-OK responses', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      jsonResponse({ error: 'already_exists' }, 409),
+    ) as unknown as typeof globalThis.fetch;
+
+    await expect(createProject('dup', 'stmx')).rejects.toThrow(/already_exists|409/i);
   });
 });

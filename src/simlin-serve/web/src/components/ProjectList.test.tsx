@@ -44,7 +44,7 @@ function unavailable(path: string): ProjectMeta {
 describe('ProjectList', () => {
   test('renders one row per project (AC1.1)', () => {
     const projects = [tracked('a.stmx', false), untracked('b.mdl'), unavailable('c.xmile')];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} />);
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
 
     expect(screen.getByText('a.stmx')).not.toBeNull();
     expect(screen.getByText('b.mdl')).not.toBeNull();
@@ -53,28 +53,28 @@ describe('ProjectList', () => {
 
   test('renders a tracked-clean badge for AC2.1', () => {
     const projects = [tracked('clean.stmx', false)];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} />);
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
 
     expect(screen.getByLabelText(/version controlled/i)).not.toBeNull();
   });
 
   test('renders a modified badge for AC2.2', () => {
     const projects = [tracked('dirty.stmx', true)];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} />);
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
 
     expect(screen.getByLabelText(/modified/i)).not.toBeNull();
   });
 
   test('renders the not-in-repo warning for AC2.3', () => {
     const projects = [untracked('orphan.mdl')];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} />);
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
 
     expect(screen.getByLabelText(/not under version control/i)).not.toBeNull();
   });
 
   test('renders the git-unavailable indicator', () => {
     const projects = [unavailable('isolated.xmile')];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} />);
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
 
     expect(screen.getByLabelText(/git status unavailable/i)).not.toBeNull();
   });
@@ -82,7 +82,7 @@ describe('ProjectList', () => {
   test('invokes onSelect with the path when a row is clicked', () => {
     const projects = [tracked('a.stmx', false), tracked('b.stmx', true)];
     const calls: Array<string> = [];
-    render(<ProjectList projects={projects} selectedPath={null} onSelect={(p) => calls.push(p)} />);
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={(p) => calls.push(p)} onCreated={() => {}} />);
 
     fireEvent.click(screen.getByText('b.stmx'));
     expect(calls).toEqual(['b.stmx']);
@@ -90,10 +90,18 @@ describe('ProjectList', () => {
 
   test('marks the selected row visibly', () => {
     const projects = [tracked('a.stmx', false), tracked('b.stmx', false)];
-    const { container } = render(<ProjectList projects={projects} selectedPath="b.stmx" onSelect={() => {}} />);
+    const { container } = render(
+      <ProjectList projects={projects} selectedPath="b.stmx" onSelect={() => {}} onCreated={() => {}} />,
+    );
 
     const selected = container.querySelector('[aria-current="true"]');
     expect(selected).not.toBeNull();
     expect(selected?.textContent).toContain('b.stmx');
+  });
+
+  test('renders the always-visible NewProjectButton at the top', () => {
+    const projects = [tracked('a.stmx', false)];
+    render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
+    expect(screen.queryByRole('button', { name: /create new model/i })).not.toBeNull();
   });
 });

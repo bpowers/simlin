@@ -4,19 +4,25 @@
 
 import * as React from 'react';
 
-// Phase 1 deliberately omits the "Create new model" affordance — that arrives
-// in Phase 8. The empty state still ships so users have a hint about what
-// `simlin-serve` is looking for.
+import { NewProjectButton } from './NewProjectButton';
 
-export class EmptyState extends React.Component {
+type EmptyStateProps = Readonly<{
+  // Invoked with the new file's relative path when the user creates a
+  // model from this empty-directory affordance. App selects the new
+  // path so the editor opens immediately.
+  onCreated: (path: string) => void;
+}>;
+
+export class EmptyState extends React.Component<EmptyStateProps> {
   render(): React.ReactNode {
     return (
       <div className="serve-empty-state">
         <h2>No models found</h2>
         <p>
           simlin-serve scans the current directory tree for <code>.stmx</code>, <code>.xmile</code>, and{' '}
-          <code>.mdl</code> files. Drop one in or run the server in a different directory.
+          <code>.mdl</code> files. Drop one in or create a new model below.
         </p>
+        <NewProjectButton onCreated={this.props.onCreated} />
       </div>
     );
   }

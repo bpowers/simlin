@@ -17,6 +17,8 @@ if (baseConfig) {
       localStorage: 'readonly',
       HTMLElement: 'readonly',
       HTMLInputElement: 'readonly',
+      HTMLButtonElement: 'readonly',
+      HTMLSelectElement: 'readonly',
       Response: 'readonly',
       RequestInit: 'readonly',
       WebSocket: 'readonly',

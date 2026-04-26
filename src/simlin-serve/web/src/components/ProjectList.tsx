@@ -5,11 +5,16 @@
 import * as React from 'react';
 
 import type { GitState, ProjectMeta } from '../api';
+import { NewProjectButton } from './NewProjectButton';
 
 type ProjectListProps = Readonly<{
   projects: ReadonlyArray<ProjectMeta>;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  // Invoked when the always-visible "+ New model" affordance creates a
+  // file. The parent updates selectedPath; the WS `projectChanged` event
+  // refreshes the list naturally so we don't need a refetch hook here.
+  onCreated: (path: string) => void;
 }>;
 
 export class ProjectList extends React.Component<ProjectListProps> {
@@ -18,24 +23,27 @@ export class ProjectList extends React.Component<ProjectListProps> {
   };
 
   render(): React.ReactNode {
-    const { projects, selectedPath } = this.props;
+    const { projects, selectedPath, onCreated } = this.props;
     return (
-      <ul className="serve-project-list" role="list">
-        {projects.map((project) => {
-          const isSelected = project.path === selectedPath;
-          return (
-            <li
-              key={project.path}
-              className={'serve-project-list-item' + (isSelected ? ' serve-project-list-item--selected' : '')}
-              aria-current={isSelected ? 'true' : undefined}
-              onClick={this.handleClick(project.path)}
-            >
-              <span className="serve-project-list-path">{project.path}</span>
-              <GitChip git={project.git} />
-            </li>
-          );
-        })}
-      </ul>
+      <div className="serve-project-list-wrapper">
+        <NewProjectButton onCreated={onCreated} />
+        <ul className="serve-project-list" role="list">
+          {projects.map((project) => {
+            const isSelected = project.path === selectedPath;
+            return (
+              <li
+                key={project.path}
+                className={'serve-project-list-item' + (isSelected ? ' serve-project-list-item--selected' : '')}
+                aria-current={isSelected ? 'true' : undefined}
+                onClick={this.handleClick(project.path)}
+              >
+                <span className="serve-project-list-path">{project.path}</span>
+                <GitChip git={project.git} />
+              </li>
+            );
+          })}
+        </ul>
+      </div>
     );
   }
 }

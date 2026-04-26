@@ -45,6 +45,16 @@ export type SaveResponse = {
   path: string;
 };
 
+// `format` is the subset of ProjectFormat the server's create endpoint
+// accepts: stmx (canonical native XMILE) or sd_json (canonical AI/SD-AI
+// format). The server rejects mdl and xmile for new files.
+export type CreateProjectFormat = 'stmx' | 'sd_json';
+
+export type CreateProjectResponse = {
+  path: string;
+  version: number;
+};
+
 // Mirror of `simlin-serve::handlers::ValidationError` (camelCase via serde).
 export type ServerValidationError = {
   code: string;
@@ -175,4 +185,54 @@ export async function saveProject(path: string, json: string, version: number): 
   }
 
   return (await response.json()) as SaveResponse;
+}
+
+/**
+ * Create a new empty model file via `POST /api/projects/new`. The server
+ * builds a minimal datamodel::Project with one empty `main` model and
+ * the canonical default sim-specs.
+ *
+ * `name` is the bare filename (no extension); the server appends the
+ * extension implied by `format`. `parentDir` is an optional
+ * forward-slash relative path under the scan root.
+ *
+ * @throws Error on any non-OK response (carrying the server message
+ *  when one is provided).
+ */
+export async function createProject(
+  name: string,
+  format: CreateProjectFormat,
+  parentDir?: string,
+): Promise<CreateProjectResponse> {
+  // Use a discriminated body so the server-side serde definition (with
+  // `parent_dir: Option<String>`) sees an absent field rather than a
+  // null when the caller doesn't pass parentDir; this mirrors the
+  // skip_serializing_if behavior on Rust's side.
+  const body: Record<string, unknown> = { name, format };
+  if (parentDir !== undefined) {
+    body.parent_dir = parentDir;
+  }
+  const response = await fetch('/api/projects/new', {
+    method: 'POST',
+    headers: {
+      ...buildAuthHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let message = `failed to create project: HTTP ${response.status}`;
+    try {
+      const errBody = (await response.json()) as { error?: string };
+      if (errBody && errBody.error) {
+        message = `${errBody.error} (HTTP ${response.status})`;
+      }
+    } catch {
+      // The body wasn't JSON; fall through to the generic message above.
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as CreateProjectResponse;
 }
