@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod hashing;
 pub mod launcher;
 pub mod loro_doc;
+pub mod mcp;
 pub mod parse;
 pub mod registry;
 pub mod scan;

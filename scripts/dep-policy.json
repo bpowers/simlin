@@ -5,7 +5,7 @@
     "simlin-cli": ["simlin-engine", "simlin"],
     "simlin-mcp": ["simlin-engine", "simlin-mcp-core"],
     "simlin-mcp-core": ["simlin-engine"],
-    "simlin-serve": ["simlin-engine"],
+    "simlin-serve": ["simlin-engine", "simlin-mcp-core"],
     "xmutil": []
   },
   "typescript": {
