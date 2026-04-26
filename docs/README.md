@@ -28,6 +28,10 @@
   - [implementation-plans/2026-04-05-server-rewrite/](implementation-plans/2026-04-05-server-rewrite/) -- 8-phase plan to build `simlin-serve` and refactor `simlin-mcp` into a shared core library
     - [test-requirements.md](implementation-plans/2026-04-05-server-rewrite/test-requirements.md) -- AC-to-test mapping for execution validation
 
+## Security
+
+- [threat-model.md](threat-model.md) -- `simlin-serve` V1 threat model: trust boundary, defenses (loopback bind, bearer token, DNS-rebinding mitigation, cross-origin defense, supply chain), and out-of-scope items
+
 ## Domain Knowledge
 
 - [reference/xmile-v1.0.html](reference/xmile-v1.0.html) -- XMILE interchange format specification
