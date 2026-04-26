@@ -21,19 +21,314 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::RefShape;
 
-/// Stub for the per-shape partial equation builder. Phase 3 replaces the
-/// body with the real implementation. Until then, calling this panics --
-/// Phase 1's tests that exercise it are `#[ignore]`-d so the panic doesn't
-/// fire during normal `cargo test`.
-#[allow(dead_code)] // populated in Phase 3
+/// Phase 1 stub renamed to `build_partial_equation_shaped` in Phase 3 Task 1.
+/// Kept as a thin alias for one commit so the Phase 1 #[ignore]-d tests continue
+/// to compile during the transition; Task 2 removes the alias and migrates the
+/// tests to call `build_partial_equation_shaped` directly.
+#[allow(dead_code)]
 pub(crate) fn build_partial_equation_for_shape(
-    _equation_text: &str,
-    _deps: &HashSet<Ident<Canonical>>,
-    _live_source: &Ident<Canonical>,
-    _live_shape: &RefShape,
-    _source_dim_elements: &[Vec<String>],
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
 ) -> String {
-    unimplemented!("populated in Phase 3")
+    build_partial_equation_shaped(
+        equation_text,
+        deps,
+        live_source,
+        live_shape,
+        source_dim_elements,
+    )
+}
+
+/// Classify an `Expr0` subscript's shape based on its indices.
+///
+/// Mirrors `db_analysis::resolve_literal_index`'s classification logic but at
+/// the `Expr0` (parsed-AST) level — used by `wrap_non_matching_in_previous`
+/// before subscripts have been lowered to `Expr2`. Each input string in
+/// `source_dim_elements` is the canonical lowercase element name for the
+/// corresponding source dimension, in source-declared order.
+///
+/// Rules:
+/// - any `IndexExpr0::Wildcard` → `RefShape::Wildcard`
+/// - all indices are literal element names that match the source's
+///   declared elements (or parseable integer literals for indexed
+///   dimensions) → `RefShape::FixedIndex(canonical_names)`
+/// - otherwise (StarRange, DimPosition, Range, non-literal Expr, or a
+///   literal that doesn't match) → `RefShape::DynamicIndex`
+///
+/// The match tries each index against the dimension at that position
+/// first, then falls back to scanning all dimensions. This keeps the
+/// classifier robust when callers pass dimensions in source-declared
+/// order but the subscript indices may not align 1:1 with dimension
+/// positions in unusual cases. Defensive `DynamicIndex` for unknown
+/// names ensures the worst case is over-conservative wrapping rather
+/// than incorrectly matching the live shape.
+#[allow(dead_code)] // consumed by wrap_non_matching_in_previous in Task 2
+fn classify_expr0_subscript_shape(
+    indices: &[IndexExpr0],
+    source_dim_elements: &[Vec<String>],
+) -> RefShape {
+    if indices
+        .iter()
+        .any(|idx| matches!(idx, IndexExpr0::Wildcard(_)))
+    {
+        return RefShape::Wildcard;
+    }
+    let mut elems = Vec::with_capacity(indices.len());
+    for (i, idx) in indices.iter().enumerate() {
+        match idx {
+            IndexExpr0::Expr(Expr0::Var(name, _)) => {
+                let canon = canonicalize(name.as_str()).into_owned();
+                let matches_position = i < source_dim_elements.len()
+                    && source_dim_elements[i].iter().any(|e| e == &canon);
+                let matches_any = !matches_position
+                    && source_dim_elements
+                        .iter()
+                        .any(|dim| dim.iter().any(|e| e == &canon));
+                if matches_position || matches_any {
+                    elems.push(canon);
+                } else {
+                    return RefShape::DynamicIndex;
+                }
+            }
+            // Possibly an integer literal index for an indexed dimension.
+            IndexExpr0::Expr(Expr0::Const(s, _, _)) if s.parse::<u32>().is_ok() => {
+                elems.push(s.clone());
+            }
+            _ => return RefShape::DynamicIndex,
+        }
+    }
+    RefShape::FixedIndex(elems)
+}
+
+/// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
+/// those whose access shape matches the live shape for the given source.
+///
+/// `live_source` identifies the source variable whose live shape is held
+/// out from `PREVIOUS` wrapping. `live_shape` declares which AST occurrences
+/// of that source remain live; all other occurrences (and all references
+/// to other sources in the same expression) are wrapped.
+///
+/// `other_deps` is the set of canonical idents for non-`live_source`
+/// dependencies that must be wrapped; nodes referencing names not in this
+/// set and not equal to `live_source` are left alone (function names and
+/// unknown identifiers). Indices of subscripts are recursively transformed
+/// even when the outer subscript matches the live shape, so nested
+/// references like `arr[other_var]` still get wrapped.
+#[allow(dead_code)] // populated/consumed across Phase 3 Tasks 1-3 and Subcomponent B
+pub(crate) fn wrap_non_matching_in_previous(
+    expr: Expr0,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    other_deps: &HashSet<Ident<Canonical>>,
+    source_dim_elements: &[Vec<String>],
+) -> Expr0 {
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            let canonical = Ident::new(ident.as_str());
+            if &canonical == live_source {
+                // The bare-Var occurrence matches `Bare`. Any other live
+                // shape (FixedIndex / Wildcard / DynamicIndex) doesn't
+                // match a bare reference, so we wrap.
+                if matches!(live_shape, RefShape::Bare) {
+                    expr
+                } else {
+                    Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                }
+            } else if other_deps.contains(&canonical) {
+                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+            } else {
+                expr
+            }
+        }
+        Expr0::Subscript(ident, indices, loc) => {
+            // Recurse into index expressions first so nested deps get
+            // wrapped regardless of the outer subscript's shape.
+            let indices: Vec<IndexExpr0> = indices
+                .into_iter()
+                .map(|idx| {
+                    wrap_index_non_matching_in_previous(
+                        idx,
+                        live_source,
+                        live_shape,
+                        other_deps,
+                        source_dim_elements,
+                    )
+                })
+                .collect();
+            let canonical = Ident::new(ident.as_str());
+            let subscript_shape = classify_expr0_subscript_shape(&indices, source_dim_elements);
+            let subscript = Expr0::Subscript(ident, indices, loc);
+            if &canonical == live_source {
+                if &subscript_shape == live_shape {
+                    subscript
+                } else {
+                    Expr0::App(
+                        UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                        loc,
+                    )
+                }
+            } else if other_deps.contains(&canonical) {
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                    loc,
+                )
+            } else {
+                subscript
+            }
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let args = args
+                .into_iter()
+                .map(|a| {
+                    wrap_non_matching_in_previous(
+                        a,
+                        live_source,
+                        live_shape,
+                        other_deps,
+                        source_dim_elements,
+                    )
+                })
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(wrap_non_matching_in_previous(
+                *inner,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            )),
+            loc,
+        ),
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(wrap_non_matching_in_previous(
+                *lhs,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            )),
+            Box::new(wrap_non_matching_in_previous(
+                *rhs,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            )),
+            loc,
+        ),
+        Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
+            Box::new(wrap_non_matching_in_previous(
+                *cond,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            )),
+            Box::new(wrap_non_matching_in_previous(
+                *then_expr,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            )),
+            Box::new(wrap_non_matching_in_previous(
+                *else_expr,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            )),
+            loc,
+        ),
+    }
+}
+
+#[allow(dead_code)] // consumed by wrap_non_matching_in_previous
+fn wrap_index_non_matching_in_previous(
+    index: IndexExpr0,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    other_deps: &HashSet<Ident<Canonical>>,
+    source_dim_elements: &[Vec<String>],
+) -> IndexExpr0 {
+    match index {
+        IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_non_matching_in_previous(
+            e,
+            live_source,
+            live_shape,
+            other_deps,
+            source_dim_elements,
+        )),
+        IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
+            wrap_non_matching_in_previous(
+                l,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            ),
+            wrap_non_matching_in_previous(
+                r,
+                live_source,
+                live_shape,
+                other_deps,
+                source_dim_elements,
+            ),
+            loc,
+        ),
+        other => other,
+    }
+}
+
+/// Build a partial equation for a per-shape link score.
+///
+/// Parses `equation_text`, computes the set of "other" deps (everything
+/// in `deps` other than `live_source`, also dropping module-prefixed
+/// references that normalize to `live_source`), and then walks the AST
+/// wrapping every reference to those other deps in `PREVIOUS()`. The
+/// reference to `live_source` is left live only at occurrences whose
+/// shape matches `live_shape`; other occurrences of `live_source` are
+/// wrapped too.
+///
+/// Unlike the legacy `build_partial_equation`, this function always
+/// canonicalizes via parse + `print_eqn`, even when no wrapping happens,
+/// so the result is always in the canonical equation format expected by
+/// downstream parsing. The performance impact is negligible because LTM
+/// equations are short.
+#[allow(dead_code)] // consumed by per-shape link score generators in Subcomponent B
+pub(crate) fn build_partial_equation_shaped(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+) -> String {
+    let other_deps: HashSet<Ident<Canonical>> = deps
+        .iter()
+        .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
+        .cloned()
+        .collect();
+
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return equation_text.to_lowercase();
+    };
+
+    let transformed = wrap_non_matching_in_previous(
+        ast,
+        live_source,
+        live_shape,
+        &other_deps,
+        source_dim_elements,
+    );
+    print_eqn(&transformed)
 }
 
 /// Recursively walk an Expr0 tree, wrapping variable references that appear in
