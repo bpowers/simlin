@@ -1772,4 +1772,43 @@ mod tests {
             "(PREVIOUS(population[nyc]) - population[boston]) * 0.01"
         );
     }
+
+    // -- AC2.4: other-source refs always wrapped, unknown idents passthrough --
+    //
+    // The two tests below pin behavior for references that aren't the live
+    // source. The first verifies that another known dep is wrapped regardless
+    // of which shape is live. The second verifies that an identifier that
+    // doesn't appear in `deps` (e.g., a typo or unresolved external) passes
+    // through unchanged -- the per-shape builder doesn't treat unknown idents
+    // as wrap candidates because they could be function names or noise that
+    // downstream parsing will diagnose separately.
+
+    #[test]
+    fn partial_equation_other_source_always_wrapped() {
+        // Equation has a reference to `helper` (other dep) plus the live
+        // source `pop`. The `helper` reference must be wrapped regardless
+        // of `live_shape`; `pop` stays live because the shape is `Bare`.
+        let deps = deps_set(&["pop", "helper"]);
+        let live = Ident::<Canonical>::new("pop");
+        let shape = RefShape::Bare;
+        let dims = region_dim_elements();
+
+        let partial = build_partial_equation_shaped("pop * helper", &deps, &live, &shape, &dims);
+        assert!(partial.contains("PREVIOUS(helper)"), "partial: {partial}");
+        assert!(!partial.contains("PREVIOUS(pop)"), "partial: {partial}");
+    }
+
+    #[test]
+    fn partial_equation_unknown_ident_unchanged() {
+        // A reference to a variable not in `deps` (e.g., a typo or external)
+        // is left alone -- it's not a known dep and shouldn't be wrapped.
+        let deps = deps_set(&["pop"]);
+        let live = Ident::<Canonical>::new("pop");
+        let shape = RefShape::Bare;
+        let dims = region_dim_elements();
+
+        let partial = build_partial_equation_shaped("pop + unknown", &deps, &live, &shape, &dims);
+        assert!(partial.contains("unknown"), "partial: {partial}");
+        assert!(!partial.contains("PREVIOUS(unknown)"), "partial: {partial}");
+    }
 }
