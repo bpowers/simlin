@@ -3450,6 +3450,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "simlin-mcp-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "schemars",
+ "serde",
+ "serde_json",
+ "simlin-engine",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "simlin-serve"
 version = "0.1.0"
 dependencies = [
