@@ -26,7 +26,7 @@ use tokio::sync::broadcast;
 use crate::events::{ChangeSource, ClientWsMessage, EventBus, WsMessage};
 use crate::git::GitProbe;
 use crate::parse::ParseError;
-use crate::path_resolution::{sidecar_for_mdl, to_forward_slash};
+use crate::path_resolution::{self, ResolutionError, sidecar_for_mdl, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
@@ -145,25 +145,25 @@ pub async fn get_project(
     let safe_rel = sanitize_rel_path(&rel_path)?;
 
     let candidate = state.root.join(&safe_rel);
-    // canonicalize fails if the file doesn't exist; that's the expected
-    // 404 path. Other I/O errors (permission, etc.) get reported as
-    // internal so the user can see something happened.
-    let canonical = match candidate.canonicalize() {
-        Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::NotFound);
-        }
-        Err(e) => return Err(ApiError::Internal(format!("canonicalize failed: {e}"))),
-    };
-
-    // Defense in depth: even if the request didn't contain `..`, a symlink
-    // within the tree could land us outside. Compare canonical paths.
+    // Resolve the leaf and confirm it's inside the registry root. Symlinks
+    // within the tree are accepted; symlinks pointing out and `..` traversal
+    // both surface as `OutOfRoot` (-> 403). Missing leaves become 404; other
+    // I/O failures (most often EACCES on a parent dir) become 500. This is
+    // the same primitive the MCP `open` / `save` / `create` paths use, so a
+    // request for a path inside the root resolves identically across every
+    // surface.
     let root_canonical = state.root.canonicalize().map_err(|e| {
         ApiError::Internal(format!("canonicalize root {}: {e}", state.root.display()))
     })?;
-    if !canonical.starts_with(&root_canonical) {
-        return Err(ApiError::Forbidden);
-    }
+    let canonical = match path_resolution::resolve_existing_within_root(&candidate, &root_canonical)
+    {
+        Ok(p) => p,
+        Err(ResolutionError::NotFound) => return Err(ApiError::NotFound),
+        Err(ResolutionError::OutOfRoot) => return Err(ApiError::Forbidden),
+        Err(ResolutionError::IoError(e)) => {
+            return Err(ApiError::Internal(format!("canonicalize failed: {e}")));
+        }
+    };
 
     // Determine source format and apply the .mdl sidecar preference: if the
     // request was for `<x>.mdl` and `<x>.sd.json` exists alongside it, swap
@@ -569,23 +569,38 @@ pub async fn create_new_project(
     }
 
     // Defense in depth: confirm the freshly-written file actually lives
-    // under the canonicalized scan root.  resolve_save_target trusted
-    // the request path, but the canonicalize-after-write step rejects
-    // symlinks that pointed out of the tree (`<root>/escape -> /tmp/...`).
-    let written_canonical = outcome.path.canonicalize().map_err(|e| {
-        NewProjectError::Internal(format!("canonicalize {}: {e}", outcome.path.display()))
-    })?;
+    // under the canonicalized scan root. resolve_create_target above
+    // already verified the *target* path resolves inside the root, but a
+    // racing rename between that check and OpenOptions::create_new could
+    // (in principle) move the path's parent symlink to escape the tree;
+    // re-canonicalising the freshly-written leaf closes that window.
+    // Routing the result through `resolve_existing_within_root` keeps the
+    // boundary check identical to the read paths' (HTTP get/save, MCP
+    // open/save).
     let root_canonical = state
         .root
         .canonicalize()
         .map_err(|e| NewProjectError::Internal(format!("canonicalize root: {e}")))?;
-    if !written_canonical.starts_with(&root_canonical) {
-        // Best-effort cleanup of the file we just wrote outside the
-        // root.  If removal fails we still surface the error; the
-        // caller will see Forbidden either way.
-        let _ = std::fs::remove_file(&written_canonical);
-        return Err(NewProjectError::Forbidden);
-    }
+    let written_canonical =
+        match path_resolution::resolve_existing_within_root(&outcome.path, &root_canonical) {
+            Ok(p) => p,
+            Err(ResolutionError::OutOfRoot) => {
+                // Best-effort cleanup of the file we just wrote outside the
+                // root. If removal fails we still surface the error; the
+                // caller will see Forbidden either way. We strip-prefix
+                // against `state.root` rather than `root_canonical` so the
+                // remove targets the same path we just wrote, in case
+                // canonicalisation has resolved differently.
+                let _ = std::fs::remove_file(&outcome.path);
+                return Err(NewProjectError::Forbidden);
+            }
+            Err(ResolutionError::NotFound) | Err(ResolutionError::IoError(_)) => {
+                return Err(NewProjectError::Internal(format!(
+                    "canonicalize {}",
+                    outcome.path.display()
+                )));
+            }
+        };
 
     let written_hash = crate::hashing::content_hash(&outcome.bytes);
     let (mtime, size) = match std::fs::metadata(&written_canonical) {
@@ -1056,27 +1071,24 @@ struct ResolvedPath {
 fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, SaveError> {
     let safe_rel = sanitize_rel_path(rel_path).map_err(api_error_to_save_error)?;
     let candidate = state.root.join(&safe_rel);
-    let canonical = match candidate.canonicalize() {
-        Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(SaveError::NotFound);
-        }
-        Err(e) => {
-            return Err(SaveError::Internal(anyhow::anyhow!(
-                "canonicalize {}: {e}",
-                candidate.display()
-            )));
-        }
-    };
     let root_canonical = state.root.canonicalize().map_err(|e| {
         SaveError::Internal(anyhow::anyhow!(
             "canonicalize root {}: {e}",
             state.root.display()
         ))
     })?;
-    if !canonical.starts_with(&root_canonical) {
-        return Err(SaveError::Forbidden);
-    }
+    let canonical = match path_resolution::resolve_existing_within_root(&candidate, &root_canonical)
+    {
+        Ok(p) => p,
+        Err(ResolutionError::NotFound) => return Err(SaveError::NotFound),
+        Err(ResolutionError::OutOfRoot) => return Err(SaveError::Forbidden),
+        Err(ResolutionError::IoError(e)) => {
+            return Err(SaveError::Internal(anyhow::anyhow!(
+                "canonicalize {}: {e}",
+                candidate.display()
+            )));
+        }
+    };
 
     let initial_format = format_for_path(&canonical)
         .ok_or_else(|| SaveError::BadRequest("unrecognized file extension".to_string()))?;

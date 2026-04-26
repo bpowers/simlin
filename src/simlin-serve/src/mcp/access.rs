@@ -30,7 +30,7 @@ use simlin_mcp_core::types::{ErrorOutput, SourceFormat};
 use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
-use crate::path_resolution::{is_mdl_extension, sidecar_for_mdl, to_forward_slash};
+use crate::path_resolution::{self, is_mdl_extension, sidecar_for_mdl, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
 use crate::writer::{SaveTarget, commit_write, resolve_save_target, serialize_project};
@@ -84,15 +84,11 @@ fn canonicalize_within_root(state: &AppState, abs_path: &Path) -> Result<PathBuf
         .map_err(|_| AccessError::NotFound {
             path: abs_path.to_path_buf(),
         })?;
-    let canonical = abs_path.canonicalize().map_err(|_| AccessError::NotFound {
-        path: abs_path.to_path_buf(),
-    })?;
-    if !canonical.starts_with(&root_canonical) {
-        return Err(AccessError::NotFound {
+    path_resolution::resolve_existing_within_root(abs_path, &root_canonical).map_err(|_| {
+        AccessError::NotFound {
             path: abs_path.to_path_buf(),
-        });
-    }
-    Ok(canonical)
+        }
+    })
 }
 
 /// Wrap [`crate::path_resolution::resolve_create_target`] to surface
@@ -111,16 +107,14 @@ fn resolve_create_path_within_root(
         .map_err(|_| AccessError::NotFound {
             path: abs_path.to_path_buf(),
         })?;
-    crate::path_resolution::resolve_create_target(abs_path, &root_canonical).map_err(
-        |err| match err {
-            crate::path_resolution::CreatePathError::OutOfRoot => AccessError::NotFound {
-                path: abs_path.to_path_buf(),
-            },
-            crate::path_resolution::CreatePathError::IoError(_) => AccessError::NotFound {
-                path: abs_path.to_path_buf(),
-            },
+    path_resolution::resolve_create_target(abs_path, &root_canonical).map_err(|err| match err {
+        path_resolution::CreatePathError::OutOfRoot => AccessError::NotFound {
+            path: abs_path.to_path_buf(),
         },
-    )
+        path_resolution::CreatePathError::IoError(_) => AccessError::NotFound {
+            path: abs_path.to_path_buf(),
+        },
+    })
 }
 
 /// Pick the on-disk `ProjectFormat` for a fresh file based on its

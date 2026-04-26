@@ -90,6 +90,71 @@ pub enum CreatePathError {
     IoError(std::io::Error),
 }
 
+/// Error returned by [`resolve_existing_within_root`]. Distinguishes the
+/// three cases the consumers need to map differently:
+///
+/// - `NotFound` — the path's leaf does not exist on disk; HTTP renders 404,
+///   `SaveError` renders 404, MCP collapses (along with the other variants)
+///   to `AccessError::NotFound`.
+/// - `OutOfRoot` — the canonicalized leaf is not a descendant of the
+///   canonicalized root; HTTP renders 403, `SaveError` renders 403, MCP
+///   collapses to `AccessError::NotFound` so it does not leak filesystem
+///   layout.
+/// - `IoError` — any other failure of `canonicalize()` (typically a
+///   permissions error on an intermediate directory or on the root itself);
+///   HTTP / `SaveError` render 500, MCP again collapses to `NotFound`.
+///
+/// The variant boundary intentionally puts root-canonicalize errors in the
+/// same `IoError` bucket as leaf-canonicalize errors that aren't `NotFound`:
+/// every consumer treats them the same way (500 Internal in HTTP, NotFound
+/// in MCP), and downstream callers that wanted to differentiate the
+/// underlying source can do so by looking at the carried `std::io::Error`'s
+/// `raw_os_error()` or `kind()`.
+#[derive(Debug)]
+pub enum ResolutionError {
+    /// `abs_path` does not exist on disk.
+    NotFound,
+    /// The canonicalized path is not a descendant of `root_canonical`.
+    OutOfRoot,
+    /// `canonicalize()` on either the path or the root itself failed for a
+    /// reason other than non-existence (e.g. EACCES on a parent dir).
+    IoError(std::io::Error),
+}
+
+/// Canonicalize `abs_path` and confirm it descends from `root_canonical`.
+///
+/// Used by every read-path consumer (HTTP `get_project`, HTTP
+/// `save_project`, MCP `open`, MCP `save`, the create handler's
+/// post-write validation) to enforce the "leaf is inside the registry
+/// root" invariant uniformly. Each transport applies its own mapping to
+/// the returned [`ResolutionError`]:
+///
+/// - HTTP `get_project` / `save_project` distinguish 404 / 403 / 500.
+/// - `RegistryAccess` collapses every variant to `AccessError::NotFound`
+///   so MCP clients cannot probe for files they don't have permission to
+///   read.
+/// - The create handler's post-write check sees `NotFound` /
+///   `IoError` only when the freshly-written file races with another
+///   process; it surfaces them as 500 and `OutOfRoot` as 403.
+///
+/// Returns the canonicalized path on success.
+pub fn resolve_existing_within_root(
+    abs_path: &Path,
+    root_canonical: &Path,
+) -> Result<PathBuf, ResolutionError> {
+    let canonical = match abs_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolutionError::NotFound);
+        }
+        Err(e) => return Err(ResolutionError::IoError(e)),
+    };
+    if !canonical.starts_with(root_canonical) {
+        return Err(ResolutionError::OutOfRoot);
+    }
+    Ok(canonical)
+}
+
 /// Resolve `abs_path` (which **does not yet exist** at its leaf) to a
 /// canonical absolute path inside `root_canonical`, rejecting symlinked
 /// or `..`-traversal escapes before the file is created.
@@ -231,6 +296,71 @@ mod tests {
     #[test]
     fn to_forward_slash_handles_simple_filename() {
         assert_eq!(to_forward_slash(Path::new("model.stmx")), "model.stmx");
+    }
+
+    #[test]
+    fn resolve_existing_inside_root_returns_canonical_path() {
+        let temp = TempDir::new().expect("tempdir");
+        let root = temp.path().canonicalize().expect("canon root");
+        let leaf = root.join("model.stmx");
+        fs::write(&leaf, b"<root/>").expect("write leaf");
+
+        let resolved = resolve_existing_within_root(&leaf, &root).expect("resolves");
+        assert_eq!(resolved, leaf);
+    }
+
+    #[test]
+    fn resolve_existing_returns_not_found_for_missing_leaf() {
+        let temp = TempDir::new().expect("tempdir");
+        let root = temp.path().canonicalize().expect("canon root");
+        let missing = root.join("missing.stmx");
+
+        match resolve_existing_within_root(&missing, &root) {
+            Err(ResolutionError::NotFound) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_existing_rejects_path_outside_root() {
+        // A leaf that exists but lives outside the registry root must not
+        // resolve. The traversal from inside the root via `..` must
+        // canonicalize to an absolute path that no longer descends from
+        // the root.
+        let temp = TempDir::new().expect("tempdir");
+        let outer = temp.path().canonicalize().expect("canon outer");
+        let inner = outer.join("inner");
+        fs::create_dir(&inner).expect("mkdir inner");
+        let outside = outer.join("escape.stmx");
+        fs::write(&outside, b"<root/>").expect("write outside");
+
+        let attempted = inner.join("..").join("escape.stmx");
+        match resolve_existing_within_root(&attempted, &inner) {
+            Err(ResolutionError::OutOfRoot) => {}
+            other => panic!("expected OutOfRoot, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_existing_rejects_symlink_pointing_outside_root() {
+        // Even a leaf whose path is lexically inside the root must be
+        // rejected if symlink resolution lands it outside. Mirrors the
+        // create-side test; this is the read-side equivalent.
+        let temp = TempDir::new().expect("tempdir");
+        let outer = temp.path().canonicalize().expect("canon outer");
+        let inner = outer.join("inner");
+        fs::create_dir(&inner).expect("mkdir inner");
+        let target_outside = outer.join("forbidden.stmx");
+        fs::write(&target_outside, b"<root/>").expect("write outside");
+
+        let symlink = inner.join("link.stmx");
+        std::os::unix::fs::symlink(&target_outside, &symlink).expect("symlink");
+
+        match resolve_existing_within_root(&symlink, &inner) {
+            Err(ResolutionError::OutOfRoot) => {}
+            other => panic!("expected OutOfRoot, got {other:?}"),
+        }
     }
 
     #[test]
