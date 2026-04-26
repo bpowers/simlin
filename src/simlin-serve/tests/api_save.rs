@@ -392,6 +392,74 @@ async fn save_mdl_creates_sidecar_and_does_not_modify_mdl() {
 /// path returns the sidecar's content (Phase 1 read-side preference,
 /// re-verified end-to-end).
 #[tokio::test]
+async fn stale_tab_save_to_mdl_after_sidecar_returns_409() {
+    // Two-tab race: Tab A saves the .mdl path, which redirects to a fresh
+    // .sd.json sidecar at version 1 and removes the .mdl registry entry.
+    // Tab B holds stale state (still believes the .mdl is at version 0)
+    // and POSTs to /api/projects/foo.mdl with version=0. Without
+    // sidecar-preference at save-resolve time, the handler's
+    // ensure_or_get re-creates a .mdl entry at version 0; the version
+    // check passes (0 == 0); the stale edit silently overwrites the
+    // newer sidecar content. The principled fix is the same disk-side
+    // sidecar-preference rule the read path applies.
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+
+    // Tab A: drive the canonical save flow that creates the sidecar at v1.
+    let (_, body_text) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    let mut tab_a_value: Value = serde_json::from_str(&body_text).unwrap();
+    tab_a_value["name"] = Value::String("tab-A-saved".to_string());
+    let tab_a_body =
+        serde_json::json!({"json": serde_json::to_string(&tab_a_value).unwrap(), "version": 0})
+            .to_string();
+    let (status, _) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(tab_a_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "tab A's first save must succeed");
+
+    // Tab B: has never observed Tab A's save. Saves to the .mdl path with
+    // a stale version=0. The sidecar exists on disk at version 1; the
+    // optimistic-lock check must run against the sidecar entry and reject.
+    let mut tab_b_value: Value = serde_json::from_str(&body_text).unwrap();
+    tab_b_value["name"] = Value::String("tab-B-stale".to_string());
+    let tab_b_body =
+        serde_json::json!({"json": serde_json::to_string(&tab_b_value).unwrap(), "version": 0})
+            .to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(tab_b_body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale .mdl save must surface 409 against the sidecar's current version; body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+
+    // The sidecar still has Tab A's content — Tab B's stale edit must
+    // not have landed.
+    let sidecar_canonical = canonical_root.join("teacup.sd.json");
+    let sidecar_bytes = fs::read(&sidecar_canonical).unwrap();
+    let sidecar_json: Value = serde_json::from_slice(&sidecar_bytes).unwrap();
+    assert_eq!(
+        sidecar_json["name"].as_str(),
+        Some("tab-A-saved"),
+        "sidecar must still hold Tab A's saved content"
+    );
+}
+
+#[tokio::test]
 async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
     let dir = TempDir::new().unwrap();
     let mdl_abs = copy_fixture("teacup.mdl", dir.path());

@@ -359,6 +359,26 @@ impl ProjectAccess for RegistryAccess {
     ) -> Result<u64, AccessError> {
         let canonical = canonicalize_within_root(&self.state, abs_path)?;
 
+        // Sidecar-preference: when the caller passes a `.mdl` path that
+        // already has a sibling `.sd.json` on disk, route the save to the
+        // sidecar key. Mirrors `open`'s preference rule and the
+        // HTTP save handler, so MCP `EditModel(.mdl)` after a prior save
+        // surfaces a real version-mismatch (not a NotFound or a stale
+        // overwrite) instead of bypassing optimistic locking.
+        let resolved = if is_mdl_extension(&canonical) {
+            let sidecar = sidecar_for_mdl(&canonical);
+            if sidecar.is_file() {
+                match sidecar.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => canonical.clone(),
+                }
+            } else {
+                canonical.clone()
+            }
+        } else {
+            canonical.clone()
+        };
+
         // The MCP-supplied `format` is the project's *content shape* the
         // caller perceives (Xmile vs NativeJson vs SdaiJson). The on-disk
         // *file shape* — and therefore where the new bytes land — is
@@ -368,7 +388,7 @@ impl ProjectAccess for RegistryAccess {
         let registry_meta =
             self.state
                 .registry
-                .get(&canonical)
+                .get(&resolved)
                 .ok_or_else(|| AccessError::NotFound {
                     path: canonical.clone(),
                 })?;
@@ -383,7 +403,7 @@ impl ProjectAccess for RegistryAccess {
         let current_doc = self
             .state
             .registry
-            .get_or_init_doc(&canonical)
+            .get_or_init_doc(&resolved)
             .map_err(|e| match e {
                 RegistryError::NotFound => AccessError::NotFound {
                     path: canonical.clone(),
@@ -444,7 +464,7 @@ impl ProjectAccess for RegistryAccess {
         let (new_version, merged_doc) = self
             .state
             .registry
-            .check_increment_and_merge(&canonical, version_check, &canonical_value)
+            .check_increment_and_merge(&resolved, version_check, &canonical_value)
             .map_err(|e| match e {
                 RegistryError::NotFound => AccessError::NotFound {
                     path: canonical.clone(),
@@ -474,7 +494,7 @@ impl ProjectAccess for RegistryAccess {
             })?;
         let merged_project: datamodel::Project = merged_json_project.into();
 
-        let target = resolve_save_target(&canonical, registry_format);
+        let target = resolve_save_target(&resolved, registry_format);
         let write_outcome = serialize_project(&merged_project, &target).map_err(|e| {
             AccessError::WriteError(std::io::Error::other(format!("serialize_project: {e}")))
         })?;
@@ -484,9 +504,7 @@ impl ProjectAccess for RegistryAccess {
         // Prime the echo-suppression hash before the OS-visible write so
         // the file watcher's inotify event sees the new hash by the time
         // it computes one — same ordering rule the HTTP handler enforces.
-        self.state
-            .registry
-            .prime_echo_hash(&canonical, written_hash);
+        self.state.registry.prime_echo_hash(&resolved, written_hash);
 
         // Sidecar saves: the watcher event fires for .sd.json, not the
         // .mdl key. Pre-establish a sidecar placeholder so the watcher
@@ -556,7 +574,7 @@ impl ProjectAccess for RegistryAccess {
                     }
                 }
             }
-            SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => canonical.clone(),
+            SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => resolved.clone(),
         };
 
         // Refresh mtime/size/hash from the freshly-written file so the

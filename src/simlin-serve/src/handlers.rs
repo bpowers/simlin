@@ -1063,16 +1063,44 @@ fn resolve_save_path(state: &AppState, rel_path: &str) -> Result<ResolvedPath, S
     let initial_format = format_for_path(&canonical)
         .ok_or_else(|| SaveError::BadRequest("unrecognized file extension".to_string()))?;
 
-    let relative_path = canonical
+    // Sidecar-preference rule: when the request is for `.mdl` and the
+    // sibling `.sd.json` exists on disk, route the save to the sidecar
+    // key. Mirrors `get_project`'s read-side preference (handlers.rs
+    // line ~181) and `RegistryAccess::open`'s MCP-side preference; the
+    // common contract is "once the sidecar exists, it is the canonical
+    // entry for both reads and writes".
+    //
+    // Without this, a stale tab POSTing to the `.mdl` path with
+    // version=0 (after a prior save's `redirect_to_sidecar` removed the
+    // `.mdl` registry entry) would be served by the save handler's
+    // `ensure_or_get` fallback: a fresh `.mdl` entry at version 0 would
+    // be inserted, the optimistic-lock check would pass (0 == 0), and
+    // the stale edit would silently overwrite newer sidecar content.
+    // Resolving to the sidecar key keeps the version check honest.
+    let (effective_canonical, effective_format) = if matches!(initial_format, ProjectFormat::Mdl) {
+        let sidecar = sidecar_for_mdl(&canonical);
+        if sidecar.is_file() {
+            match sidecar.canonicalize() {
+                Ok(p) => (p, ProjectFormat::SdJson),
+                Err(_) => (canonical.clone(), ProjectFormat::Mdl),
+            }
+        } else {
+            (canonical.clone(), ProjectFormat::Mdl)
+        }
+    } else {
+        (canonical.clone(), initial_format)
+    };
+
+    let relative_path = effective_canonical
         .strip_prefix(&root_canonical)
         .map(Path::to_path_buf)
-        .unwrap_or_else(|_| canonical.clone());
+        .unwrap_or_else(|_| effective_canonical.clone());
 
     Ok(ResolvedPath {
-        canonical,
+        canonical: effective_canonical,
         root_canonical,
         relative_path,
-        initial_format,
+        initial_format: effective_format,
     })
 }
 
