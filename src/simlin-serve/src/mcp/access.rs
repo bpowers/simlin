@@ -441,6 +441,28 @@ impl ProjectAccess for RegistryAccess {
             .registry
             .prime_echo_hash(&canonical, written_hash);
 
+        // Sidecar saves: the watcher event fires for .sd.json, not the
+        // .mdl key. Pre-establish a sidecar placeholder so the watcher
+        // echo-suppresses against the primed hash even if it processes
+        // its event before redirect_to_sidecar runs. See
+        // ProjectRegistry::prime_sidecar_echo_hash for the full
+        // rationale.
+        if let SaveTarget::SidecarJson {
+            mdl_path,
+            sidecar_path,
+        } = &target
+            && let Err(e) = self.state.registry.prime_sidecar_echo_hash(
+                mdl_path,
+                sidecar_path.clone(),
+                written_hash,
+            )
+        {
+            tracing::warn!(
+                error = %e,
+                "MCP save: .mdl entry vanished before sidecar prime; commit_write may produce a spurious watcher merge"
+            );
+        }
+
         commit_write(&write_outcome).map_err(|e| {
             AccessError::WriteError(std::io::Error::other(format!("commit_write: {e}")))
         })?;

@@ -382,6 +382,64 @@ impl ProjectRegistry {
         }
     }
 
+    /// Establish a placeholder sidecar entry mirroring `source_path`'s
+    /// data with the on-disk hash primed to `hash`. Used by the
+    /// `.mdl → .sd.json` save flow to close the watcher echo-suppression
+    /// race window between [`std::fs`] commit and
+    /// [`Self::redirect_to_sidecar`].
+    ///
+    /// The watcher's echo-suppression check looks up the registry by the
+    /// canonical path the OS event carries — for a sidecar save that is
+    /// the `.sd.json` path, even though the in-memory source-of-truth
+    /// entry is keyed on `.mdl` until the redirect runs. Without the
+    /// placeholder, a watcher event arriving between `commit_write` and
+    /// `redirect_to_sidecar` finds either no entry at all or a
+    /// scanner-inserted entry with `last_disk_hash = 0`, falls into the
+    /// merge path, and broadcasts a spurious `ProjectChanged{Disk}` for
+    /// content the server itself wrote.
+    ///
+    /// The placeholder shares `source_path`'s doc Arc so reads via
+    /// either key (e.g. an HTTP `GET` whose sidecar-preference rule
+    /// switched to the sidecar) see the same merged state across the
+    /// race window. After [`Self::redirect_to_sidecar`] runs, the
+    /// `.mdl` entry is removed and the merged-doc state migrates onto
+    /// the sidecar entry directly; the placeholder's data is replaced
+    /// (the redirect's `prev` carries forward).
+    ///
+    /// If a sidecar entry already exists (e.g. the scanner discovered a
+    /// pre-existing `.sd.json`), the higher version is kept so an
+    /// in-flight client never observes a rollback. Returns
+    /// [`RegistryError::NotFound`] when `source_path` is not in the
+    /// registry — caller should hold the source entry across this call.
+    pub fn prime_sidecar_echo_hash(
+        &self,
+        source_path: &Path,
+        sidecar_path: PathBuf,
+        hash: u64,
+    ) -> Result<(), RegistryError> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let source = guard.get(source_path).ok_or(RegistryError::NotFound)?;
+        let mut placeholder = ProjectMeta {
+            path: relativize(&self.root, &sidecar_path),
+            format: ProjectFormat::SdJson,
+            mtime: source.mtime,
+            size: source.size,
+            git: source.git,
+            version: source.version,
+            doc: source.doc.clone(),
+            last_disk_hash: hash,
+            last_diagnostic_keys: source.last_diagnostic_keys.clone(),
+        };
+        if let Some(existing) = guard.get(&sidecar_path) {
+            placeholder.version = placeholder.version.max(existing.version);
+        }
+        guard.insert(sidecar_path, placeholder);
+        Ok(())
+    }
+
     /// Atomic compare-and-update of the entry's `last_diagnostic_keys`
     /// cache.
     ///
@@ -1342,6 +1400,87 @@ mod tests {
         let returned =
             reg.update_git_state_if_changed(&root.join("nope.stmx"), GitState::Untracked);
         assert_eq!(returned, None);
+    }
+
+    #[test]
+    fn prime_sidecar_echo_hash_creates_placeholder_with_shared_doc() {
+        // The save handler primes a placeholder sidecar entry before
+        // commit_write fires the OS event for the freshly-written
+        // .sd.json. The placeholder must (a) carry the primed hash so
+        // the watcher's lookup-by-sidecar-path echo-suppresses, and
+        // (b) share the source's doc Arc so reads via either path
+        // observe the same in-memory state until redirect_to_sidecar
+        // collapses them.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl = root.join("model.mdl");
+        let sidecar = root.join("model.sd.json");
+
+        let mut mdl_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
+        mdl_meta.version = 5;
+        let mut keys = BTreeSet::new();
+        keys.insert(("UnknownDependency".to_string(), Some("x".to_string())));
+        mdl_meta.last_diagnostic_keys = keys.clone();
+        reg.upsert(mdl.clone(), mdl_meta);
+
+        reg.prime_sidecar_echo_hash(&mdl, sidecar.clone(), 0xCAFE_BEEF)
+            .expect("prime succeeds when source exists");
+
+        let mdl_entry = reg.get(&mdl).expect("mdl entry preserved");
+        let sidecar_entry = reg.get(&sidecar).expect("sidecar placeholder created");
+
+        assert_eq!(sidecar_entry.last_disk_hash, 0xCAFE_BEEF);
+        assert_eq!(sidecar_entry.format, ProjectFormat::SdJson);
+        assert_eq!(sidecar_entry.version, 5, "version mirrors source");
+        assert_eq!(
+            sidecar_entry.last_diagnostic_keys, keys,
+            "diagnostic-keys cache mirrors source so DiagnosticsChanged dedup behaves correctly"
+        );
+        assert!(
+            Arc::ptr_eq(&mdl_entry.doc, &sidecar_entry.doc),
+            "doc Arc must be shared so concurrent reads via either path see the same merged state"
+        );
+    }
+
+    #[test]
+    fn prime_sidecar_echo_hash_returns_not_found_when_source_missing() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let result = reg.prime_sidecar_echo_hash(
+            &root.join("missing.mdl"),
+            root.join("missing.sd.json"),
+            0xAA,
+        );
+        assert!(matches!(result, Err(RegistryError::NotFound)));
+    }
+
+    #[test]
+    fn prime_sidecar_echo_hash_takes_max_version_with_existing_sidecar() {
+        // Pre-existing sidecar entry (e.g. scanner found it before the save
+        // started). The placeholder must carry the higher version forward
+        // so an in-flight client never observes a rollback.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let mdl = root.join("model.mdl");
+        let sidecar = root.join("model.sd.json");
+
+        let mut mdl_meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Mdl);
+        mdl_meta.version = 3;
+        reg.upsert(mdl.clone(), mdl_meta);
+
+        let mut existing = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        existing.version = 9;
+        reg.upsert(sidecar.clone(), existing);
+
+        reg.prime_sidecar_echo_hash(&mdl, sidecar.clone(), 0x1234)
+            .expect("prime succeeds");
+
+        let entry = reg.get(&sidecar).expect("sidecar entry");
+        assert_eq!(
+            entry.version, 9,
+            "must take max(3, 9) = 9 to avoid rollback"
+        );
+        assert_eq!(entry.last_disk_hash, 0x1234);
     }
 
     #[test]

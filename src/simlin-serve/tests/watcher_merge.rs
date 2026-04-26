@@ -673,6 +673,71 @@ async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
     shutdown.notify_waiters();
 }
 
+/// .mdl-save echo-suppression: when a save's commit_write lands a fresh
+/// `.sd.json` next to its `.mdl` source, the watcher must echo-suppress
+/// against the primed placeholder. Without `prime_sidecar_echo_hash`, the
+/// watcher's lookup-by-sidecar-path finds nothing (or a stale
+/// scanner-inserted entry), falls into the merge path, and broadcasts a
+/// spurious `ProjectChanged{Disk}` for content the server itself just
+/// wrote. The principled fix establishes the sidecar placeholder ahead
+/// of the OS-visible write so the lookup short-circuits.
+#[tokio::test]
+async fn primed_sidecar_placeholder_echo_suppresses_post_save_watcher_event() {
+    let dir = TempDir::new().expect("tempdir");
+    let canonical_root = dir.path().canonicalize().expect("canon root");
+    let mdl_path = canonical_root.join("model.mdl");
+    let sidecar_path = canonical_root.join("model.sd.json");
+    let mdl_bytes = b"{UTF-8}\n\nfoo=1\n  ~\n  ~|\n".to_vec();
+    std::fs::write(&mdl_path, &mdl_bytes).expect("write mdl");
+
+    let state = build_state(dir.path());
+    seed_registry(
+        &state,
+        &mdl_path,
+        ProjectFormat::Mdl,
+        content_hash(&mdl_bytes),
+    );
+
+    let shutdown: ShutdownSignal = Arc::new(Notify::new());
+    let _watcher = spawn_watcher(state.clone(), shutdown.clone()).expect("spawn watcher");
+    let mut rx = state.events.subscribe();
+
+    // Wait past startup so any debouncer settling does not poison rx.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Mimic the save handler's pre-write priming: prime both the .mdl
+    // source key (legacy: in case anything still keys lookups there) and
+    // the sidecar placeholder (the new fix). The placeholder is what the
+    // watcher's lookup will hit when commit_write fires the OS event.
+    let sidecar_content = sd_json("after-mdl-save");
+    let sidecar_hash = content_hash(sidecar_content.as_bytes());
+    state.registry.prime_echo_hash(&mdl_path, sidecar_hash);
+    state
+        .registry
+        .prime_sidecar_echo_hash(&mdl_path, sidecar_path.clone(), sidecar_hash)
+        .expect("prime sidecar placeholder");
+
+    // Mimic commit_write: the kernel emits a Create event for the
+    // freshly-written .sd.json. The placeholder we just primed is what
+    // makes the watcher's echo-suppression check succeed.
+    simlin_engine::io::atomic_write(&sidecar_path, sidecar_content.as_bytes())
+        .expect("atomic_write sidecar");
+
+    // Wait past the watcher's debounce window plus generous processing
+    // budget. A Disk event here would mean echo-suppression failed — the
+    // exact bug the placeholder closes.
+    let no_disk_event = tokio::time::timeout(
+        Duration::from_millis(800),
+        await_disk_event(&mut rx, Duration::from_millis(800)),
+    )
+    .await;
+    if let Ok(Some(ev)) = no_disk_event {
+        panic!("primed sidecar write must echo-suppress; got: {ev:?}");
+    }
+
+    shutdown.notify_waiters();
+}
+
 /// Phase 8 Task 2: an external rename of a tracked model file re-keys the
 /// registry entry and broadcasts `ProjectRenamed`. The pre-rename version,
 /// echo-suppression hash, and `LoroDoc` are all preserved across the

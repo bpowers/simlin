@@ -874,6 +874,27 @@ pub async fn save_project(
         .registry
         .prime_echo_hash(&resolved.canonical, written_hash);
 
+    // For sidecar saves the watcher event fires for the .sd.json path,
+    // not the .mdl key the registry currently holds the entry under.
+    // Pre-establish a sidecar placeholder carrying the primed hash and
+    // a shared doc Arc so a watcher event arriving between commit_write
+    // and redirect_to_sidecar finds the entry it expects and short-circuits
+    // via echo-suppression instead of re-merging the just-written content.
+    if let SaveTarget::SidecarJson {
+        mdl_path,
+        sidecar_path,
+    } = &target
+        && let Err(e) =
+            state
+                .registry
+                .prime_sidecar_echo_hash(mdl_path, sidecar_path.clone(), written_hash)
+    {
+        tracing::warn!(
+            error = %e,
+            ".mdl entry vanished before sidecar prime; commit_write may produce a spurious watcher merge"
+        );
+    }
+
     // Commit to disk. The echo-suppression hash is already in the registry
     // so a watcher event that arrives here will be suppressed correctly.
     commit_write(&write_outcome)
