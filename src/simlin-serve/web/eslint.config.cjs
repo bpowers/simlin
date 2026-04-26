@@ -19,6 +19,12 @@ if (baseConfig) {
       HTMLInputElement: 'readonly',
       Response: 'readonly',
       RequestInit: 'readonly',
+      WebSocket: 'readonly',
+      MessageEvent: 'readonly',
+      CloseEvent: 'readonly',
+      Event: 'readonly',
+      location: 'readonly',
+      clearTimeout: 'readonly',
     },
   };
 }

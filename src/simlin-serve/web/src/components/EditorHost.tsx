@@ -11,6 +11,13 @@ import type { GetProjectResponse, JsonProjectData, ServerValidationError } from 
 
 type EditorHostProps = Readonly<{
   path: string | null;
+  // Latest server-announced version observed via the WebSocket. App
+  // updates this whenever a `ProjectChanged` arrives for `path`. When
+  // it advances past the version EditorHost currently holds in state,
+  // EditorHost refetches and remounts the Editor with the new payload
+  // (Phase 3 Task 11). The default of 0 is "no live version observed
+  // yet"; the gate in componentDidUpdate compares strictly greater.
+  liveVersion?: number;
   // Invoked when a `.mdl` save creates a sidecar so the parent can update
   // its selectedPath state and refresh the project list. Optional because
   // not every host needs to track the redirect (e.g. tests that only

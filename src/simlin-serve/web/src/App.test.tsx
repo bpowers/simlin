@@ -7,6 +7,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 import { App } from './App';
 import type { ListProjectsResponse } from './api';
+import { TOKEN_STORAGE_KEY } from './launch-token';
 
 function makeListFetch(body: ListProjectsResponse): jest.Mock {
   return jest.fn().mockResolvedValue({
@@ -16,11 +17,46 @@ function makeListFetch(body: ListProjectsResponse): jest.Mock {
   });
 }
 
+// Test double for the global WebSocket. We keep it minimal: enough surface
+// to record construction and let tests drive incoming messages. The App
+// tests here only need to confirm App constructs a socket with the right
+// URL and disposes it on unmount; the parsed-message behavior is covered
+// by ws.test.ts.
+class MockWebSocket {
+  static instances: Array<MockWebSocket> = [];
+
+  readonly url: string;
+  readyState = 0;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onclose: ((ev: CloseEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  closeArgs: { code?: number; reason?: string } | null = null;
+
+  constructor(url: string) {
+    this.url = url;
+    MockWebSocket.instances.push(this);
+  }
+
+  close(code?: number, reason?: string): void {
+    this.closeArgs = { code, reason };
+    this.readyState = 3;
+  }
+
+  emitMessage(data: string): void {
+    this.onmessage?.(new MessageEvent('message', { data }));
+  }
+}
+
 let originalFetch: typeof globalThis.fetch | undefined;
+let originalWebSocket: typeof globalThis.WebSocket | undefined;
 
 beforeEach(() => {
   sessionStorage.clear();
   originalFetch = globalThis.fetch;
+  originalWebSocket = globalThis.WebSocket;
+  MockWebSocket.instances = [];
+  globalThis.WebSocket = MockWebSocket as unknown as typeof globalThis.WebSocket;
 });
 
 afterEach(() => {
@@ -28,6 +64,11 @@ afterEach(() => {
     globalThis.fetch = originalFetch;
   } else {
     delete (globalThis as Partial<typeof globalThis>).fetch;
+  }
+  if (originalWebSocket) {
+    globalThis.WebSocket = originalWebSocket;
+  } else {
+    delete (globalThis as Partial<typeof globalThis>).WebSocket;
   }
 });
 
@@ -83,5 +124,50 @@ describe('App shell', () => {
     render(<App />);
     await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
     expect(screen.queryByRole('banner')).toBeNull();
+  });
+
+  test('opens an UpdatesSocket against /api/updates with the launch token', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'live-token');
+    globalThis.fetch = makeListFetch({
+      projects: [],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const url = MockWebSocket.instances[0].url;
+    expect(url).toMatch(/\/api\/updates\?token=live-token$/);
+  });
+
+  test('does not open a WebSocket when no launch token is stored', async () => {
+    globalThis.fetch = makeListFetch({
+      projects: [],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+
+    // Allow App's fetch resolution to settle, then assert no socket was
+    // constructed. Without a token there's nothing to authenticate, so
+    // skipping the connection is the right behavior.
+    await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  test('closes the WebSocket on unmount', async () => {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    globalThis.fetch = makeListFetch({
+      projects: [],
+      git_available: true,
+    }) as unknown as typeof globalThis.fetch;
+
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+    expect(ws.closeArgs).toBeNull();
+
+    unmount();
+    expect(ws.closeArgs).not.toBeNull();
   });
 });
