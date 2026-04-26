@@ -72,12 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         open_browser(&launch_url);
     }
 
-    // Spawn the file watcher (Phase 4). The shutdown signal is held here
-    // so a future Ctrl-C handler (Task 8) can trigger graceful teardown
-    // of both the server and the watcher; on the current path the actor
-    // exits when the binary terminates and the join handle is dropped.
+    // Spawn the file watcher (Phase 4). The shutdown notifier is shared
+    // with the Ctrl-C path below: a single signal stops both the server
+    // (via axum's with_graceful_shutdown) and the watcher actor (via
+    // the Notify).
     let watcher_shutdown: ShutdownSignal = Arc::new(tokio::sync::Notify::new());
-    let _watcher_handle = match spawn_watcher(state.clone(), watcher_shutdown.clone(), None) {
+    let watcher_handle = match spawn_watcher(state.clone(), watcher_shutdown.clone(), None) {
         Ok(h) => Some(h),
         Err(err) => {
             // Failing to set up the watcher is non-fatal: the server still
@@ -89,6 +89,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    axum::serve(listener, build_router(state)).await?;
+    // Order of teardown on Ctrl-C:
+    //   1. ctrl_c() resolves -> notify the axum server (via the Future
+    //      passed to with_graceful_shutdown) to stop accepting new
+    //      connections and drain in-flight requests.
+    //   2. After axum::serve returns, fire the watcher shutdown so the
+    //      actor breaks out of its select! loop and drops the
+    //      Debouncer (which releases the OS-level watch).
+    //   3. Await the watcher's JoinHandle so the binary doesn't exit
+    //      while the actor is mid-shutdown.
+    //
+    // Server first, then watcher: avoids spurious watcher events
+    // during teardown that would never be delivered (the EventBus is
+    // about to drop its sole sender as the AppState clones go out of
+    // scope) and gives clients a clean Close handshake before the
+    // listening socket disappears.
+    let shutdown_signal = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                tracing::info!("ctrl-c received; shutting down");
+            }
+            Err(err) => {
+                // Failing to install the handler typically means we're
+                // running under a supervisor that strips signals; falling
+                // back to "never shutdown" is the safe default.
+                tracing::error!(error = %err, "failed to install ctrl-c handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    axum::serve(listener, build_router(state))
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
+
+    watcher_shutdown.notify_waiters();
+    if let Some(handle) = watcher_handle {
+        // Drop the join handle's result silently; a panicking watcher
+        // task is logged at the actor's source, not here.
+        let _ = handle.await;
+    }
+
     Ok(())
 }
