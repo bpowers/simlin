@@ -2833,8 +2833,22 @@ pub fn model_ltm_variables(
             loop_partitions.insert(l.id.clone(), partitions.partition_for_loop(l));
         }
 
-        let loop_vars =
-            crate::ltm_augment::generate_loop_score_variables(detected_loops, &partitions);
+        // Build the set of link-score variable names emitted so far so
+        // generate_loop_score_equation can resolve each loop link to a
+        // name that actually exists. Without this, loops traversing
+        // edges whose only AST shape is Wildcard or DynamicIndex would
+        // reference a never-emitted Bare canonical name and the
+        // fragment compiler would silently fall back to a stub dep.
+        let emitted_link_score_names: HashSet<String> = vars
+            .iter()
+            .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
+            .map(|v| v.name.clone())
+            .collect();
+        let loop_vars = crate::ltm_augment::generate_loop_score_variables(
+            detected_loops,
+            &partitions,
+            &emitted_link_score_names,
+        );
         for (name, var) in loop_vars {
             let equation = match var.get_equation() {
                 Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),

@@ -452,6 +452,7 @@ pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> Str
 pub(crate) fn generate_loop_score_variables(
     loops: &[Loop],
     partitions: &CyclePartitions,
+    emitted_link_score_names: &HashSet<String>,
 ) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut loop_vars = HashMap::new();
 
@@ -475,7 +476,7 @@ pub(crate) fn generate_loop_score_variables(
 
     for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
-        let equation = generate_loop_score_equation(loop_item);
+        let equation = generate_loop_score_equation(loop_item, emitted_link_score_names);
         loop_score_bytes += equation.len() as u64;
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(Ident::new(&var_name), ltm_var);
@@ -787,21 +788,77 @@ fn generate_stock_to_flow_equation(
     )
 }
 
+/// Resolve the link-score variable name a loop_score equation should
+/// reference for a single loop link.
+///
+/// `emit_per_shape_link_scores` emits names per-shape based on what the
+/// target's AST contains: `pop→share` (Bare), `pop→share⁚wildcard`
+/// (Wildcard), `pop[nyc]→share` (FixedIndex via element-level `from`),
+/// and so on. The loop topology doesn't carry the access shape, so we
+/// resolve at equation-generation time by trying candidate names in
+/// priority order against the set of names actually emitted.
+///
+/// Priority:
+///
+/// 1. `Bare` -- the canonical `{from}→{to}` form. Cross-dimensional
+///    edges naturally produce a bracketed `from` like `"pop[nyc]"`,
+///    which combines with Bare naming to match the per-element name
+///    `try_cross_dimensional_link_scores` emits. This is also the only
+///    correct choice when both Bare and a suffixed variant coexist, so
+///    that the documented edge-aliasing limitation stays consistent.
+///
+/// 2. `Wildcard` (`⁚wildcard` suffix) -- e.g., `share[r] = SUM(pop[*])`
+///    where the only AST occurrence of `pop` is inside a wildcard
+///    reducer. Without this fallback, the loop_score would reference
+///    the never-emitted Bare name.
+///
+/// 3. `DynamicIndex` (`⁚dynamic` suffix) -- analogous to Wildcard for
+///    expression-indexed subscripts.
+///
+/// If none of the candidates is in `emitted`, return the Bare canonical
+/// name anyway and let the fragment compiler's stub-dep fallback fire.
+/// That matches the pre-resolver behavior on the unreachable branch.
+fn resolve_link_score_name_for_loop(from: &str, to: &str, emitted: &HashSet<String>) -> String {
+    for shape in [RefShape::Bare, RefShape::Wildcard, RefShape::DynamicIndex] {
+        let candidate = link_score_var_name(from, to, &shape);
+        if emitted.contains(&candidate) {
+            return candidate;
+        }
+    }
+    link_score_var_name(from, to, &RefShape::Bare)
+}
+
 /// Generate the equation for a loop score variable.
 ///
 /// The loop score is the product of all link scores in the loop. The
 /// per-element distinction for cross-dimensional edges (e.g.,
-/// `pop[nyc]→total_pop`) lives in `link.from` itself, not in a separate
-/// shape field; we always use `Bare` here so `link_score_var_name`
-/// emits the canonical `{from}→{to}` form, matching what
-/// `try_cross_dimensional_link_scores` and `emit_per_shape_link_scores`
-/// produce.
-fn generate_loop_score_equation(loop_item: &Loop) -> String {
+/// `pop[nyc]→total_pop`) lives in `link.from` itself; for everything
+/// else, the access shape is implicit in which name was actually
+/// emitted by `emit_per_shape_link_scores`.
+///
+/// `emitted_link_score_names` carries every link-score variable name the
+/// caller has emitted so far. For each loop link we try the canonical
+/// Bare name first (since `try_cross_dimensional_link_scores` and the
+/// common Bare-AST case both produce that form) and fall back to the
+/// `⁚wildcard` and `⁚dynamic` shape suffixes when only those variants
+/// exist (e.g., `share[r] = SUM(pop[*])` emits only the wildcard
+/// variant of `pop→share`). Without this resolution the loop_score
+/// equation would multiply against a missing variable and the fragment
+/// compiler would silently insert a stub dep, dropping the link's
+/// contribution.
+fn generate_loop_score_equation(
+    loop_item: &Loop,
+    emitted_link_score_names: &HashSet<String>,
+) -> String {
     let link_score_names: Vec<String> = loop_item
         .links
         .iter()
         .map(|link| {
-            let name = link_score_var_name(link.from.as_str(), link.to.as_str(), &RefShape::Bare);
+            let name = resolve_link_score_name_for_loop(
+                link.from.as_str(),
+                link.to.as_str(),
+                emitted_link_score_names,
+            );
             // Double-quote the variable name so it can be parsed
             format!("\"{name}\"")
         })
@@ -1942,7 +1999,13 @@ mod tests {
             dimensions: vec![],
         };
 
-        let eq = generate_loop_score_equation(&loop_item);
+        // Pretend both candidates were emitted as Bare; the resolver
+        // will pick the canonical form via Bare naming, so the
+        // bracketed from flows through verbatim.
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop".to_string());
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}rel_pop\u{2192}pop".to_string());
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
 
         // Element-level from flows through Bare naming verbatim.
         assert!(
@@ -1956,6 +2019,46 @@ mod tests {
         );
         // Loop score is the product of the two references.
         assert!(eq.contains(" * "), "expected product join; got: {eq}");
+    }
+
+    /// Regression test: when only the Wildcard variant is in `emitted`,
+    /// the resolver must pick the suffixed name rather than the Bare
+    /// canonical form. This is the case that breaks for fixtures like
+    /// `share[r] = SUM(pop[*])` where the only AST shape for (pop, share)
+    /// is Wildcard.
+    #[test]
+    fn loop_score_equation_falls_back_to_wildcard_when_bare_not_emitted() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "u1".to_string(),
+            links: vec![Link {
+                from: Ident::<Canonical>::new("pop"),
+                to: Ident::<Canonical>::new("share"),
+                polarity: LinkPolarity::Positive,
+            }],
+            stocks: vec![],
+            polarity: LoopPolarity::Undetermined,
+            dimensions: vec![],
+        };
+
+        let mut emitted = HashSet::new();
+        // Only the wildcard variant is emitted.
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard".to_string(),
+        );
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert!(
+            eq.contains(
+                "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard\""
+            ),
+            "expected wildcard-suffixed reference when Bare is not emitted; got: {eq}"
+        );
+        assert!(
+            !eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\""),
+            "must not reference the never-emitted Bare canonical name; got: {eq}"
+        );
     }
 
     /// Regression test: a `DynamicIndex` live reference must still wrap

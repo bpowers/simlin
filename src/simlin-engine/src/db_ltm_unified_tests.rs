@@ -1218,6 +1218,74 @@ fn mixed_scalar_loop_partitions_resolve_to_some() {
     );
 }
 
+/// Regression test: when a loop traverses an edge whose only AST shape
+/// is `Wildcard` (or `DynamicIndex`), `emit_per_shape_link_scores` only
+/// emits the suffixed name (`pop->share:wildcard`), not the canonical
+/// Bare name. The loop_score equation must reference the suffixed name
+/// for the link to actually contribute -- the buggy version always used
+/// Bare naming, so the loop_score multiplied against a missing variable
+/// and the fragment compiler quietly fell back to a stub dep.
+#[test]
+fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
+    // share[r] depends on pop only via SUM(pop[*]) -- pure wildcard,
+    // no bare ref. update[r] feeds back into pop[r] via the structural
+    // flow path. The loop pop[r] -> share[r] -> update[r] -> pop[r]
+    // exists at the element graph level (cross-element via the
+    // wildcard reducer).
+    let project = TestProject::new("wildcard_only_loop")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let emitted: std::collections::HashSet<String> =
+        ltm.vars.iter().map(|v| v.name.clone()).collect();
+
+    assert!(
+        !emitted.is_empty(),
+        "expected LTM variables for the wildcard-only feedback fixture"
+    );
+
+    let loop_score_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .collect();
+
+    assert!(
+        !loop_score_vars.is_empty(),
+        "expected at least one loop_score variable; emitted: {emitted:?}"
+    );
+
+    // Every link-score reference inside a loop_score equation must
+    // resolve to a variable that was actually emitted.
+    for lsv in &loop_score_vars {
+        let refs = extract_quoted_refs(&lsv.equation);
+        for r in &refs {
+            assert!(
+                emitted.contains(r),
+                "loop_score {:?} references {:?} which is not in emitted vars.\n\
+                 Expected resolution to use an emitted shape variant when \
+                 Bare is absent.\nEmitted names matching pop->share:\n  {}\n",
+                lsv.name,
+                r,
+                emitted
+                    .iter()
+                    .filter(|n| n.contains("pop") && n.contains("share"))
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n  "),
+            );
+        }
+    }
+}
+
 #[test]
 fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
     // Regression test for the silent correctness bug where exhaustive-mode
