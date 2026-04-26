@@ -27,12 +27,23 @@ export type WsMessage = {
 };
 
 type OnMessageFn = (msg: WsMessage) => void;
+type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'dead';
+type OnStatusFn = (status: ConnectionStatus) => void;
 
 // Backoff schedule in milliseconds. Index N is the delay before reconnect
 // attempt N+1 after consecutive failures. The last value caps the schedule:
 // once we hit it, subsequent failures keep that same delay rather than
 // growing unboundedly. Reset on first successful message receipt.
 const RECONNECT_DELAYS_MS: ReadonlyArray<number> = [1000, 2000, 5000];
+
+// After this many consecutive failures with no successful frame we stop
+// reconnecting. This caps infinite retry loops caused by persistent auth
+// failures (e.g. a stale token after a server restart). The caller can
+// detect the give-up state via the optional `onStatus` callback; it is
+// intentionally left up to the call site to decide whether to surface a
+// user-visible indicator or attempt recovery (e.g. by constructing a
+// new UpdatesSocket with a fresh token).
+const MAX_CONSECUTIVE_FAILURES = 10;
 
 function reconnectDelay(consecutiveFailures: number): number {
   const idx = Math.min(consecutiveFailures, RECONNECT_DELAYS_MS.length - 1);
@@ -49,6 +60,7 @@ function buildUrl(token: string): string {
 export class UpdatesSocket {
   private readonly token: string;
   private readonly onMessage: OnMessageFn;
+  private readonly onStatus: OnStatusFn | undefined;
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   // Number of consecutive failures since the last successful message.
@@ -60,9 +72,10 @@ export class UpdatesSocket {
   private consecutiveFailures: number = 0;
   private closed: boolean = false;
 
-  constructor(token: string, onMessage: OnMessageFn) {
+  constructor(token: string, onMessage: OnMessageFn, onStatus?: OnStatusFn) {
     this.token = token;
     this.onMessage = onMessage;
+    this.onStatus = onStatus;
     this.connect();
   }
 
@@ -119,7 +132,10 @@ export class UpdatesSocket {
       console.warn('UpdatesSocket: dropped frame with unknown shape', parsed);
       return;
     }
-    this.consecutiveFailures = 0;
+    if (this.consecutiveFailures !== 0) {
+      this.consecutiveFailures = 0;
+      this.onStatus?.('connected');
+    }
     this.onMessage(parsed);
   }
 
@@ -142,6 +158,16 @@ export class UpdatesSocket {
     if (this.reconnectTimer !== null) {
       return;
     }
+    if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      // Persistent failure: give up so we don't loop forever on stale
+      // tokens or a server that has restarted with a different auth config.
+      // The caller can construct a new UpdatesSocket if/when recovery is
+      // appropriate (e.g. after re-authenticating).
+      this.closed = true;
+      this.onStatus?.('dead');
+      return;
+    }
+    this.onStatus?.('connecting');
     const delay = reconnectDelay(this.consecutiveFailures);
     this.consecutiveFailures += 1;
     this.reconnectTimer = setTimeout(() => {
@@ -150,6 +176,8 @@ export class UpdatesSocket {
     }, delay);
   }
 }
+
+export type { ConnectionStatus, OnStatusFn };
 
 function isWsMessage(value: unknown): value is WsMessage {
   if (typeof value !== 'object' || value === null) {

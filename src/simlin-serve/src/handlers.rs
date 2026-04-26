@@ -860,12 +860,16 @@ async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<WsMess
                             Ok(s) => s,
                             Err(err) => {
                                 tracing::error!(error = %err, "ws: serialize WsMessage failed; closing");
+                                // Best-effort: the socket may already be in a bad state; ignore errors.
+                                let _ = socket.send(Message::Close(None)).await;
                                 break;
                             }
                         };
                         tracing::debug!(target: "simlin_serve::ws", "ws: send {} bytes", json.len());
                         if let Err(err) = socket.send(Message::Text(json.into())).await {
                             tracing::debug!(error = %err, "ws: send failed; closing");
+                            // No Close frame: the send failure indicates the transport is
+                            // already broken, so a Close would also fail.
                             break;
                         }
                     }
@@ -878,13 +882,18 @@ async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<WsMess
                     }
                     Err(RecvError::Closed) => {
                         // Bus shut down (process is exiting). Close cleanly.
+                        let _ = socket.send(Message::Close(None)).await;
                         break;
                     }
                 }
             }
             client_frame = socket.recv() => {
                 match client_frame {
-                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // Client initiated close; echo Close to complete the handshake.
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
                     Some(Ok(Message::Ping(_))) => {
                         // axum auto-pongs; nothing to do here. Logged at
                         // debug because pings are routine.
@@ -895,9 +904,13 @@ async fn handle_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<WsMess
                     }
                     Some(Err(err)) => {
                         tracing::debug!(error = %err, "ws: client recv error; closing");
+                        // Transport already broken; a Close send would also fail.
                         break;
                     }
-                    None => break,
+                    None => {
+                        // Stream ended without a Close frame (abnormal closure on client side).
+                        break;
+                    }
                 }
             }
         }

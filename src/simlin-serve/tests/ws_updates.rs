@@ -25,14 +25,12 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Test harness: bind a port, spawn the server, return (state, address).
-async fn spawn_server(token: &str) -> (AppState, String) {
+/// Test harness: bind a port, spawn the server, return (state, address, dir).
+/// The caller must keep `TempDir` alive; dropping it removes the root and the
+/// server starts returning 404 for project lookups.
+async fn spawn_server(token: &str) -> (AppState, String, TempDir) {
     let dir = TempDir::new().expect("tempdir");
     let canonical = dir.path().canonicalize().expect("canonicalize");
-    // Leak the tempdir so the registry's root stays valid for the lifetime
-    // of the spawned server task. Tests are short-lived and don't read
-    // any files from the root, so this is acceptable.
-    std::mem::forget(dir);
 
     let state = AppState {
         registry: Arc::new(ProjectRegistry::new(canonical.clone())),
@@ -49,12 +47,12 @@ async fn spawn_server(token: &str) -> (AppState, String) {
         let _ = axum::serve(listener, router).await;
     });
 
-    (state, format!("127.0.0.1:{}", addr.port()))
+    (state, format!("127.0.0.1:{}", addr.port()), dir)
 }
 
 #[tokio::test]
 async fn happy_path_receives_published_project_changed() {
-    let (state, addr) = spawn_server("secret-token").await;
+    let (state, addr, _dir) = spawn_server("secret-token").await;
     let url = format!("ws://{}/api/updates?token=secret-token", addr);
 
     let (mut ws, response) = connect_async(&url).await.expect("connect");
@@ -86,7 +84,7 @@ async fn happy_path_receives_published_project_changed() {
 
 #[tokio::test]
 async fn wrong_token_is_rejected_with_401() {
-    let (_state, addr) = spawn_server("real-token").await;
+    let (_state, addr, _dir) = spawn_server("real-token").await;
     let url = format!("ws://{}/api/updates?token=wrong", addr);
 
     let result = connect_async(&url).await;
@@ -107,7 +105,7 @@ async fn wrong_token_is_rejected_with_401() {
 async fn missing_token_is_rejected_with_400() {
     // axum's Query<TokenParams> extractor rejects missing required fields
     // before we get to the handler body, which surfaces as 400 Bad Request.
-    let (_state, addr) = spawn_server("any-token").await;
+    let (_state, addr, _dir) = spawn_server("any-token").await;
     let url = format!("ws://{}/api/updates", addr);
 
     let result = connect_async(&url).await;
@@ -132,7 +130,7 @@ async fn lagged_client_does_not_panic_and_keeps_receiving() {
     // the WS handler logs + ignores, then auto-resumes. We then read
     // until we get something non-lagged. The test passes if the read
     // loop terminates with a successful frame and no panic.
-    let (state, addr) = spawn_server("k").await;
+    let (state, addr, _dir) = spawn_server("k").await;
     let url = format!("ws://{}/api/updates?token=k", addr);
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");
@@ -175,7 +173,7 @@ async fn client_close_terminates_server_task_cleanly() {
     // (drop the only Sender) and observing the next recv() yields None
     // — but a simpler check is to send Close and then see the server
     // close its side; tokio_tungstenite reports `None` from the Stream.
-    let (_state, addr) = spawn_server("token").await;
+    let (_state, addr, _dir) = spawn_server("token").await;
     let url = format!("ws://{}/api/updates?token=token", addr);
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");

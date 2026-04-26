@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// pattern: Functional Core
+// pattern: Imperative Shell
 //
 // `EventBus` wraps a `tokio::sync::broadcast::Sender` and exposes a small,
 // project-shaped surface: `subscribe()` for WebSocket handlers and
