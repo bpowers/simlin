@@ -95,11 +95,15 @@ export class App extends React.Component<Record<string, never>, AppState> {
   private handleLiveMessage = (msg: WsMessage): void => {
     if (msg.type === 'projectChanged') {
       this.setState((prev) => {
-        const previous = prev.liveVersions[msg.path] ?? 0;
-        // Versions are monotonically increasing per path; if a stale
-        // event arrives (e.g. due to broadcast ordering races), keep the
-        // higher value so the EditorHost refetch gate doesn't oscillate.
-        if (msg.version <= previous) {
+        const previous = prev.liveVersions[msg.path];
+        // Drop only when we have already observed a version greater than
+        // or equal to this one. A first-time event for an unseen path
+        // always lands so the create/discover flow (which emits
+        // version 0 for fresh registry entries) updates live state in
+        // every receiving tab. Without this guard the gate compared
+        // `msg.version <= 0` against an `undefined ?? 0` default and
+        // dropped every first-time event at version 0.
+        if (previous !== undefined && msg.version <= previous) {
           return null;
         }
         return {
@@ -107,6 +111,18 @@ export class App extends React.Component<Record<string, never>, AppState> {
           liveSources: { ...prev.liveSources, [msg.path]: msg.source },
         };
       });
+      // When a projectChanged carries a path the sidebar does not yet
+      // know about (cross-tab CreateModel, MCP create, or a new file
+      // the watcher just discovered), refresh the projects list so the
+      // entry appears without a manual reload. Reading `this.state`
+      // gives the most recent committed projects; setState calls earlier
+      // in this handler are queued, but for an unseen path the projects
+      // entry would not be there in either pre- or post-commit state.
+      const known =
+        this.state.projects?.some((p) => p.path === msg.path) ?? false;
+      if (!known) {
+        void this.loadProjects();
+      }
       return;
     }
     if (msg.type === 'projectRemoved') {
@@ -219,7 +235,15 @@ export class App extends React.Component<Record<string, never>, AppState> {
 
   private handleDismissGitHint = (): void => {
     if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem(GIT_HINT_DISMISSED_KEY, '1');
+      try {
+        sessionStorage.setItem(GIT_HINT_DISMISSED_KEY, '1');
+      } catch {
+        // Some browsers (notably Safari in private mode) throw on any
+        // sessionStorage access. Swallow the error so the in-memory
+        // dismissal still lands; the hint reappears in fresh tabs but
+        // that matches the documented "session" semantics. Mirrors the
+        // try/catch pattern in readDismissedFlag.
+      }
     }
     this.setState({ gitHintDismissed: true });
   };

@@ -131,6 +131,36 @@ describe('App shell', () => {
     expect(screen.getByRole('banner').textContent).toMatch(/git not on path/i);
   });
 
+  test('AC2.5 dismiss survives a sessionStorage.setItem that throws', async () => {
+    // Mirror the read-side guard: in private/incognito browsers
+    // sessionStorage access can throw synchronously. The dismiss
+    // handler must not bubble that out as an uncaught UI error;
+    // the in-memory state update should land regardless so the
+    // banner disappears for the rest of the session.
+    globalThis.fetch = makeListFetch({
+      projects: [],
+      git_available: false,
+    }) as unknown as typeof globalThis.fetch;
+
+    const proto = Object.getPrototypeOf(sessionStorage);
+    const originalSetItem = proto.setItem;
+    proto.setItem = function (): void {
+      throw new Error('QuotaExceededError');
+    };
+
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.queryByRole('banner')).not.toBeNull());
+
+      expect(() =>
+        fireEvent.click(screen.getByRole('button', { name: /dismiss/i })),
+      ).not.toThrow();
+      expect(screen.queryByRole('banner')).toBeNull();
+    } finally {
+      proto.setItem = originalSetItem;
+    }
+  });
+
   test('AC2.5 banner is dismissable and the dismissal sticks via sessionStorage', async () => {
     globalThis.fetch = makeListFetch({
       projects: [],
@@ -592,6 +622,68 @@ describe('App shell', () => {
 
     await waitFor(() => expect(screen.queryByRole('status')).not.toBeNull());
     expect(screen.getByRole('status').textContent).toMatch(/updated on disk/i);
+  });
+
+  test('projectChanged for an unknown path refreshes the sidebar (cross-tab/MCP create)', async () => {
+    // When another tab/session creates a model (or the watcher discovers
+    // a new file), the server broadcasts ProjectChanged for the new
+    // path. The receiving tab's sidebar must gain that entry without a
+    // manual reload. Two bugs combined to leave it stale:
+    //   1. The stale-event gate dropped first-time events at version 0
+    //      because `previous` defaulted to 0 and `msg.version <= 0`.
+    //   2. The handler updated only liveVersions/liveSources, never
+    //      reconciling the projects list.
+    // Both fixes land together: process events for unseen paths even
+    // at version 0, and refresh the projects list when the path is not
+    // in the current `projects`.
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ projects: [], git_available: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            {
+              path: 'new.sd.json',
+              format: 'sd_json',
+              mtime: new Date(0).toISOString(),
+              size: 0,
+              git: { kind: 'untracked' },
+              version: 0,
+            },
+          ],
+          git_available: true,
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<App />);
+    await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const ws = MockWebSocket.instances[0];
+
+    // First-time event for an unknown path at version 0 — covers the
+    // CreateModel/POST-new flow where the registry's freshly-inserted
+    // entry is at version 0.
+    await act(async () => {
+      ws.emitMessage(
+        JSON.stringify({
+          type: 'projectChanged',
+          path: 'new.sd.json',
+          version: 0,
+          source: 'agent',
+        }),
+      );
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText('new.sd.json')).not.toBeNull());
   });
 
   test('does not show the disk toast when the change came from the user', async () => {
