@@ -2,7 +2,7 @@
 
 MCP (Model Context Protocol) server exposing the Simlin simulation engine as tools for AI assistants.
 
-<!-- Last reviewed: 2026-04-25 -->
+<!-- Last reviewed: 2026-04-26 -->
 
 ## Architecture
 
