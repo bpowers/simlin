@@ -15,4 +15,5 @@
 //! these in `CallToolResult`.
 
 pub mod create_model;
+pub mod edit_model;
 pub mod read_model;
