@@ -425,6 +425,36 @@ impl ProjectRegistry {
         true
     }
 
+    /// Atomically update the entry's `git` field, leaving every other
+    /// field untouched. Returns `Some(version)` when the value actually
+    /// changed (so the caller can broadcast a `ProjectChanged` carrying
+    /// the entry's current version), `None` when the entry is absent or
+    /// the value is unchanged.
+    ///
+    /// This is the watcher's `handle_git_change` primitive. The earlier
+    /// implementation rebuilt a full `ProjectMeta` from a `snapshot()`
+    /// entry and wrote it back via `upsert_preserve_version`, which
+    /// preserved only `version` — racing saves landing between
+    /// snapshot and upsert would have their freshly-primed
+    /// `last_disk_hash` (echo-suppression key) and
+    /// `last_diagnostic_keys` (DiagnosticsChanged dedup cache)
+    /// overwritten by the snapshot's stale values. Doing the
+    /// compare-and-update under one lock against `entry.git` alone
+    /// closes that window without requiring the caller to know which
+    /// other fields might have moved.
+    pub fn update_git_state_if_changed(&self, abs_path: &Path, new_git: GitState) -> Option<u64> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let entry = guard.get_mut(abs_path)?;
+        if entry.git == new_git {
+            return None;
+        }
+        entry.git = new_git;
+        Some(entry.version)
+    }
+
     /// Like `refresh_meta`, but also stores the XXH3-64 hash of the bytes
     /// just written. The hash is the echo-suppression key the Phase 4 file
     /// watcher uses to recognize its own atomic-write events.
@@ -1246,6 +1276,72 @@ mod tests {
 
         let entry = reg.get(&abs).expect("entry");
         assert_eq!(entry.version, 0);
+    }
+
+    #[test]
+    fn update_git_state_if_changed_preserves_disk_hash_and_diagnostics() {
+        // Watcher's handle_git_change used to rebuild a full ProjectMeta from
+        // a snapshot and write it back via upsert_preserve_version, which
+        // clobbered last_disk_hash and last_diagnostic_keys when a save
+        // landed between the snapshot and the write. The CAS-style helper
+        // mutates only `git`, leaving every other field untouched even
+        // under racing writes.
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.version = 11;
+        meta.last_disk_hash = 0xdead_beef_cafe_babe;
+        let mut keys = BTreeSet::new();
+        keys.insert(("UnknownDependency".to_string(), Some("x".to_string())));
+        meta.last_diagnostic_keys = keys.clone();
+        reg.upsert(abs.clone(), meta);
+
+        let returned = reg.update_git_state_if_changed(&abs, GitState::Tracked { dirty: true });
+        assert_eq!(
+            returned,
+            Some(11),
+            "must report the entry's current version when git state changed"
+        );
+
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.git, GitState::Tracked { dirty: true });
+        assert_eq!(entry.version, 11, "version must not be touched");
+        assert_eq!(
+            entry.last_disk_hash, 0xdead_beef_cafe_babe,
+            "echo-suppression hash must not be clobbered by a git update"
+        );
+        assert_eq!(
+            entry.last_diagnostic_keys, keys,
+            "diagnostic key cache must not be clobbered by a git update"
+        );
+    }
+
+    #[test]
+    fn update_git_state_if_changed_returns_none_when_unchanged() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx);
+        meta.git = GitState::Tracked { dirty: false };
+        reg.upsert(abs.clone(), meta);
+
+        let returned = reg.update_git_state_if_changed(&abs, GitState::Tracked { dirty: false });
+        assert_eq!(
+            returned, None,
+            "no broadcast/version-emit when the git state is unchanged"
+        );
+    }
+
+    #[test]
+    fn update_git_state_if_changed_returns_none_when_path_absent() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let returned =
+            reg.update_git_state_if_changed(&root.join("nope.stmx"), GitState::Untracked);
+        assert_eq!(returned, None);
     }
 
     #[test]

@@ -928,15 +928,16 @@ impl WatcherActor {
 
         state.git.invalidate_repo_cache(&canonical_repo);
 
+        // The snapshot is only used to enumerate paths. Every per-entry
+        // mutation goes through `update_git_state_if_changed`, which
+        // does the compare-and-update under the registry write lock and
+        // touches *only* the `git` field. That closes the window where
+        // a save landing between snapshot and write would have its
+        // freshly-primed `last_disk_hash` / `last_diagnostic_keys`
+        // overwritten by stale values from the snapshot.
         let snapshot = state.registry.snapshot();
         for entry in snapshot {
-            // The snapshot's path is relative-to-root; rebuild the
-            // absolute key the same way the registry does internally.
             let abs = state.root.as_ref().join(&entry.path);
-            // Skip files outside the affected repo. enclosing_git_root
-            // walks upward until it finds a `.git`; if that root
-            // doesn't match the affected repo, this entry's git
-            // status didn't change.
             let entry_repo = match crate::git::enclosing_git_root(&abs) {
                 Some(r) => r,
                 None => continue,
@@ -945,25 +946,9 @@ impl WatcherActor {
                 continue;
             }
             let new_git = state.git.status_for(&abs);
-            if new_git == entry.git {
+            let Some(version) = state.registry.update_git_state_if_changed(&abs, new_git) else {
                 continue;
-            }
-            // Update the registry entry's git field in place. We
-            // rebuild a fresh ProjectMeta because the registry's
-            // upsert overwrites the whole entry; preserve every
-            // non-git field.
-            let updated = ProjectMeta {
-                path: PathBuf::new(),
-                format: entry.format,
-                mtime: entry.mtime,
-                size: entry.size,
-                git: new_git,
-                version: entry.version,
-                doc: entry.doc.clone(),
-                last_disk_hash: entry.last_disk_hash,
-                last_diagnostic_keys: entry.last_diagnostic_keys.clone(),
             };
-            state.registry.upsert_preserve_version(abs.clone(), updated);
 
             let display_path = match abs.strip_prefix(state.root.as_ref()) {
                 Ok(rel) => path_to_forward_slash(rel),
@@ -971,12 +956,12 @@ impl WatcherActor {
             };
             tracing::debug!(
                 path = %display_path,
-                version = entry.version,
+                version,
                 "watcher: git status changed; broadcasting ProjectChanged"
             );
             state.events.publish(WsMessage::ProjectChanged {
                 path: display_path,
-                version: entry.version,
+                version,
                 source: ChangeSource::Disk,
             });
         }
