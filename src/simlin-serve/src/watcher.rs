@@ -323,26 +323,94 @@ impl WatcherActor {
         drop(_debouncer);
     }
 
-    /// Stub for Subcomponent A: just log. Subcomponent B replaces this
-    /// with per-event classification + dispatch (Tasks 3, 4, 5, 6, 7).
+    /// Classify each event in the batch and dispatch to the appropriate
+    /// handler. The handlers themselves are `tracing::debug!` stubs in
+    /// Subcomponent A; Subcomponent B (Tasks 5/6/7) replaces them with
+    /// real read/parse/validate/merge logic.
+    ///
+    /// Errors from the debouncer are logged but never propagated -- the
+    /// actor keeps running so a transient watch failure (rare) doesn't
+    /// take down the server.
     ///
     /// Takes `&AppState` rather than `&self` because `run` already
     /// destructured `self` into individual fields to keep the partial
     /// borrow checker happy across the `select!` arms.
-    async fn handle_batch(_state: &AppState, result: DebounceEventResult) {
-        match result {
-            Ok(events) => {
-                tracing::info!(
-                    count = events.len(),
-                    "watcher actor: received debounced batch"
-                );
-            }
+    async fn handle_batch(state: &AppState, result: DebounceEventResult) {
+        let events = match result {
+            Ok(events) => events,
             Err(errors) => {
                 for err in errors {
                     tracing::warn!(error = %err, "watcher actor: debouncer error");
                 }
+                return;
+            }
+        };
+
+        for event in &events {
+            match classify(event) {
+                ClassifiedEvent::ModelFile {
+                    path,
+                    format,
+                    change,
+                } => {
+                    Self::handle_model_change(state, path, format, change).await;
+                }
+                ClassifiedEvent::Removed { path, format } => {
+                    Self::handle_model_removal(state, path, format).await;
+                }
+                ClassifiedEvent::GitInternal { repo_root } => {
+                    Self::handle_git_change(state, repo_root).await;
+                }
+                ClassifiedEvent::Ignored => {
+                    // Most events are ignored; tracing at debug keeps
+                    // logs quiet under normal operation but lets us
+                    // diagnose missing-event reports by raising the
+                    // log level.
+                    tracing::debug!(
+                        kind = ?event.kind,
+                        paths = ?event.paths,
+                        "watcher actor: ignored event"
+                    );
+                }
             }
         }
+    }
+
+    /// Stub for Subcomponent A. Task 5 replaces this with the real
+    /// read/parse/validate/merge path that drives `apply_canonical_json`
+    /// against the per-project `ProjectDoc`.
+    async fn handle_model_change(
+        _state: &AppState,
+        path: PathBuf,
+        format: ProjectFormat,
+        change: ChangeKind,
+    ) {
+        tracing::debug!(
+            path = %path.display(),
+            ?format,
+            ?change,
+            "watcher actor: model file change (stub)"
+        );
+    }
+
+    /// Stub for Subcomponent A. Task 6 replaces this with the real
+    /// `registry.remove(...)` + `WsMessage::ProjectRemoved` broadcast.
+    async fn handle_model_removal(_state: &AppState, path: PathBuf, format: Option<ProjectFormat>) {
+        tracing::debug!(
+            path = %path.display(),
+            ?format,
+            "watcher actor: model file removal (stub)"
+        );
+    }
+
+    /// Stub for Subcomponent A. Task 7 replaces this with
+    /// `state.git.invalidate_repo_cache(&repo_root)` plus a re-status
+    /// pass over registry entries living inside the repo.
+    async fn handle_git_change(_state: &AppState, repo_root: PathBuf) {
+        tracing::debug!(
+            repo_root = %repo_root.display(),
+            "watcher actor: .git/HEAD or .git/index change (stub)"
+        );
     }
 }
 
@@ -647,5 +715,59 @@ mod tests {
             vec![PathBuf::from("/repo/notes.md")],
         );
         assert_eq!(classify(&event), ClassifiedEvent::Ignored);
+    }
+
+    #[tokio::test]
+    async fn handle_batch_dispatches_each_classified_variant_without_panic() {
+        // The handlers are stubs in Subcomponent A; this test verifies
+        // that the dispatch wiring runs to completion for each variant
+        // (no panics, no awaiters left dangling). When Subcomponent B
+        // replaces the stubs with real handlers, this test will need to
+        // be expanded to assert their observable side effects -- but
+        // the dispatch shape itself stays the same.
+        let dir = TempDir::new().expect("tempdir");
+        let state = build_app_state(dir.path());
+
+        let events = vec![
+            // ModelFile / Modified
+            make_debounced(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                vec![PathBuf::from("/repo/models/x.stmx")],
+            ),
+            // ModelFile / Created
+            make_debounced(
+                EventKind::Create(CreateKind::File),
+                vec![PathBuf::from("/repo/models/y.stmx")],
+            ),
+            // Removed
+            make_debounced(
+                EventKind::Remove(RemoveKind::File),
+                vec![PathBuf::from("/repo/models/z.stmx")],
+            ),
+            // GitInternal
+            make_debounced(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                vec![PathBuf::from("/repo/.git/HEAD")],
+            ),
+            // Ignored
+            make_debounced(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                vec![PathBuf::from("/repo/notes.md")],
+            ),
+        ];
+        let result: DebounceEventResult = Ok(events);
+        WatcherActor::handle_batch(&state, result).await;
+    }
+
+    #[tokio::test]
+    async fn handle_batch_logs_errors_without_propagating() {
+        // An Err arm from the debouncer (rare in practice -- most
+        // commonly a transient inotify resource hiccup) should be
+        // logged but not crash the actor. We only assert the call
+        // returns without panic; tracing output is not captured here.
+        let dir = TempDir::new().expect("tempdir");
+        let state = build_app_state(dir.path());
+        let result: DebounceEventResult = Err(vec![notify::Error::generic("simulated failure")]);
+        WatcherActor::handle_batch(&state, result).await;
     }
 }
