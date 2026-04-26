@@ -44,7 +44,6 @@ use crate::db::RefShape;
 /// positions in unusual cases. Defensive `DynamicIndex` for unknown
 /// names ensures the worst case is over-conservative wrapping rather
 /// than incorrectly matching the live shape.
-#[allow(dead_code)] // consumed by wrap_non_matching_in_previous in Task 2
 fn classify_expr0_subscript_shape(
     indices: &[IndexExpr0],
     source_dim_elements: &[Vec<String>],
@@ -96,7 +95,6 @@ fn classify_expr0_subscript_shape(
 /// unknown identifiers). Indices of subscripts are recursively transformed
 /// even when the outer subscript matches the live shape, so nested
 /// references like `arr[other_var]` still get wrapped.
-#[allow(dead_code)] // populated/consumed across Phase 3 Tasks 1-3 and Subcomponent B
 pub(crate) fn wrap_non_matching_in_previous(
     expr: Expr0,
     live_source: &Ident<Canonical>,
@@ -230,7 +228,6 @@ pub(crate) fn wrap_non_matching_in_previous(
     }
 }
 
-#[allow(dead_code)] // consumed by wrap_non_matching_in_previous
 fn wrap_index_non_matching_in_previous(
     index: IndexExpr0,
     live_source: &Ident<Canonical>,
@@ -277,12 +274,10 @@ fn wrap_index_non_matching_in_previous(
 /// shape matches `live_shape`; other occurrences of `live_source` are
 /// wrapped too.
 ///
-/// Unlike the legacy `build_partial_equation`, this function always
-/// canonicalizes via parse + `print_eqn`, even when no wrapping happens,
-/// so the result is always in the canonical equation format expected by
-/// downstream parsing. The performance impact is negligible because LTM
-/// equations are short.
-#[allow(dead_code)] // consumed by per-shape link score generators in Subcomponent B
+/// The function always canonicalizes via parse + `print_eqn`, even when
+/// no wrapping happens, so the result is always in the canonical equation
+/// format expected by downstream parsing. The performance impact is
+/// negligible because LTM equations are short.
 pub(crate) fn build_partial_equation_shaped(
     equation_text: &str,
     deps: &HashSet<Ident<Canonical>>,
@@ -307,108 +302,6 @@ pub(crate) fn build_partial_equation_shaped(
         &other_deps,
         source_dim_elements,
     );
-    print_eqn(&transformed)
-}
-
-/// Recursively walk an Expr0 tree, wrapping variable references that appear in
-/// `deps` with `PREVIOUS(...)`.  Function names in App nodes are never touched,
-/// so a variable named `max` won't corrupt `MAX(max, s)`.
-///
-/// Legacy single-shape builder, scheduled for removal at the end of Phase 3
-/// (Task 8) once `build_partial_equation_shaped` covers every call site.
-#[allow(dead_code)] // removed at end of Phase 3
-fn wrap_deps_in_previous(expr: Expr0, deps: &HashSet<Ident<Canonical>>) -> Expr0 {
-    match expr {
-        Expr0::Var(ref ident, loc) => {
-            let canonical = Ident::new(&canonicalize(ident.as_str()));
-            if deps.contains(&canonical) {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
-            } else {
-                expr
-            }
-        }
-        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
-            let args = args
-                .into_iter()
-                .map(|a| wrap_deps_in_previous(a, deps))
-                .collect();
-            Expr0::App(UntypedBuiltinFn(name, args), loc)
-        }
-        Expr0::Op1(op, inner, loc) => {
-            Expr0::Op1(op, Box::new(wrap_deps_in_previous(*inner, deps)), loc)
-        }
-        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
-            op,
-            Box::new(wrap_deps_in_previous(*lhs, deps)),
-            Box::new(wrap_deps_in_previous(*rhs, deps)),
-            loc,
-        ),
-        Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
-            Box::new(wrap_deps_in_previous(*cond, deps)),
-            Box::new(wrap_deps_in_previous(*then_expr, deps)),
-            Box::new(wrap_deps_in_previous(*else_expr, deps)),
-            loc,
-        ),
-        Expr0::Subscript(ident, indices, loc) => {
-            let indices = indices
-                .into_iter()
-                .map(|idx| wrap_index_deps_in_previous(idx, deps))
-                .collect();
-            let canonical = Ident::new(&canonicalize(ident.as_str()));
-            let subscript = Expr0::Subscript(ident, indices, loc);
-            if deps.contains(&canonical) {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
-                    loc,
-                )
-            } else {
-                subscript
-            }
-        }
-        Expr0::Const(..) => expr,
-    }
-}
-
-#[allow(dead_code)] // removed at end of Phase 3
-fn wrap_index_deps_in_previous(index: IndexExpr0, deps: &HashSet<Ident<Canonical>>) -> IndexExpr0 {
-    match index {
-        IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_deps_in_previous(e, deps)),
-        IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
-            wrap_deps_in_previous(l, deps),
-            wrap_deps_in_previous(r, deps),
-            loc,
-        ),
-        other => other,
-    }
-}
-
-/// Parse an equation, wrap all dependency references except `exclude` in PREVIOUS(),
-/// and return the resulting equation text.  Falls back to lowercased original text
-/// if parsing fails.
-///
-/// Legacy single-shape builder, scheduled for removal at the end of Phase 3
-/// (Task 8) once `build_partial_equation_shaped` covers every call site.
-#[allow(dead_code)] // removed at end of Phase 3
-fn build_partial_equation(
-    equation_text: &str,
-    deps: &HashSet<Ident<Canonical>>,
-    exclude: &Ident<Canonical>,
-) -> String {
-    let deps_to_wrap: HashSet<Ident<Canonical>> = deps
-        .iter()
-        .filter(|d| *d != exclude && normalize_module_ref(d) != *exclude)
-        .cloned()
-        .collect();
-
-    if deps_to_wrap.is_empty() {
-        return equation_text.to_lowercase();
-    }
-
-    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return equation_text.to_lowercase();
-    };
-
-    let transformed = wrap_deps_in_previous(ast, &deps_to_wrap);
     print_eqn(&transformed)
 }
 
@@ -442,7 +335,6 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 /// identifier, so the generated names cannot be confused with user
 /// variables. The `parse_link_offsets` discovery parser strips the
 /// `⁚wildcard` / `⁚dynamic` suffix before resolving offsets.
-#[allow(dead_code)] // consumed by per-shape link score emission in Task 5
 pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> String {
     let from_part = match shape {
         RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),

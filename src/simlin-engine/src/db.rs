@@ -2124,15 +2124,11 @@ pub fn link_score_equation_text<'db>(
 
     // Standard ceteris-paribus formula for non-module links.
     //
-    // The legacy `link_score_equation_text` keys link scores by
-    // `(from, to)` only -- it doesn't carry per-shape information. The
-    // Bare shape and empty `source_dim_elements` reproduce the original
-    // pre-Phase-3 behavior: every reference to non-`from` deps is wrapped
-    // and `from` itself stays live regardless of subscript shape (the
-    // build_partial_equation_shaped Bare path leaves bare-Var occurrences
-    // live and wraps everything else, which matches the legacy
-    // `build_partial_equation` semantics for callers that don't care
-    // about per-reference shape granularity). New callers that need
+    // `link_score_equation_text` keys link scores by `(from, to)` only --
+    // it doesn't carry per-shape information. The Bare shape and empty
+    // `source_dim_elements` reproduce the original pre-Phase-3 behavior:
+    // every reference to non-`from` deps is wrapped and `from` itself
+    // stays live regardless of subscript shape. New callers that need
     // per-shape behavior should use `link_score_equation_text_shaped`.
     let mut all_vars = HashMap::new();
     if let Some(ref fv) = from_var {
