@@ -33,7 +33,7 @@
 //! registry entry inside it, broadcasting `ProjectChanged` for any
 //! whose git status changed.
 
-use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +50,7 @@ use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
 use crate::parse::parse_to_datamodel;
+use crate::path_resolution::{sidecar_for_mdl, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
 
@@ -293,28 +294,6 @@ fn path_traverses_excluded_dir(path: &Path) -> bool {
         Component::Normal(name) => name.to_str().map(is_excluded_dir).unwrap_or(false),
         _ => false,
     })
-}
-
-/// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Same rule
-/// the GET handler and writer use; kept here to avoid a cross-module
-/// dep just for the sidecar-name predicate.
-fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
-    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    parent.join(format!("{stem}.sd.json"))
-}
-
-/// Render a relative `Path` as a string with forward-slash separators.
-/// Mirrors handlers.rs's local helper -- we duplicate here rather than
-/// expose because the watcher is a sibling module and the converter is
-/// trivially small.
-fn path_to_forward_slash(path: &Path) -> String {
-    let display = path.to_string_lossy().into_owned();
-    if MAIN_SEPARATOR == '/' {
-        display
-    } else {
-        display.replace(MAIN_SEPARATOR, "/")
-    }
 }
 
 /// Long-lived actor that bridges the OS filesystem watcher into tokio.
@@ -670,8 +649,8 @@ impl WatcherActor {
         }
 
         let display_path = match canonical.strip_prefix(state.root.as_ref()) {
-            Ok(rel) => path_to_forward_slash(rel),
-            Err(_) => path_to_forward_slash(&canonical),
+            Ok(rel) => to_forward_slash(rel),
+            Err(_) => to_forward_slash(&canonical),
         };
 
         tracing::info!(
@@ -762,12 +741,12 @@ impl WatcherActor {
                 // destination is re-hydrated from the freshly renamed file
                 // via `handle_model_change`.
                 let from_display = match from.strip_prefix(state.root.as_ref()) {
-                    Ok(rel) => path_to_forward_slash(rel),
-                    Err(_) => path_to_forward_slash(&from),
+                    Ok(rel) => to_forward_slash(rel),
+                    Err(_) => to_forward_slash(&from),
                 };
                 let to_display = match to_key.strip_prefix(state.root.as_ref()) {
-                    Ok(rel) => path_to_forward_slash(rel),
-                    Err(_) => path_to_forward_slash(&to_key),
+                    Ok(rel) => to_forward_slash(rel),
+                    Err(_) => to_forward_slash(&to_key),
                 };
                 tracing::debug!(
                     from = %from.display(),
@@ -797,12 +776,12 @@ impl WatcherActor {
         }
 
         let from_display = match from.strip_prefix(state.root.as_ref()) {
-            Ok(rel) => path_to_forward_slash(rel),
-            Err(_) => path_to_forward_slash(&from),
+            Ok(rel) => to_forward_slash(rel),
+            Err(_) => to_forward_slash(&from),
         };
         let to_display = match to_key.strip_prefix(state.root.as_ref()) {
-            Ok(rel) => path_to_forward_slash(rel),
-            Err(_) => path_to_forward_slash(&to_key),
+            Ok(rel) => to_forward_slash(rel),
+            Err(_) => to_forward_slash(&to_key),
         };
 
         tracing::info!(
@@ -880,8 +859,8 @@ impl WatcherActor {
         }
 
         let display_path = match path.strip_prefix(state.root.as_ref()) {
-            Ok(rel) => path_to_forward_slash(rel),
-            Err(_) => path_to_forward_slash(&path),
+            Ok(rel) => to_forward_slash(rel),
+            Err(_) => to_forward_slash(&path),
         };
 
         tracing::info!(
@@ -951,8 +930,8 @@ impl WatcherActor {
             };
 
             let display_path = match abs.strip_prefix(state.root.as_ref()) {
-                Ok(rel) => path_to_forward_slash(rel),
-                Err(_) => path_to_forward_slash(&abs),
+                Ok(rel) => to_forward_slash(rel),
+                Err(_) => to_forward_slash(&abs),
             };
             tracing::debug!(
                 path = %display_path,

@@ -19,7 +19,7 @@
 //! 3. Broadcasts `ProjectChanged { source: Agent }` after a successful
 //!    merge so connected browser sockets remount their editors.
 
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use simlin_engine::datamodel;
@@ -30,6 +30,7 @@ use simlin_mcp_core::types::{ErrorOutput, SourceFormat};
 use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
+use crate::path_resolution::{is_mdl_extension, sidecar_for_mdl, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
 use crate::writer::{SaveTarget, commit_write, resolve_save_target, serialize_project};
@@ -64,20 +65,6 @@ fn project_format_to_source_format(format: ProjectFormat) -> SourceFormat {
     match format {
         ProjectFormat::Stmx | ProjectFormat::Xmile | ProjectFormat::Mdl => SourceFormat::Xmile,
         ProjectFormat::SdJson => SourceFormat::NativeJson,
-    }
-}
-
-/// Render a relative path as a forward-slash string so the wire format
-/// is platform-agnostic. Mirrors `handlers::path_to_forward_slash`; we
-/// duplicate rather than re-export because the handler form is private
-/// today and the broadcast envelope's wire shape is the contract that
-/// matters here.
-fn path_to_forward_slash(path: &Path) -> String {
-    let display = path.to_string_lossy().into_owned();
-    if MAIN_SEPARATOR == '/' {
-        display
-    } else {
-        display.replace(MAIN_SEPARATOR, "/")
     }
 }
 
@@ -134,27 +121,6 @@ fn resolve_create_path_within_root(
             },
         },
     )
-}
-
-/// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Same rule
-/// `handlers::sidecar_for_mdl` and `writer::resolve_save_target` use;
-/// duplicated locally to avoid a cross-module dep just for this two-line
-/// helper (matches `watcher.rs`'s justification).
-fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
-    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    parent.join(format!("{stem}.sd.json"))
-}
-
-/// True when `path`'s file name ends with `.mdl` (case-insensitive). Used
-/// only by `open` to decide whether to apply the sidecar-preference rule;
-/// the heavier `format_for_path` helper in `handlers.rs` also handles
-/// `.sd.json`/`.stmx`/`.xmile` and is overkill here.
-fn is_mdl_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.eq_ignore_ascii_case("mdl"))
-        .unwrap_or(false)
 }
 
 /// Pick the on-disk `ProjectFormat` for a fresh file based on its
@@ -552,7 +518,7 @@ impl ProjectAccess for RegistryAccess {
             .strip_prefix(&root_canonical)
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| registry_key.clone());
-        let rel_str = path_to_forward_slash(&rel);
+        let rel_str = to_forward_slash(&rel);
 
         self.state.events.publish(WsMessage::ProjectChanged {
             path: rel_str,
@@ -678,7 +644,7 @@ impl ProjectAccess for RegistryAccess {
             .strip_prefix(&root_canonical)
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| resolved.clone());
-        let rel_str = path_to_forward_slash(&rel);
+        let rel_str = to_forward_slash(&rel);
 
         self.state.events.publish(WsMessage::ProjectChanged {
             path: rel_str,

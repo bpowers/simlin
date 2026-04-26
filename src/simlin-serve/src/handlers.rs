@@ -12,7 +12,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Json;
@@ -26,6 +26,7 @@ use tokio::sync::broadcast;
 use crate::events::{ChangeSource, ClientWsMessage, EventBus, WsMessage};
 use crate::git::GitProbe;
 use crate::parse::ParseError;
+use crate::path_resolution::{sidecar_for_mdl, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry, RegistryError};
 use crate::scan::scan_into_registry;
 use crate::validation::{BaselineErrors, ValidationFailure, ValidationOutcome, validate_save};
@@ -95,7 +96,7 @@ pub async fn list_projects(State(state): State<AppState>) -> Json<ListProjectsRe
     let projects = snapshot
         .into_iter()
         .map(|meta| ProjectEntry {
-            path: path_to_forward_slash(&meta.path),
+            path: to_forward_slash(&meta.path),
             format: meta.format,
             mtime: meta.mtime,
             size: meta.size,
@@ -617,7 +618,7 @@ pub async fn create_new_project(
         .strip_prefix(&root_canonical)
         .map(Path::to_path_buf)
         .unwrap_or_else(|_| written_canonical.clone());
-    let response_path = path_to_forward_slash(&rel_for_wire);
+    let response_path = to_forward_slash(&rel_for_wire);
 
     state.events.publish(WsMessage::ProjectChanged {
         path: response_path.clone(),
@@ -991,10 +992,10 @@ pub async fn save_project(
                 .strip_prefix(&resolved.root_canonical)
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|_| sidecar_path.clone());
-            path_to_forward_slash(&rel)
+            to_forward_slash(&rel)
         }
         SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => {
-            path_to_forward_slash(&resolved.relative_path)
+            to_forward_slash(&resolved.relative_path)
         }
     };
 
@@ -1226,27 +1227,6 @@ fn format_for_path(path: &Path) -> Option<ProjectFormat> {
     }
 }
 
-/// For `path = "/some/dir/foo.mdl"`, return `/some/dir/foo.sd.json`. The
-/// sibling-sidecar convention is documented in the design plan; Phase 2
-/// writes the sidecar on save.
-fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
-    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    parent.join(format!("{stem}.sd.json"))
-}
-
-/// Render a relative `PathBuf` as a string with forward-slash separators so
-/// the wire format is platform-agnostic. On Unix this is a no-op cast; on
-/// Windows it rewrites `\` to `/` so URLs work without further escaping.
-fn path_to_forward_slash(path: &Path) -> String {
-    let display = path.to_string_lossy().into_owned();
-    if MAIN_SEPARATOR == '/' {
-        display
-    } else {
-        display.replace(MAIN_SEPARATOR, "/")
-    }
-}
-
 /// `GET /api/updates` — WebSocket endpoint that streams `WsMessage`
 /// frames to the connected browser. Each connection subscribes to the
 /// process's `EventBus`; messages are JSON-encoded and sent as text
@@ -1422,16 +1402,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forward_slash_is_identity_on_unix_paths() {
-        assert_eq!(path_to_forward_slash(Path::new("a/b/c.stmx")), "a/b/c.stmx");
-    }
-
-    #[test]
-    fn forward_slash_handles_simple_relative_paths() {
-        assert_eq!(path_to_forward_slash(Path::new("model.stmx")), "model.stmx");
-    }
-
-    #[test]
     fn sanitize_rejects_parent_dir_segments() {
         let err = sanitize_rel_path("../etc/passwd").unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)));
@@ -1464,14 +1434,6 @@ mod tests {
         // The curdir gets preserved by Components but isn't a security issue;
         // canonicalize will collapse it.
         assert!(!components.is_empty());
-    }
-
-    #[test]
-    fn sidecar_for_mdl_swaps_extension() {
-        assert_eq!(
-            sidecar_for_mdl(Path::new("/tmp/foo/bar.mdl")),
-            PathBuf::from("/tmp/foo/bar.sd.json")
-        );
     }
 
     #[test]

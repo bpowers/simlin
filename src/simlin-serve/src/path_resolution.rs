@@ -24,7 +24,52 @@
 //! apply the rule consumer Y enforces": the rules are implemented once and
 //! every consumer calls the same function.
 
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+
+/// Sibling `.sd.json` for a `.mdl` path: `/dir/foo.mdl` → `/dir/foo.sd.json`.
+///
+/// Lossy conversion of the file stem to UTF-8 is intentional: filenames that
+/// are not valid UTF-8 produce an empty stem, so the resulting sidecar path
+/// is `<parent>/.sd.json`. That is fine because such paths cannot be created
+/// by callers in practice (the registry rejects them upstream) and the
+/// callers that do reach here use the result only to test on-disk existence.
+pub fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
+    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    parent.join(format!("{stem}.sd.json"))
+}
+
+/// Case-insensitive check for the `.mdl` extension.
+///
+/// Used by the consumers that distinguish "is this an `.mdl`?" from "what
+/// is the on-disk format here?" — for the latter the heavier
+/// [`crate::registry::ProjectFormat`]-yielding dispatcher is correct, but
+/// the sidecar-preference rule only cares whether the input is an `.mdl`
+/// at all. Centralising here ensures every consumer agrees on case
+/// folding.
+pub fn is_mdl_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("mdl"))
+        .unwrap_or(false)
+}
+
+/// Render a relative `Path` as a forward-slash string for the WebSocket /
+/// HTTP wire format.
+///
+/// On Unix this is a no-op cast; on Windows it rewrites `\` to `/` so URL
+/// segments work without further escaping. The conversion is lossy if the
+/// path contains non-UTF-8 bytes — the resulting string substitutes the
+/// Unicode replacement character — but that is the correct behaviour for
+/// JSON payloads, which require well-formed UTF-8 by definition.
+pub fn to_forward_slash(path: &Path) -> String {
+    let display = path.to_string_lossy().into_owned();
+    if MAIN_SEPARATOR == '/' {
+        display
+    } else {
+        display.replace(MAIN_SEPARATOR, "/")
+    }
+}
 
 /// Error returned by [`resolve_create_target`]. Generic over the caller's
 /// own error variant (`AccessError`, `SaveError`, etc.) because each
@@ -118,6 +163,75 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn sidecar_for_mdl_swaps_extension_to_sd_json() {
+        assert_eq!(
+            sidecar_for_mdl(Path::new("/tmp/foo/bar.mdl")),
+            PathBuf::from("/tmp/foo/bar.sd.json")
+        );
+    }
+
+    #[test]
+    fn sidecar_for_mdl_preserves_parent_directory_chain() {
+        // Multi-level paths must keep their parent intact; only the leaf
+        // file changes.
+        assert_eq!(
+            sidecar_for_mdl(Path::new("a/b/c/model.mdl")),
+            PathBuf::from("a/b/c/model.sd.json")
+        );
+    }
+
+    #[test]
+    fn sidecar_for_mdl_handles_dotted_stem() {
+        // `foo.bar.mdl` -> stem `foo.bar`, so the sidecar is
+        // `foo.bar.sd.json`. This matches the rest of the pipeline's
+        // file_stem-based logic.
+        assert_eq!(
+            sidecar_for_mdl(Path::new("/tmp/foo.bar.mdl")),
+            PathBuf::from("/tmp/foo.bar.sd.json")
+        );
+    }
+
+    #[test]
+    fn is_mdl_extension_matches_lowercase() {
+        assert!(is_mdl_extension(Path::new("/tmp/x.mdl")));
+    }
+
+    #[test]
+    fn is_mdl_extension_matches_uppercase_and_mixed() {
+        // The watcher and HTTP handlers see paths produced by
+        // canonicalize() (which preserves case on case-sensitive
+        // filesystems and lower-cases on case-insensitive ones), so an
+        // uppercase `.MDL` from a case-preserving fs must classify
+        // identically. This is the exact bug shape the centralisation
+        // is designed to prevent.
+        assert!(is_mdl_extension(Path::new("/tmp/X.MDL")));
+        assert!(is_mdl_extension(Path::new("/tmp/x.Mdl")));
+    }
+
+    #[test]
+    fn is_mdl_extension_rejects_other_extensions() {
+        assert!(!is_mdl_extension(Path::new("/tmp/x.stmx")));
+        assert!(!is_mdl_extension(Path::new("/tmp/x.sd.json")));
+        assert!(!is_mdl_extension(Path::new("/tmp/x.xmile")));
+        assert!(!is_mdl_extension(Path::new("/tmp/x.txt")));
+    }
+
+    #[test]
+    fn is_mdl_extension_rejects_no_extension() {
+        assert!(!is_mdl_extension(Path::new("/tmp/no_extension")));
+    }
+
+    #[test]
+    fn to_forward_slash_is_identity_for_unix_relative_paths() {
+        assert_eq!(to_forward_slash(Path::new("a/b/c.stmx")), "a/b/c.stmx");
+    }
+
+    #[test]
+    fn to_forward_slash_handles_simple_filename() {
+        assert_eq!(to_forward_slash(Path::new("model.stmx")), "model.stmx");
+    }
 
     #[test]
     fn resolves_inside_root_when_parent_exists() {
