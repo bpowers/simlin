@@ -31,6 +31,7 @@ rand = "0.10"
 base64 = "0.22"
 open = "5"
 anyhow = "1"
+loro = "1.11"
 
 [build-dependencies]
 anyhow = "1"
