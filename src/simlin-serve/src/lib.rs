@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod parse;
 pub mod registry;
 pub mod scan;
+pub mod serving;
 pub mod static_assets;
 pub mod token;
 pub mod validation;
