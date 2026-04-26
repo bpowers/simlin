@@ -2186,22 +2186,25 @@ pub(crate) fn build_element_level_loops(
                 dimensions,
             });
         } else if is_cross_element {
-            // Cross-element circuits (mixed subscripts or repeated variable
-            // names). These circuits reference off-diagonal element edges
-            // like population[nyc] → migration_pressure[boston], for which
-            // no dedicated link score variables exist.
+            // Cross-element circuits: a circuit where nodes have different
+            // element subscripts on the same dimension (e.g., pop[nyc] ->
+            // total_pop -> pop[boston] -> total_pop -> pop[nyc] via a
+            // wildcard reducer like SUM(pop[*])).
             //
-            // Rather than dropping these entirely (which would leave models
-            // with ONLY cross-element feedback with no scored loops), extract
-            // the unique variable-level cycle and create a SCALAR loop that
-            // references existing A2A link score variables. The resulting
-            // loop score uses diagonal link score values as an approximation
-            // (the actual off-diagonal sensitivities may differ).
+            // After the per-reference element graph (FixedIndex no longer
+            // expands to NxN), the cross-element circuits that survive
+            // originate primarily from wildcard reducers. Such reducers
+            // already encode the cross-element contribution as a single
+            // A2A link-score value per neighbour, so we extract the unique
+            // variable-level cycle and emit a scalar Loop whose links
+            // reference the canonical {from}->{to} A2A link-score variables
+            // (Bare shape). The diagonal link-score values capture the loop
+            // structure without needing dedicated off-diagonal link scores.
             //
             // Deduplication: strip subscripts and take the shortest unique
-            // cycle. E.g., pop[nyc]→mp[boston]→mo[boston]→pop[boston]→mp[nyc]→
-            // mo[nyc] has stripped sequence pop,mp,mo,pop,mp,mo; the unique
-            // cycle starting at the first repeat is pop→mp→mo.
+            // cycle. E.g., pop[nyc]->total_pop->pop[boston]->total_pop has
+            // stripped sequence pop,total_pop,pop,total_pop; the unique
+            // cycle starting at the first repeat is pop->total_pop.
             let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
 
             // Find the shortest unique cycle in the stripped sequence
@@ -2217,10 +2220,9 @@ pub(crate) fn build_element_level_loops(
             if unique_cycle.len() >= 2 {
                 let mut links = var_graph.circuit_to_links(&unique_cycle);
                 // Cross-element circuits are scored as a scalar loop using
-                // the diagonal-link-score approximation: every link reads
-                // the canonical {from}->{to} A2A link score (Bare shape).
-                // The actual off-diagonal sensitivities are not directly
-                // available -- this is the documented approximation.
+                // the wildcard-reducer's already-aggregated A2A link-score
+                // values: every link reads the canonical {from}->{to} A2A
+                // link score (Bare shape).
                 for link in &mut links {
                     link.shape = Some(RefShape::Bare);
                 }
@@ -2232,7 +2234,7 @@ pub(crate) fn build_element_level_loops(
                     links,
                     stocks,
                     polarity,
-                    dimensions: vec![], // scalar: approximate cross-element score
+                    dimensions: vec![], // scalar: wildcard-reducer aggregated
                 });
             }
         } else {
@@ -2527,9 +2529,10 @@ pub fn model_ltm_variables(
         // (e.g., `share[R] = population[R] / SUM(population[*])`), this
         // creates only N diagonal link scores (one per element). Off-diagonal
         // link scores (e.g., population[boston] -> share[nyc]) are not
-        // generated. Cross-element circuits are detected by
-        // build_element_level_loops and scored approximately using
-        // variable-level link references.
+        // generated; the wildcard reducer already aggregates the
+        // cross-element contribution into the diagonal A2A link score, and
+        // build_element_level_loops uses those diagonal values when
+        // emitting scalar Loops for the surviving cross-element circuits.
         //
         // Check whether this edge should use the target's dimensions for
         // the link score. This covers:
