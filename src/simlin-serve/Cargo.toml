@@ -53,3 +53,10 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
+# rustls-tls is required despite this being a loopback-only smoke test:
+# reqwest's default features pull in OpenSSL, which adds a system
+# build-tools dependency the cross-platform CI smoke job (Windows, in
+# particular) doesn't have without extra setup. rustls is pure Rust.
+# `json` enables `Response::json` so the smoke test doesn't have to
+# round-trip JSON bodies through `text()` + `serde_json::from_str`.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
