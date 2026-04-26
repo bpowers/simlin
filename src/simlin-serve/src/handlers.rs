@@ -17,11 +17,10 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use crate::events::{ChangeSource, ClientWsMessage, EventBus, WsMessage};
@@ -44,14 +43,8 @@ pub struct AppState {
     pub root: Arc<PathBuf>,
     /// Internal pub/sub for `WsMessage` events. The save handler calls
     /// `events.publish` after a successful merge; the WebSocket handler
-    /// (Phase 3 Task 7) creates one subscriber per connected client.
+    /// creates one subscriber per connected client.
     pub events: Arc<EventBus>,
-    /// One-time launch token — same value baked into the launch URL.
-    /// The WebSocket upgrade handler validates the `?token=...` query
-    /// param against this with a constant-time compare; HTTP handlers
-    /// don't read it (they're loopback-only by virtue of the bind, and
-    /// the SPA proves origin via the loaded HTML carrying the token).
-    pub launch_token: Arc<String>,
     /// Bound UI/HTTP port. The host validator middleware uses this to
     /// compute the per-launch allowlist (`127.0.0.1:<ui_port>`,
     /// `localhost:<ui_port>`); 0 in tests where ephemeral ports are
@@ -1230,35 +1223,25 @@ fn path_to_forward_slash(path: &Path) -> String {
     }
 }
 
-/// Query-string carrier for the WebSocket upgrade. Browser-native
-/// `WebSocket` cannot set custom headers on the handshake, so the bearer
-/// rides as a query parameter; the launcher embeds the same token in the
-/// initial URL the user opens.
-#[derive(Debug, Deserialize)]
-pub struct WsParams {
-    pub token: String,
-}
-
 /// `GET /api/updates` — WebSocket endpoint that streams `WsMessage`
 /// frames to the connected browser. Each connection subscribes to the
 /// process's `EventBus`; messages are JSON-encoded and sent as text
 /// frames.
 ///
-/// Auth: the `?token=...` query parameter is compared against
-/// `state.launch_token` with a constant-time compare. Mismatched length
-/// or value -> 401. Missing token -> 400 (Axum's `Query` extractor
-/// rejects the request before the handler runs).
+/// Auth: see `docs/threat-model.md`. V1 trusts the OS user-account
+/// boundary plus the host/origin allowlist (DNS-rebinding defense);
+/// there is no bearer-token check.
 ///
-/// Origin validation (Phase 8 Task 8): the `Origin:` request header is
-/// compared against the SPA's allowlist
-/// (`http://127.0.0.1:<ui_port>`, `http://localhost:<ui_port>`).
-/// Browser-native `WebSocket` always sets this header for cross-origin
-/// inspection; rejecting non-allowlisted values prevents a malicious
-/// page from upgrading the WS even if it somehow obtained the token.
-/// An empty `Origin` is honored under `--strict-origin=false` (the
-/// default `--strict-origin=true` rejects it) so non-browser clients
-/// like `wscat` keep working in dev. The HTTP-side host validator runs
-/// before this handler, so the loopback `Host:` is already proven.
+/// Origin validation: the `Origin:` request header is compared against
+/// the SPA's allowlist (`http://127.0.0.1:<ui_port>`,
+/// `http://localhost:<ui_port>`). Browser-native `WebSocket` always
+/// sets this header for cross-origin inspection; rejecting
+/// non-allowlisted values prevents a malicious page from upgrading the
+/// WS. An empty `Origin` is honored only under `--strict-origin=false`
+/// (the default `--strict-origin=true` rejects it) so non-browser
+/// clients like `wscat` keep working in dev. The HTTP-side host
+/// validator runs before this handler, so the loopback `Host:` is
+/// already proven.
 ///
 /// Inbound (client → server) frames carry [`ClientWsMessage`] variants
 /// (`projectFocused` and `selectionChanged`). Server-computed events
@@ -1267,18 +1250,13 @@ pub struct WsParams {
 /// an error and is logged + ignored without breaking the connection.
 pub async fn updates_ws_handler(
     State(state): State<AppState>,
-    Query(params): Query<WsParams>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !tokens_match(&params.token, &state.launch_token) {
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-    }
-
     // Origin validation: a present header must hit the allowlist; an
     // empty one is honored only when `--strict-origin=false`.  The
-    // HTTP-side host validator (Phase 8 Task 8) ran ahead of this
-    // handler, so the loopback Host is already proven.
+    // HTTP-side host validator ran ahead of this handler, so the
+    // loopback Host is already proven.
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     match origin {
         Some(o) if crate::middleware::is_allowed_origin(o, state.ui_port) => {}
@@ -1299,19 +1277,6 @@ pub async fn updates_ws_handler(
     let events = state.events.clone();
     tracing::info!("ws: client accepted on /api/updates");
     ws.on_upgrade(move |socket| handle_socket(socket, rx, events))
-}
-
-/// Constant-time token comparison.
-///
-/// `subtle::ConstantTimeEq::ct_eq` returns `Choice` (a wrapper around
-/// `u8`); `.into()` converts to `bool`. We compare byte slices directly;
-/// `ct_eq` short-circuits the early-exit-on-mismatch leak that a naive
-/// `==` could expose. Token lengths in this build are always 43 bytes
-/// (32 random bytes -> URL-safe base64, no pad), but the compare also
-/// handles the empty-launch-token case (used by tests that don't care
-/// about auth) by falling through to `ct_eq`'s length-mismatch path.
-fn tokens_match(presented: &str, expected: &str) -> bool {
-    presented.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 /// Per-connection WebSocket loop. Multiplexes between:

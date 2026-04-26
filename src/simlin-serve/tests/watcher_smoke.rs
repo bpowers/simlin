@@ -31,7 +31,6 @@ fn build_app_state(dir: &std::path::Path) -> AppState {
         git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new("smoke-token".to_string()),
         // Watcher tests don't go through the HTTP layer, so the host
         // validator is never consulted; ports are placeholders.
         ui_port: 0,

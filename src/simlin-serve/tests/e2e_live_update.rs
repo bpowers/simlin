@@ -35,7 +35,6 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-const TOKEN: &str = "e2e-secret-token";
 
 fn copy_fixture(name: &str, dest_dir: &std::path::Path) -> PathBuf {
     let src = PathBuf::from(FIXTURES_DIR).join(name);
@@ -80,7 +79,6 @@ async fn spawn_server(fixture: &str) -> (AppState, String, TempDir) {
         git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical_root),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new(TOKEN.to_string()),
         ui_port: port,
         mcp_port: 0,
         strict_origin: false,
@@ -225,7 +223,7 @@ async fn save_post_emits_project_changed_and_get_reflects_merged_state() {
     // Connect the WS client AFTER the server is bound + registered. The
     // broadcast channel does not replay history, so any save fired
     // before subscription would be missed.
-    let url = format!("ws://{}/api/updates?token={}", addr, TOKEN);
+    let url = format!("ws://{}/api/updates", addr);
     let (mut ws, response) = connect_async(&url).await.expect("ws connect");
     assert_eq!(
         response.status().as_u16(),

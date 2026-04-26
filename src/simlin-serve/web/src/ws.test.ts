@@ -8,8 +8,7 @@ import type { WsMessage } from './ws';
 // Hand-rolled WebSocket double. We avoid `jest-websocket-mock` so the test
 // suite stays dependency-light and so we have direct control over the timing
 // of `onopen`/`onmessage`/`onclose`/`onerror` from individual tests. Each
-// MockWebSocket records its construction URL so `UpdatesSocket`'s URL
-// formation (token query-param encoding) is observable.
+// MockWebSocket records its construction URL.
 class MockWebSocket {
   static CONNECTING = 0 as const;
   static OPEN = 1 as const;
@@ -81,24 +80,23 @@ afterEach(() => {
 });
 
 describe('UpdatesSocket', () => {
-  test('opens the WebSocket against /api/updates with a URL-encoded token', () => {
-    const socket = new UpdatesSocket('tok with/space&plus', () => {
+  test('opens the WebSocket against /api/updates without a token', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
 
     expect(MockWebSocket.instances).toHaveLength(1);
     const url = MockWebSocket.instances[0].url;
-    // URL form: ws://<host>/api/updates?token=<encoded>. We assert on the
-    // suffix because jsdom's location.host varies but the path + query
-    // should be deterministic across test environments.
-    expect(url).toMatch(/^ws:\/\/[^/]+\/api\/updates\?token=/);
-    expect(url).toContain(`token=${encodeURIComponent('tok with/space&plus')}`);
+    // URL form: ws://<host>/api/updates. V1 has no bearer-token gate
+    // (see docs/threat-model.md); the host- and origin-allowlist on the
+    // server is the cross-origin defense.
+    expect(url).toMatch(/^ws:\/\/[^/]+\/api\/updates$/);
     socket.close();
   });
 
   test('parses incoming messages and forwards them to onMessage', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
     ws.open();
@@ -123,7 +121,7 @@ describe('UpdatesSocket', () => {
 
   test('parses projectRemoved frames and forwards them to onMessage', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
     ws.open();
@@ -144,7 +142,7 @@ describe('UpdatesSocket', () => {
 
   test('drops projectRemoved frames missing the path field', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
     ws.open();
@@ -156,7 +154,7 @@ describe('UpdatesSocket', () => {
 
   test('parses projectRenamed frames and forwards them to onMessage', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
     ws.open();
@@ -179,7 +177,7 @@ describe('UpdatesSocket', () => {
 
   test('drops projectRenamed frames missing required fields', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
     ws.open();
@@ -193,7 +191,7 @@ describe('UpdatesSocket', () => {
 
   test('ignores message frames whose body is not valid JSON without throwing', () => {
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     const ws = MockWebSocket.instances[0];
 
     ws.open();
@@ -207,7 +205,7 @@ describe('UpdatesSocket', () => {
     jest.useFakeTimers();
 
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
     expect(MockWebSocket.instances).toHaveLength(1);
 
     // First close: should schedule a reconnect at 1s.
@@ -243,7 +241,7 @@ describe('UpdatesSocket', () => {
     jest.useFakeTimers();
 
     const onMessage = jest.fn<void, [WsMessage]>();
-    const socket = new UpdatesSocket('t', onMessage);
+    const socket = new UpdatesSocket(onMessage);
 
     // Drive backoff up via two consecutive closes.
     MockWebSocket.instances[0].emitClose();
@@ -272,7 +270,7 @@ describe('UpdatesSocket', () => {
   test('error events also trigger backoff reconnect', () => {
     jest.useFakeTimers();
 
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     MockWebSocket.instances[0].emitError();
@@ -286,7 +284,7 @@ describe('UpdatesSocket', () => {
   test('close() prevents further reconnect attempts', () => {
     jest.useFakeTimers();
 
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     socket.close();
@@ -299,7 +297,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('close() closes the underlying WebSocket', () => {
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -309,7 +307,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('send() writes the JSON-encoded ClientWsMessage when the socket is open', () => {
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -327,7 +325,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('send() encodes selectionChanged frames with variableIdents', () => {
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -355,7 +353,7 @@ describe('UpdatesSocket', () => {
     // and must survive the CONNECTING → OPEN transition so the server
     // sees the focus even when EditorHost.componentDidMount races with
     // the WS handshake.
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -377,7 +375,7 @@ describe('UpdatesSocket', () => {
   test('send() drops selectionChanged frames when the socket is not yet open', () => {
     // selectionChanged events during the CONNECTING window are stale once
     // the socket opens; the next explicit selection will arrive after open.
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -393,7 +391,7 @@ describe('UpdatesSocket', () => {
   test('send() replaces a pending projectFocused with a newer one before open', () => {
     // Only the latest focus frame matters; if two arrive before the
     // socket opens, only the second should be sent.
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -410,7 +408,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('send() drops frames after close() has been called', () => {
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];
@@ -423,7 +421,7 @@ describe('UpdatesSocket', () => {
   });
 
   test('pending projectFocused is discarded when close() is called before open', () => {
-    const socket = new UpdatesSocket('t', () => {
+    const socket = new UpdatesSocket(() => {
       // unused
     });
     const ws = MockWebSocket.instances[0];

@@ -42,7 +42,6 @@ fn build_state(root: PathBuf) -> Arc<AppState> {
         git: Arc::new(unavailable_git_probe()),
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new(String::new()),
         // MCP tool-surface tests speak through the rmcp duplex stream
         // rather than HTTP, so the host validator never runs.
         ui_port: 0,

@@ -30,12 +30,9 @@ rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-s
 schemars = { version = "1", features = ["preserve_order"] }
 rust-embed = "8"
 mime_guess = "2"
-rand = "0.10"
-base64 = "0.22"
 open = "5"
 anyhow = "1"
 loro = "1.11"
-subtle = "2"
 notify-debouncer-full = "0.7"
 twox-hash = { version = "2", default-features = false, features = ["xxhash3_64", "std"] }
 

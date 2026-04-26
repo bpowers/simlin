@@ -9,7 +9,6 @@ import type { ProjectMeta } from './api';
 import { EditorHost } from './components/EditorHost';
 import { EmptyState } from './components/EmptyState';
 import { ProjectList } from './components/ProjectList';
-import { readLaunchToken } from './launch-token';
 import { UpdatesSocket } from './ws';
 import type { ChangeSource, WsMessage } from './ws';
 
@@ -17,7 +16,7 @@ const GIT_HINT_DISMISSED_KEY = 'simlin-serve-git-hint-dismissed';
 
 // Reads the dismissed flag from sessionStorage without throwing: some browsers
 // (notably in private/incognito mode) throw on any sessionStorage access rather
-// than returning null. The pattern mirrors readLaunchToken in launch-token.ts.
+// than returning null.
 function readDismissedFlag(): boolean {
   if (typeof sessionStorage === 'undefined') {
     return false;
@@ -82,14 +81,7 @@ export class App extends React.Component<Record<string, never>, AppState> {
   }
 
   private openLiveUpdates(): void {
-    const token = readLaunchToken();
-    if (!token) {
-      // The legacy/manual flow without a launch token cannot upgrade
-      // (the server enforces the token on /api/updates). Skip rather
-      // than spin a reconnect loop that will keep getting 401s.
-      return;
-    }
-    this.socket = new UpdatesSocket(token, this.handleLiveMessage);
+    this.socket = new UpdatesSocket(this.handleLiveMessage);
   }
 
   private handleLiveMessage = (msg: WsMessage): void => {

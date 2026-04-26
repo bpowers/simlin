@@ -10,8 +10,8 @@
 /// Build the launch URL the SPA should open. Pulled out of `main.rs` so we can
 /// unit-test the formatting without binding a TCP port. The 127.0.0.1 host is
 /// hard-coded because the listener is similarly bound to loopback in `main`.
-pub fn build_launch_url(port: u16, token: &str) -> String {
-    format!("http://127.0.0.1:{port}/?token={token}")
+pub fn build_launch_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/")
 }
 
 /// Try to open the user's default browser at `url`. Returns `true` on success
@@ -37,14 +37,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_launch_url_includes_host_port_and_token() {
-        let url = build_launch_url(54321, "abc123");
-        assert_eq!(url, "http://127.0.0.1:54321/?token=abc123");
+    fn build_launch_url_includes_host_and_port() {
+        let url = build_launch_url(54321);
+        assert_eq!(url, "http://127.0.0.1:54321/");
     }
 
     #[test]
     fn build_launch_url_uses_loopback_host() {
-        let url = build_launch_url(8080, "tok");
+        let url = build_launch_url(8080);
         assert!(
             url.starts_with("http://127.0.0.1:"),
             "expected loopback host, got {url:?}"

@@ -19,7 +19,6 @@ use simlin_serve::mcp::build_mcp_router;
 use simlin_serve::registry::ProjectRegistry;
 use simlin_serve::scan::scan_into_registry;
 use simlin_serve::serving::bind_or_die;
-use simlin_serve::token::generate_launch_token;
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
 
 #[tokio::main]
@@ -45,10 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Bind both listeners up front so a port-conflict diagnosis surfaces
-    // before we generate any tokens or open a browser. Order matters:
-    // bind UI first so a successful UI bind doesn't leak when the MCP
-    // bind subsequently fails (the OS releases the UI listener when the
-    // returned `TcpListener` is dropped on early return).
+    // before we open a browser. Order matters: bind UI first so a
+    // successful UI bind doesn't leak when the MCP bind subsequently
+    // fails (the OS releases the UI listener when the returned
+    // `TcpListener` is dropped on early return).
     let ui_listener = bind_or_die(("127.0.0.1", args.port), "HTTP/UI server", None).await?;
     let mcp_listener = bind_or_die(
         ("127.0.0.1", args.mcp_port),
@@ -60,23 +59,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_addr = ui_listener.local_addr()?;
     let mcp_addr = mcp_listener.local_addr()?;
 
-    // Generate the one-time launch token after both binds so we never log a
-    // token associated with a port we failed to acquire.
-    let token = generate_launch_token();
-    let launch_url = build_launch_url(ui_addr.port(), &token);
+    let launch_url = build_launch_url(ui_addr.port());
 
-    // Token is shared into the AppState so the WebSocket upgrade handler
-    // can validate the `?token=...` query param against the same value
-    // that ended up in the launch URL.  ui_port and mcp_port carry the
-    // actually-bound ports (which differ from `args.port` / `args.mcp_port`
-    // when the user passed `0`) so the host-validator middleware computes
-    // the per-launch allowlist correctly.
+    // ui_port and mcp_port carry the actually-bound ports (which differ
+    // from `args.port` / `args.mcp_port` when the user passed `0`) so
+    // the host-validator middleware computes the per-launch allowlist
+    // correctly.
     let state = AppState {
         registry,
         git,
         root: Arc::new(canonical_root),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new(token.clone()),
         ui_port: ui_addr.port(),
         mcp_port: mcp_addr.port(),
         strict_origin: args.strict_origin,

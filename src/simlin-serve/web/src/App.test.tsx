@@ -7,7 +7,6 @@ import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 
 import { App } from './App';
 import type { ListProjectsResponse } from './api';
-import { TOKEN_STORAGE_KEY } from './launch-token';
 
 function makeListFetch(body: ListProjectsResponse): jest.Mock {
   return jest.fn().mockResolvedValue({
@@ -180,8 +179,7 @@ describe('App shell', () => {
     expect(screen.queryByRole('banner')).toBeNull();
   });
 
-  test('opens an UpdatesSocket against /api/updates with the launch token', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'live-token');
+  test('opens an UpdatesSocket against /api/updates', async () => {
     globalThis.fetch = makeListFetch({
       projects: [],
       git_available: true,
@@ -191,26 +189,10 @@ describe('App shell', () => {
 
     await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
     const url = MockWebSocket.instances[0].url;
-    expect(url).toMatch(/\/api\/updates\?token=live-token$/);
-  });
-
-  test('does not open a WebSocket when no launch token is stored', async () => {
-    globalThis.fetch = makeListFetch({
-      projects: [],
-      git_available: true,
-    }) as unknown as typeof globalThis.fetch;
-
-    render(<App />);
-
-    // Allow App's fetch resolution to settle, then assert no socket was
-    // constructed. Without a token there's nothing to authenticate, so
-    // skipping the connection is the right behavior.
-    await waitFor(() => expect(screen.queryByText(/no models found/i)).not.toBeNull());
-    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(url).toMatch(/\/api\/updates$/);
   });
 
   test('closes the WebSocket on unmount', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     globalThis.fetch = makeListFetch({
       projects: [],
       git_available: true,
@@ -226,7 +208,6 @@ describe('App shell', () => {
   });
 
   test('drops the entry and clears selection when projectRemoved arrives for the selected path', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     globalThis.fetch = makeListFetch({
       projects: [
         {
@@ -273,7 +254,6 @@ describe('App shell', () => {
   });
 
   test('drops the entry and keeps selection when projectRemoved arrives for a different path', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     globalThis.fetch = makeListFetch({
       projects: [
         {
@@ -317,7 +297,6 @@ describe('App shell', () => {
   });
 
   test('updates the projects list and selectedPath in place when projectRenamed arrives for the selected path', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     // Three fetches: list, GET for selected path's editor, and a GET for
     // the renamed path's editor (because EditorHost re-mounts on path change).
     // After the rename, the editor uses the new path name when refetching.
@@ -384,7 +363,6 @@ describe('App shell', () => {
   });
 
   test('updates the projects list and keeps the unaffected selection when projectRenamed targets a different path', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce({
@@ -448,7 +426,6 @@ describe('App shell', () => {
   });
 
   test('carries the live version forward across a projectRenamed for the active path', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     // Two fetches expected at steady state: list, then GET for the
     // selected path's editor. After the disk advance bumps liveVersion
     // beyond serverVersion, a third refetch fires. After the rename
@@ -532,7 +509,6 @@ describe('App shell', () => {
   });
 
   test('falls back to the empty state when the last remaining selected project is removed', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     globalThis.fetch = makeListFetch({
       projects: [
         {
@@ -563,7 +539,6 @@ describe('App shell', () => {
   });
 
   test('surfaces a disk-update toast when the selected project advances via disk', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     // First fetch is the project list. Second is the GET for the
     // selected project (initial mount). Third is the GET refetch
     // triggered by the disk-source live advance.
@@ -636,7 +611,6 @@ describe('App shell', () => {
     // Both fixes land together: process events for unseen paths even
     // at version 0, and refresh the projects list when the path is not
     // in the current `projects`.
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce({
@@ -687,7 +661,6 @@ describe('App shell', () => {
   });
 
   test('does not show the disk toast when the change came from the user', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce({

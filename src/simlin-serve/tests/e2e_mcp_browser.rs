@@ -125,21 +125,15 @@ fn copy_fixture(name: &str, dest_dir: &std::path::Path) -> PathBuf {
     dest
 }
 
-/// Replace `http://127.0.0.1:PORT` with `ws://127.0.0.1:PORT` and rewrite
-/// the path/query. The original URL has the form
-/// `http://127.0.0.1:PORT/?token=TOKEN` so we replace the path portion
-/// with `/api/updates`.
+/// Replace `http://127.0.0.1:PORT/` with `ws://127.0.0.1:PORT/api/updates`.
+/// The launch URL has the form `http://127.0.0.1:PORT/`; we strip the
+/// trailing slash and append the WS upgrade path.
 fn ws_updates_url_from_ui(ui_url: &str) -> String {
     let parsed = ui_url
         .strip_prefix("http://")
         .unwrap_or_else(|| panic!("UI url missing http:// prefix: {ui_url}"));
-    let (host_port, query_part) = parsed.split_once('?').unwrap_or((parsed, ""));
-    let host_port = host_port.trim_end_matches('/');
-    if query_part.is_empty() {
-        format!("ws://{host_port}/api/updates")
-    } else {
-        format!("ws://{host_port}/api/updates?{query_part}")
-    }
+    let host_port = parsed.split('/').next().unwrap_or(parsed);
+    format!("ws://{host_port}/api/updates")
 }
 
 type HttpClient = Client<HttpConnector, Full<Bytes>>;

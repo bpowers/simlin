@@ -2,16 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// Browser-side client for the simlin-serve `/api/updates` WebSocket. The
-// upgrade is gated by a `?token=...` query param (see Phase 3 Note 7: native
-// browser `WebSocket` cannot set custom request headers, so the bearer must
-// ride in the URL).
+// Browser-side client for the simlin-serve `/api/updates` WebSocket.
 //
 // This module is the Imperative Shell for the live-update channel: it wraps
 // the raw WebSocket lifecycle (open, message, close, error) with reconnect
 // behavior and surfaces a typed `WsMessage` callback to the caller. It does
 // not interpret the message contents — `App.tsx` decides what to do with
 // each event.
+//
+// V1 has no bearer-token gate (see docs/threat-model.md); the host- and
+// origin-allowlist on the server is what defends against cross-origin
+// browsers reaching the loopback port.
 
 export type ChangeSource = 'user' | 'agent' | 'disk';
 
@@ -62,12 +63,11 @@ type OnStatusFn = (status: ConnectionStatus) => void;
 const RECONNECT_DELAYS_MS: ReadonlyArray<number> = [1000, 2000, 5000];
 
 // After this many consecutive failures with no successful frame we stop
-// reconnecting. This caps infinite retry loops caused by persistent auth
-// failures (e.g. a stale token after a server restart). The caller can
-// detect the give-up state via the optional `onStatus` callback; it is
-// intentionally left up to the call site to decide whether to surface a
-// user-visible indicator or attempt recovery (e.g. by constructing a
-// new UpdatesSocket with a fresh token).
+// reconnecting. This caps infinite retry loops caused by a server that
+// stopped responding (process exit, port collision after restart). The
+// caller can detect the give-up state via the optional `onStatus`
+// callback; it is intentionally left up to the call site to decide
+// whether to surface a user-visible indicator or attempt recovery.
 const MAX_CONSECUTIVE_FAILURES = 10;
 
 function reconnectDelay(consecutiveFailures: number): number {
@@ -75,25 +75,21 @@ function reconnectDelay(consecutiveFailures: number): number {
   return RECONNECT_DELAYS_MS[idx];
 }
 
-function buildUrl(token: string): string {
+function buildUrl(): string {
   // location.host carries port + hostname so the dev-mode and bound-port
-  // flows both work without extra config. The token is URL-encoded so
-  // characters like `/` and `&` survive transit intact.
-  return `ws://${location.host}/api/updates?token=${encodeURIComponent(token)}`;
+  // flows both work without extra config.
+  return `ws://${location.host}/api/updates`;
 }
 
 export class UpdatesSocket {
-  private readonly token: string;
   private readonly onMessage: OnMessageFn;
   private readonly onStatus: OnStatusFn | undefined;
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  // Number of consecutive failures since the last successful message.
-  // A successful message resets to 0 so a stable connection that
-  // eventually drops goes through the fast (1s) retry again. This is
-  // the loop-prevention requirement called out in the phase plan: a
-  // long-lived connection should not be punished with a 5s reconnect
-  // when it finally drops.
+  // Number of consecutive failures since the last successful open. A
+  // successful open resets to 0 so a long-lived connection that goes
+  // through a quiet period (no broadcast frames) and eventually drops
+  // is not punished with the 5s cap on reconnect.
   private consecutiveFailures: number = 0;
   private closed: boolean = false;
   // At most one pending projectFocused frame queued while the socket is
@@ -105,8 +101,7 @@ export class UpdatesSocket {
   // replaces any previously buffered one (only the latest focus matters).
   private pendingFocusedFrame: ClientWsMessage | null = null;
 
-  constructor(token: string, onMessage: OnMessageFn, onStatus?: OnStatusFn) {
-    this.token = token;
+  constructor(onMessage: OnMessageFn, onStatus?: OnStatusFn) {
     this.onMessage = onMessage;
     this.onStatus = onStatus;
     this.connect();
@@ -154,7 +149,7 @@ export class UpdatesSocket {
     }
     let socket: WebSocket;
     try {
-      socket = new WebSocket(buildUrl(this.token));
+      socket = new WebSocket(buildUrl());
     } catch (err) {
       // The WebSocket constructor throws on syntactically invalid URLs.
       // Surface to console (a thrown error here is a configuration bug,

@@ -37,7 +37,6 @@ fn build_state() -> (AppState, TempDir) {
         git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new(String::new()),
         ui_port: UI_PORT,
         mcp_port: MCP_PORT,
         strict_origin: true,

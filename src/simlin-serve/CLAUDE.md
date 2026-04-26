@@ -8,10 +8,12 @@ Local-first HTTP server + React SPA + in-process MCP server. Distributed as the 
 
 `simlin-serve` is one binary that binds two ports on `127.0.0.1`:
 
-1. **UI port** (default ephemeral) -- Axum HTTP router serving the routes "/healthz", "/api/projects" (list/get/save/create), "/api/updates" (WebSocket), and a SPA fallback. Auth is a 256-bit per-launch bearer token baked into the URL printed at startup.
+1. **UI port** (default ephemeral) -- Axum HTTP router serving the routes "/healthz", "/api/projects" (list/get/save/create), "/api/updates" (WebSocket), and a SPA fallback.
 2. **MCP port** (default `7878`) -- rmcp `StreamableHttpService` mounted at the route "/mcp". Stable across launches so AI client configs don't drift.
 
-Both ports share one `AppState` (registry, git probe, root, event bus, launch token, port numbers, strict-origin flag). The same in-memory `LoroDoc` per project backs the UI save handler and the MCP `EditModel` tool; concurrent edits from either side merge instead of clobbering.
+V1 is intended for **single-user workstations** (a developer running `npx` `@simlin/serve` from a terminal on their laptop). The trust boundary is the OS user account; both routers rely on the loopback bind plus the host/origin allowlist for cross-origin defense, with no bearer-token gate. See `docs/threat-model.md` for the full design and what is explicitly out of scope (multi-user shared hosts).
+
+Both ports share one `AppState` (registry, git probe, root, event bus, port numbers, strict-origin flag). The same in-memory `LoroDoc` per project backs the UI save handler and the MCP `EditModel` tool; concurrent edits from either side merge instead of clobbering.
 
 A long-lived watcher actor observes the directory tree, classifies events (model change, model removal, git status change), and merges external edits through the same `apply_canonical_json` primitive the HTTP and MCP paths use.
 
@@ -19,7 +21,7 @@ A long-lived watcher actor observes the directory tree, classifies events (model
 
 ### Crate root
 - `src/lib.rs` -- `build_router(state)` composes the UI router with `host_validator` -> `RequestBodyLimitLayer` (16 MiB) -> `TraceLayer`. Registration order matters: the "/api/projects/new" route must precede the "/api/projects/{*rel_path}" wildcard so the Axum matcher dispatches POST-to-create before POST-to-save against a file literally named `new`.
-- `src/main.rs` -- Composes the binary: scans the root, binds both listeners up front (so port-conflict diagnoses surface before token generation), constructs `AppState`, prints the launch URL, optionally opens a browser, spawns the watcher and MCP servers under a single Ctrl-C shutdown signal.
+- `src/main.rs` -- Composes the binary: scans the root, binds both listeners up front (so port-conflict diagnoses surface early), constructs `AppState`, prints the launch URL, optionally opens a browser, spawns the watcher and MCP servers under a single Ctrl-C shutdown signal.
 
 ### Domain modules (under `src/`)
 - `cli.rs` -- `clap` `Args` (`root`, `--port`, `--mcp-port`, `--no-open`, `--strict-origin`).
@@ -32,11 +34,10 @@ A long-lived watcher actor observes the directory tree, classifies events (model
 - `validation.rs` -- Pure save-validation pipeline. `compute_baseline` captures the on-disk error set; `validate_save_project` rejects only *new* errors (so saves that fix some errors without introducing more are accepted).
 - `writer.rs` -- `resolve_save_target` (pure dispatch) + `commit_write` (atomic file I/O). `.stmx`/`.xmile` go in-place; `.mdl` writes to a sibling `.sd.json` sidecar (the `.mdl` itself stays untouched -- the GET handler prefers the sidecar when both exist); `.sd.json` overwrites in place.
 - `watcher.rs` -- `WatcherActor` consumes `notify-debouncer-full` batches via a tokio mpsc channel. Per-event handlers: `handle_model_change` (read, hash-compare for echo suppression, parse, validate, merge, broadcast), `handle_model_removal` (drop registry entry, broadcast `ProjectRemoved`), `handle_model_rename` (preserves the `LoroDoc`, broadcasts `ProjectRenamed`), `handle_git_change` (invalidate `GitProbe` cache, re-evaluate every entry in the affected repo).
-- `handlers.rs` -- The Axum HTTP handlers (`list_projects`, `get_project`, `save_project`, `create_new_project`, `updates_ws_handler`) plus the `AppState` and `WsParams` extractor. The save handler runs validation, calls `check_increment_and_merge`, calls `commit_write`, refreshes registry mtime/size, and publishes `WsMessage::ProjectChanged { source: User }`.
+- `handlers.rs` -- The Axum HTTP handlers (`list_projects`, `get_project`, `save_project`, `create_new_project`, `updates_ws_handler`) plus the `AppState`. The save handler runs validation, calls `check_increment_and_merge`, calls `commit_write`, refreshes registry mtime/size, and publishes `WsMessage::ProjectChanged { source: User }`.
 - `middleware.rs` -- `host_validator_middleware` enforces the per-launch `Host:` allowlist (`127.0.0.1:<ui_port>`, `localhost:<ui_port>`) on every HTTP route. Layered innermost so the inexpensive trace and body-limit layers wrap it.
 - `serving.rs` -- `bind_or_die` binds a `TcpListener` and prints a hint mentioning the relevant CLI flag on `EADDRINUSE`.
 - `static_assets.rs` -- `rust-embed`-baked SPA assets with SPA-fallback (unknown routes serve `index.html`).
-- `token.rs` -- 256-bit launch token via `rand` + base64url; constant-time compare via `subtle`.
 - `launcher.rs` -- `build_launch_url`, `open_browser`. Optional headless launch via `--no-open`.
 - `hashing.rs` -- XXH3-64 of file bytes for watcher echo suppression.
 - `diagnostics.rs` -- `compute_diagnostic_set` runs the engine pipeline once and returns the canonical key set used by `DiagnosticsChanged` deduplication.
@@ -55,7 +56,6 @@ React 19 + Vite + Jest. Built into a `dist` directory and embedded by `rust-embe
 - `EditorHost.tsx` (in the `components` subdirectory) -- Hosts `@simlin/diagram`'s `<Editor>`. Wires real `onSave` (with sidecar-redirect on 409 conflict), debounced `onSelectionChanged` (150ms), and `projectFocused` on mount/path change.
 - `api.ts` -- HTTP client (list/get/save/create).
 - `ws.ts` -- WebSocket client; reconnects on transient failure, parses `WsMessage` discriminants, ignores unknown `type` values for forward compat.
-- `launch-token.ts` -- One-shot URL-token bootstrap into `sessionStorage`.
 
 ## Contracts
 
@@ -63,7 +63,7 @@ React 19 + Vite + Jest. Built into a `dist` directory and embedded by `rust-embe
 - **Source provenance is observable** -- every `ProjectChanged` broadcast carries `ChangeSource: User | Agent | Disk` so subscribers can distinguish "I made this" from "the AI made this" from "an external edit landed".
 - **Optimistic-locking is mandatory** -- save handlers and the MCP `EditModel` impl pass `expected_version`. A mismatch returns 409 / `AccessError::VersionMismatch`; the SPA refetches and re-renders.
 - **MCP notifications are advisory** -- the transport delivers tool responses and notifications on parallel paths; clients may see a notification before the response that produced it. Treat each as a hint, not authoritative state.
-- **WebSocket auth via query param** -- browser `WebSocket` cannot set custom headers, so the launch token rides as `?token=...`. Validated with constant-time compare. Missing token: 400. Mismatch: 401.
+- **No bearer-token auth** -- V1 trusts the OS user-account boundary. The host- and origin-allowlist on the WS upgrade is the only cross-origin defense. Multi-user shared hosts are out of scope; see `docs/threat-model.md`.
 - **Empty-`Origin` policy** -- `--strict-origin` defaults to `true` (production-correct: SPA always sends `Origin`). Setting to `false` allows non-browser clients like `wscat` for local development. A *present* `Origin` must always match the loopback allowlist regardless.
 - **`.mdl` writes are sidecar-only** -- the `.mdl` source is never modified; structural edits land in a sibling `.sd.json` that becomes source-of-truth on subsequent reads.
 - **No external deps unless launched** -- the binary is self-contained: SPA assets are embedded, the MCP server is in-process, and there is no database.
@@ -75,7 +75,7 @@ React 19 + Vite + Jest. Built into a `dist` directory and embedded by `rust-embe
 - `rmcp` -- the streamable-HTTP server transport and `ServerHandler` machinery.
 - `loro` -- the per-project CRDT.
 - `notify-debouncer-full` -- filesystem watcher (recommended platform watcher under the hood).
-- `axum` (with `ws` feature), `tower-http`, `tokio` (`full`), `tracing`, `clap`, `rust-embed`, `subtle` (constant-time compare), `twox-hash` (XXH3-64), `ignore` (gitignore-aware walk).
+- `axum` (with `ws` feature), `tower-http`, `tokio` (`full`), `tracing`, `clap`, `rust-embed`, `twox-hash` (XXH3-64), `ignore` (gitignore-aware walk).
 
 Used-by: nothing else in the workspace links against `simlin-serve` -- it is a leaf binary + library.
 

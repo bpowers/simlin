@@ -76,7 +76,7 @@ struct StartupOutput {
     mcp_url: String,
 }
 
-/// `  UI:  http://127.0.0.1:54321/?token=...` -> the URL substring.
+/// `  UI:  http://127.0.0.1:54321/` -> the URL substring.
 fn parse_url_after_label(line: &str) -> Option<String> {
     let idx = line.find("http://")?;
     Some(line[idx..].trim().to_string())
@@ -144,8 +144,8 @@ fn spawn_and_collect_urls(temp: &Path, timeout: Duration) -> (Child, StartupOutp
     (child, StartupOutput { ui_url, mcp_url })
 }
 
-/// Strip the trailing `/?token=...` fragment off the UI URL so callers
-/// can build their own paths against the same origin.
+/// Strip the trailing `/` off the UI URL so callers can build their own
+/// paths against the same origin.
 fn ui_origin(ui_url: &str) -> String {
     let parsed = ui_url
         .strip_prefix("http://")

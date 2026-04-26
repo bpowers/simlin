@@ -6,8 +6,6 @@
 // layer that talks HTTP. Pure helpers (path encoding) live in api-utils.ts so
 // tests can exercise them without mocking fetch.
 
-import { readLaunchToken } from './launch-token';
-
 export type ProjectFormat = 'stmx' | 'xmile' | 'mdl' | 'sd_json';
 
 export type GitState = { kind: 'tracked'; dirty: boolean } | { kind: 'untracked' } | { kind: 'unavailable' };
@@ -105,16 +103,8 @@ export function encodeProjectPath(path: string): string {
   return path.split('/').map(encodeURIComponent).join('/');
 }
 
-// Build the headers object for a /api/* request. Returns an empty record when
-// no launch token is stored so callers can still pass the result to fetch
-// without a conditional.
-function buildAuthHeaders(): Record<string, string> {
-  const token = readLaunchToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 export async function fetchProjects(): Promise<ListProjectsResponse> {
-  const response = await fetch('/api/projects', { headers: buildAuthHeaders() });
+  const response = await fetch('/api/projects');
   if (!response.ok) {
     throw new Error(`failed to fetch projects: HTTP ${response.status}`);
   }
@@ -122,9 +112,7 @@ export async function fetchProjects(): Promise<ListProjectsResponse> {
 }
 
 export async function fetchProject(path: string): Promise<GetProjectResponse> {
-  const response = await fetch(`/api/projects/${encodeProjectPath(path)}`, {
-    headers: buildAuthHeaders(),
-  });
+  const response = await fetch(`/api/projects/${encodeProjectPath(path)}`);
   if (!response.ok) {
     let message = `failed to fetch ${path}: HTTP ${response.status}`;
     try {
@@ -154,7 +142,6 @@ export async function saveProject(path: string, json: string, version: number): 
   const response = await fetch(`/api/projects/${encodeProjectPath(path)}`, {
     method: 'POST',
     headers: {
-      ...buildAuthHeaders(),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ json, version }),
@@ -215,7 +202,6 @@ export async function createProject(
   const response = await fetch('/api/projects/new', {
     method: 'POST',
     headers: {
-      ...buildAuthHeaders(),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),

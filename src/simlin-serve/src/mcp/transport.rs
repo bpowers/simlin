@@ -81,7 +81,6 @@ mod tests {
             git: Arc::new(GitProbe::new_unavailable()),
             root: Arc::new(root),
             events: Arc::new(EventBus::new()),
-            launch_token: Arc::new(String::new()),
             ui_port: 12345,
             mcp_port: 12346,
             strict_origin: true,

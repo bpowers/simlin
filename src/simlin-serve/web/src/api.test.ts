@@ -11,7 +11,6 @@ import {
   ValidationError,
   VersionConflictError,
 } from './api';
-import { TOKEN_STORAGE_KEY } from './launch-token';
 
 let originalFetch: typeof globalThis.fetch | undefined;
 
@@ -46,9 +45,8 @@ describe('encodeProjectPath', () => {
   });
 });
 
-describe('fetchProjects authorization header', () => {
-  test('includes Bearer token when sessionStorage has one', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok-123');
+describe('fetchProjects', () => {
+  test('hits /api/projects without an Authorization header', async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       jsonResponse({
         projects: [],
@@ -60,31 +58,15 @@ describe('fetchProjects authorization header', () => {
     await fetchProjects();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const init = fetchMock.mock.calls[0][1] as RequestInit | undefined;
-    const headers = init?.headers as Record<string, string> | undefined;
-    expect(headers?.['Authorization']).toBe('Bearer tok-123');
-  });
-
-  test('omits Authorization header when no token is stored', async () => {
-    const fetchMock = jest.fn().mockResolvedValue(
-      jsonResponse({
-        projects: [],
-        git_available: true,
-      }),
-    );
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    await fetchProjects();
-
-    const init = fetchMock.mock.calls[0][1] as RequestInit | undefined;
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    expect(url).toBe('/api/projects');
     const headers = (init?.headers ?? {}) as Record<string, string>;
     expect(headers['Authorization']).toBeUndefined();
   });
 });
 
-describe('fetchProject authorization header', () => {
-  test('includes Bearer token on read requests', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok-xyz');
+describe('fetchProject', () => {
+  test('hits the encoded path without an Authorization header', async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       jsonResponse({
         json: '{}',
@@ -96,9 +78,10 @@ describe('fetchProject authorization header', () => {
 
     await fetchProject('teacup.stmx');
 
-    const init = fetchMock.mock.calls[0][1] as RequestInit | undefined;
-    const headers = init?.headers as Record<string, string> | undefined;
-    expect(headers?.['Authorization']).toBe('Bearer tok-xyz');
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    expect(url).toBe('/api/projects/teacup.stmx');
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    expect(headers['Authorization']).toBeUndefined();
   });
 });
 
@@ -140,23 +123,6 @@ describe('saveProject', () => {
 
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/projects/sub%20dir/has%20space.xmile');
-  });
-
-  test('includes the bearer token on POST', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok-save');
-    const fetchMock = jest.fn().mockResolvedValue(
-      jsonResponse({
-        version: 1,
-        path: 'a.stmx',
-      }),
-    );
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    await saveProject('a.stmx', '{}', 0);
-
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    const headers = init.headers as Record<string, string>;
-    expect(headers['Authorization']).toBe('Bearer tok-save');
   });
 
   test('throws VersionConflictError on 409 carrying the actual version', async () => {
@@ -258,19 +224,6 @@ describe('createProject', () => {
       format: 'stmx',
       parent_dir: 'sub',
     });
-  });
-
-  test('includes the bearer token when one is stored', async () => {
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, 'tok-create');
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(jsonResponse({ path: 'a.stmx', version: 0 }));
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    await createProject('a', 'stmx');
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    const headers = init.headers as Record<string, string>;
-    expect(headers['Authorization']).toBe('Bearer tok-create');
   });
 
   test('throws an Error carrying the server message on non-OK responses', async () => {

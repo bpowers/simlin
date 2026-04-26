@@ -1036,7 +1036,6 @@ mod tests {
             git: Arc::new(GitProbe::new_unavailable()),
             root: Arc::new(canonical),
             events: Arc::new(EventBus::new()),
-            launch_token: Arc::new("test-token".to_string()),
             ui_port: 0,
             mcp_port: 0,
             strict_origin: true,

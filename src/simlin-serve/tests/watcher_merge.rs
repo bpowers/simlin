@@ -49,7 +49,6 @@ fn build_state(dir: &Path) -> AppState {
         git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new("watcher-merge-token".to_string()),
         ui_port: TEST_UI_PORT,
         mcp_port: TEST_MCP_PORT,
         strict_origin: true,

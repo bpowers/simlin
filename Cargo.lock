@@ -3854,7 +3854,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64",
  "bytes",
  "clap",
  "futures-util",
@@ -3866,7 +3865,6 @@ dependencies = [
  "mime_guess",
  "notify-debouncer-full",
  "open",
- "rand 0.10.1",
  "reqwest",
  "rmcp",
  "rust-embed",
@@ -3876,7 +3874,6 @@ dependencies = [
  "serde_yaml",
  "simlin-engine",
  "simlin-mcp-core",
- "subtle",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

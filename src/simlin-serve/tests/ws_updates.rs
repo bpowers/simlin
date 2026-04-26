@@ -6,9 +6,9 @@
 //!
 //! Pattern: bind a real `TcpListener` on `127.0.0.1:0`, spawn the router
 //! via `axum::serve`, then connect with `tokio_tungstenite`. We exercise
-//! the auth gate (correct/wrong/missing tokens), the happy path
-//! (subscribe -> receive a published `ProjectChanged`), the lagged-client
-//! recovery path, and a graceful close.
+//! the happy path (subscribe -> receive a published `ProjectChanged`),
+//! the origin-allowlist defense (V1's only auth on this route), the
+//! lagged-client recovery path, and a graceful close.
 
 #![deny(unsafe_code)]
 
@@ -35,14 +35,11 @@ use tokio_tungstenite::tungstenite::http::header;
 /// can be passed into AppState.ui_port — the host-validator middleware
 /// uses that to compute the per-launch allowlist, and tokio_tungstenite
 /// always sets `Host: 127.0.0.1:<port>` based on the URL.
-async fn spawn_server(token: &str) -> (AppState, String, TempDir) {
-    spawn_server_with_strict_origin(token, false).await
+async fn spawn_server() -> (AppState, String, TempDir) {
+    spawn_server_with_strict_origin(false).await
 }
 
-async fn spawn_server_with_strict_origin(
-    token: &str,
-    strict_origin: bool,
-) -> (AppState, String, TempDir) {
+async fn spawn_server_with_strict_origin(strict_origin: bool) -> (AppState, String, TempDir) {
     let dir = TempDir::new().expect("tempdir");
     let canonical = dir.path().canonicalize().expect("canonicalize");
 
@@ -54,7 +51,6 @@ async fn spawn_server_with_strict_origin(
         git: Arc::new(unavailable_git_probe()),
         root: Arc::new(canonical),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new(token.to_string()),
         ui_port: addr.port(),
         mcp_port: 0,
         strict_origin,
@@ -70,8 +66,8 @@ async fn spawn_server_with_strict_origin(
 
 #[tokio::test]
 async fn happy_path_receives_published_project_changed() {
-    let (state, addr, _dir) = spawn_server("secret-token").await;
-    let url = format!("ws://{}/api/updates?token=secret-token", addr);
+    let (state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
 
     let (mut ws, response) = connect_async(&url).await.expect("connect");
     assert_eq!(
@@ -101,46 +97,6 @@ async fn happy_path_receives_published_project_changed() {
 }
 
 #[tokio::test]
-async fn wrong_token_is_rejected_with_401() {
-    let (_state, addr, _dir) = spawn_server("real-token").await;
-    let url = format!("ws://{}/api/updates?token=wrong", addr);
-
-    let result = connect_async(&url).await;
-    match result {
-        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
-            assert_eq!(
-                resp.status().as_u16(),
-                401,
-                "wrong token must produce 401 Unauthorized"
-            );
-        }
-        Err(other) => panic!("expected HTTP error, got {other:?}"),
-        Ok(_) => panic!("connection should have been rejected"),
-    }
-}
-
-#[tokio::test]
-async fn missing_token_is_rejected_with_400() {
-    // axum's Query<TokenParams> extractor rejects missing required fields
-    // before we get to the handler body, which surfaces as 400 Bad Request.
-    let (_state, addr, _dir) = spawn_server("any-token").await;
-    let url = format!("ws://{}/api/updates", addr);
-
-    let result = connect_async(&url).await;
-    match result {
-        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
-            assert_eq!(
-                resp.status().as_u16(),
-                400,
-                "missing token must produce 400 Bad Request"
-            );
-        }
-        Err(other) => panic!("expected HTTP error, got {other:?}"),
-        Ok(_) => panic!("connection should have been rejected"),
-    }
-}
-
-#[tokio::test]
 async fn lagged_client_does_not_panic_and_keeps_receiving() {
     // Connect, do not read for a while. Publish 100 messages. The server
     // sends them serially as fast as the broadcast buffer drains; if the
@@ -148,8 +104,8 @@ async fn lagged_client_does_not_panic_and_keeps_receiving() {
     // the WS handler logs + ignores, then auto-resumes. We then read
     // until we get something non-lagged. The test passes if the read
     // loop terminates with a successful frame and no panic.
-    let (state, addr, _dir) = spawn_server("k").await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");
 
@@ -191,8 +147,8 @@ async fn client_close_terminates_server_task_cleanly() {
     // (drop the only Sender) and observing the next recv() yields None
     // — but a simpler check is to send Close and then see the server
     // close its side; tokio_tungstenite reports `None` from the Stream.
-    let (_state, addr, _dir) = spawn_server("token").await;
-    let url = format!("ws://{}/api/updates?token=token", addr);
+    let (_state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");
     ws.send(Message::Close(None)).await.expect("send close");
@@ -236,8 +192,8 @@ async fn await_published(
 
 #[tokio::test]
 async fn inbound_project_focused_is_published_on_eventbus() {
-    let (state, addr, _dir) = spawn_server("k").await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
     let mut bus_rx = state.events.subscribe();
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");
@@ -259,8 +215,8 @@ async fn inbound_project_focused_is_published_on_eventbus() {
 
 #[tokio::test]
 async fn inbound_selection_changed_is_published_on_eventbus() {
-    let (state, addr, _dir) = spawn_server("k").await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
     let mut bus_rx = state.events.subscribe();
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");
@@ -289,8 +245,8 @@ async fn malformed_inbound_frame_does_not_close_connection() {
     // The server must log and continue serving — a buggy client should not
     // be able to terminate the WebSocket session by sending garbage. After
     // the malformed frame we send a valid one and verify the bus saw it.
-    let (state, addr, _dir) = spawn_server("k").await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
     let mut bus_rx = state.events.subscribe();
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");
@@ -318,8 +274,8 @@ async fn strict_origin_rejects_upgrade_with_no_origin_header() {
     // The default production posture is `strict_origin=true`. The SPA
     // always sets Origin; a request with no Origin is hostile or
     // malformed, so the upgrade must be refused with 403.
-    let (_state, addr, _dir) = spawn_server_with_strict_origin("k", true).await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (_state, addr, _dir) = spawn_server_with_strict_origin(true).await;
+    let url = format!("ws://{}/api/updates", addr);
 
     let result = connect_async(&url).await;
     match result {
@@ -337,8 +293,8 @@ async fn strict_origin_rejects_upgrade_with_no_origin_header() {
 
 #[tokio::test]
 async fn allowed_origin_passes_under_strict_origin() {
-    let (state, addr, _dir) = spawn_server_with_strict_origin("k", true).await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (state, addr, _dir) = spawn_server_with_strict_origin(true).await;
+    let url = format!("ws://{}/api/updates", addr);
     let port = state.ui_port;
 
     // Build a request with an Origin matching the loopback allowlist.
@@ -359,8 +315,8 @@ async fn allowed_origin_passes_under_strict_origin() {
 
 #[tokio::test]
 async fn cross_origin_attacker_is_rejected_under_strict_origin() {
-    let (_state, addr, _dir) = spawn_server_with_strict_origin("k", true).await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (_state, addr, _dir) = spawn_server_with_strict_origin(true).await;
+    let url = format!("ws://{}/api/updates", addr);
 
     let mut request = url.into_client_request().expect("build request");
     request.headers_mut().insert(
@@ -388,8 +344,8 @@ async fn cross_origin_attacker_is_rejected_under_strict_origin() {
 /// `wscat` or raw `curl --no-buffer` where setting Origin is inconvenient.
 #[tokio::test]
 async fn non_strict_origin_accepts_no_origin_header() {
-    let (_state, addr, _dir) = spawn_server_with_strict_origin("k", false).await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (_state, addr, _dir) = spawn_server_with_strict_origin(false).await;
+    let url = format!("ws://{}/api/updates", addr);
 
     // tokio_tungstenite does not set an Origin header by default, which
     // exercises the `None` origin arm in the handler with strict_origin=false.
@@ -412,8 +368,8 @@ async fn unknown_inbound_variant_is_logged_and_ignored() {
     // diagnosticsChanged is server-only (no inbound counterpart). A client
     // attempting to push it should be ignored at the parse layer; the
     // connection stays open and a follow-up valid frame is processed.
-    let (state, addr, _dir) = spawn_server("k").await;
-    let url = format!("ws://{}/api/updates?token=k", addr);
+    let (state, addr, _dir) = spawn_server().await;
+    let url = format!("ws://{}/api/updates", addr);
     let mut bus_rx = state.events.subscribe();
 
     let (mut ws, _) = connect_async(&url).await.expect("connect");

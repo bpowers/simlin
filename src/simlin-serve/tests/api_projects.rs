@@ -40,7 +40,6 @@ fn build_state(root: PathBuf, git: GitProbe) -> AppState {
         git: Arc::new(git),
         root: Arc::new(root),
         events: Arc::new(EventBus::new()),
-        launch_token: Arc::new(String::new()),
         ui_port: TEST_UI_PORT,
         mcp_port: TEST_MCP_PORT,
         strict_origin: true,

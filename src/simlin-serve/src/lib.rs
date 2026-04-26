@@ -22,7 +22,6 @@ pub mod serving;
 pub mod static_assets;
 #[doc(hidden)]
 pub mod test_support;
-pub mod token;
 pub mod validation;
 pub mod watcher;
 pub mod writer;
@@ -81,8 +80,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         // WebSocket upgrade lives under /api/updates so it shares the
         // /api/* prefix that frontends use to distinguish data-plane
-        // calls from SPA assets. The Query<WsParams> extractor enforces
-        // a present `?token=...` query param ahead of the handler body.
+        // calls from SPA assets. V1 has no bearer-token check (see
+        // docs/threat-model.md); the host-allowlist + origin-allowlist
+        // pair is the cross-origin defense.
         .route("/api/updates", get(updates_ws_handler))
         .fallback(static_handler)
         .layer(from_fn_with_state(state.clone(), host_validator_middleware))

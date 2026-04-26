@@ -7,7 +7,7 @@ choices behind each layer.
 
 The audience is anyone evaluating whether the server is safe to run on
 their machine. If you're contributing code that touches the bind, the
-auth gate, or the request validation, this is the contract you're
+host allowlist, or the request validation, this is the contract you're
 working against -- changes here need a paired update to the threat
 model.
 
@@ -21,17 +21,30 @@ on the same machine, not `simlin-serve`. The server is therefore
 inherited the user's privileges can do everything `simlin-serve` can
 do, and more, regardless of the server.
 
+`simlin-serve` is designed for **single-user workstations**: a
+developer running `npx @simlin/serve` from a terminal on their
+laptop. Multi-user shared hosts (school computers, kiosk machines,
+build servers shared by multiple humans) are explicitly out of scope
+for V1; if that's your environment, do not run this.
+
 What the server does protect:
 
 - **Network reachability.** Only loopback (`127.0.0.1`) is bound.
   Other hosts on the LAN cannot connect.
-- **Other users on the same machine.** They lack file-system access
-  and cannot send the bearer token (which never leaves the user's
-  process and browser).
 - **Cross-origin browsers.** A malicious website cannot reach
-  `simlin-serve` from a victim's browser -- the bearer token, the
-  host-allowlist middleware, and the WS origin check together close
-  the path.
+  `simlin-serve` from a victim's browser -- the host allowlist and
+  the WS origin check together close the path.
+
+What the server does **not** protect:
+
+- **Other OS users on the same machine.** They can connect to the
+  loopback ports and exercise both the HTTP/UI surface and the MCP
+  surface. The OS file-permission model is the only thing that limits
+  what they can read or write through the server. If your model
+  directory is readable by another local user, they can read it
+  through `simlin-serve`; if it's writable, they can write to it.
+  This is the same posture as Jupyter notebooks, `vite dev`, and
+  every other "loopback-only dev server" in common use.
 
 ## Defenses
 
@@ -44,33 +57,7 @@ at all -- there is no socket for them to reach.
 
 This is not configurable. There is no "listen on 0.0.0.0" mode.
 
-### 2. Per-launch bearer token (defense-in-depth)
-
-`main()` generates a fresh **256-bit URL-safe random token** at
-startup using the OS CSPRNG (`getrandom`). The token is:
-
-- Embedded in the launch URL the browser opens
-  (`http://127.0.0.1:<port>/?token=...`)
-- Stored by the SPA in `sessionStorage` after first load (the URL is
-  rewritten to remove the query parameter)
-- Required as a `?token=...` query parameter on the `/api/updates`
-  WebSocket upgrade
-
-The HTTP `/api/*` routes do not check the bearer because the loopback
-bind and the Host allowlist (§1 and §3) are the primary defenses there.
-Browsers cannot set custom headers on a WebSocket handshake, so the
-token rides as a query parameter on the WS upgrade instead; that is the
-one case where the bearer is both necessary and enforced.
-
-The token rotates on every `npx @simlin/serve` invocation. Killing
-and restarting the server invalidates every prior URL the user had
-saved or shared. There is no persistent token store -- the launch
-URL is the only place the token lives outside the running process,
-and it expires when the process exits.
-
-Brute-force is out of scope: 256 bits of entropy.
-
-### 3. Host header allowlist (DNS rebinding defense)
+### 2. Host header allowlist (DNS rebinding defense)
 
 A malicious website can persuade the victim's browser to connect to
 `127.0.0.1:<port>` by registering a DNS name that resolves to the
@@ -90,14 +77,14 @@ official MCP TypeScript SDK's localhost servers via this vector.
 front of every route on both the UI and MCP routers (see
 `src/middleware.rs`).
 
-### 4. Origin header allowlist (cross-origin WS defense)
+### 3. Origin header allowlist (cross-origin WS defense)
 
 WebSocket upgrades carry an `Origin:` header set by the browser. The
 upgrade handler compares it against `http://127.0.0.1:<ui_port>` and
 `http://localhost:<ui_port>`; mismatches return `403 Forbidden`. This
-catches the case where an attacker page somehow obtained the bearer
-token (e.g. shoulder-surfing the launch URL) but is still hosted at a
-non-allowlisted origin.
+catches the case where an attacker page somehow crossed the host
+allowlist (e.g. via a same-origin compromise) but is still hosted at
+a non-allowlisted origin.
 
 The default `--strict-origin true` rejects upgrades with no `Origin:`
 header. Browsers always send one; non-browser clients like `wscat`
@@ -105,7 +92,7 @@ typically don't, so dev users can pass `--strict-origin false` to
 relax that one specific check (a present `Origin:` is still validated
 against the allowlist).
 
-### 5. Path traversal rejection
+### 4. Path traversal rejection
 
 Every `rel_path` segment from the client is validated:
 
@@ -118,13 +105,13 @@ Every `rel_path` segment from the client is validated:
 
 The same checks apply to MCP-supplied paths via `RegistryAccess`.
 
-### 6. Request body size cap
+### 5. Request body size cap
 
 `/api/projects/{*rel_path}` POST bodies are capped at 16 MiB
 (`MAX_BODY_BYTES` in `src/lib.rs`). Larger requests are rejected by
 `tower-http`'s `RequestBodyLimitLayer` ahead of any handler.
 
-### 7. Supply-chain posture
+### 6. Supply-chain posture
 
 The npm packages (`@simlin/serve`, `@simlin/mcp`, and the per-
 platform binary shims) are published with `npm publish --provenance`,
@@ -139,15 +126,6 @@ The trust chain is therefore: npm registry + GitHub Actions OIDC. A
 compromise of either link is out of scope; we assume the npm signing
 key and the OIDC token are not under attacker control.
 
-### 8. Token leakage via logs
-
-The launch token is logged exactly once, at info level, as part of
-the launch URL printed to the operator's stdout. It is **never**
-written to the server's `tracing` log even at trace level. Code that
-emits a request log event must scrub the `token` query parameter from
-the URI -- a future refactor that introduces a new log line near the
-WS upgrade should follow the same convention.
-
 ## Out of Scope
 
 These items are intentionally not defended against. If your threat
@@ -156,9 +134,8 @@ model includes one, do not run `simlin-serve` on a hostile host.
 | Out-of-scope item | Why |
 |---|---|
 | **HTTPS/TLS** | The server binds loopback only. There is no plaintext network segment to encrypt. A loopback connection between two processes on the same machine traverses the OS kernel, not a wire. |
-| **Persistent token** | The token is regenerated per launch and held only in process memory + `sessionStorage`. There is no on-disk token to steal at rest. |
-| **Token brute-force** | 256-bit keyspace; brute-forcing is computationally infeasible. |
-| **OS user namespace** | We assume the OS user is the sole administrator of the user's processes and files. Malware running as the same user is already inside the trust boundary. |
+| **Bearer-token authentication** | V1 trusts the OS user-account boundary. Any process running as the same user can already read and write the model files directly; gating the server on a token would not raise the privilege bar. Multi-user hosts are out of scope (see Trust Boundary). |
+| **OS user namespace** | We assume the OS user is the sole administrator of the user's processes and files. Malware running as the same user is already inside the trust boundary. Other OS users on the same machine are also outside the protected set -- the OS file-permission model is what mediates access to the served files. |
 | **File-watcher event content** | The watcher feeds disk-content into the same parser/validator pipeline that browser saves go through; malformed projects are rejected with the same diagnostic surface. There is no eval-on-content path. |
 | **Compiler/runtime exploits** | The simulation engine compiles models to a stack-based bytecode VM with checked indexing. A bug in the engine could crash a worker, but is not a privilege escalation -- the worker only has the user's own privileges. |
 | **DoS via large models** | Body size is capped; oversize fixtures rejected. There is no rate limit on `/api/*` because the server is single-user. |
@@ -170,7 +147,6 @@ The defenses above are exercised by these tests:
 
 | Defense | Test |
 |---|---|
-| Bearer token gate (WS) | `tests/ws_updates.rs::wrong_token_is_rejected_with_401` |
 | Host allowlist (UI router) | `tests/middleware_host.rs::*` |
 | Host allowlist (MCP router) | `tests/middleware_host.rs::mcp_router_*` |
 | Origin allowlist (WS) | `tests/ws_updates.rs::*_origin_*` |
