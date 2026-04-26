@@ -5,6 +5,7 @@
 import * as React from 'react';
 
 import type { GitState, ProjectMeta } from '../api';
+import { disambiguatedLabels } from '../utils/disambiguate';
 import { NewProjectButton } from './NewProjectButton';
 
 type ProjectListProps = Readonly<{
@@ -24,11 +25,12 @@ export class ProjectList extends React.Component<ProjectListProps> {
 
   render(): React.ReactNode {
     const { projects, selectedPath, onCreated } = this.props;
+    const labelled = disambiguatedLabels(projects);
     return (
       <div className="serve-project-list-wrapper">
         <NewProjectButton onCreated={onCreated} />
         <ul className="serve-project-list" role="list">
-          {projects.map((project) => {
+          {labelled.map(({ item: project, label }) => {
             const isSelected = project.path === selectedPath;
             return (
               <li
@@ -37,7 +39,7 @@ export class ProjectList extends React.Component<ProjectListProps> {
                 aria-current={isSelected ? 'true' : undefined}
                 onClick={this.handleClick(project.path)}
               >
-                <span className="serve-project-list-path">{project.path}</span>
+                <ProjectLabel label={label} />
                 <GitChip git={project.git} />
               </li>
             );
@@ -46,6 +48,28 @@ export class ProjectList extends React.Component<ProjectListProps> {
       </div>
     );
   }
+}
+
+type ProjectLabelProps = Readonly<{ label: string }>;
+
+// Splits the on-screen label so the directory portion can fade visually
+// (CSS `opacity: 0.65` via `.serve-project-list-path-dir`). When the
+// label is a bare basename the label renders as a single span — the dir
+// span is omitted rather than emitted empty so screen readers don't
+// announce a phantom prefix.
+function ProjectLabel({ label }: ProjectLabelProps): React.ReactElement {
+  const slash = label.lastIndexOf('/');
+  if (slash === -1) {
+    return <span className="serve-project-list-path">{label}</span>;
+  }
+  const dir = label.slice(0, slash + 1);
+  const base = label.slice(slash + 1);
+  return (
+    <span className="serve-project-list-path">
+      <span className="serve-project-list-path-dir">{dir}</span>
+      {base}
+    </span>
+  );
 }
 
 type GitChipProps = Readonly<{

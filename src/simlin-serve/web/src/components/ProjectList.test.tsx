@@ -104,4 +104,54 @@ describe('ProjectList', () => {
     render(<ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />);
     expect(screen.queryByRole('button', { name: /create new model/i })).not.toBeNull();
   });
+
+  test('renders bare basenames when no collision exists', () => {
+    const projects = [tracked('subdir/a.stmx', false), tracked('elsewhere/b.stmx', false)];
+    const { container } = render(
+      <ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />,
+    );
+    const labels = Array.from(container.querySelectorAll('.serve-project-list-path')).map(
+      (el) => el.textContent ?? '',
+    );
+    expect(labels).toEqual(['a.stmx', 'b.stmx']);
+  });
+
+  test('renders the full relative path when basenames collide', () => {
+    const projects = [tracked('a/x.stmx', false), tracked('b/x.stmx', false)];
+    const { container } = render(
+      <ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />,
+    );
+    const labels = Array.from(container.querySelectorAll('.serve-project-list-path')).map(
+      (el) => el.textContent ?? '',
+    );
+    expect(labels).toEqual(['a/x.stmx', 'b/x.stmx']);
+  });
+
+  test('still calls onSelect with the canonical path even when the label is the bare basename', () => {
+    // The label is presentation-only; clicks must always carry the full
+    // path so the parent can find the project in its registry.
+    const projects = [tracked('subdir/unique.stmx', false)];
+    const calls: Array<string> = [];
+    const { container } = render(
+      <ProjectList projects={projects} selectedPath={null} onSelect={(p) => calls.push(p)} onCreated={() => {}} />,
+    );
+    const pathLabels = container.querySelectorAll('.serve-project-list-path');
+    expect(pathLabels.length).toBe(1);
+    expect(pathLabels[0].textContent).toBe('unique.stmx');
+    fireEvent.click(pathLabels[0]);
+    expect(calls).toEqual(['subdir/unique.stmx']);
+  });
+
+  test('renders the directory portion with a lighter style when the path is shown', () => {
+    const projects = [tracked('a/x.stmx', false), tracked('b/x.stmx', false)];
+    const { container } = render(
+      <ProjectList projects={projects} selectedPath={null} onSelect={() => {}} onCreated={() => {}} />,
+    );
+    // Directory portion lives in its own span so CSS can style it
+    // independently of the basename. Both must be present in the DOM.
+    const dirSpans = container.querySelectorAll('.serve-project-list-path-dir');
+    expect(dirSpans.length).toBe(2);
+    expect(dirSpans[0].textContent).toBe('a/');
+    expect(dirSpans[1].textContent).toBe('b/');
+  });
 });

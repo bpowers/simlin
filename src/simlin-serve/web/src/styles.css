@@ -219,6 +219,14 @@ body,
   margin-right: 8px;
 }
 
+/* Directory portion of a disambiguated path. Lighter than the basename so
+ * the eye can still locate the file but the parent directory is visually
+ * subordinated. Only emitted when basenames collide (see
+ * `disambiguatedLabels`); a bare basename has no leading directory span. */
+.serve-project-list-path-dir {
+  opacity: 0.65;
+}
+
 .serve-git-chip {
   font-size: 11px;
   padding: 2px 6px;
