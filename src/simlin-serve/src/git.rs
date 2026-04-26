@@ -32,12 +32,13 @@ struct RepoCache {
     /// repos with no commits hit this case and we treat the cache as
     /// always-stale.
     ///
-    /// There is a narrow TOCTOU window: `status_for` reads the mtime before
-    /// `build_repo_cache` runs `git status` and `git ls-files`. If the index
-    /// is rewritten between those two points, the stored mtime will be stale
-    /// by one generation — the *next* call will miss the cache and recompute,
-    /// so at worst we serve one response that reflects slightly-earlier state.
-    /// Phase 4's inotify/FSEvents watcher closes this window entirely (AC2.4).
+    /// Race-window note: `build_repo_cache` runs the git commands first and
+    /// reads this mtime afterward. If the index is rewritten between those two
+    /// reads, the cache stores fresh-looking mtime metadata alongside
+    /// slightly-stale data. The next request hits this cache entry and returns
+    /// the stale data; only a *subsequent* index rewrite triggers
+    /// recomputation. The window is bounded (one stale response in the worst
+    /// case) and Phase 4's filesystem watcher closes it entirely (AC2.4).
     index_mtime: Option<SystemTime>,
     /// Map from absolute path to "is dirty" (true => `Tracked { dirty: true }`).
     /// Files not in this map but in `tracked` are `Tracked { dirty: false }`.
