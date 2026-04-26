@@ -47,6 +47,14 @@ type EditorHostState = {
   // Successful saves do NOT bump this — the Editor tracks its own
   // version via `state.projectVersion`.
   loadGeneration: number;
+  // Latest server version this host is aware of for the loaded path.
+  // Distinct from `payload.version` because successful saves bump it
+  // without bumping `payload` (the Editor keeps editing in-place
+  // without remount). The WebSocket-driven refetch gate compares
+  // `props.liveVersion` against this: if a `ProjectChanged` event
+  // for a version we already know about (e.g., the echo of our own
+  // save) arrives, we skip the refetch.
+  serverVersion: number;
 };
 
 const INITIAL_STATE: EditorHostState = {
@@ -55,6 +63,7 @@ const INITIAL_STATE: EditorHostState = {
   error: null,
   pending: false,
   loadGeneration: 0,
+  serverVersion: 0,
 };
 
 // Format the server's per-error validation details into a single
@@ -87,15 +96,32 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
   }
 
   componentDidUpdate(prev: EditorHostProps): void {
-    if (prev.path === this.props.path) {
+    if (prev.path !== this.props.path) {
+      if (!this.props.path) {
+        this.currentLoadKey += 1;
+        this.setState(INITIAL_STATE);
+        return;
+      }
+      void this.loadProject(this.props.path);
       return;
     }
-    if (!this.props.path) {
-      this.currentLoadKey += 1;
-      this.setState(INITIAL_STATE);
-      return;
+    // Path unchanged: check whether the WS-driven liveVersion advanced
+    // past our last-known server version. The strict `>` is what
+    // prevents refetch loops on our own save's echo: a successful save
+    // bumps `state.serverVersion` to the new server value, then the WS
+    // delivers `liveVersion` equal to that same value, which fails the
+    // gate. The Editor keeps editing in-place; no remount is needed.
+    //
+    // We bump `serverVersion` synchronously when scheduling the refetch
+    // so the intermediate `setState({pending: true})` inside
+    // `loadProject` doesn't re-enter this branch and re-issue the
+    // request before the GET resolves.
+    const path = this.props.path;
+    const liveVersion = this.props.liveVersion ?? 0;
+    if (path && liveVersion > this.state.serverVersion) {
+      this.setState({ serverVersion: liveVersion });
+      void this.loadProject(path);
     }
-    void this.loadProject(this.props.path);
   }
 
   private async loadProject(path: string): Promise<void> {
@@ -115,6 +141,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
         error: null,
         pending: false,
         loadGeneration: prev.loadGeneration + 1,
+        serverVersion: payload.version,
       }));
     } catch (err) {
       if (loadKey !== this.currentLoadKey) {
@@ -142,6 +169,11 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       if (result.path !== path) {
         this.props.onPathRedirect?.(result.path);
       }
+      // Track the post-save server version so the WS echo of our own
+      // save (which arrives with the same version) does not trigger a
+      // refetch. `setState` here only matters for the WS gate; the
+      // Editor itself owns its `projectVersion` via `result.version`.
+      this.setState({ serverVersion: result.version });
       return result.version;
     } catch (err) {
       if (err instanceof VersionConflictError) {
@@ -177,6 +209,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       error: null,
       pending: false,
       loadGeneration: prev.loadGeneration + 1,
+      serverVersion: latest.version,
     }));
   }
 

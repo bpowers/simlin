@@ -135,7 +135,10 @@ describe('EditorHost', () => {
     expect(onSave).toBeDefined();
 
     const projectData: JsonProjectData = { format: 'json', data: '{"updated":true}' };
-    const result = await onSave?.(projectData, 0);
+    let result: number | undefined;
+    await act(async () => {
+      result = await onSave?.(projectData, 0);
+    });
     expect(result).toBe(1);
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -174,7 +177,9 @@ describe('EditorHost', () => {
 
     const onSave = EditorMock.lastProps?.onSave;
     const projectData: JsonProjectData = { format: 'json', data: '{}' };
-    await onSave?.(projectData, 0);
+    await act(async () => {
+      await onSave?.(projectData, 0);
+    });
 
     expect(onPathRedirect).toHaveBeenCalledTimes(1);
     expect(onPathRedirect).toHaveBeenCalledWith('population.sd.json');
@@ -205,7 +210,9 @@ describe('EditorHost', () => {
     await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
 
     const onSave = EditorMock.lastProps?.onSave;
-    await onSave?.({ format: 'json', data: '{}' }, 0);
+    await act(async () => {
+      await onSave?.({ format: 'json', data: '{}' }, 0);
+    });
 
     expect(onPathRedirect).not.toHaveBeenCalled();
   });
@@ -390,5 +397,122 @@ describe('EditorHost', () => {
     // After the conflict, EditorHost must re-render with the refetched payload.
     await waitFor(() => expect(EditorMock.lastProps?.initialProjectVersion).toBe(9));
     expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":9}');
+  });
+
+  test('refetches and remounts the Editor when liveVersion advances past state.version', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":3}',
+          version: 3,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="teacup.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(EditorMock.lastProps?.initialProjectVersion).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Advance liveVersion: simulates a ProjectChanged WS event for this path.
+    rerender(<EditorHost path="teacup.stmx" liveVersion={3} />);
+
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectVersion).toBe(3));
+    expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":3}');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('does not refetch when liveVersion is less than or equal to state.version (own-save echo)', async () => {
+    // Initial GET responds with version 0; we then "save" (driven by the
+    // onSave handler) and the server responds with version 1. Once the
+    // EditorHost knows about version 1 (via the save's POST response),
+    // a subsequent WS echo with liveVersion=1 must NOT trigger a refetch
+    // — this is the loop-prevention requirement.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: 1, path: 'teacup.stmx' }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path="teacup.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(EditorMock.lastProps?.initialProjectVersion).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Drive a save via the Editor's onSave callback (mirrors the Editor
+    // handing back the new version after a successful POST). After this,
+    // the host's state.version is 1.
+    const onSave = EditorMock.lastProps?.onSave;
+    await act(async () => {
+      const result = await onSave?.({ format: 'json', data: '{"v":0}' }, 0);
+      expect(result).toBe(1);
+    });
+
+    // The own-save echo arrives over the WS with the same version we
+    // already know about. The refetch gate must skip it.
+    rerender(<EditorHost path="teacup.stmx" liveVersion={1} />);
+
+    // Give React a chance to run any componentDidUpdate side-effects.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Total fetch calls remain at the initial GET + the save POST: no
+    // third GET was issued in response to the echo.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('liveVersion=0 default does not trigger a refetch on initial render', async () => {
+    const fetchMock = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        json: '{"v":0}',
+        version: 0,
+        source_format: 'stmx',
+      }),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<EditorHost path="teacup.stmx" liveVersion={0} />);
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    // Single GET — the initial mount fetch. No extra refetch from the
+    // 0 liveVersion against state.version 0.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('liveVersion does not trigger a refetch when no path is selected', async () => {
+    const fetchMock = jest.fn();
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { rerender } = render(<EditorHost path={null} liveVersion={0} />);
+    rerender(<EditorHost path={null} liveVersion={5} />);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
