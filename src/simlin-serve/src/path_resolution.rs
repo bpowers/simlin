@@ -12,17 +12,25 @@
 //! 1. **Reading an existing path safely** — the leaf must exist; canonicalize
 //!    it and confirm it descends from the registry root. Symlinks within the
 //!    tree are accepted, ones pointing out of the tree are rejected.
+//!    Implemented by [`resolve_existing_within_root`].
 //! 2. **Writing to a path that does not yet exist** — canonicalize fails on
 //!    missing leaves, so we walk up to the deepest *existing* ancestor and
 //!    canonicalize that. The boundary check applies before any byte hits
 //!    disk so a symlinked parent dir cannot create files outside the root.
+//!    Implemented by [`resolve_create_target`].
 //! 3. **Resolving the registry's canonical key** — for `.mdl` paths, when a
 //!    sibling `.sd.json` exists on disk it becomes the canonical entry for
-//!    both reads and writes. (See `RegistryKey` below.)
+//!    both reads and writes. The sidecar's canonical form must itself
+//!    descend from the registry root: a symlink sidecar pointing outside
+//!    the tree falls back to the `.mdl`. Implemented by
+//!    [`apply_sidecar_preference`].
 //!
 //! Centralizing these here removes the class of bug "consumer X forgot to
 //! apply the rule consumer Y enforces": the rules are implemented once and
-//! every consumer calls the same function.
+//! every consumer calls the same function. Trivial helpers
+//! ([`sidecar_for_mdl`], [`is_mdl_extension`], [`to_forward_slash`]) live
+//! here for the same reason — different consumers had drifted on case
+//! folding and string-rendering, producing the same shape of bug.
 
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
