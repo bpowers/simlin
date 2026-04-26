@@ -44,6 +44,37 @@ use crate::db::RefShape;
 /// positions in unusual cases. Defensive `DynamicIndex` for unknown
 /// names ensures the worst case is over-conservative wrapping rather
 /// than incorrectly matching the live shape.
+/// Whether a single subscript index is a "literal element" reference --
+/// i.e., a `Var` naming a known dimension element or an integer literal.
+/// These are dimension references at runtime, not variable references,
+/// and must not be PREVIOUS-wrapped even when their textual form
+/// collides with a user-variable name.
+///
+/// `position` is the index's 0-based position in the subscript; literal
+/// `Var` names are matched against the dimension at that position first
+/// and then against any dimension as a fallback (mirroring
+/// `classify_expr0_subscript_shape`'s match rules).
+fn is_literal_element_index(
+    idx: &IndexExpr0,
+    position: usize,
+    source_dim_elements: &[Vec<String>],
+) -> bool {
+    match idx {
+        IndexExpr0::Expr(Expr0::Var(name, _)) => {
+            let canon = canonicalize(name.as_str()).into_owned();
+            let matches_position = position < source_dim_elements.len()
+                && source_dim_elements[position].iter().any(|e| e == &canon);
+            let matches_any = !matches_position
+                && source_dim_elements
+                    .iter()
+                    .any(|dim| dim.iter().any(|e| e == &canon));
+            matches_position || matches_any
+        }
+        IndexExpr0::Expr(Expr0::Const(s, _, _)) => s.parse::<u32>().is_ok(),
+        _ => false,
+    }
+}
+
 fn classify_expr0_subscript_shape(
     indices: &[IndexExpr0],
     source_dim_elements: &[Vec<String>],
@@ -132,12 +163,44 @@ pub(crate) fn wrap_non_matching_in_previous(
             let canonical = Ident::new(ident.as_str());
             let subscript_shape = classify_expr0_subscript_shape(&indices, source_dim_elements);
             if &canonical == live_source && &subscript_shape == live_shape {
-                // Live reference: keep the subscript and its indices
-                // verbatim. The indices are dimension elements at runtime
-                // (per the classification above), not variable references,
-                // so we must not recurse into them -- doing so would treat
-                // a literal element name like `NYC` as an `other_deps`
-                // variable and wrap it in PREVIOUS.
+                // Live reference: the OUTER subscript stays unwrapped.
+                // Decide per-index whether to recurse:
+                //
+                //   - Literal element refs (Var matching a dim element,
+                //     or an integer literal in an indexed dim) are
+                //     dimension references at runtime; leave them
+                //     verbatim so a variable/element name collision
+                //     doesn't wrap them.
+                //
+                //   - Wildcard tokens (`*`) have no inner content to
+                //     wrap; recursing is a no-op so doing it for
+                //     uniformity is fine.
+                //
+                //   - Non-literal indices (expressions like `idx + helper`
+                //     in `RefShape::DynamicIndex`) are computational
+                //     content; recurse so any `other_deps` referenced
+                //     inside get held at PREVIOUS for ceteris-paribus.
+                //
+                // Without the per-index split, DynamicIndex live refs
+                // would skip wrapping inner deps and the partial
+                // equation would no longer be ceteris-paribus.
+                let indices: Vec<IndexExpr0> = indices
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, idx)| {
+                        if is_literal_element_index(&idx, i, source_dim_elements) {
+                            idx
+                        } else {
+                            wrap_index_non_matching_in_previous(
+                                idx,
+                                live_source,
+                                live_shape,
+                                other_deps,
+                                source_dim_elements,
+                            )
+                        }
+                    })
+                    .collect();
                 return Expr0::Subscript(ident, indices, loc);
             }
             // Non-live reference: recurse into indices so any nested
@@ -1893,6 +1956,43 @@ mod tests {
         );
         // Loop score is the product of the two references.
         assert!(eq.contains(" * "), "expected product join; got: {eq}");
+    }
+
+    /// Regression test: a `DynamicIndex` live reference must still wrap
+    /// inner index expressions that reference other deps. The buggy
+    /// version skipped recursion for ANY live-shape match, which is
+    /// correct for `FixedIndex` (literal element indices are dimension
+    /// references, not deps) but wrong for `DynamicIndex` (the index is
+    /// an expression that may reference deps which must be held at
+    /// PREVIOUS for ceteris-paribus).
+    #[test]
+    fn partial_equation_dynamic_index_wraps_inner_deps() {
+        // arr[idx + helper] with live_source=arr, live_shape=DynamicIndex.
+        // The OUTER subscript is the live reference; idx and helper
+        // inside the index expression are other deps and must be wrapped
+        // in PREVIOUS for ceteris-paribus.
+        let dims: Vec<Vec<String>> = vec![];
+        let deps = deps_set(&["arr", "idx", "helper"]);
+        let live = Ident::new("arr");
+        let shape = RefShape::DynamicIndex;
+
+        let partial =
+            build_partial_equation_shaped("arr[idx + helper]", &deps, &live, &shape, &dims);
+
+        assert!(
+            partial.contains("PREVIOUS(idx)"),
+            "idx must be wrapped in PREVIOUS for ceteris-paribus; got: {partial}",
+        );
+        assert!(
+            partial.contains("PREVIOUS(helper)"),
+            "helper must be wrapped in PREVIOUS for ceteris-paribus; got: {partial}",
+        );
+        // The outer arr[...] reference must stay live (no PREVIOUS wrap
+        // around the whole subscript).
+        assert!(
+            !partial.contains("PREVIOUS(arr["),
+            "live arr ref must not be wrapped; got: {partial}",
+        );
     }
 
     /// Regression test: a literal-element subscript like `pop[NYC]` must
