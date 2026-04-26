@@ -424,12 +424,15 @@ pub async fn save_project(
         SaveTarget::InPlaceXmile(_) | SaveTarget::SdJson(_) => resolved.canonical.clone(),
     };
 
-    // Refresh the registry's mtime from the freshly-written file so a
-    // subsequent listing reflects the new modification time.
+    // Refresh the registry's mtime + size from the freshly-written
+    // file so a subsequent listing reflects the new modification time
+    // and byte count. The SPA's stale-data heuristics depend on these.
     if let Ok(metadata) = std::fs::metadata(&written_path)
         && let Ok(mtime) = metadata.modified()
     {
-        state.registry.refresh_meta_mtime(&registry_key, mtime);
+        state
+            .registry
+            .refresh_meta(&registry_key, mtime, metadata.len());
     }
 
     // For SidecarJson the response path points at the freshly-created

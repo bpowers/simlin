@@ -19,7 +19,9 @@ use simlin_serve::registry::ProjectRegistry;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-const OVERSIZED_BYTES: usize = 5 * 1024 * 1024;
+// Phase 2 bumped the body limit to 16 MiB; pick a value comfortably
+// above that so this test continues to exercise the rejection path.
+const OVERSIZED_BYTES: usize = 17 * 1024 * 1024;
 
 fn build_state() -> AppState {
     let dir = TempDir::new().expect("tempdir");

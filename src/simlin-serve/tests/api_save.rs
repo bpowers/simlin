@@ -425,6 +425,81 @@ async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
     assert_eq!(inner_json["name"].as_str(), Some("post-save-name"));
 }
 
+/// After a successful save, the registry's snapshot for the written
+/// path shows updated mtime and size matching the on-disk file. The
+/// SPA's listing relies on these for stale-data heuristics.
+#[tokio::test]
+async fn registry_metadata_is_refreshed_after_save() {
+    let dir = TempDir::new().unwrap();
+    let abs = copy_fixture("teacup.stmx", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let abs_canonical = abs.canonicalize().unwrap();
+    let state = build_state(canonical_root);
+    seed_registry(&state, &abs_canonical, ProjectFormat::Stmx);
+
+    let pre_meta = state.registry.get(&abs_canonical).expect("seeded");
+    let pre_mtime = pre_meta.mtime;
+    let pre_size = pre_meta.size;
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.stmx").await;
+
+    // Round-trip the canonical JSON through a name change so the
+    // re-serialized XMILE is guaranteed to differ in size from the
+    // original fixture (the fixture's product/header bytes won't match
+    // ours exactly anyway, so size will change either way; this just
+    // makes the assertion more explicit).
+    let mut json_value: serde_json::Value =
+        serde_json::from_str(&json_body).expect("parse canonical json");
+    json_value["name"] = serde_json::Value::String("renamed-for-meta-test".to_string());
+    let mutated_json = serde_json::to_string(&json_value).expect("reserialize");
+
+    // Sleep just long enough for the OS-level mtime resolution to record
+    // a different timestamp on the rewritten file. Filesystems vary
+    // (ext4 with high-res mtime: nanosecond; HFS+: 1s; many CI containers:
+    // millisecond), so we use a small but realistic delay rather than
+    // hoping for sub-microsecond resolution.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let body = serde_json::json!({"json": mutated_json, "version": 0}).to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.stmx",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+
+    let post_meta = state.registry.get(&abs_canonical).expect("post entry");
+    let on_disk = fs::metadata(&abs_canonical).unwrap();
+
+    assert!(
+        post_meta.mtime >= pre_mtime,
+        "post-save mtime ({:?}) must be >= pre-save mtime ({:?})",
+        post_meta.mtime,
+        pre_mtime,
+    );
+    assert_eq!(
+        post_meta.mtime,
+        on_disk.modified().unwrap(),
+        "registry mtime must match the on-disk mtime after save"
+    );
+    assert_eq!(
+        post_meta.size,
+        on_disk.len(),
+        "registry size must match the on-disk file size after save"
+    );
+    // The size is expected to differ from the pre-save fixture size
+    // because we re-serialized through `to_xmile`. Don't pin the exact
+    // value, just confirm the registry tracks the new value.
+    let _ = pre_size;
+}
+
 /// Idempotence: a second save (using the next version) must continue
 /// to write only to the sidecar; the .mdl stays untouched.
 #[tokio::test]

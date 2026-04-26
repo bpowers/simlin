@@ -26,10 +26,12 @@ use tower_http::trace::TraceLayer;
 use crate::handlers::{AppState, get_project, list_projects, save_project};
 use crate::static_assets::static_handler;
 
-/// Maximum accepted request body size. Phase 1 is read-only so this is
-/// conservative; Phase 2 may bump this when the save path lands and large
-/// XMILE/MDL projects need to round-trip.
-const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum accepted request body size. POST bodies carry the full
+/// canonical JSON of an edited model; 16 MiB comfortably accommodates
+/// even large real-world projects (the largest fixtures in
+/// `test/test-models` are well under 1 MiB serialized). Bumped from the
+/// 4 MiB read-only Phase 1 limit when Phase 2's save path landed.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Build the HTTP router with the `AppState` shared across all handlers.
 /// Exposed as a library function so integration tests and future callers can

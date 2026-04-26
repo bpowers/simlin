@@ -200,19 +200,21 @@ impl ProjectRegistry {
         Ok(entry.version)
     }
 
-    /// Update the entry's `mtime` to `mtime`. No-op if the path is not in
-    /// the registry. Used by the save handler after a successful disk
-    /// write so a subsequent listing reflects the new modification time.
-    /// Task 7 extends this with size refresh; for Task 5 the mtime alone
-    /// is enough to keep the SPA's stale-data heuristics in sync with
-    /// disk reality.
-    pub fn refresh_meta_mtime(&self, abs_path: &Path, mtime: SystemTime) {
+    /// Update the entry's `mtime` and `size` from a freshly-stat'd
+    /// post-write file. No-op if the path is not in the registry.
+    ///
+    /// Used by the save handler after a successful disk write so a
+    /// subsequent listing reflects both the new modification time and
+    /// the new file size; the SPA's stale-data heuristics rely on
+    /// these to detect external file changes.
+    pub fn refresh_meta(&self, abs_path: &Path, mtime: SystemTime, size: u64) {
         let mut guard = self
             .inner
             .write()
             .expect("registry RwLock poisoned by panic in another thread");
         if let Some(entry) = guard.get_mut(abs_path) {
             entry.mtime = mtime;
+            entry.size = size;
         }
     }
 
@@ -481,31 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn refresh_meta_mtime_updates_existing_entry() {
-        let root = PathBuf::from("/tmp/root");
-        let reg = ProjectRegistry::new(root.clone());
-        let abs = root.join("model.stmx");
-        reg.upsert(
-            abs.clone(),
-            make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx),
-        );
-        let updated_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_500);
-        reg.refresh_meta_mtime(&abs, updated_mtime);
-        assert_eq!(reg.get(&abs).expect("entry").mtime, updated_mtime);
-    }
-
-    #[test]
-    fn refresh_meta_mtime_is_noop_for_missing_path() {
-        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
-        let nonexistent = PathBuf::from("/tmp/root/missing.stmx");
-        reg.refresh_meta_mtime(
-            &nonexistent,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(42),
-        );
-        assert!(reg.is_empty());
-    }
-
-    #[test]
     fn redirect_to_sidecar_moves_entry_and_carries_version() {
         let root = PathBuf::from("/tmp/root");
         let reg = ProjectRegistry::new(root.clone());
@@ -536,6 +513,35 @@ mod tests {
         let sidecar = PathBuf::from("/tmp/root/missing.sd.json");
         let err = reg.redirect_to_sidecar(&mdl, sidecar).unwrap_err();
         assert_eq!(err, RegistryError::NotFound);
+    }
+
+    #[test]
+    fn refresh_meta_updates_mtime_and_size() {
+        let root = PathBuf::from("/tmp/root");
+        let reg = ProjectRegistry::new(root.clone());
+        let abs = root.join("model.stmx");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::Stmx),
+        );
+        let new_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let new_size = 9_999u64;
+        reg.refresh_meta(&abs, new_mtime, new_size);
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.mtime, new_mtime);
+        assert_eq!(entry.size, new_size);
+    }
+
+    #[test]
+    fn refresh_meta_is_noop_for_missing_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let nonexistent = PathBuf::from("/tmp/root/missing.stmx");
+        reg.refresh_meta(
+            &nonexistent,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(42),
+            123,
+        );
+        assert!(reg.is_empty());
     }
 
     #[test]
