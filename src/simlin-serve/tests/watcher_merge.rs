@@ -188,7 +188,7 @@ async fn external_disk_edit_triggers_disk_source_broadcast() {
         WsMessage::ProjectChanged { source, .. } => {
             assert_eq!(source, ChangeSource::Disk);
         }
-        WsMessage::ProjectRemoved { .. } => panic!("expected ProjectChanged, got ProjectRemoved"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 
     // The doc reflects the disk state.
@@ -309,7 +309,7 @@ async fn browser_and_disk_edits_both_preserved_via_merge() {
         .expect("watcher fires Disk-source ProjectChanged within 2s");
     match event {
         WsMessage::ProjectChanged { source, .. } => assert_eq!(source, ChangeSource::Disk),
-        WsMessage::ProjectRemoved { .. } => panic!("expected ProjectChanged, got ProjectRemoved"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 
     // After both edits the merged doc must show S1="100" (browser edit
@@ -458,7 +458,7 @@ async fn create_event_for_new_path_adds_registry_entry_and_broadcasts() {
         .expect("watcher must broadcast for new file");
     match event {
         WsMessage::ProjectChanged { source, .. } => assert_eq!(source, ChangeSource::Disk),
-        WsMessage::ProjectRemoved { .. } => panic!("expected ProjectChanged, got ProjectRemoved"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 
     // Registry now has the entry.
@@ -508,7 +508,7 @@ async fn external_remove_drops_registry_entry_and_broadcasts_removed() {
         WsMessage::ProjectRemoved { path } => {
             assert_eq!(path, "doomed.sd.json");
         }
-        WsMessage::ProjectChanged { .. } => panic!("expected ProjectRemoved, got ProjectChanged"),
+        other => panic!("expected ProjectRemoved, got {other:?}"),
     }
 
     // Registry no longer has the entry.

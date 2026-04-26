@@ -660,7 +660,7 @@ async fn successful_save_publishes_project_changed_with_source_user() {
             assert_eq!(version, 1);
             assert_eq!(source, ChangeSource::User);
         }
-        WsMessage::ProjectRemoved { .. } => panic!("save must not publish a removal"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 }
 

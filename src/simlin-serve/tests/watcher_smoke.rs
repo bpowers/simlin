@@ -90,7 +90,7 @@ async fn watcher_emits_project_changed_for_new_file() {
         WsMessage::ProjectChanged { source, .. } => {
             assert_eq!(source, ChangeSource::Disk);
         }
-        WsMessage::ProjectRemoved { .. } => panic!("expected ProjectChanged, got ProjectRemoved"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 
     shutdown.notify_waiters();

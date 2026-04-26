@@ -26,6 +26,13 @@
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+/// Wire-shape for a single validation diagnostic carried inside
+/// [`WsMessage::DiagnosticsChanged`]. Re-exported from
+/// `simlin_mcp_core::ErrorOutput` so the WebSocket and MCP surfaces emit
+/// byte-identical error structures, and so callers building a message
+/// don't need to know which crate the type lives in.
+pub use simlin_mcp_core::ErrorOutput as ValidationError;
+
 /// Bounded fan-out capacity for the broadcast channel. A subscriber that
 /// falls 64 messages behind starts losing the oldest events; the receiver
 /// surfaces this as `RecvError::Lagged(n)` exactly once and then auto-
@@ -106,6 +113,41 @@ pub enum WsMessage {
         /// Same wire shape as `ProjectChanged.path` so the client can
         /// look up the entry by string equality.
         path: String,
+    },
+    /// The browser focused (or switched to) a project. Phase 7's MCP
+    /// notifications router fans this out as `simlin/projectFocused` so
+    /// AI clients can track which project the user is currently looking
+    /// at.
+    ProjectFocused {
+        /// Forward-slash relative path of the focused project.
+        path: String,
+    },
+    /// The browser's variable selection changed inside the active
+    /// project. The list of canonical idents lets MCP clients show
+    /// "what's selected" without needing to round-trip through the
+    /// browser's view state.
+    #[serde(rename_all = "camelCase")]
+    SelectionChanged {
+        /// Forward-slash relative path of the project whose selection
+        /// changed (the browser may have multiple projects open in
+        /// tabs).
+        path: String,
+        /// Canonical idents of the currently selected named view
+        /// elements. Empty when nothing is selected.
+        variable_idents: Vec<String>,
+    },
+    /// The set of validation errors for a project changed (an edit
+    /// introduced new errors, fixed existing ones, or both). Computed
+    /// after every successful save / file-watcher merge and only
+    /// published when the `(code, variable_name)` set actually
+    /// differs from the previous snapshot.
+    DiagnosticsChanged {
+        /// Forward-slash relative path of the project whose diagnostics
+        /// changed.
+        path: String,
+        /// Full formatted error list for the project (not just the
+        /// delta). An empty vector signals "all errors fixed".
+        errors: Vec<ValidationError>,
     },
 }
 
@@ -191,7 +233,7 @@ mod tests {
             WsMessage::ProjectChanged { version, .. } => {
                 assert_eq!(version, 36, "auto-resume must yield the oldest retained");
             }
-            WsMessage::ProjectRemoved { .. } => panic!("did not publish a removal here"),
+            _ => panic!("expected ProjectChanged"),
         }
     }
 
@@ -259,7 +301,117 @@ mod tests {
             WsMessage::ProjectChanged { path, .. } => {
                 assert_eq!(path, "late");
             }
-            WsMessage::ProjectRemoved { .. } => panic!("did not publish a removal here"),
+            _ => panic!("expected ProjectChanged"),
         }
+    }
+
+    #[test]
+    fn project_focused_serializes_with_camel_case_and_tag() {
+        let msg = WsMessage::ProjectFocused {
+            path: "sub/foo.stmx".into(),
+        };
+        let value = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(value["type"].as_str(), Some("projectFocused"));
+        assert_eq!(value["path"].as_str(), Some("sub/foo.stmx"));
+    }
+
+    #[test]
+    fn selection_changed_serializes_with_camel_case_and_tag() {
+        let msg = WsMessage::SelectionChanged {
+            path: "sub/foo.stmx".into(),
+            variable_idents: vec!["teacup_temperature".into(), "ambient_temperature".into()],
+        };
+        let value = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(value["type"].as_str(), Some("selectionChanged"));
+        assert_eq!(value["path"].as_str(), Some("sub/foo.stmx"));
+        let idents = value["variableIdents"].as_array().expect("array");
+        assert_eq!(idents.len(), 2);
+        assert_eq!(idents[0].as_str(), Some("teacup_temperature"));
+        assert_eq!(idents[1].as_str(), Some("ambient_temperature"));
+    }
+
+    #[test]
+    fn diagnostics_changed_serializes_with_camel_case_and_tag() {
+        let msg = WsMessage::DiagnosticsChanged {
+            path: "models/teacup.xmile".into(),
+            errors: vec![ValidationError {
+                code: "unknown_dependency".into(),
+                message: "variable 'x' references unknown 'bogus'".into(),
+                model_name: Some("main".into()),
+                variable_name: Some("x".into()),
+                kind: "variable".into(),
+            }],
+        };
+        let value = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(value["type"].as_str(), Some("diagnosticsChanged"));
+        assert_eq!(value["path"].as_str(), Some("models/teacup.xmile"));
+        let errors = value["errors"].as_array().expect("errors array");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["code"].as_str(), Some("unknown_dependency"));
+        assert_eq!(errors[0]["modelName"].as_str(), Some("main"));
+        assert_eq!(errors[0]["variableName"].as_str(), Some("x"));
+        assert_eq!(errors[0]["kind"].as_str(), Some("variable"));
+    }
+
+    #[test]
+    fn diagnostics_changed_with_empty_errors_serializes_cleanly() {
+        // Emitted when all previously known errors have been fixed.
+        let msg = WsMessage::DiagnosticsChanged {
+            path: "models/teacup.xmile".into(),
+            errors: vec![],
+        };
+        let value = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(value["type"].as_str(), Some("diagnosticsChanged"));
+        assert_eq!(value["errors"].as_array().expect("errors array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn project_focused_round_trips_through_eventbus() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        let msg = WsMessage::ProjectFocused {
+            path: "demo.stmx".into(),
+        };
+        bus.publish(msg.clone());
+
+        let got = rx.recv().await.expect("recv");
+        assert_eq!(got, msg);
+    }
+
+    #[tokio::test]
+    async fn selection_changed_round_trips_through_eventbus() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        let msg = WsMessage::SelectionChanged {
+            path: "demo.stmx".into(),
+            variable_idents: vec!["a".into(), "b".into()],
+        };
+        bus.publish(msg.clone());
+
+        let got = rx.recv().await.expect("recv");
+        assert_eq!(got, msg);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_changed_round_trips_through_eventbus() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        let msg = WsMessage::DiagnosticsChanged {
+            path: "demo.stmx".into(),
+            errors: vec![ValidationError {
+                code: "syntax".into(),
+                message: "bad equation".into(),
+                model_name: None,
+                variable_name: Some("y".into()),
+                kind: "variable".into(),
+            }],
+        };
+        bus.publish(msg.clone());
+
+        let got = rx.recv().await.expect("recv");
+        assert_eq!(got, msg);
     }
 }

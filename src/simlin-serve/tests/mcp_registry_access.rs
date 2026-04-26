@@ -226,7 +226,7 @@ async fn mcp_save_broadcasts_project_changed_with_agent_source() {
             assert_eq!(source, ChangeSource::Agent);
             assert_eq!(path, "teacup.xmile");
         }
-        WsMessage::ProjectRemoved { .. } => panic!("did not expect ProjectRemoved"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 }
 
@@ -607,7 +607,7 @@ async fn create_broadcasts_project_changed_with_agent_source_and_version_zero() 
             assert_eq!(source, ChangeSource::Agent);
             assert_eq!(path, "announce.sd.json");
         }
-        WsMessage::ProjectRemoved { .. } => panic!("did not expect ProjectRemoved"),
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
 }
 

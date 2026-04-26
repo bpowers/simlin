@@ -96,7 +96,7 @@ impl From<simlin_engine::layout::metadata::DominantPeriod> for DominantPeriodOut
 /// Converts engine `FormattedError` into a serializable type suitable for
 /// MCP structured content, so LLM clients can programmatically inspect
 /// what went wrong.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorOutput {
     pub code: String,
