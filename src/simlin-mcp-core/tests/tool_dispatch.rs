@@ -6,86 +6,18 @@
 //
 //! End-to-end test for the rmcp tool dispatch surface.
 //!
-//! Spawns a `SimlinMcpServer<FsAccess>` against an in-memory duplex pair
-//! and uses an rmcp client (`().serve(...)`) to issue real `tools/call`
-//! requests.  This is the only path that exercises the `is_error: true`
-//! contract for validation failures end-to-end through rmcp's macros —
-//! the per-tool e2e suites (`read_model_e2e.rs`, `edit_model_e2e.rs`,
-//! `create_model_e2e.rs`) call the tool functions directly and don't
-//! touch the `CallToolResult` shape.
-
-use std::path::Path;
+//! Spawns a `SimlinMcpServer<TestFileSystemAccess>` against an in-memory
+//! duplex pair and uses an rmcp client (`().serve(...)`) to issue real
+//! `tools/call` requests.  This is the only path that exercises the
+//! `is_error: true` contract for validation failures end-to-end through
+//! rmcp's macros — the per-tool e2e suites (`read_model_e2e.rs`,
+//! `edit_model_e2e.rs`, `create_model_e2e.rs`) call the tool functions
+//! directly and don't touch the `CallToolResult` shape.
 
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
-use simlin_engine::datamodel;
-use simlin_engine::json as ejson;
-use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
-use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::server::SimlinMcpServer;
-use simlin_mcp_core::types::SourceFormat;
-
-/// Test-local stateless filesystem impl mirroring `read_model_e2e.rs`'s
-/// `FsAccess`.  We need open + save here so `edit_model` can run end to
-/// end and surface a validation error from the diagnostic gate.
-struct FsAccess;
-
-impl ProjectAccess for FsAccess {
-    async fn open(&self, abs_path: &Path) -> Result<OpenedProject, AccessError> {
-        let contents = tokio::fs::read_to_string(abs_path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                AccessError::NotFound {
-                    path: abs_path.to_path_buf(),
-                }
-            } else {
-                AccessError::IoError(e)
-            }
-        })?;
-        let (project, source_format) = simlin_mcp_core::open::open_project(abs_path, &contents)?;
-        Ok(OpenedProject {
-            project,
-            source_format,
-            version: 0,
-        })
-    }
-
-    async fn save(
-        &self,
-        abs_path: &Path,
-        project: &datamodel::Project,
-        format: SourceFormat,
-        _expected_version: Option<u64>,
-    ) -> Result<u64, AccessError> {
-        let bytes = match format {
-            SourceFormat::Xmile => simlin_engine::to_xmile(project)
-                .map_err(|e| {
-                    AccessError::ParseError(anyhow::anyhow!("failed to serialize XMILE: {e:?}"))
-                })?
-                .into_bytes(),
-            SourceFormat::NativeJson => {
-                let json_project = ejson::Project::from(project);
-                serde_json::to_vec_pretty(&json_project)
-                    .map_err(|e| AccessError::ParseError(anyhow::anyhow!("serialize: {e}")))?
-            }
-            SourceFormat::SdaiJson => {
-                let sdai_model = simlin_engine::json_sdai::SdaiModel::from(project);
-                serde_json::to_vec_pretty(&sdai_model)
-                    .map_err(|e| AccessError::ParseError(anyhow::anyhow!("serialize: {e}")))?
-            }
-        };
-        simlin_engine::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
-        Ok(0)
-    }
-
-    async fn create(
-        &self,
-        _abs_path: &Path,
-        _project: &datamodel::Project,
-        _format: SourceFormat,
-    ) -> Result<(), AccessError> {
-        unreachable!("tool_dispatch tests do not call create")
-    }
-}
+use simlin_mcp_core::test_support::TestFileSystemAccess;
 
 fn minimal_project_json() -> serde_json::Value {
     serde_json::json!({
@@ -104,14 +36,19 @@ fn minimal_project_json() -> serde_json::Value {
 
 async fn spawn_server_pair() -> (
     rmcp::service::RunningService<rmcp::RoleClient, ()>,
-    rmcp::service::RunningService<rmcp::RoleServer, SimlinMcpServer<FsAccess>>,
+    rmcp::service::RunningService<rmcp::RoleServer, SimlinMcpServer<TestFileSystemAccess>>,
 ) {
     // Tokio's duplex provides two AsyncRead+AsyncWrite halves connected
     // in memory.  The 64KiB buffer is well above the size of any single
     // JSON-RPC message we exchange in these tests.
     let (server_io, client_io) = tokio::io::duplex(65536);
 
-    let server = SimlinMcpServer::new(FsAccess, "Test instructions".into(), vec![]);
+    let server = SimlinMcpServer::new(
+        TestFileSystemAccess,
+        "Test instructions".into(),
+        vec![],
+        "0.0.0".into(),
+    );
 
     // Server-side: spawn `.serve(...)` on the duplex's server half.
     // Client-side: `()` is the rmcp idiom for a no-op handler that only
@@ -156,7 +93,7 @@ async fn edit_model_validation_error_returns_is_error_true_with_structured_conte
         _ => unreachable!("arguments is constructed as an object literal"),
     };
 
-    let mut params = CallToolRequestParams::new("edit_model");
+    let mut params = CallToolRequestParams::new("EditModel");
     if let Some(args) = arguments_obj {
         params = params.with_arguments(args);
     }
@@ -224,7 +161,7 @@ async fn read_model_success_returns_is_error_false_with_structured_content() {
         _ => unreachable!("arguments is constructed as an object literal"),
     };
 
-    let mut params = CallToolRequestParams::new("read_model");
+    let mut params = CallToolRequestParams::new("ReadModel");
     if let Some(args) = arguments_obj {
         params = params.with_arguments(args);
     }
@@ -250,6 +187,115 @@ async fn read_model_success_returns_is_error_false_with_structured_content() {
     assert!(
         structured.get("model").is_some(),
         "structured content must include a model snapshot: {structured}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn read_model_missing_file_returns_is_error_true_with_structured_content() {
+    let (client, server) = spawn_server_pair().await;
+
+    let arguments = serde_json::json!({ "projectPath": "/does/not/exist/model.sd.json" });
+    let arguments_obj = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        _ => unreachable!("arguments is constructed as an object literal"),
+    };
+
+    let mut params = CallToolRequestParams::new("ReadModel");
+    if let Some(args) = arguments_obj {
+        params = params.with_arguments(args);
+    }
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("call_tool must return a CallToolResult, not a transport error");
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "missing-file error must set is_error: true"
+    );
+    let structured = result
+        .structured_content
+        .expect("missing-file error must include structured content");
+    assert!(
+        structured.get("error").and_then(|v| v.as_str()).is_some(),
+        "structured content must carry an error string: {structured}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn edit_model_mdl_rejection_returns_is_error_true_with_structured_content() {
+    let mdl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/sdeverywhere/models/elmcount/elmcount.mdl"
+    );
+
+    let (client, server) = spawn_server_pair().await;
+
+    let arguments = serde_json::json!({
+        "projectPath": mdl_path,
+        "operations": [{"upsertAuxiliary": {"name": "x", "equation": "1"}}]
+    });
+    let arguments_obj = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        _ => unreachable!("arguments is constructed as an object literal"),
+    };
+
+    let mut params = CallToolRequestParams::new("EditModel");
+    if let Some(args) = arguments_obj {
+        params = params.with_arguments(args);
+    }
+    let result = client
+        .peer()
+        .call_tool(params)
+        .await
+        .expect("call_tool must return a CallToolResult, not a transport error");
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        ".mdl rejection must set is_error: true"
+    );
+    let structured = result
+        .structured_content
+        .expect(".mdl rejection must include structured content");
+    let err_str = structured
+        .get("error")
+        .and_then(|v| v.as_str())
+        .expect("structured content must carry an error string");
+    assert!(
+        err_str.contains(".mdl"),
+        ".mdl rejection error must mention .mdl format: {err_str}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn tools_list_returns_pascal_case_names() {
+    let (client, server) = spawn_server_pair().await;
+
+    let result = client
+        .peer()
+        .list_tools(None)
+        .await
+        .expect("tools/list must succeed");
+
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        vec!["CreateModel", "EditModel", "ReadModel"],
+        "wire-level tool names must be PascalCase to preserve @simlin/mcp client compatibility; got: {names:?}"
     );
 
     let _ = client.cancel().await;

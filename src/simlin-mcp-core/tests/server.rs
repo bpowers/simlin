@@ -5,15 +5,17 @@
 // pattern: Imperative Shell
 //
 //! Tests for the rmcp `ServerHandler` impl owned by `simlin-mcp-core`.
-//! These exercise the static surface (`get_info`, list/read resources)
-//! against a no-op `MockAccess` so we never touch the filesystem.  Tool
-//! call dispatch is exercised end-to-end by the binary's transport
-//! tests in Subcomponent C; here we only assert the metadata surface.
+//!
+//! Server-info metadata (`get_info`) is exercised via a synchronous
+//! handler call.  Resource list and read operations are exercised through
+//! a real rmcp client/server duplex pair so the actual `ServerHandler`
+//! trait methods (including `ErrorCode::RESOURCE_NOT_FOUND = -32002`) are
+//! tested rather than internal helper methods.
 
 use std::path::Path;
 
-use rmcp::ServerHandler;
-use rmcp::model::ProtocolVersion;
+use rmcp::model::{PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams};
+use rmcp::{ServerHandler, ServiceError, ServiceExt};
 use simlin_engine::datamodel;
 use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
 use simlin_mcp_core::errors::AccessError;
@@ -59,12 +61,40 @@ fn sample_resource() -> ResourceContent {
     }
 }
 
+async fn spawn_server_pair_with_resources(
+    resources: Vec<ResourceContent>,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    rmcp::service::RunningService<rmcp::RoleServer, SimlinMcpServer<MockAccess>>,
+) {
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let server = SimlinMcpServer::new(
+        MockAccess,
+        "Test instructions".into(),
+        resources,
+        "0.0.0".into(),
+    );
+    let server_task = tokio::spawn(async move { server.serve(server_io).await });
+    let client = ().serve(client_io).await.expect("client failed to initialize");
+    let server = server_task
+        .await
+        .expect("server task panicked")
+        .expect("server failed to initialize");
+    (client, server)
+}
+
 #[test]
 fn get_info_advertises_latest_protocol_and_capabilities() {
-    let server = SimlinMcpServer::new(MockAccess, "Test instructions".to_string(), vec![]);
+    let server = SimlinMcpServer::new(
+        MockAccess,
+        "Test instructions".to_string(),
+        vec![],
+        "1.2.3".into(),
+    );
     let info = server.get_info();
     assert_eq!(info.protocol_version, ProtocolVersion::LATEST);
     assert_eq!(info.server_info.name, "simlin-mcp");
+    assert_eq!(info.server_info.version, "1.2.3");
     assert_eq!(info.instructions.as_deref(), Some("Test instructions"));
     assert!(info.capabilities.tools.is_some(), "tools must be enabled");
     assert!(
@@ -75,39 +105,83 @@ fn get_info_advertises_latest_protocol_and_capabilities() {
 
 #[tokio::test]
 async fn list_resources_returns_provided_entries() {
-    let server = SimlinMcpServer::new(
-        MockAccess,
-        "Test instructions".to_string(),
-        vec![sample_resource()],
-    );
-    // Calling list_resources directly uses the test-only helper that
-    // wraps the inherent method; the rmcp dispatch path is tested in
-    // the binary's smoke tests.
-    let listed = server.list_resources_for_test();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].raw.uri, "simlin://skills/test");
+    let (client, server) = spawn_server_pair_with_resources(vec![sample_resource()]).await;
+
+    let result = client
+        .peer()
+        .list_resources(None)
+        .await
+        .expect("resources/list must succeed");
+
+    assert_eq!(result.resources.len(), 1);
+    assert_eq!(result.resources[0].raw.uri, "simlin://skills/test");
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
 }
 
 #[tokio::test]
 async fn read_resource_returns_body_for_known_uri() {
-    let server = SimlinMcpServer::new(
-        MockAccess,
-        "Test instructions".to_string(),
-        vec![sample_resource()],
-    );
-    let body = server
-        .read_resource_for_test("simlin://skills/test")
-        .expect("known URI must resolve");
+    let (client, server) = spawn_server_pair_with_resources(vec![sample_resource()]).await;
+
+    let result = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("simlin://skills/test"))
+        .await
+        .expect("resources/read must succeed for known URI");
+
+    assert_eq!(result.contents.len(), 1);
+    let body = match &result.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        other => panic!("expected TextResourceContents, got {other:?}"),
+    };
     assert_eq!(body, "# hello\nworld\n");
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
 }
 
 #[tokio::test]
-async fn read_resource_returns_none_for_unknown_uri() {
-    let server = SimlinMcpServer::new(MockAccess, "x".into(), vec![sample_resource()]);
+async fn read_resource_returns_error_code_for_unknown_uri() {
+    let (client, server) = spawn_server_pair_with_resources(vec![sample_resource()]).await;
+
+    let result = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("simlin://skills/missing"))
+        .await;
+
+    match result {
+        Err(ServiceError::McpError(e)) => {
+            // ErrorCode::RESOURCE_NOT_FOUND is -32002 in the MCP spec.
+            assert_eq!(
+                e.code.0, -32002,
+                "unknown URI must surface as RESOURCE_NOT_FOUND (-32002), got code {}",
+                e.code.0
+            );
+        }
+        Err(other) => panic!("expected McpError(-32002), got {other:?}"),
+        Ok(_) => panic!("expected an error for unknown URI, got Ok"),
+    }
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test]
+async fn list_resources_empty_when_no_resources_registered() {
+    let (client, server) = spawn_server_pair_with_resources(vec![]).await;
+
+    let result = client
+        .peer()
+        .list_resources(None::<PaginatedRequestParams>)
+        .await
+        .expect("resources/list must succeed even with empty list");
+
     assert!(
-        server
-            .read_resource_for_test("simlin://skills/missing")
-            .is_none(),
-        "unknown URI must surface as None so the rmcp handler can map to ErrorCode(-32002)"
+        result.resources.is_empty(),
+        "no resources registered => empty list"
     );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
 }

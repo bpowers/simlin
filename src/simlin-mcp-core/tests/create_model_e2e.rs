@@ -5,62 +5,13 @@
 // pattern: Imperative Shell
 //
 //! End-to-end test for `create_model` against a filesystem-backed
-//! `ProjectAccess` impl.  See `read_model_e2e.rs` for the rationale of
-//! defining a test-local `FsAccess` rather than depending on Task 7's
-//! `FileSystemAccess`.
+//! `ProjectAccess` impl.
 
 use std::io;
-use std::path::Path;
 
-use simlin_engine::datamodel;
-use simlin_mcp_core::access::{OpenedProject, ProjectAccess};
 use simlin_mcp_core::errors::AccessError;
+use simlin_mcp_core::test_support::TestFileSystemAccess;
 use simlin_mcp_core::tools::create_model::{CreateModelInput, create_model};
-use simlin_mcp_core::types::SourceFormat;
-
-/// Test-local stateless filesystem impl. Mirrors what Task 7 will
-/// promote into the simlin-mcp binary; only `create` is exercised here.
-struct FsAccess;
-
-impl ProjectAccess for FsAccess {
-    async fn open(&self, _abs_path: &Path) -> Result<OpenedProject, AccessError> {
-        unreachable!("create_model never calls open")
-    }
-
-    async fn save(
-        &self,
-        _abs_path: &Path,
-        _project: &datamodel::Project,
-        _format: SourceFormat,
-        _expected_version: Option<u64>,
-    ) -> Result<u64, AccessError> {
-        unreachable!("create_model never calls save")
-    }
-
-    async fn create(
-        &self,
-        abs_path: &Path,
-        project: &datamodel::Project,
-        _format: SourceFormat,
-    ) -> Result<(), AccessError> {
-        if abs_path.exists() {
-            return Err(AccessError::WriteError(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("file already exists: {}", abs_path.display()),
-            )));
-        }
-        if let Some(parent) = abs_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(AccessError::WriteError)?;
-        }
-        let json_project = simlin_engine::json::Project::from(project);
-        let bytes = serde_json::to_vec_pretty(&json_project)
-            .map_err(|e| AccessError::ParseError(anyhow::anyhow!("serialize failed: {e}")))?;
-        simlin_engine::io::atomic_write(abs_path, &bytes).map_err(AccessError::WriteError)?;
-        Ok(())
-    }
-}
 
 #[tokio::test]
 async fn create_model_with_default_specs_writes_parseable_file() {
@@ -72,7 +23,7 @@ async fn create_model_with_default_specs_writes_parseable_file() {
         sim_specs: None,
     };
 
-    let output = create_model(&FsAccess, input).await.unwrap();
+    let output = create_model(&TestFileSystemAccess, input).await.unwrap();
     assert_eq!(output.model_name, "main");
     assert!(path.exists(), "create must write the file");
 
@@ -103,7 +54,7 @@ async fn create_model_with_custom_sim_specs_persists_them() {
         }),
     };
 
-    let output = create_model(&FsAccess, input).await.unwrap();
+    let output = create_model(&TestFileSystemAccess, input).await.unwrap();
     assert_eq!(output.sim_specs.start_time, 10.0);
     assert_eq!(output.sim_specs.end_time, 200.0);
     assert_eq!(output.sim_specs.dt, "0.5");
@@ -125,7 +76,7 @@ async fn create_model_refuses_to_overwrite_existing_file() {
         sim_specs: None,
     };
 
-    let result = create_model(&FsAccess, input).await;
+    let result = create_model(&TestFileSystemAccess, input).await;
     match result {
         Err(AccessError::WriteError(e)) => {
             assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);

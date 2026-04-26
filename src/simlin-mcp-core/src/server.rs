@@ -20,7 +20,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, CallToolResult, Content, ErrorCode, Implementation, ListResourcesResult,
+    AnnotateAble, CallToolResult, ErrorCode, Implementation, ListResourcesResult,
     PaginatedRequestParams, ProtocolVersion, RawResource, ReadResourceRequestParams,
     ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
 };
@@ -56,11 +56,17 @@ pub struct ResourceContent {
 /// service factory in Phase 6 expects `Self: Clone`).  The instructions
 /// string and resource list are likewise behind `Arc` so cloning is
 /// cheap.
+///
+/// `version` is the binary's own version string, passed by the entry
+/// point (main.rs or simlin-serve's main) using `env!("CARGO_PKG_VERSION")`
+/// so `serverInfo.version` reflects the binary version rather than this
+/// library's.
 #[derive(Clone)]
 pub struct SimlinMcpServer<A: ProjectAccess> {
     access: Arc<A>,
     instructions: Arc<String>,
     resources: Arc<Vec<ResourceContent>>,
+    version: Arc<String>,
     // The router is consumed by the rmcp `tool_handler` macro expansion,
     // not by direct method calls — silence the dead-code warning.
     #[allow(dead_code)]
@@ -68,55 +74,26 @@ pub struct SimlinMcpServer<A: ProjectAccess> {
 }
 
 impl<A: ProjectAccess> SimlinMcpServer<A> {
-    pub fn new(access: A, instructions: String, resources: Vec<ResourceContent>) -> Self {
+    pub fn new(
+        access: A,
+        instructions: String,
+        resources: Vec<ResourceContent>,
+        version: String,
+    ) -> Self {
         Self {
             access: Arc::new(access),
             instructions: Arc::new(instructions),
             resources: Arc::new(resources),
+            version: Arc::new(version),
             tool_router: Self::tool_router(),
         }
-    }
-
-    /// Test-only helper that returns the resource list as rmcp's
-    /// `Resource` values.  The actual `list_resources` ServerHandler
-    /// method wraps this; exposing it directly keeps unit tests free
-    /// of `RequestContext` plumbing.
-    #[doc(hidden)]
-    pub fn list_resources_for_test(&self) -> Vec<Resource> {
-        self.resources
-            .iter()
-            .map(|r| {
-                let raw = RawResource::new(r.uri.clone(), r.name.clone());
-                let raw = if r.description.is_empty() {
-                    raw
-                } else {
-                    raw.with_description(r.description.clone())
-                };
-                let raw = if r.mime_type.is_empty() {
-                    raw
-                } else {
-                    raw.with_mime_type(r.mime_type.clone())
-                };
-                raw.no_annotation()
-            })
-            .collect()
-    }
-
-    /// Test-only helper for `read_resource`.  Returns `Some(body)` for
-    /// known URIs, `None` for unknown ones (the public ServerHandler
-    /// method maps `None` to `ErrorCode::RESOURCE_NOT_FOUND`).
-    #[doc(hidden)]
-    pub fn read_resource_for_test(&self, uri: &str) -> Option<String> {
-        self.resources
-            .iter()
-            .find(|r| r.uri == uri)
-            .map(|r| r.body.clone())
     }
 }
 
 #[tool_router]
 impl<A: ProjectAccess> SimlinMcpServer<A> {
     #[tool(
+        name = "ReadModel",
         description = "Read a system dynamics model file and return its JSON snapshot \
             enriched with loop dominance analysis. \
             Supports XMILE (.stmx, .xmile), Vensim (.mdl), and Simlin JSON formats."
@@ -131,7 +108,9 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
         }
     }
 
-    #[tool(description = "Edit a system dynamics model by applying operations. \
+    #[tool(
+        name = "EditModel",
+        description = "Edit a system dynamics model by applying operations. \
             Supports upserting stocks, flows, and auxiliaries, removing variables, \
             and updating simulation specs. Returns a refreshed model snapshot \
             with loop dominance analysis after applying changes. \
@@ -139,7 +118,8 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
             default to empty. Use ReadModel first to get current state, then \
             include all fields you want to preserve. \
             Note: Vensim .mdl files are read-only -- use ReadModel to inspect them, \
-            then CreateModel to start a new .sd.json file you can edit.")]
+            then CreateModel to start a new .sd.json file you can edit."
+    )]
     async fn edit_model(
         &self,
         Parameters(input): Parameters<EditModelInput>,
@@ -150,9 +130,12 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
         }
     }
 
-    #[tool(description = "Create a new empty system dynamics model file. \
+    #[tool(
+        name = "CreateModel",
+        description = "Create a new empty system dynamics model file. \
             Produces a Simlin JSON file at the given path with a single \
-            \"main\" model and the specified simulation specs.")]
+            \"main\" model and the specified simulation specs."
+    )]
     async fn create_model(
         &self,
         Parameters(input): Parameters<CreateModelInput>,
@@ -176,7 +159,7 @@ impl<A: ProjectAccess> ServerHandler for SimlinMcpServer<A> {
         .with_protocol_version(ProtocolVersion::LATEST)
         .with_server_info(Implementation::new(
             "simlin-mcp",
-            env!("CARGO_PKG_VERSION").to_string(),
+            self.version.as_str().to_string(),
         ))
         .with_instructions(self.instructions.as_str())
     }
@@ -239,9 +222,11 @@ fn call_tool_success<T: serde::Serialize>(output: &T) -> Result<CallToolResult, 
     Ok(CallToolResult::structured(value))
 }
 
-/// Build a `CallToolResult` for the error path.  Validation failures
-/// surface as a structured `errors` array so an LLM can inspect them
-/// programmatically; everything else collapses to a string message.
+/// Build a `CallToolResult` for the error path.  All failures carry both
+/// a text content item (for legacy clients) and a structured JSON value
+/// so LLMs can inspect the error programmatically regardless of error
+/// kind.  Validation failures include the full `errors` array; all other
+/// failures carry a plain `error` string.
 fn call_tool_error(err: &AccessError) -> CallToolResult {
     match err {
         AccessError::Validation { errors } => {
@@ -251,6 +236,9 @@ fn call_tool_error(err: &AccessError) -> CallToolResult {
             });
             CallToolResult::structured_error(value)
         }
-        other => CallToolResult::error(vec![Content::text(other.to_string())]),
+        other => {
+            let value = serde_json::json!({ "error": other.to_string() });
+            CallToolResult::structured_error(value)
+        }
     }
 }

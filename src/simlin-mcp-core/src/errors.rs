@@ -47,13 +47,13 @@ impl fmt::Display for AccessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AccessError::NotFound { path } => write!(f, "project not found: {}", path.display()),
-            AccessError::IoError(err) => write!(f, "i/o error: {err}"),
-            AccessError::ParseError(err) => write!(f, "parse error: {err}"),
+            AccessError::IoError(err) => write!(f, "{err}"),
+            AccessError::ParseError(err) => write!(f, "{err}"),
             AccessError::VersionMismatch { expected, actual } => write!(
                 f,
                 "project version mismatch: expected {expected}, actual {actual}"
             ),
-            AccessError::WriteError(err) => write!(f, "write error: {err}"),
+            AccessError::WriteError(err) => write!(f, "{err}"),
             AccessError::Validation { errors } => {
                 write!(f, "validation failed ({} error(s))", errors.len())
             }

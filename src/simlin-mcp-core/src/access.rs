@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Functional Core
+//
 //! Abstraction for opening and persisting Simlin projects.
 //!
 //! Tools in this crate operate against the [`ProjectAccess`] trait so the

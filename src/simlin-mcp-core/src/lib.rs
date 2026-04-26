@@ -16,6 +16,8 @@ pub mod access;
 pub mod errors;
 pub mod open;
 pub mod server;
+#[doc(hidden)]
+pub mod test_support;
 pub mod tools;
 pub mod types;
 

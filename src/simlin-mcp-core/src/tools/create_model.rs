@@ -108,9 +108,8 @@ pub async fn create_model<A: ProjectAccess>(
         source: None,
     };
 
-    // Convert to datamodel::Project so the access impl can serialise it
-    // however its backing store needs.  CreateModel always produces a
-    // native-JSON file (the canonical `.sd.json` format).
+    // The access impl owns serialisation per its backing store, so we
+    // hand it the canonical datamodel form.
     let project: datamodel::Project = json_project.into();
     access
         .create(path, &project, SourceFormat::NativeJson)
