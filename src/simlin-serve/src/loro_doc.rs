@@ -39,6 +39,7 @@ use std::collections::HashSet;
 
 use loro::{Container, LoroDoc, LoroList, LoroMap, LoroValue, ValueOrContainer};
 use serde_json::{Map as JsonMap, Number, Value};
+use simlin_engine::common::{Canonical, Ident};
 
 /// Errors raised while diffing or merging JSON against the Loro tree.
 ///
@@ -124,12 +125,23 @@ impl ProjectDoc {
     /// One `commit()` per call: Loro batches the inserts/deletes between
     /// commits, so subscribe_root callbacks (Phase 4) fire once per logical
     /// merge regardless of how deep the tree is.
+    ///
+    /// The incoming JSON is reshaped via `project_json_to_loro_shape`
+    /// before merging so variable arrays land as canonical-name-keyed
+    /// `LoroMap`s (giving us per-variable LWW on concurrent edits). The
+    /// `export_canonical_json` inverse rebuilds the on-disk array shape.
     pub fn apply_canonical_json(&self, new_json: &Value) -> Result<(), MergeError> {
-        let json_obj = new_json.as_object().ok_or_else(|| MergeError::ShapeError {
-            path: "$".into(),
-            expected: "object",
-            actual: json_value_kind(new_json),
-        })?;
+        let projected = project_json_to_loro_shape(new_json)?;
+        let json_obj = match &projected {
+            Value::Object(o) => o,
+            other => {
+                return Err(MergeError::ShapeError {
+                    path: "$".into(),
+                    expected: "object",
+                    actual: json_value_kind(other),
+                });
+            }
+        };
         let root = self.doc.get_map(ROOT_MAP_KEY);
         merge_map(&root, json_obj, "$")?;
         self.doc.commit();
@@ -139,7 +151,8 @@ impl ProjectDoc {
     /// Inverse of `apply_canonical_json`: snapshot the doc's current
     /// project state as a `serde_json::Value`. The returned value matches
     /// the shape that was last applied — i.e. the project object directly,
-    /// not wrapped under a `"project"` key.
+    /// not wrapped under a `"project"` key — and the variable-array
+    /// fields are sorted by name for deterministic output.
     pub fn export_canonical_json(&self) -> Result<Value, MergeError> {
         let deep = self.doc.get_deep_value();
         // The doc's deep value is `{ "project": {...} }`; we strip the
@@ -147,17 +160,20 @@ impl ProjectDoc {
         // An empty doc (no apply_canonical_json yet) has no `project` key,
         // so we return an empty object as the "no project loaded yet"
         // signal — matches the empty-input case for round-tripping.
-        match loro_value_to_json(&deep) {
+        let project_value = match loro_value_to_json(&deep) {
             Value::Object(mut map) => match map.remove(ROOT_MAP_KEY) {
-                Some(project) => Ok(project),
-                None => Ok(Value::Object(JsonMap::new())),
+                Some(project) => project,
+                None => return Ok(Value::Object(JsonMap::new())),
             },
-            other => Err(MergeError::ShapeError {
-                path: "$".into(),
-                expected: "object",
-                actual: json_value_kind(&other),
-            }),
-        }
+            other => {
+                return Err(MergeError::ShapeError {
+                    path: "$".into(),
+                    expected: "object",
+                    actual: json_value_kind(&other),
+                });
+            }
+        };
+        loro_shape_to_canonical_json(project_value)
     }
 
     /// Convenience: serialize `export_canonical_json` to a JSON string.
@@ -406,6 +422,269 @@ fn json_value_kind(value: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+/// Variable-array fields within a `json::Model` that we project into
+/// canonical-name-keyed maps. Listed in source-of-truth order so any
+/// future variant added to `json::Model` can be cross-checked at a
+/// glance. Lists outside this set (`views`, `loop_metadata`, `groups`)
+/// stay as positional arrays since they don't carry a stable name key.
+const VARIABLE_ARRAY_FIELDS: &[&str] = &["stocks", "flows", "auxiliaries", "modules"];
+
+/// Re-shape a `json::Project`-shaped value for storage in the LoroDoc.
+///
+/// The on-disk JSON uses `Vec<Variable>` for stocks/flows/auxiliaries/
+/// modules and `Vec<Model>` for the models. In Loro we want the per-name
+/// last-writer-wins property, which `LoroMap` gives us natively when the
+/// keys are stable identifiers. So the projection rewrites:
+///
+///   - `models: [<Model>, ...]`  -> `models: { "<model_name>": <Model> }`
+///   - inside each model:
+///     `stocks: [<Stock>, ...]` -> `stocks: { "<canonical_name>": <Stock> }`
+///     (and same for flows / auxiliaries / modules)
+///
+/// `views`/`dimensions`/`units`/`groups`/`loop_metadata` are left alone
+/// as positional arrays — they have no stable per-element name key (or
+/// position is the meaningful field, as for `views`).
+///
+/// Variable names are canonicalized via `Ident::<Canonical>::new(...)`
+/// so callers using mixed-case or whitespace variants land on the same
+/// key. Model names are stored as-is — the design doesn't canonicalize
+/// model names elsewhere either.
+///
+/// Returns `ShapeError` only when the input fundamentally doesn't match
+/// the project schema (e.g. `models` isn't an array). Missing optional
+/// keys are passed through unchanged so partial projects (a JSON missing
+/// `dimensions`, say) still merge cleanly.
+fn project_json_to_loro_shape(json: &Value) -> Result<Value, MergeError> {
+    let obj = match json {
+        Value::Object(map) => map,
+        _ => {
+            return Err(MergeError::ShapeError {
+                path: "$".into(),
+                expected: "object",
+                actual: json_value_kind(json),
+            });
+        }
+    };
+
+    let mut out = JsonMap::with_capacity(obj.len());
+    for (key, value) in obj {
+        if key == "models" {
+            out.insert(key.clone(), models_array_to_map(value, "$.models")?);
+        } else {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn models_array_to_map(value: &Value, path: &str) -> Result<Value, MergeError> {
+    let arr = match value {
+        Value::Array(a) => a,
+        _ => {
+            return Err(MergeError::ShapeError {
+                path: path.into(),
+                expected: "array",
+                actual: json_value_kind(value),
+            });
+        }
+    };
+
+    let mut out = JsonMap::with_capacity(arr.len());
+    for (idx, model) in arr.iter().enumerate() {
+        let elem_path = format!("{path}[{idx}]");
+        let model_obj = match model {
+            Value::Object(m) => m,
+            _ => {
+                return Err(MergeError::ShapeError {
+                    path: elem_path,
+                    expected: "object",
+                    actual: json_value_kind(model),
+                });
+            }
+        };
+        let model_name = model_obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| MergeError::ShapeError {
+                path: format!("{elem_path}.name"),
+                expected: "string",
+                actual: model_obj
+                    .get("name")
+                    .map(json_value_kind)
+                    .unwrap_or("missing"),
+            })?
+            .to_owned();
+        let projected_model = project_model(model_obj, &elem_path)?;
+        out.insert(model_name, projected_model);
+    }
+    Ok(Value::Object(out))
+}
+
+fn project_model(model: &JsonMap<String, Value>, path: &str) -> Result<Value, MergeError> {
+    let mut out = JsonMap::with_capacity(model.len());
+    for (key, value) in model {
+        if VARIABLE_ARRAY_FIELDS.contains(&key.as_str()) {
+            let field_path = format!("{path}.{key}");
+            out.insert(key.clone(), variables_array_to_map(value, &field_path)?);
+        } else {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn variables_array_to_map(value: &Value, path: &str) -> Result<Value, MergeError> {
+    let arr = match value {
+        Value::Array(a) => a,
+        _ => {
+            return Err(MergeError::ShapeError {
+                path: path.into(),
+                expected: "array",
+                actual: json_value_kind(value),
+            });
+        }
+    };
+
+    let mut out = JsonMap::with_capacity(arr.len());
+    for (idx, var) in arr.iter().enumerate() {
+        let elem_path = format!("{path}[{idx}]");
+        let var_obj = match var {
+            Value::Object(v) => v,
+            _ => {
+                return Err(MergeError::ShapeError {
+                    path: elem_path,
+                    expected: "object",
+                    actual: json_value_kind(var),
+                });
+            }
+        };
+        let raw_name = var_obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| MergeError::ShapeError {
+                path: format!("{elem_path}.name"),
+                expected: "string",
+                actual: var_obj
+                    .get("name")
+                    .map(json_value_kind)
+                    .unwrap_or("missing"),
+            })?;
+        let key = Ident::<Canonical>::new(raw_name).as_str().to_owned();
+        out.insert(key, Value::Object(var_obj.clone()));
+    }
+    Ok(Value::Object(out))
+}
+
+/// Inverse of `project_json_to_loro_shape`: rebuild the on-disk
+/// `Vec<Variable>` / `Vec<Model>` arrays from the name-keyed maps.
+///
+/// Sort order: variables and models are sorted by their `name` field
+/// (case-sensitive lexicographic). This mirrors the order XMILE writers
+/// produce so a roundtrip via the LoroDoc doesn't churn the on-disk
+/// file. If a variable somehow lacks a `name` (shouldn't happen given
+/// `apply_canonical_json` enforces the schema on write), we sort it
+/// to the end with the canonical map key as a fallback.
+fn loro_shape_to_canonical_json(value: Value) -> Result<Value, MergeError> {
+    let obj = match value {
+        Value::Object(map) => map,
+        _ => {
+            return Err(MergeError::ShapeError {
+                path: "$".into(),
+                expected: "object",
+                actual: json_value_kind(&value),
+            });
+        }
+    };
+
+    let mut out = JsonMap::with_capacity(obj.len());
+    for (key, value) in obj {
+        if key == "models" {
+            out.insert(key, models_map_to_array(value, "$.models")?);
+        } else {
+            out.insert(key, value);
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn models_map_to_array(value: Value, path: &str) -> Result<Value, MergeError> {
+    let map = match value {
+        Value::Object(m) => m,
+        _ => {
+            return Err(MergeError::ShapeError {
+                path: path.into(),
+                expected: "object",
+                actual: json_value_kind(&value),
+            });
+        }
+    };
+    let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, model_value) in entries {
+        let model_obj = match model_value {
+            Value::Object(m) => m,
+            other => {
+                return Err(MergeError::ShapeError {
+                    path: format!("{path}.{key}"),
+                    expected: "object",
+                    actual: json_value_kind(&other),
+                });
+            }
+        };
+        let model_path = format!("{path}.{key}");
+        out.push(unproject_model(model_obj, &model_path)?);
+    }
+    Ok(Value::Array(out))
+}
+
+fn unproject_model(model: JsonMap<String, Value>, path: &str) -> Result<Value, MergeError> {
+    let mut out = JsonMap::with_capacity(model.len());
+    for (key, value) in model {
+        if VARIABLE_ARRAY_FIELDS.contains(&key.as_str()) {
+            let field_path = format!("{path}.{key}");
+            out.insert(key, variables_map_to_array(value, &field_path)?);
+        } else {
+            out.insert(key, value);
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn variables_map_to_array(value: Value, path: &str) -> Result<Value, MergeError> {
+    let map = match value {
+        Value::Object(m) => m,
+        _ => {
+            return Err(MergeError::ShapeError {
+                path: path.into(),
+                expected: "object",
+                actual: json_value_kind(&value),
+            });
+        }
+    };
+    let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+    // Sort by the variable's `name` field so the on-disk array matches
+    // the natural alphabetic order used by the XMILE writer. Keys of
+    // the canonical-name map are themselves canonical, so we fall back
+    // to them when `name` is missing (defensive — won't happen for
+    // doc state produced through the schema-enforcing apply path).
+    entries.sort_by(|a, b| {
+        let name_a =
+            a.1.as_object()
+                .and_then(|m| m.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(a.0.as_str());
+        let name_b =
+            b.1.as_object()
+                .and_then(|m| m.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(b.0.as_str());
+        name_a.cmp(name_b)
+    });
+    let out: Vec<Value> = entries.into_iter().map(|(_, v)| v).collect();
+    Ok(Value::Array(out))
 }
 
 #[cfg(test)]
@@ -726,5 +1005,301 @@ mod tests {
         doc.apply_canonical_json(&updated).expect("second");
         let exported = doc.export_canonical_json().expect("export");
         assert_eq!(exported, updated);
+    }
+
+    fn small_project_json() -> Value {
+        // A minimal `json::Project`-shaped value: one model, two stocks,
+        // one flow, one auxiliary, one module. The names are chosen so
+        // canonicalization (lowercasing, space-to-underscore) is observable.
+        serde_json::json!({
+            "name": "demo",
+            "simSpecs": {
+                "startTime": 0.0,
+                "endTime": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [
+                    {
+                        "name": "Population",
+                        "initialEquation": "100",
+                        "inflows": ["births"],
+                        "outflows": []
+                    },
+                    {
+                        "name": "Deaths Stock",
+                        "initialEquation": "0",
+                        "inflows": [],
+                        "outflows": []
+                    }
+                ],
+                "flows": [{
+                    "name": "births",
+                    "equation": "Population * 0.05",
+                    "units": ""
+                }],
+                "auxiliaries": [{
+                    "name": "Growth Rate",
+                    "equation": "0.05",
+                    "units": ""
+                }],
+                "modules": []
+            }],
+            "dimensions": [],
+            "units": []
+        })
+    }
+
+    #[test]
+    fn project_json_round_trips_through_apply_export() {
+        // Apply a small full project and assert export structurally
+        // matches. The arrays come back sorted by `name` (alphabetic),
+        // which is the canonical xmile order.
+        let doc = ProjectDoc::new();
+        let input = small_project_json();
+        doc.apply_canonical_json(&input).expect("apply");
+        let exported = doc.export_canonical_json().expect("export");
+
+        // Top-level scalars and the simSpecs block must round-trip exactly.
+        assert_eq!(exported["name"], input["name"]);
+        assert_eq!(exported["simSpecs"], input["simSpecs"]);
+
+        // The models array should still be an array (export inverted the
+        // map projection) with one entry whose name is "main".
+        let models = exported["models"].as_array().expect("models is array");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["name"], "main");
+
+        // Stocks come back sorted by `name`. "Deaths Stock" comes before
+        // "Population" alphabetically.
+        let stocks = models[0]["stocks"].as_array().expect("stocks is array");
+        assert_eq!(stocks.len(), 2);
+        assert_eq!(stocks[0]["name"], "Deaths Stock");
+        assert_eq!(stocks[1]["name"], "Population");
+
+        // Flows / auxiliaries also preserved (only one each here).
+        let flows = models[0]["flows"].as_array().expect("flows is array");
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0]["name"], "births");
+        let auxes = models[0]["auxiliaries"]
+            .as_array()
+            .expect("auxiliaries is array");
+        assert_eq!(auxes.len(), 1);
+        assert_eq!(auxes[0]["name"], "Growth Rate");
+    }
+
+    #[test]
+    fn variable_keys_are_canonical_form() {
+        // The Loro storage keys are canonical (lowercase, spaces->underscores).
+        // We verify by examining the doc's deep value directly: the key
+        // for "Deaths Stock" must be the canonical form, not the raw form.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&small_project_json())
+            .expect("apply");
+
+        let inner = doc.inner_doc().get_deep_value();
+        let json = loro_value_to_json(&inner);
+        // Drill into project.models.main.stocks
+        let stocks_map = &json["project"]["models"]["main"]["stocks"];
+        // Canonical form: "deaths_stock" (lowercase, space -> underscore)
+        assert!(
+            stocks_map.get("deaths_stock").is_some(),
+            "expected canonical key 'deaths_stock' in {stocks_map}"
+        );
+        assert!(
+            stocks_map.get("population").is_some(),
+            "expected canonical key 'population' in {stocks_map}"
+        );
+    }
+
+    #[test]
+    fn project_json_to_loro_shape_rejects_non_object_root() {
+        let err = project_json_to_loro_shape(&serde_json::json!([1, 2, 3])).unwrap_err();
+        match err {
+            MergeError::ShapeError {
+                path,
+                expected,
+                actual,
+            } => {
+                assert_eq!(path, "$");
+                assert_eq!(expected, "object");
+                assert_eq!(actual, "array");
+            }
+            other => panic!("expected ShapeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_json_to_loro_shape_rejects_non_array_models() {
+        let bad = serde_json::json!({ "name": "x", "models": "not-an-array" });
+        let err = project_json_to_loro_shape(&bad).unwrap_err();
+        match err {
+            MergeError::ShapeError { path, expected, .. } => {
+                assert_eq!(path, "$.models");
+                assert_eq!(expected, "array");
+            }
+            other => panic!("expected ShapeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_json_to_loro_shape_rejects_model_missing_name() {
+        // A model object without a `name` field cannot be keyed; the
+        // projection must surface a precise ShapeError pointing at the
+        // bad element.
+        let bad = serde_json::json!({
+            "name": "x",
+            "models": [{ "stocks": [] }]
+        });
+        let err = project_json_to_loro_shape(&bad).unwrap_err();
+        match err {
+            MergeError::ShapeError { path, .. } => {
+                assert_eq!(path, "$.models[0].name");
+            }
+            other => panic!("expected ShapeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_json_to_loro_shape_rejects_variable_missing_name() {
+        let bad = serde_json::json!({
+            "name": "x",
+            "models": [{
+                "name": "main",
+                "stocks": [{ "initialEquation": "0" }]
+            }]
+        });
+        let err = project_json_to_loro_shape(&bad).unwrap_err();
+        match err {
+            MergeError::ShapeError { path, .. } => {
+                assert_eq!(path, "$.models[0].stocks[0].name");
+            }
+            other => panic!("expected ShapeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_serial_modify_different_stocks_preserves_both() {
+        // The AC4.1 partial verification: simulate the production
+        // execution model where two source-of-edit (browser tabs) each
+        // produce a save modifying different stocks. Both saves are
+        // sequenced through the registry write lock, so they apply
+        // serially against the LoroDoc — but the per-stock map keying
+        // means the *second* apply doesn't clobber the first stock's
+        // edit even though a naive list-replace would.
+        let doc = ProjectDoc::new();
+
+        // Initial state: two stocks, S1 and S2, each with a placeholder
+        // initial equation.
+        let initial = serde_json::json!({
+            "name": "demo",
+            "simSpecs": {
+                "startTime": 0.0, "endTime": 10.0, "dt": "1", "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [
+                    { "name": "S1", "initialEquation": "0", "inflows": [], "outflows": [] },
+                    { "name": "S2", "initialEquation": "0", "inflows": [], "outflows": [] }
+                ]
+            }]
+        });
+        doc.apply_canonical_json(&initial).expect("initial apply");
+
+        // Save 1: client modifies only S1 (their canonical JSON still
+        // contains both stocks but with S1's equation updated).
+        let mut save_a = initial.clone();
+        save_a["models"][0]["stocks"][0]["initialEquation"] = serde_json::json!("100");
+        doc.apply_canonical_json(&save_a).expect("save A");
+
+        // Save 2: client modifies only S2. Importantly, this client's
+        // canonical JSON *also* carries the S1 baseline they last saw —
+        // which still reads "100" because they refetched after save A,
+        // mirroring the real-world flow. (The CRDT property is in the
+        // *delta* shape: only S2 changed in this apply.)
+        let mut save_b = save_a.clone();
+        save_b["models"][0]["stocks"][1]["initialEquation"] = serde_json::json!("200");
+        doc.apply_canonical_json(&save_b).expect("save B");
+
+        let exported = doc.export_canonical_json().expect("export");
+        let stocks = exported["models"][0]["stocks"]
+            .as_array()
+            .expect("stocks array");
+
+        // Find both stocks by name (sort order is by name).
+        let s1 = stocks
+            .iter()
+            .find(|v| v["name"] == "S1")
+            .expect("S1 present");
+        let s2 = stocks
+            .iter()
+            .find(|v| v["name"] == "S2")
+            .expect("S2 present");
+        assert_eq!(s1["initialEquation"], "100", "S1 edit preserved");
+        assert_eq!(s2["initialEquation"], "200", "S2 edit preserved");
+    }
+
+    #[test]
+    fn dropping_a_stock_removes_it_from_export() {
+        // A save that drops a stock from the array should remove the
+        // corresponding key from the LoroMap (since it's absent from the
+        // incoming JSON). The export then reflects the smaller set.
+        let doc = ProjectDoc::new();
+        doc.apply_canonical_json(&small_project_json())
+            .expect("first apply");
+
+        let mut updated = small_project_json();
+        let stocks_arr = updated["models"][0]["stocks"].as_array_mut().unwrap();
+        // Keep only "Population"; drop "Deaths Stock".
+        stocks_arr.retain(|v| v["name"] == "Population");
+
+        doc.apply_canonical_json(&updated).expect("second apply");
+        let exported = doc.export_canonical_json().expect("export");
+        let stocks = exported["models"][0]["stocks"]
+            .as_array()
+            .expect("stocks array");
+        assert_eq!(stocks.len(), 1);
+        assert_eq!(stocks[0]["name"], "Population");
+    }
+
+    #[test]
+    fn loro_shape_to_canonical_json_sorts_models_by_name() {
+        // Assemble a doc-shape value with models in non-alphabetic order
+        // and verify the inverse projection sorts them.
+        let shape = serde_json::json!({
+            "name": "x",
+            "models": {
+                "zebra": { "name": "zebra" },
+                "alpha": { "name": "alpha" }
+            }
+        });
+        let out = loro_shape_to_canonical_json(shape).expect("invert");
+        let models = out["models"].as_array().expect("models array");
+        assert_eq!(models[0]["name"], "alpha");
+        assert_eq!(models[1]["name"], "zebra");
+    }
+
+    #[test]
+    fn loro_shape_to_canonical_json_sorts_variables_by_name() {
+        // Variables should sort by their `name` field (case-sensitive),
+        // matching the XMILE writer's order.
+        let shape = serde_json::json!({
+            "name": "x",
+            "models": {
+                "main": {
+                    "name": "main",
+                    "stocks": {
+                        "zebra_stock": { "name": "Zebra Stock" },
+                        "alpha_stock": { "name": "Alpha Stock" }
+                    }
+                }
+            }
+        });
+        let out = loro_shape_to_canonical_json(shape).expect("invert");
+        let stocks = out["models"][0]["stocks"].as_array().expect("stocks array");
+        assert_eq!(stocks[0]["name"], "Alpha Stock");
+        assert_eq!(stocks[1]["name"], "Zebra Stock");
     }
 }
