@@ -21,7 +21,7 @@ use axum::routing::get;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::handlers::{AppState, get_project, list_projects};
+use crate::handlers::{AppState, get_project, list_projects, save_project};
 use crate::static_assets::static_handler;
 
 /// Maximum accepted request body size. Phase 1 is read-only so this is
@@ -43,7 +43,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/projects", get(list_projects))
-        .route("/api/projects/{*rel_path}", get(get_project))
+        .route(
+            "/api/projects/{*rel_path}",
+            get(get_project).post(save_project),
+        )
         .fallback(static_handler)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())

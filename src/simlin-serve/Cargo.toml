@@ -30,6 +30,7 @@ mime_guess = "2"
 rand = "0.10"
 base64 = "0.22"
 open = "5"
+anyhow = "1"
 
 [build-dependencies]
 anyhow = "1"

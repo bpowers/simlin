@@ -15,7 +15,7 @@ use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::git::GitProbe;
 use crate::parse::{ParseError, datamodel_to_canonical_json, parse_to_datamodel};
@@ -168,6 +168,114 @@ pub async fn get_project(
         version,
         source_format: effective_format,
     }))
+}
+
+/// Wire shape of a save request. The `json` field carries the canonical
+/// stringified JSON the Editor produced from `engine.serializeJson()`; we
+/// re-parse it server-side rather than accepting structured fields so the
+/// editor's serialization stays the single source of truth for the
+/// canonical form.
+#[derive(Debug, Deserialize)]
+pub struct SaveRequest {
+    pub json: String,
+    pub version: u64,
+}
+
+/// Wire shape of a successful save response. `path` is the (forward-slash)
+/// relative path the server actually wrote; this differs from the request
+/// path when a `.mdl`-backed entry redirects to a sibling `.sd.json`
+/// sidecar (Phase 2 Subcomponent B).
+#[derive(Debug, Serialize)]
+pub struct SaveResponse {
+    pub version: u64,
+    pub path: String,
+}
+
+/// Structured detail attached to 422 responses. Mirrors
+/// `simlin-mcp::tools::types::ErrorOutput` field-for-field; we duplicate
+/// the structure here rather than depending on `simlin-mcp` to keep crate
+/// boundaries clean (`simlin-serve` and `simlin-mcp` are sibling consumers
+/// of the same engine error types).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variable_name: Option<String>,
+    pub kind: String,
+}
+
+/// Errors surfaced from the save handler. Status mapping lives entirely in
+/// the `IntoResponse` impl; handler code only constructs variants and lets
+/// Axum render them.
+#[derive(Debug)]
+pub enum SaveError {
+    /// Optimistic-lock mismatch: the client's `version` is stale. The
+    /// `actual` field tells the client what to refetch against.
+    VersionMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    BadRequest(String),
+    /// Path was outside the scan root or otherwise denied.
+    Forbidden,
+    /// One or more new errors would be introduced by this edit. The list
+    /// only contains *new* errors (errors that already existed before this
+    /// save are filtered out so a save that fixes some errors without
+    /// introducing any new ones is accepted).
+    Validation {
+        errors: Vec<ValidationError>,
+    },
+    /// Anything we couldn't classify; rendered as 500 and logged.
+    Internal(anyhow::Error),
+}
+
+impl IntoResponse for SaveError {
+    fn into_response(self) -> Response {
+        match self {
+            SaveError::VersionMismatch { expected, actual } => {
+                let body = serde_json::json!({
+                    "error": "version_mismatch",
+                    "expected": expected,
+                    "actual": actual,
+                });
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            SaveError::BadRequest(msg) => {
+                let body = serde_json::json!({ "error": msg });
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            SaveError::Forbidden => {
+                let body = serde_json::json!({ "error": "forbidden" });
+                (StatusCode::FORBIDDEN, Json(body)).into_response()
+            }
+            SaveError::Validation { errors } => {
+                let body = serde_json::json!({
+                    "error": "validation_failed",
+                    "details": errors,
+                });
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
+            }
+            SaveError::Internal(err) => {
+                tracing::error!(error = %err, "internal server error in save handler");
+                let body = serde_json::json!({ "error": "internal server error" });
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/projects/{*rel_path}` — save edits to a model. Stub for Task 1;
+/// later tasks fill in the version check, validation, and disk write.
+pub async fn save_project(
+    State(_state): State<AppState>,
+    AxumPath(_rel_path): AxumPath<String>,
+    Json(_body): Json<SaveRequest>,
+) -> Result<Json<SaveResponse>, SaveError> {
+    Err(SaveError::Internal(anyhow::anyhow!("not yet implemented")))
 }
 
 /// Errors surfaced through HTTP. The `IntoResponse` impl owns the status code
@@ -358,5 +466,103 @@ mod tests {
             Some(ProjectFormat::SdJson)
         );
         assert_eq!(format_for_path(Path::new("/tmp/x.txt")), None);
+    }
+
+    #[test]
+    fn save_error_version_mismatch_maps_to_409() {
+        let err = SaveError::VersionMismatch {
+            expected: 1,
+            actual: 0,
+        };
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn save_error_bad_request_maps_to_400() {
+        let err = SaveError::BadRequest("invalid".into());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn save_error_forbidden_maps_to_403() {
+        let err = SaveError::Forbidden;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn save_error_validation_maps_to_422() {
+        let err = SaveError::Validation { errors: vec![] };
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn save_error_internal_maps_to_500() {
+        let err = SaveError::Internal(anyhow::anyhow!("oops"));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn save_error_validation_body_carries_details() {
+        let errors = vec![ValidationError {
+            code: "unknown_dependency".into(),
+            message: "undefined: foo".into(),
+            model_name: Some("main".into()),
+            variable_name: Some("bar".into()),
+            kind: "variable".into(),
+        }];
+        let serialized = serde_json::to_value(&errors).expect("serialize details");
+        // The IntoResponse body uses the same serialization, so we cross-check
+        // the field projection here without re-running the response machinery.
+        assert_eq!(serialized[0]["code"], "unknown_dependency");
+        assert_eq!(serialized[0]["modelName"], "main");
+        assert_eq!(serialized[0]["variableName"], "bar");
+        assert_eq!(serialized[0]["kind"], "variable");
+    }
+
+    #[test]
+    fn save_request_round_trips_through_json() {
+        let req = SaveRequest {
+            json: "{}".into(),
+            version: 1,
+        };
+        let serialized = serde_json::json!({
+            "json": &req.json,
+            "version": req.version,
+        })
+        .to_string();
+        let parsed: SaveRequest =
+            serde_json::from_str(&serialized).expect("SaveRequest parses back");
+        assert_eq!(parsed.json, "{}");
+        assert_eq!(parsed.version, 1);
+    }
+
+    #[test]
+    fn save_response_serializes_with_expected_fields() {
+        let resp = SaveResponse {
+            version: 7,
+            path: "sub/model.stmx".into(),
+        };
+        let value = serde_json::to_value(&resp).expect("serialize SaveResponse");
+        assert_eq!(value["version"].as_u64(), Some(7));
+        assert_eq!(value["path"].as_str(), Some("sub/model.stmx"));
+    }
+
+    #[test]
+    fn validation_error_skips_none_fields() {
+        let err = ValidationError {
+            code: "not_simulatable".into(),
+            message: "msg".into(),
+            model_name: None,
+            variable_name: None,
+            kind: "simulation".into(),
+        };
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert!(value.get("modelName").is_none());
+        assert!(value.get("variableName").is_none());
     }
 }
