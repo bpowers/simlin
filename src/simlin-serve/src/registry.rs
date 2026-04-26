@@ -499,6 +499,62 @@ impl ProjectRegistry {
         Ok((new_version, arc_doc))
     }
 
+    /// Apply a merge sourced from an on-disk change without a client-supplied
+    /// version check. Mirrors `check_increment_and_merge` minus the
+    /// version-comparison step: the file watcher is authoritative for "what
+    /// just happened on disk", so there's no expected_version to honor.
+    ///
+    /// On every call we:
+    /// 1. Look up the entry (returning `NotFound` when absent).
+    /// 2. Lazily hydrate the entry's `ProjectDoc` if it isn't already cached.
+    /// 3. Apply `apply_canonical_json` against the doc.
+    /// 4. Bump the entry's version.
+    ///
+    /// Returns the new version on success. Lock scope and `doc` slot
+    /// hydration follow the same shape as `check_increment_and_merge`; the
+    /// only structural difference is the absence of a version-mismatch arm.
+    pub fn merge_disk_change(
+        &self,
+        abs_path: &Path,
+        new_json: &serde_json::Value,
+    ) -> Result<u64, RegistryError> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("registry RwLock poisoned by panic in another thread");
+        let entry = guard.get_mut(abs_path).ok_or(RegistryError::NotFound)?;
+
+        let format = entry.format;
+        let doc_slot = entry.doc.clone();
+        let arc_doc = {
+            let read_guard = doc_slot
+                .read()
+                .expect("doc RwLock poisoned by panic in another thread");
+            if let Some(existing) = read_guard.as_ref() {
+                existing.clone()
+            } else {
+                drop(read_guard);
+                let mut write_guard = doc_slot
+                    .write()
+                    .expect("doc RwLock poisoned by panic in another thread");
+                if let Some(existing) = write_guard.as_ref() {
+                    existing.clone()
+                } else {
+                    let doc = hydrate_doc_from_disk(abs_path, format)?;
+                    let arc = Arc::new(doc);
+                    *write_guard = Some(arc.clone());
+                    arc
+                }
+            }
+        };
+
+        arc_doc
+            .apply_canonical_json(new_json)
+            .map_err(|e| RegistryError::HydrationFailed(format!("apply: {e}")))?;
+        entry.version += 1;
+        Ok(entry.version)
+    }
+
     /// Number of entries currently in the registry.
     pub fn len(&self) -> usize {
         let guard = self
@@ -1329,6 +1385,76 @@ mod tests {
         let exported = doc.export_canonical_json().expect("export");
         assert_eq!(exported["name"].as_str(), Some("renamed"));
         assert_eq!(reg.get(&abs).expect("entry").version, 1);
+    }
+
+    #[test]
+    fn merge_disk_change_returns_not_found_for_unknown_path() {
+        let reg = ProjectRegistry::new(PathBuf::from("/tmp/root"));
+        let err = reg
+            .merge_disk_change(Path::new("/tmp/root/missing.stmx"), &serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(err, RegistryError::NotFound);
+    }
+
+    #[test]
+    fn merge_disk_change_increments_version_without_expected_check() {
+        // Watcher is authoritative for "what happened on disk", so unlike
+        // check_increment_and_merge there is no expected_version argument.
+        // Each call increments the version and applies the merge.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("m.sd.json");
+        let initial = r#"{"name":"on-disk","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, initial).expect("write");
+        let mut meta = make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson);
+        meta.version = 5;
+        reg.upsert(abs.clone(), meta);
+
+        let new_json = serde_json::json!({
+            "name":"after-disk-edit",
+            "simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},
+            "models":[{"name":"main"}]
+        });
+        let new_version = reg.merge_disk_change(&abs, &new_json).expect("merge");
+        assert_eq!(new_version, 6, "version increments without expected check");
+        let entry = reg.get(&abs).expect("entry");
+        assert_eq!(entry.version, 6);
+
+        // Inspect the merged doc to verify the merge actually applied.
+        let doc = reg.get_or_init_doc(&abs).expect("doc");
+        let exported = doc.export_canonical_json().expect("export");
+        assert_eq!(exported["name"].as_str(), Some("after-disk-edit"));
+    }
+
+    #[test]
+    fn merge_disk_change_hydrates_from_disk_on_first_touch() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let reg = ProjectRegistry::new(temp.path().to_path_buf());
+        let abs = temp.path().join("m.sd.json");
+        let initial = r#"{"name":"baseline","simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},"models":[{"name":"main"}]}"#;
+        std::fs::write(&abs, initial).expect("write");
+        reg.upsert(
+            abs.clone(),
+            make_meta(PathBuf::from("ignored"), ProjectFormat::SdJson),
+        );
+
+        // doc slot is empty before the call.
+        {
+            let entry = reg.get(&abs).expect("entry");
+            assert!(entry.doc.read().expect("read doc slot").is_none());
+        }
+
+        let updated = serde_json::json!({
+            "name":"new-from-disk",
+            "simSpecs":{"startTime":0,"endTime":10,"dt":"1","method":"euler"},
+            "models":[{"name":"main"}]
+        });
+        let new_version = reg.merge_disk_change(&abs, &updated).expect("merge");
+        assert_eq!(new_version, 1, "version starts at 0 + 1 = 1");
+
+        let cached = reg.get_or_init_doc(&abs).expect("cached doc");
+        let exported = cached.export_canonical_json().expect("export");
+        assert_eq!(exported["name"].as_str(), Some("new-from-disk"));
     }
 
     #[test]

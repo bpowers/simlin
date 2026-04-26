@@ -24,12 +24,16 @@
 //! `tokio::select!`s over (a) `rx.recv()` for new batches and
 //! (b) `shutdown.notified()` for graceful teardown.
 //!
-//! The actor's job in Subcomponent A is plumbing only. Subcomponent B
-//! will fill in the per-event handlers (`handle_model_change`,
-//! `handle_model_removal`, `handle_git_change`) so the watcher actually
-//! drives merges; for now those handlers are `tracing::debug!` stubs.
+//! Per-event handlers (Subcomponent B): `handle_model_change` reads,
+//! hash-compares for echo-suppression, parses, validates, and merges
+//! through the registry's `merge_disk_change` primitive;
+//! `handle_model_removal` drops the registry entry and emits
+//! `WsMessage::ProjectRemoved`; `handle_git_change` invalidates the
+//! `GitProbe` cache for the affected repo and re-evaluates each
+//! registry entry inside it, broadcasting `ProjectChanged` for any
+//! whose git status changed.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,8 +46,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{classify_extension, is_excluded_dir};
+use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
-use crate::registry::ProjectFormat;
+use crate::hashing::content_hash;
+use crate::parse::parse_to_datamodel;
+use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
+use crate::validation::{compute_baseline, validate_save};
 
 /// Cross-task shutdown notifier. `main()` constructs one and passes clones
 /// into long-lived actors (the watcher in Phase 4; the websocket loops can
@@ -233,6 +241,28 @@ fn path_traverses_excluded_dir(path: &Path) -> bool {
     })
 }
 
+/// For `path = "/dir/foo.mdl"`, return `/dir/foo.sd.json`. Same rule
+/// the GET handler and writer use; kept here to avoid a cross-module
+/// dep just for the sidecar-name predicate.
+fn sidecar_for_mdl(mdl_path: &Path) -> PathBuf {
+    let parent = mdl_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = mdl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    parent.join(format!("{stem}.sd.json"))
+}
+
+/// Render a relative `Path` as a string with forward-slash separators.
+/// Mirrors handlers.rs's local helper -- we duplicate here rather than
+/// expose because the watcher is a sibling module and the converter is
+/// trivially small.
+fn path_to_forward_slash(path: &Path) -> String {
+    let display = path.to_string_lossy().into_owned();
+    if MAIN_SEPARATOR == '/' {
+        display
+    } else {
+        display.replace(MAIN_SEPARATOR, "/")
+    }
+}
+
 /// Test-only side channel for observing raw debounced events.
 ///
 /// The watcher's normal path is to classify and dispatch events through
@@ -376,21 +406,263 @@ impl WatcherActor {
         }
     }
 
-    /// Stub for Subcomponent A. Task 5 replaces this with the real
-    /// read/parse/validate/merge path that drives `apply_canonical_json`
-    /// against the per-project `ProjectDoc`.
+    /// Disk-side merge path. Reads the file, short-circuits on byte
+    /// echo (matching the cached `last_disk_hash` from our own atomic
+    /// writes), parses + validates against the current Loro tip's
+    /// baseline, and applies the new state through
+    /// `registry.merge_disk_change`. Failures (read, parse, validation)
+    /// preserve the last-known-good in-memory state and only emit a
+    /// `tracing::warn!` so the operator can see something went wrong.
+    ///
+    /// On success, broadcasts `ProjectChanged { source: Disk }` so the
+    /// browser remounts the editor with the merged state.
+    ///
+    /// Sidecar override (plan note 9): if `format == Mdl` and a sibling
+    /// `.sd.json` exists, ignore the `.mdl` event entirely. The sidecar
+    /// is canonical once it exists; an event on the `.mdl` is stale.
     async fn handle_model_change(
-        _state: &AppState,
+        state: &AppState,
         path: PathBuf,
         format: ProjectFormat,
         change: ChangeKind,
     ) {
-        tracing::debug!(
-            path = %path.display(),
-            ?format,
-            ?change,
-            "watcher actor: model file change (stub)"
+        if format == ProjectFormat::Mdl {
+            let sidecar = sidecar_for_mdl(&path);
+            if sidecar.is_file() {
+                tracing::debug!(
+                    path = %path.display(),
+                    sidecar = %sidecar.display(),
+                    "watcher: ignoring .mdl event because sidecar exists"
+                );
+                return;
+            }
+        }
+
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(err) => {
+                // The file may have been removed between the event and
+                // the read; that race is an Removed event in disguise
+                // and the dispatch routes it elsewhere. Either way,
+                // there's nothing to merge here.
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "watcher: read failed (likely vanished); skipping merge"
+                );
+                return;
+            }
+        };
+
+        let new_hash = content_hash(&bytes);
+        let canonical = match path.canonicalize() {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "watcher: canonicalize failed; skipping merge"
+                );
+                return;
+            }
+        };
+
+        // Echo suppression: if the bytes hash to the same value the save
+        // handler stored after its own atomic_write, we're seeing our own
+        // event come back through the OS watcher. Skip the merge.
+        if let Some(meta) = state.registry.get(&canonical) {
+            if meta.last_disk_hash == new_hash {
+                tracing::debug!(
+                    path = %canonical.display(),
+                    hash = %format!("{new_hash:#x}"),
+                    "watcher: echo-suppressed (hash matches last save)"
+                );
+                return;
+            }
+        } else if change != ChangeKind::Created {
+            // Create-on-an-unknown-path is the legitimate "freshly
+            // dropped a model in the watched dir" case; for Modify/Other
+            // events on paths we don't track we just skip.
+            tracing::debug!(
+                path = %canonical.display(),
+                "watcher: modify on path not in registry; ignoring"
+            );
+            return;
+        }
+
+        let contents = match std::str::from_utf8(&bytes) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    error = %err,
+                    "watcher: file is not valid UTF-8; ignoring change"
+                );
+                return;
+            }
+        };
+
+        let new_project = match parse_to_datamodel(&canonical, format, contents) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    error = %err,
+                    "watcher: parse failed; preserving last-known-good in-memory state"
+                );
+                return;
+            }
+        };
+
+        // Compute the baseline against the current Loro tip so an external
+        // edit that fixes pre-existing errors is accepted. If the doc
+        // hasn't been hydrated yet (e.g. a Created event on a fresh path),
+        // the baseline is empty, which means any new error will block the
+        // merge — appropriate for a brand-new file we're about to track.
+        let baseline = match state.registry.get_or_init_doc(&canonical) {
+            Ok(doc) => match doc.export_canonical_json() {
+                Ok(value) => match serde_json::from_value::<simlin_engine::json::Project>(value) {
+                    Ok(json_project) => {
+                        let project: simlin_engine::datamodel::Project = json_project.into();
+                        compute_baseline(&project)
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %canonical.display(),
+                            error = %err,
+                            "watcher: doc state is not a project; using empty baseline"
+                        );
+                        Default::default()
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        path = %canonical.display(),
+                        error = %err,
+                        "watcher: doc export failed; using empty baseline"
+                    );
+                    Default::default()
+                }
+            },
+            Err(_) => {
+                // No doc yet for this entry (the registry doesn't even
+                // know about it). Fall through with an empty baseline;
+                // the subsequent ensure_or_get below seeds the entry.
+                Default::default()
+            }
+        };
+
+        let canonical_project: simlin_engine::json::Project = (&new_project).into();
+        let canonical_value = match serde_json::to_value(&canonical_project) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    error = %err,
+                    "watcher: serialize canonical json failed"
+                );
+                return;
+            }
+        };
+        let canonical_string = canonical_value.to_string();
+        let outcome = match validate_save(&canonical_string, &baseline) {
+            Ok(o) => o,
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    error = %err,
+                    "watcher: validation parse failed; preserving last-known-good"
+                );
+                return;
+            }
+        };
+        if !outcome.new_errors.is_empty() {
+            tracing::warn!(
+                path = %canonical.display(),
+                errors = ?outcome.new_errors,
+                "watcher: validation failed; preserving last-known-good"
+            );
+            return;
+        }
+
+        // For a brand-new path the registry has nothing to merge against;
+        // ensure a default ProjectMeta exists (with `last_disk_hash = 0`
+        // so we don't echo-suppress the very next legitimate edit).
+        if state.registry.get(&canonical).is_none() {
+            let metadata = std::fs::metadata(&canonical);
+            let (mtime, size) = match metadata {
+                Ok(m) => (
+                    m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    m.len(),
+                ),
+                Err(_) => (std::time::SystemTime::UNIX_EPOCH, 0),
+            };
+            state
+                .registry
+                .ensure_or_get(canonical.clone(), || ProjectMeta {
+                    path: PathBuf::new(),
+                    format,
+                    mtime,
+                    size,
+                    git: GitState::Untracked,
+                    version: 0,
+                    doc: Default::default(),
+                    last_disk_hash: 0,
+                });
+        }
+
+        let new_version = match state
+            .registry
+            .merge_disk_change(&canonical, &canonical_value)
+        {
+            Ok(v) => v,
+            Err(RegistryError::NotFound) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    "watcher: registry entry vanished between ensure_or_get and merge"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    error = %err,
+                    "watcher: merge failed; preserving last-known-good"
+                );
+                return;
+            }
+        };
+
+        // Refresh the meta + last_disk_hash so a subsequent identical
+        // event (e.g., the editor wrote the same bytes twice) is
+        // echo-suppressed. The hash is computed from the bytes WE just
+        // ingested, not from a re-read; that closes a TOCTOU window
+        // where another writer comes in between the merge and the
+        // metadata refresh.
+        if let Ok(metadata) = std::fs::metadata(&canonical)
+            && let Ok(mtime) = metadata.modified()
+        {
+            state
+                .registry
+                .refresh_after_write(&canonical, mtime, metadata.len(), new_hash);
+        }
+
+        let display_path = match canonical.strip_prefix(state.root.as_ref()) {
+            Ok(rel) => path_to_forward_slash(rel),
+            Err(_) => path_to_forward_slash(&canonical),
+        };
+
+        tracing::info!(
+            path = %display_path,
+            version = new_version,
+            "watcher: merged disk change"
         );
+
+        state.events.publish(WsMessage::ProjectChanged {
+            path: display_path,
+            version: new_version,
+            source: ChangeSource::Disk,
+        });
     }
 
     /// Stub for Subcomponent A. Task 6 replaces this with the real
