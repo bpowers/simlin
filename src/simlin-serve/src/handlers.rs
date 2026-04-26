@@ -194,6 +194,7 @@ pub async fn get_project(
             version: 0,
             doc: Default::default(),
             last_disk_hash: 0,
+            last_diagnostic_keys: std::collections::BTreeSet::new(),
         }
     });
 
@@ -398,6 +399,7 @@ pub async fn save_project(
                 version: 0,
                 doc: Default::default(),
                 last_disk_hash: 0,
+                last_diagnostic_keys: std::collections::BTreeSet::new(),
             }
         });
     }
@@ -565,6 +567,7 @@ pub async fn save_project(
                             version: new_version,
                             doc: Default::default(),
                             last_disk_hash: written_hash,
+                            last_diagnostic_keys: std::collections::BTreeSet::new(),
                         },
                     );
                     sidecar_path.clone()

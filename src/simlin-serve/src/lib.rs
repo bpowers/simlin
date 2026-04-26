@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 pub mod cli;
+pub mod diagnostics;
 pub mod discovery;
 pub mod events;
 pub mod git;

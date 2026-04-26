@@ -572,6 +572,7 @@ impl WatcherActor {
                     version: 0,
                     doc: Default::default(),
                     last_disk_hash: 0,
+                    last_diagnostic_keys: std::collections::BTreeSet::new(),
                 });
         }
 
@@ -773,6 +774,7 @@ impl WatcherActor {
                 version: entry.version,
                 doc: entry.doc.clone(),
                 last_disk_hash: entry.last_disk_hash,
+                last_diagnostic_keys: entry.last_diagnostic_keys.clone(),
             };
             state.registry.upsert_preserve_version(abs.clone(), updated);
 

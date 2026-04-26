@@ -11,7 +11,7 @@
 //! prefixes; the `path` field stored on each `ProjectMeta` is the
 //! relative-to-root display form because that's what the SPA renders.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -93,6 +93,18 @@ pub struct ProjectMeta {
     /// correctness violation.
     #[serde(skip)]
     pub last_disk_hash: u64,
+    /// Canonical key set of the project's most recently computed
+    /// diagnostics — pairs of `(error_code, variable_name)`. Used by
+    /// the save / watcher / MCP merge paths to decide whether the
+    /// post-merge diagnostic set actually changed; only differing sets
+    /// produce a `WsMessage::DiagnosticsChanged` broadcast.
+    ///
+    /// Empty on a freshly inserted entry. The first merge after insert
+    /// compares against this empty set so any errors present in the
+    /// new state surface as `DiagnosticsChanged` (and a clean project
+    /// stays silent on its first save).
+    #[serde(skip)]
+    pub last_diagnostic_keys: BTreeSet<(String, Option<String>)>,
 }
 
 /// Failures produced by registry operations that need to report a
@@ -430,6 +442,10 @@ impl ProjectRegistry {
             // sidecar takes over as source of truth; the next save will
             // refresh this slot with the sidecar's bytes.
             last_disk_hash: prev.last_disk_hash,
+            // Carry the cached diagnostic key set forward so a save that
+            // simply transitions .mdl → .sd.json without changing the
+            // model body doesn't re-emit `DiagnosticsChanged`.
+            last_diagnostic_keys: prev.last_diagnostic_keys,
         };
         guard.insert(sidecar_path, new_meta);
         Ok(())
@@ -711,6 +727,7 @@ mod tests {
             version: 0,
             doc: Default::default(),
             last_disk_hash: 0,
+            last_diagnostic_keys: BTreeSet::new(),
         }
     }
 
@@ -803,6 +820,7 @@ mod tests {
                 version: 0,
                 doc: Default::default(),
                 last_disk_hash: 0,
+                last_diagnostic_keys: BTreeSet::new(),
             },
         );
         reg.upsert(
@@ -816,6 +834,7 @@ mod tests {
                 version: 0,
                 doc: Default::default(),
                 last_disk_hash: 0,
+                last_diagnostic_keys: BTreeSet::new(),
             },
         );
 
@@ -1229,6 +1248,7 @@ mod tests {
                 version: new_version,
                 doc: Default::default(),
                 last_disk_hash: 0,
+                last_diagnostic_keys: BTreeSet::new(),
             },
         );
 
@@ -1274,6 +1294,7 @@ mod tests {
                 version: new_version,
                 doc: Default::default(),
                 last_disk_hash: 0,
+                last_diagnostic_keys: BTreeSet::new(),
             },
         );
 

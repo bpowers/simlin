@@ -65,6 +65,7 @@ fn seed_registry(state: &AppState, abs_path: &Path, format: ProjectFormat, hash:
             version: 0,
             doc: Default::default(),
             last_disk_hash: hash,
+            last_diagnostic_keys: std::collections::BTreeSet::new(),
         },
     );
 }

@@ -260,6 +260,7 @@ mod tests {
                 version: 0,
                 doc: Default::default(),
                 last_disk_hash: 0,
+                last_diagnostic_keys: std::collections::BTreeSet::new(),
             },
         );
     }

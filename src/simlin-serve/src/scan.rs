@@ -109,6 +109,7 @@ pub fn scan_into_registry(
             version: 0,
             doc: Default::default(),
             last_disk_hash: 0,
+            last_diagnostic_keys: std::collections::BTreeSet::new(),
         };
 
         visited.insert(abs_path.clone());
