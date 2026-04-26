@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { Editor } from '@simlin/diagram';
 
-import { fetchProject, saveProject } from '../api';
+import { fetchProject, saveProject, VersionConflictError } from '../api';
 import type { GetProjectResponse, JsonProjectData } from '../api';
 
 type EditorHostProps = Readonly<{
@@ -16,6 +16,13 @@ type EditorHostProps = Readonly<{
   // not every host needs to track the redirect (e.g. tests that only
   // verify the wire format).
   onPathRedirect?: (newPath: string) => void;
+  // Invoked when a save returns 409 Conflict and EditorHost has refetched
+  // the latest server state. Lets the parent reset any external editor
+  // state to the new authoritative payload. When omitted, EditorHost
+  // re-renders the Editor itself with the refetched payload (the Editor's
+  // `key` prop forces a remount so its internal state matches the new
+  // initial JSON).
+  onConflict?: (latestJson: string, latestVersion: number) => void;
 }>;
 
 type EditorHostState = {
@@ -23,6 +30,13 @@ type EditorHostState = {
   payload: GetProjectResponse | null;
   error: string | null;
   pending: boolean;
+  // Bumped each time we replace the payload from the server (initial GET
+  // or post-409 refetch). Used as part of the Editor's `key` so the
+  // component remounts with fresh initial state when the server
+  // authoritative copy diverges from what the Editor was tracking.
+  // Successful saves do NOT bump this — the Editor tracks its own
+  // version via `state.projectVersion`.
+  loadGeneration: number;
 };
 
 const INITIAL_STATE: EditorHostState = {
@@ -30,6 +44,7 @@ const INITIAL_STATE: EditorHostState = {
   payload: null,
   error: null,
   pending: false,
+  loadGeneration: 0,
 };
 
 export class EditorHost extends React.Component<EditorHostProps, EditorHostState> {
@@ -68,7 +83,13 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
       if (loadKey !== this.currentLoadKey) {
         return;
       }
-      this.setState({ loadedPath: path, payload, error: null, pending: false });
+      this.setState((prev) => ({
+        loadedPath: path,
+        payload,
+        error: null,
+        pending: false,
+        loadGeneration: prev.loadGeneration + 1,
+      }));
     } catch (err) {
       if (loadKey !== this.currentLoadKey) {
         return;
@@ -90,16 +111,49 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
     if (!path) {
       return undefined;
     }
-    const result = await saveProject(path, project.data, currVersion);
-    if (result.path !== path) {
-      this.props.onPathRedirect?.(result.path);
+    try {
+      const result = await saveProject(path, project.data, currVersion);
+      if (result.path !== path) {
+        this.props.onPathRedirect?.(result.path);
+      }
+      return result.version;
+    } catch (err) {
+      if (err instanceof VersionConflictError) {
+        await this.handleVersionConflict(path);
+        // Surface a friendly toast via the Editor's onSave error path.
+        // Phase 3 will replace this round-trip with proper Loro merging.
+        throw new Error(
+          'Your edit conflicted with another save. The latest version has been loaded — please re-apply your changes.',
+        );
+      }
+      throw err;
     }
-    return result.version;
   };
+
+  // Refetch the project after a 409 and surface the new authoritative
+  // state. If the parent supplied `onConflict`, hand the latest payload
+  // off to it; otherwise update local state and let the Editor's `key`
+  // remount with the new initial JSON + version. Refetch failures
+  // propagate to the caller so the user sees the underlying error
+  // instead of a stale conflict toast.
+  private async handleVersionConflict(path: string): Promise<void> {
+    const latest = await fetchProject(path);
+    if (this.props.onConflict) {
+      this.props.onConflict(latest.json, latest.version);
+      return;
+    }
+    this.setState((prev) => ({
+      loadedPath: path,
+      payload: latest,
+      error: null,
+      pending: false,
+      loadGeneration: prev.loadGeneration + 1,
+    }));
+  }
 
   render(): React.ReactNode {
     const { path } = this.props;
-    const { payload, error, loadedPath } = this.state;
+    const { payload, error, loadedPath, loadGeneration } = this.state;
 
     if (!path) {
       return null;
@@ -127,6 +181,7 @@ export class EditorHost extends React.Component<EditorHostProps, EditorHostState
           </div>
         ) : null}
         <Editor
+          key={`${path}#${loadGeneration}`}
           inputFormat="json"
           initialProjectJson={payload.json}
           initialProjectVersion={payload.version}

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 
 import { EditorHost } from './EditorHost';
 import type { GetProjectResponse, JsonProjectData } from '../api';
@@ -208,5 +208,102 @@ describe('EditorHost', () => {
     await onSave?.({ format: 'json', data: '{}' }, 0);
 
     expect(onPathRedirect).not.toHaveBeenCalled();
+  });
+
+  test('on 409, refetches GET, invokes onConflict with the latest state, and throws a friendly error (AC3.6)', async () => {
+    // 1) initial GET, 2) POST returns 409, 3) refetch GET returns the latest.
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          error: 'version_mismatch',
+          expected: 0,
+          actual: 5,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":5}',
+          version: 5,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const onConflict = jest.fn();
+    render(<EditorHost path="teacup.stmx" onConflict={onConflict} />);
+
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+
+    const onSave = EditorMock.lastProps?.onSave;
+    const projectData: JsonProjectData = { format: 'json', data: '{"v":0}' };
+    await expect(onSave?.(projectData, 0)).rejects.toThrow(/conflict/i);
+
+    expect(onConflict).toHaveBeenCalledTimes(1);
+    expect(onConflict).toHaveBeenCalledWith('{"v":5}', 5);
+
+    // The third fetch call is the refetch.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/projects/teacup.stmx');
+  });
+
+  test('on 409 without an onConflict callback, EditorHost re-renders with the latest payload', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":0}',
+          version: 0,
+          source_format: 'stmx',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          error: 'version_mismatch',
+          expected: 0,
+          actual: 9,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          json: '{"v":9}',
+          version: 9,
+          source_format: 'stmx',
+        }),
+      });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    render(<EditorHost path="teacup.stmx" />);
+
+    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(EditorMock.lastProps?.initialProjectVersion).toBe(0);
+
+    const onSave = EditorMock.lastProps?.onSave;
+    await act(async () => {
+      await expect(onSave?.({ format: 'json', data: '{"v":0}' }, 0)).rejects.toThrow(/conflict/i);
+    });
+
+    // After the conflict, EditorHost must re-render with the refetched payload.
+    await waitFor(() => expect(EditorMock.lastProps?.initialProjectVersion).toBe(9));
+    expect(EditorMock.lastProps?.initialProjectJson).toBe('{"v":9}');
   });
 });
