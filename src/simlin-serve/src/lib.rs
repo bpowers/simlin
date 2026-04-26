@@ -14,6 +14,7 @@ pub mod registry;
 pub mod scan;
 pub mod static_assets;
 pub mod token;
+pub mod validation;
 
 use axum::Router;
 use axum::http::StatusCode;
