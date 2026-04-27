@@ -318,3 +318,17 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Description**: The npm release workflows for `@simlin/mcp` and `@simlin/serve` do not produce a macOS Intel (darwin-x64) binary. Only `darwin-arm64` (Apple Silicon) and Linux targets are built. Intel Mac users cannot install these packages via npm optionalDependencies. The fix is to add `cargo-zigbuild --target x86_64-apple-darwin` steps to both release workflows and add `"@simlin/mcp-darwin-x64"` / `"@simlin/serve-darwin-x64"` entries to the respective `package.json` optionalDependencies.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-25
+
+### 37. macOS Rename Pairing Limitation in Watcher
+
+- **Component**: simlin-serve (`src/watcher.rs`, `tests/watcher_merge.rs`)
+- **Severity**: medium
+- **Description**: On macOS, an external `mv a.sd.json b.sd.json` does not produce the paired `Modify(Name(Both))` debouncer event the watcher's `handle_model_rename` arm depends on. FSEvents reports each side independently as `Modify(Name(Any))` and `notify-debouncer-full` only pairs them when its file-id cache already knows about the source — which only happens for files that arrived via a `Create` event after the watcher started. Files that existed *before* the watcher began (the typical "open this folder" UX) are never in the cache, so pairing always fails and the watcher sees two unpaired single-path events. Result: the source side drops out via `handle_model_removal` (broadcasting `ProjectRemoved`), and the destination side runs through `handle_model_change` (merging into either an existing tracked entry or, for an unknown destination, no-op'ing because `Modified` events on untracked paths are ignored). On Linux the pairing works because inotify's `MOVED_FROM`/`MOVED_TO` cookies always arrive together regardless of cache state.
+- **Symptoms**: external rename of a tracked file: SPA's editor for the old path may not migrate cleanly to the new path; rename-collision over a tracked destination merges contents instead of dropping both stale Loro states; `ProjectRenamed` is never broadcast on macOS.
+- **Test impact**: `external_rename_re_keys_registry_and_emits_project_renamed` and `rename_over_tracked_destination_removes_both_and_rehydrates` are gated with `#[cfg_attr(target_os = "macos", ignore = ...)]`. The `external_remove_drops_registry_entry_and_broadcasts_removed` test still runs on macOS — it is covered by the "missing-file `Modify(Name(_))` ⇒ `Removed`" classify branch.
+- **Possible fixes** (need design discussion, not papered over):
+  - **Hydrate the file-id cache at watcher start** by recursively scanning the root and registering each existing file with the debouncer's cache. This restores the rename pairing for the typical case at the cost of a one-shot scan.
+  - **Heuristic post-hoc pairing in our actor**: keep a short-lived (<=200ms) "recently disappeared registry entries" buffer; when a `Modify(Name(_))` arrives for an unknown destination path, pair it with a recent removal whose content hash matches.
+  - **Accept the macOS UX gap** as documented and update the SPA client to handle the unpaired event sequence (a removal followed by a separate hydrate of the destination) without losing in-flight Loro edits — likely requires Loro doc state to migrate via content rather than via path-key.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-26

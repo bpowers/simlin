@@ -151,10 +151,17 @@ pub enum ClassifiedEvent {
 /// re-trigger git-status recomputation on.
 ///
 /// macOS rename quirk (plan note 3): FSEvents does not always emit
-/// paired rename events; a `Modify(Name(Any))` for the destination
-/// path can show up alone. We classify those as `Modified` so the
-/// merge layer re-reads the file and absorbs the new content -- the
-/// path-id cache has already given us the canonical destination.
+/// paired rename events; a `Modify(Name(Any))` shows up alone for
+/// either side. We disambiguate by checking whether the path still
+/// exists on disk: if the file is there, treat the event as
+/// `Modified` so the merge layer re-reads and absorbs the new content
+/// (matches the destination side of a rename, or a content-rewrite
+/// FSEvents reported as a rename); if the file is gone, treat it as
+/// `Removed` so the registry's entry can be dropped and `ProjectRemoved`
+/// broadcast (matches the source side of a rename, or an `unlink()`
+/// that FSEvents surfaced via `ITEM_RENAMED` rather than `ITEM_REMOVED`).
+/// Without the existence check we would silently swallow source-side
+/// rename and rename-flagged unlink events on macOS.
 pub fn classify(event: &DebouncedEvent) -> ClassifiedEvent {
     // The debouncer puts rename pairs in [from, to] order; the
     // destination ("to") is the last path. For single-path events the
@@ -227,12 +234,23 @@ pub fn classify(event: &DebouncedEvent) -> ClassifiedEvent {
             change: ChangeKind::Created,
         },
         EventKind::Modify(ModifyKind::Name(_)) => {
-            // macOS / FSEvents path: rename-without-content-change.
-            // Treat as Modified so the merge layer re-reads the file.
-            ClassifiedEvent::ModelFile {
-                path,
-                format,
-                change: ChangeKind::Modified,
+            // macOS / FSEvents path: an unpaired rename event lands as
+            // `Modify(Name(Any))`. Disambiguate by existence so the
+            // source side of a rename (or an unlink that FSEvents
+            // surfaced via `ITEM_RENAMED`) drops its registry entry,
+            // while the destination side / content-rewrite case routes
+            // through the merge path. See the function-level docstring.
+            if path.exists() {
+                ClassifiedEvent::ModelFile {
+                    path,
+                    format,
+                    change: ChangeKind::Modified,
+                }
+            } else {
+                ClassifiedEvent::Removed {
+                    path,
+                    format: Some(format),
+                }
             }
         }
         EventKind::Modify(_) => ClassifiedEvent::ModelFile {
@@ -1143,12 +1161,16 @@ mod tests {
     }
 
     #[test]
-    fn classify_modify_name_on_stmx_treated_as_modified_for_macos_quirk() {
-        // Per plan note 3: macOS FSEvents may emit a `Modify(Name(Any))`
-        // for renames without a matching content event. We classify
-        // those as Modified so the merge layer re-reads and ingests
-        // the new content keyed at the destination path.
-        let path = PathBuf::from("/repo/models/x.stmx");
+    fn classify_modify_name_with_existing_file_returns_modified_for_macos_quirk() {
+        // macOS / FSEvents quirk: an unpaired `Modify(Name(Any))` for the
+        // *destination* side of a rename (or for a content-rewrite that
+        // FSEvents surfaced as a rename) lands as a single-path event
+        // with the file still present on disk. classify routes it to
+        // `Modified` so the merge layer re-reads and ingests the new
+        // content keyed at the destination path.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("destination.stmx");
+        std::fs::write(&path, b"<root/>").expect("write file");
         let event = make_debounced(
             EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
             vec![path.clone()],
@@ -1159,6 +1181,34 @@ mod tests {
                 path,
                 format: ProjectFormat::Stmx,
                 change: ChangeKind::Modified,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_modify_name_with_missing_file_returns_removed_for_macos_quirk() {
+        // macOS / FSEvents quirk: an unpaired `Modify(Name(Any))` for the
+        // *source* side of a rename (or an `unlink()` that FSEvents
+        // surfaced via `ITEM_RENAMED` rather than `ITEM_REMOVED`) lands
+        // as a single-path event with the file already gone from disk.
+        // classify routes it to `Removed` so the registry entry can be
+        // dropped and `ProjectRemoved` broadcast — without this the
+        // event would silently fall into the merge path and the
+        // canonicalize-then-read step there would fail and skip the
+        // event, leaving the registry holding a phantom entry.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("disappeared.stmx");
+        // Note: file is *not* written, so it does not exist on disk.
+        assert!(!path.exists(), "precondition: file must be missing");
+        let event = make_debounced(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            vec![path.clone()],
+        );
+        assert_eq!(
+            classify(&event),
+            ClassifiedEvent::Removed {
+                path,
+                format: Some(ProjectFormat::Stmx),
             }
         );
     }
