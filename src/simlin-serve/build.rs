@@ -19,6 +19,22 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Spawnable name for the `pnpm` launcher. On Windows the launcher is
+/// `pnpm.cmd` (a PowerShell-friendly batch file shipped by the
+/// `pnpm/action-setup` GitHub Action and by `corepack`); `Command::new`
+/// uses `CreateProcess` directly and does NOT consult `PATHEXT`, so a
+/// bare `"pnpm"` lookup fails with `ERROR_FILE_NOT_FOUND` on Windows
+/// runners even though `pnpm` is on `PATH` in the surrounding shell.
+/// Linux and macOS install pnpm as a plain executable so the bare name
+/// resolves there.
+fn pnpm_program() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "pnpm.cmd"
+    } else {
+        "pnpm"
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let web_dir = manifest_dir.join("web");
@@ -45,24 +61,26 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let install = Command::new("pnpm")
+    let pnpm = pnpm_program();
+    let install = Command::new(pnpm)
         .arg("install")
         .arg("--frozen-lockfile")
         .current_dir(&web_dir)
         .status()?;
     if !install.success() {
         anyhow::bail!(
-            "`pnpm install --frozen-lockfile` failed in {}",
+            "`{} install --frozen-lockfile` failed in {}",
+            pnpm,
             web_dir.display()
         );
     }
 
-    let build = Command::new("pnpm")
+    let build = Command::new(pnpm)
         .arg("build")
         .current_dir(&web_dir)
         .status()?;
     if !build.success() {
-        anyhow::bail!("`pnpm build` failed in {}", web_dir.display());
+        anyhow::bail!("`{} build` failed in {}", pnpm, web_dir.display());
     }
 
     Ok(())
