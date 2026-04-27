@@ -1,0 +1,59 @@
+[package]
+name = "simlin-serve"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Local HTTP server for browsing and editing system-dynamics models"
+
+[lib]
+name = "simlin_serve"
+path = "src/lib.rs"
+
+[[bin]]
+name = "simlin-serve"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ignore = "0.4"
+simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
+simlin-mcp-core = { version = "0.1", path = "../simlin-mcp-core" }
+rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
+schemars = { version = "1", features = ["preserve_order"] }
+rust-embed = "8"
+mime_guess = "2"
+open = "5"
+anyhow = "1"
+loro = "1.11"
+notify-debouncer-full = "0.7"
+twox-hash = { version = "2", default-features = false, features = ["xxhash3_64", "std"] }
+
+[build-dependencies]
+anyhow = "1"
+
+[dev-dependencies]
+tower = "0.5"
+tempfile = "3"
+serde_yaml = "0.9"
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+rmcp = { version = "1", features = ["server", "macros", "schemars", "transport-streamable-http-server", "client", "transport-async-rw"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+# rustls-tls is required despite this being a loopback-only smoke test:
+# reqwest's default features pull in OpenSSL, which adds a system
+# build-tools dependency the cross-platform CI smoke job (Windows, in
+# particular) doesn't have without extra setup. rustls is pure Rust.
+# `json` enables `Response::json` so the smoke test doesn't have to
+# round-trip JSON bodies through `text()` + `serde_json::from_str`.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

@@ -23,52 +23,52 @@ A design document that specifies a local-first Simlin server (`simlin-serve`) --
 
 ## Acceptance Criteria
 
-### local-serve.AC1: Discovery and listing
-- **local-serve.AC1.1 Success:** Running `simlin-serve` in a directory containing `.stmx`, `.xmile`, and `.mdl` files lists all of them in the browser UI
-- **local-serve.AC1.2 Success:** Discovery is recursive across subdirectories, with each file's path shown relative to `$PWD`
-- **local-serve.AC1.3 Success:** Files inside `node_modules/`, `.git/`, `target/`, and other conventional generated directories are excluded
-- **local-serve.AC1.4 Edge:** Directories with no model files render an empty-state UI with a "Create new model" affordance
-- **local-serve.AC1.5 Edge:** Symlinked directories are not followed (avoids infinite-loop risk)
+### server-rewrite.AC1: Discovery and listing
+- **server-rewrite.AC1.1 Success:** Running `simlin-serve` in a directory containing `.stmx`, `.xmile`, and `.mdl` files lists all of them in the browser UI
+- **server-rewrite.AC1.2 Success:** Discovery is recursive across subdirectories, with each file's path shown relative to `$PWD`
+- **server-rewrite.AC1.3 Success:** Files inside `node_modules/`, `.git/`, `target/`, and other conventional generated directories are excluded
+- **server-rewrite.AC1.4 Edge:** Directories with no model files render an empty-state UI with a "Create new model" affordance
+- **server-rewrite.AC1.5 Edge:** Symlinked directories are not followed (avoids infinite-loop risk)
 
-### local-serve.AC2: Git status reporting
-- **local-serve.AC2.1 Success:** Each listed file shows a "version controlled" indicator if it is tracked by an enclosing git repository
-- **local-serve.AC2.2 Success:** Each listed file shows a "modified" indicator if it has uncommitted local changes
-- **local-serve.AC2.3 Success:** Files outside any git working tree show a clear "not under version control" warning in both the list view and the editor view
-- **local-serve.AC2.4 Edge:** Git status is recomputed when the file watcher fires for the file or for `.git/HEAD`/`.git/index`
-- **local-serve.AC2.5 Failure:** When `git` is not on the user's PATH, the server still runs but every file is reported as "git status unavailable" with a one-time UI hint
+### server-rewrite.AC2: Git status reporting
+- **server-rewrite.AC2.1 Success:** Each listed file shows a "version controlled" indicator if it is tracked by an enclosing git repository
+- **server-rewrite.AC2.2 Success:** Each listed file shows a "modified" indicator if it has uncommitted local changes
+- **server-rewrite.AC2.3 Success:** Files outside any git working tree show a clear "not under version control" warning in both the list view and the editor view
+- **server-rewrite.AC2.4 Edge:** Git status is recomputed when the file watcher fires for the file or for `.git/HEAD`/`.git/index`
+- **server-rewrite.AC2.5 Failure:** When `git` is not on the user's PATH, the server still runs but every file is reported as "git status unavailable" with a one-time UI hint
 
-### local-serve.AC3: Editing round-trip
-- **local-serve.AC3.1 Success:** Opening a `.stmx` or `.xmile` file in the browser displays the model and allows editing
-- **local-serve.AC3.2 Success:** Saving an edit to a `.stmx`/`.xmile` file writes the new content back to the original file in XMILE format
-- **local-serve.AC3.3 Success:** Opening a `.mdl` file in the browser parses the file via xmutil and displays the model
-- **local-serve.AC3.4 Success:** Saving an edit to a `.mdl` file writes a `<name>.sd.json` sidecar in the same directory; the original `.mdl` is never modified
-- **local-serve.AC3.5 Success:** Re-opening a `.mdl` after edits prefers `<name>.sd.json` over the `.mdl` (the sidecar is the new source of truth once it exists)
-- **local-serve.AC3.6 Failure:** Stale-version save (optimistic lock) returns 409 Conflict and the browser refetches
+### server-rewrite.AC3: Editing round-trip
+- **server-rewrite.AC3.1 Success:** Opening a `.stmx` or `.xmile` file in the browser displays the model and allows editing
+- **server-rewrite.AC3.2 Success:** Saving an edit to a `.stmx`/`.xmile` file writes the new content back to the original file in XMILE format
+- **server-rewrite.AC3.3 Success:** Opening a `.mdl` file in the browser parses the file via xmutil and displays the model
+- **server-rewrite.AC3.4 Success:** Saving an edit to a `.mdl` file writes a `<name>.sd.json` sidecar in the same directory; the original `.mdl` is never modified
+- **server-rewrite.AC3.5 Success:** Re-opening a `.mdl` after edits prefers `<name>.sd.json` over the `.mdl` (the sidecar is the new source of truth once it exists)
+- **server-rewrite.AC3.6 Failure:** Stale-version save (optimistic lock) returns 409 Conflict and the browser refetches
 
-### local-serve.AC4: Concurrent editing via Loro
-- **local-serve.AC4.1 Success:** Two near-simultaneous edits from the browser and the MCP server both apply without data loss
-- **local-serve.AC4.2 Success:** Editing a model file in an external text editor (e.g. vim) while the browser has the model open causes the browser to update live with the disk-side changes (no reload prompt)
-- **local-serve.AC4.3 Success:** Browser-side in-flight edits are preserved across an external disk edit (the merge layer combines both)
-- **local-serve.AC4.4 Edge:** A disk edit that is byte-identical to the current Loro tip is a no-op (no broadcast, no churn)
+### server-rewrite.AC4: Concurrent editing via Loro
+- **server-rewrite.AC4.1 Success:** Two near-simultaneous edits from the browser and the MCP server both apply without data loss
+- **server-rewrite.AC4.2 Success:** Editing a model file in an external text editor (e.g. vim) while the browser has the model open causes the browser to update live with the disk-side changes (no reload prompt)
+- **server-rewrite.AC4.3 Success:** Browser-side in-flight edits are preserved across an external disk edit (the merge layer combines both)
+- **server-rewrite.AC4.4 Edge:** A disk edit that is byte-identical to the current Loro tip is a no-op (no broadcast, no churn)
 
-### local-serve.AC5: In-process MCP
-- **local-serve.AC5.1 Success:** `simlin-serve` exposes an MCP server at `http://127.0.0.1:7878/mcp` (configurable via `--mcp-port`) when launched
-- **local-serve.AC5.2 Success:** The MCP server advertises `file://$PWD` as a root in its initialize response
-- **local-serve.AC5.3 Success:** A Claude desktop client configured against the URL can call `list_projects`, `get_project`, `apply_edit`, `simulate`, and `create_project` tools and observe results in the browser within one second
-- **local-serve.AC5.4 Success:** MCP-initiated edits and browser-initiated edits flow through the same `apply_canonical_json` merge primitive and produce identical end states regardless of order
-- **local-serve.AC5.5 Edge:** A second `simlin-serve` started in the same `$PWD` (or with the same `--mcp-port`) fails fast with a port-conflict message and a hint to either stop the running instance or pass `--mcp-port`
+### server-rewrite.AC5: In-process MCP
+- **server-rewrite.AC5.1 Success:** `simlin-serve` exposes an MCP server at `http://127.0.0.1:7878/mcp` (configurable via `--mcp-port`) when launched
+- **server-rewrite.AC5.2 Success:** The MCP server advertises `file://$PWD` as a root in its initialize response
+- **server-rewrite.AC5.3 Success:** A Claude desktop client configured against the URL can call `list_projects`, `get_project`, `apply_edit`, `simulate`, and `create_project` tools and observe results in the browser within one second
+- **server-rewrite.AC5.4 Success:** MCP-initiated edits and browser-initiated edits flow through the same `apply_canonical_json` merge primitive and produce identical end states regardless of order
+- **server-rewrite.AC5.5 Edge:** A second `simlin-serve` started in the same `$PWD` (or with the same `--mcp-port`) fails fast with a port-conflict message and a hint to either stop the running instance or pass `--mcp-port`
 
-### local-serve.AC6: MCP push notifications
-- **local-serve.AC6.1 Success:** Opening or switching a project in the browser emits a `projectFocused` notification to subscribed MCP clients
-- **local-serve.AC6.2 Success:** Selecting a variable in the browser emits a `selectionChanged` notification with the variable's canonical idents
-- **local-serve.AC6.3 Success:** Any change (browser, MCP, disk) emits a `projectChanged` notification with a `source` discriminator (`"user" | "agent" | "disk"`)
-- **local-serve.AC6.4 Success:** Changes in validation diagnostics emit `diagnosticsChanged` notifications
+### server-rewrite.AC6: MCP push notifications
+- **server-rewrite.AC6.1 Success:** Opening or switching a project in the browser emits a `projectFocused` notification to subscribed MCP clients
+- **server-rewrite.AC6.2 Success:** Selecting a variable in the browser emits a `selectionChanged` notification with the variable's canonical idents
+- **server-rewrite.AC6.3 Success:** Any change (browser, MCP, disk) emits a `projectChanged` notification with a `source` discriminator (`"user" | "agent" | "disk"`)
+- **server-rewrite.AC6.4 Success:** Changes in validation diagnostics emit `diagnosticsChanged` notifications
 
-### local-serve.AC7: Distribution and bootstrap
-- **local-serve.AC7.1 Success:** `npx @simlin/serve` works on macOS (x64 and arm64), Linux (x64 and arm64), and Windows (x64) by downloading the appropriate prebuilt native binary as an `optionalDependencies` install
-- **local-serve.AC7.2 Success:** On startup, the server prints the local URLs (HTTP UI and MCP) and attempts to open the HTTP URL via `open` (macOS), `xdg-open` (Linux), or `start` (Windows)
-- **local-serve.AC7.3 Success:** The launched URL includes a one-time `?token=...` query parameter; the SPA stores it in sessionStorage and uses it as a bearer for the WebSocket upgrade. Loopback is the primary boundary; the token is defense in depth against another local process opening tabs into our editor.
-- **local-serve.AC7.4 Edge:** When the browser cannot be opened automatically (headless environment, missing `open`/`xdg-open`), the server prints the URL prominently and continues running
+### server-rewrite.AC7: Distribution and bootstrap
+- **server-rewrite.AC7.1 Success:** `npx @simlin/serve` works on macOS (x64 and arm64), Linux (x64 and arm64), and Windows (x64) by downloading the appropriate prebuilt native binary as an `optionalDependencies` install
+- **server-rewrite.AC7.2 Success:** On startup, the server prints the local URLs (HTTP UI and MCP) and attempts to open the HTTP URL via `open` (macOS), `xdg-open` (Linux), or `start` (Windows)
+- **server-rewrite.AC7.3 Success:** The launched URL includes a one-time `?token=...` query parameter; the SPA stores it in sessionStorage and uses it as a bearer for the WebSocket upgrade. Loopback is the primary boundary; the token is defense in depth against another local process opening tabs into our editor.
+- **server-rewrite.AC7.4 Edge:** When the browser cannot be opened automatically (headless environment, missing `open`/`xdg-open`), the server prints the URL prominently and continues running
 
 ## Glossary
 

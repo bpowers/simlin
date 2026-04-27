@@ -1,0 +1,22 @@
+[package]
+name = "simlin-mcp-core"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Transport-agnostic core library for the Simlin MCP server"
+
+[dependencies]
+simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
+rmcp = { version = "1", features = ["server", "macros", "schemars"] }
+schemars = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+anyhow = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+rmcp = { version = "1", features = ["server", "macros", "client", "transport-async-rw"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }

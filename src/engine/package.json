@@ -65,7 +65,7 @@
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",
     "lint": "eslint --cache --cache-location node_modules/.cache/eslint/ src",
     "clean": "rm -rf ./lib ./lib.browser ./core",
-    "build": "./build.sh",
+    "build": "bash build.sh",
     "tsc": "tsc",
     "test": "jest",
     "test:watch": "jest --watch"

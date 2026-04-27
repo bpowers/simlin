@@ -10,6 +10,11 @@ const config = {
   moduleFileExtensions: ['ts', 'tsx', 'js'],
   moduleNameMapper: {
     '\\.css$': '<rootDir>/tests/css-module-stub.ts',
+    // wouter ships as ESM-only ("type":"module") which CommonJS ts-jest cannot
+    // process. Map it to a stub so tests that import React components loading
+    // wouter (e.g. Editor.tsx) can still run. The stub returns the minimal API
+    // surface that Editor.tsx imports (Link); tests never exercise routing.
+    '^wouter$': '<rootDir>/tests/wouter-stub.ts',
     '^@simlin/engine/internal/wasm$': '<rootDir>/../engine/src/internal/wasm.node.ts',
     '^@simlin/engine/internal/backend-factory$': '<rootDir>/../engine/src/backend-factory.node.ts',
     '^@simlin/engine$': '<rootDir>/../engine/src/index.ts',

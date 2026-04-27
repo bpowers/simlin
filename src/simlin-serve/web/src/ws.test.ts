@@ -1,0 +1,469 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+import { UpdatesSocket } from './ws';
+import type { WsMessage } from './ws';
+
+// Hand-rolled WebSocket double. We avoid `jest-websocket-mock` so the test
+// suite stays dependency-light and so we have direct control over the timing
+// of `onopen`/`onmessage`/`onclose`/`onerror` from individual tests. Each
+// MockWebSocket records its construction URL.
+class MockWebSocket {
+  static CONNECTING = 0 as const;
+  static OPEN = 1 as const;
+  static CLOSING = 2 as const;
+  static CLOSED = 3 as const;
+
+  readonly url: string;
+  readyState: number = MockWebSocket.CONNECTING;
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onclose: ((ev: CloseEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  closeArgs: { code?: number; reason?: string } | null = null;
+  // Recorded payloads from `send()`. We record the raw stringified
+  // frame (matching what the production WebSocket would have written
+  // to the wire) so tests can assert the exact JSON envelope.
+  sentFrames: Array<string> = [];
+
+  static instances: Array<MockWebSocket> = [];
+
+  constructor(url: string) {
+    this.url = url;
+    MockWebSocket.instances.push(this);
+  }
+
+  open(): void {
+    this.readyState = MockWebSocket.OPEN;
+    this.onopen?.(new Event('open'));
+  }
+
+  emitMessage(data: string): void {
+    this.onmessage?.(new MessageEvent('message', { data }));
+  }
+
+  emitClose(code = 1006): void {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new CloseEvent('close', { code }));
+  }
+
+  emitError(): void {
+    this.onerror?.(new Event('error'));
+  }
+
+  close(code?: number, reason?: string): void {
+    this.closeArgs = { code, reason };
+    this.readyState = MockWebSocket.CLOSED;
+  }
+
+  send(data: string): void {
+    this.sentFrames.push(data);
+  }
+}
+
+let originalWebSocket: typeof globalThis.WebSocket | undefined;
+
+beforeEach(() => {
+  MockWebSocket.instances = [];
+  originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = MockWebSocket as unknown as typeof globalThis.WebSocket;
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+  if (originalWebSocket) {
+    globalThis.WebSocket = originalWebSocket;
+  } else {
+    delete (globalThis as Partial<typeof globalThis>).WebSocket;
+  }
+});
+
+describe('UpdatesSocket', () => {
+  test('opens the WebSocket against /api/updates without a token', () => {
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    const url = MockWebSocket.instances[0].url;
+    // URL form: ws://<host>/api/updates. V1 has no bearer-token gate
+    // (see docs/threat-model.md); the host- and origin-allowlist on the
+    // server is the cross-origin defense.
+    expect(url).toMatch(/^ws:\/\/[^/]+\/api\/updates$/);
+    socket.close();
+  });
+
+  test('parses incoming messages and forwards them to onMessage', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'projectChanged',
+        path: 'a.stmx',
+        version: 5,
+        source: 'user',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'projectChanged',
+      path: 'a.stmx',
+      version: 5,
+      source: 'user',
+    });
+    socket.close();
+  });
+
+  test('parses projectRemoved frames and forwards them to onMessage', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'projectRemoved',
+        path: 'a.stmx',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'projectRemoved',
+      path: 'a.stmx',
+    });
+    socket.close();
+  });
+
+  test('drops projectRemoved frames missing the path field', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(JSON.stringify({ type: 'projectRemoved' }));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    socket.close();
+  });
+
+  test('parses projectRenamed frames and forwards them to onMessage', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'projectRenamed',
+        from: 'a.stmx',
+        to: 'b.stmx',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'projectRenamed',
+      from: 'a.stmx',
+      to: 'b.stmx',
+    });
+    socket.close();
+  });
+
+  test('drops projectRenamed frames missing required fields', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage(JSON.stringify({ type: 'projectRenamed', from: 'a.stmx' }));
+    ws.emitMessage(JSON.stringify({ type: 'projectRenamed', to: 'b.stmx' }));
+    ws.emitMessage(JSON.stringify({ type: 'projectRenamed' }));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    socket.close();
+  });
+
+  test('ignores message frames whose body is not valid JSON without throwing', () => {
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    const ws = MockWebSocket.instances[0];
+
+    ws.open();
+    ws.emitMessage('this is not json');
+
+    expect(onMessage).not.toHaveBeenCalled();
+    socket.close();
+  });
+
+  test('reconnects with 1s/2s/5s backoff after consecutive close events', () => {
+    jest.useFakeTimers();
+
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    // First close: should schedule a reconnect at 1s.
+    MockWebSocket.instances[0].emitClose();
+    jest.advanceTimersByTime(999);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    jest.advanceTimersByTime(1);
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    // Second consecutive close (no successful message in between): 2s backoff.
+    MockWebSocket.instances[1].emitClose();
+    jest.advanceTimersByTime(1999);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    jest.advanceTimersByTime(1);
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    // Third consecutive close: capped at 5s.
+    MockWebSocket.instances[2].emitClose();
+    jest.advanceTimersByTime(4999);
+    expect(MockWebSocket.instances).toHaveLength(3);
+    jest.advanceTimersByTime(1);
+    expect(MockWebSocket.instances).toHaveLength(4);
+
+    // Fourth consecutive close: still capped at 5s.
+    MockWebSocket.instances[3].emitClose();
+    jest.advanceTimersByTime(5000);
+    expect(MockWebSocket.instances).toHaveLength(5);
+
+    socket.close();
+  });
+
+  test('resets backoff on successful open even when no message arrives', () => {
+    // A long-running connection that opens cleanly but receives no
+    // broadcast frames (the server is quiet, the user is just reading)
+    // and eventually drops (laptop sleep, network blip, server restart)
+    // must not be punished with the 5s reconnect cap. Without this
+    // reset, MAX_CONSECUTIVE_FAILURES (10) is reachable across a
+    // workday of quiet-then-drop cycles, after which the socket flips
+    // to permanent 'dead' with no recovery path.
+    jest.useFakeTimers();
+
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+
+    // Cycle: open → close, with NO message in between, repeatedly. If
+    // handleOpen does not reset the counter, each cycle bumps it by 1
+    // and after MAX_CONSECUTIVE_FAILURES cycles the socket is dead.
+    for (let cycle = 0; cycle < 12; cycle += 1) {
+      const ws = MockWebSocket.instances[cycle];
+      ws.open();
+      ws.emitClose();
+      jest.advanceTimersByTime(5000);
+    }
+
+    // With the fix, every cycle resets to 0 on open, so we never hit
+    // MAX_CONSECUTIVE_FAILURES and the next cycle still produces a
+    // fresh WebSocket instance.
+    expect(MockWebSocket.instances.length).toBeGreaterThanOrEqual(13);
+
+    socket.close();
+  });
+
+  test('resets backoff after a successful message before the next close', () => {
+    jest.useFakeTimers();
+
+    const onMessage = jest.fn<void, [WsMessage]>();
+    const socket = new UpdatesSocket(onMessage);
+
+    // Drive backoff up via two consecutive closes.
+    MockWebSocket.instances[0].emitClose();
+    jest.advanceTimersByTime(1000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    MockWebSocket.instances[1].emitClose();
+    jest.advanceTimersByTime(2000);
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    // Receive a successful message: backoff resets.
+    MockWebSocket.instances[2].open();
+    MockWebSocket.instances[2].emitMessage(
+      JSON.stringify({ type: 'projectChanged', path: 'p', version: 1, source: 'user' }),
+    );
+
+    // Next close should schedule at 1s, not 5s.
+    MockWebSocket.instances[2].emitClose();
+    jest.advanceTimersByTime(999);
+    expect(MockWebSocket.instances).toHaveLength(3);
+    jest.advanceTimersByTime(1);
+    expect(MockWebSocket.instances).toHaveLength(4);
+
+    socket.close();
+  });
+
+  test('error events also trigger backoff reconnect', () => {
+    jest.useFakeTimers();
+
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    MockWebSocket.instances[0].emitError();
+    MockWebSocket.instances[0].emitClose();
+    jest.advanceTimersByTime(1000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    socket.close();
+  });
+
+  test('close() prevents further reconnect attempts', () => {
+    jest.useFakeTimers();
+
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    socket.close();
+
+    // Even if the underlying socket emits a close, no new connection
+    // should be created.
+    MockWebSocket.instances[0].emitClose();
+    jest.advanceTimersByTime(10_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  test('close() closes the underlying WebSocket', () => {
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    expect(ws.closeArgs).toBeNull();
+    socket.close();
+    expect(ws.closeArgs).not.toBeNull();
+  });
+
+  test('send() writes the JSON-encoded ClientWsMessage when the socket is open', () => {
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({
+      type: 'projectFocused',
+      path: 'a.stmx',
+    });
+
+    socket.close();
+  });
+
+  test('send() encodes selectionChanged frames with variableIdents', () => {
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    socket.send({
+      type: 'selectionChanged',
+      path: 'a.stmx',
+      variableIdents: ['teacup_temperature', 'ambient'],
+    });
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({
+      type: 'selectionChanged',
+      path: 'a.stmx',
+      variableIdents: ['teacup_temperature', 'ambient'],
+    });
+
+    socket.close();
+  });
+
+  test('send() queues a projectFocused frame when the socket is not yet open, and flushes on open', () => {
+    // The socket is in CONNECTING state until `open()` is invoked.
+    // projectFocused carries persistent intent (which project is focused)
+    // and must survive the CONNECTING → OPEN transition so the server
+    // sees the focus even when EditorHost.componentDidMount races with
+    // the WS handshake.
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    // Not yet sent — socket is still CONNECTING.
+    expect(ws.sentFrames).toHaveLength(0);
+
+    // Opening the socket must flush the pending frame.
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({ type: 'projectFocused', path: 'a.stmx' });
+
+    socket.close();
+  });
+
+  test('send() drops selectionChanged frames when the socket is not yet open', () => {
+    // selectionChanged events during the CONNECTING window are stale once
+    // the socket opens; the next explicit selection will arrive after open.
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'selectionChanged', path: 'a.stmx', variableIdents: ['x'] });
+
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(0);
+    socket.close();
+  });
+
+  test('send() replaces a pending projectFocused with a newer one before open', () => {
+    // Only the latest focus frame matters; if two arrive before the
+    // socket opens, only the second should be sent.
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'projectFocused', path: 'first.stmx' });
+    socket.send({ type: 'projectFocused', path: 'second.stmx' });
+
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(1);
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({ type: 'projectFocused', path: 'second.stmx' });
+
+    socket.close();
+  });
+
+  test('send() drops frames after close() has been called', () => {
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+    socket.close();
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+
+    expect(ws.sentFrames).toHaveLength(0);
+  });
+
+  test('pending projectFocused is discarded when close() is called before open', () => {
+    const socket = new UpdatesSocket(() => {
+      // unused
+    });
+    const ws = MockWebSocket.instances[0];
+
+    socket.send({ type: 'projectFocused', path: 'a.stmx' });
+    socket.close();
+
+    // Simulating the socket opening after close() — the pending frame
+    // must not be sent because the socket has been explicitly torn down.
+    ws.open();
+
+    expect(ws.sentFrames).toHaveLength(0);
+  });
+});

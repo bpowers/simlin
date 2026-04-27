@@ -231,6 +231,10 @@ interface EditorPropsBase {
   name: string; // used when saving
   embedded?: boolean;
   readOnlyMode?: boolean;
+  // Optional selection callback fired after each selection change. Hosts
+  // (e.g. simlin-serve's EditorHost) use this to forward selection state
+  // to backend listeners; HostedWebEditor in src/app does not subscribe.
+  onSelectionChanged?: (idents: string[]) => void;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -242,6 +246,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   inSave = false;
   saveQueued = false;
+  // Pending setTimeout(0) handle for the deferred onSelectionChanged
+  // callback. Held so componentWillUnmount can cancel — without that,
+  // a remount triggered by an EditorHost path swap (which keys the
+  // Editor by `${path}#${loadGeneration}`) would let the prior
+  // instance's callback fire against the new instance, re-introducing
+  // the stale-idents-on-new-path bug.
+  private selectionDeferralTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(props: EditorProps) {
     super(props);
@@ -296,6 +307,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   componentWillUnmount() {
     document.removeEventListener('keydown', this.handleKeyDown);
+    if (this.selectionDeferralTimer !== null) {
+      clearTimeout(this.selectionDeferralTimer);
+      this.selectionDeferralTimer = null;
+    }
   }
 
   handleKeyDown = (e: KeyboardEvent) => {
@@ -472,19 +487,14 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       this.setState({
         modelErrors: [...this.state.modelErrors, err as Error],
       });
-      return;
-    }
-
-    this.inSave = false;
-
-    if (this.saveQueued) {
-      this.saveQueued = false;
-      if (version) {
-        await this.save(version);
-      } else {
-        this.setState({
-          modelErrors: [...this.state.modelErrors, new Error('last save failed, please reload')],
-        });
+    } finally {
+      this.inSave = false;
+      if (this.saveQueued) {
+        this.saveQueued = false;
+        // Use the new server version when available; fall back to
+        // currVersion on error so the queued edit still attempts to flush
+        // rather than being silently dropped.
+        await this.save(version ?? currVersion);
       }
     }
   }
@@ -579,6 +589,28 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     });
     if (selection.size === 0) {
       this.setState({ showDetails: undefined });
+    }
+    // Defer one tick so React commits the new selection before the host
+    // observes the callback. getSelectionIdents reads `this.state.selection`,
+    // which is asynchronous in React 19 — calling it inline here would
+    // return the prior selection. Reading inside the setTimeout closure
+    // guarantees the call happens after the setState commit.
+    //
+    // Track the timer in an instance field so componentWillUnmount can
+    // cancel it; a host that key-swaps the Editor (path change in
+    // EditorHost) must not see this instance's idents land on the new
+    // instance's path. A new selection in the same instance also
+    // supersedes any pending deferral so the host always sees the
+    // latest committed selection.
+    const onSelectionChanged = this.props.onSelectionChanged;
+    if (onSelectionChanged) {
+      if (this.selectionDeferralTimer !== null) {
+        clearTimeout(this.selectionDeferralTimer);
+      }
+      this.selectionDeferralTimer = setTimeout(() => {
+        this.selectionDeferralTimer = null;
+        onSelectionChanged(this.getSelectionIdents());
+      }, 0);
     }
   };
 

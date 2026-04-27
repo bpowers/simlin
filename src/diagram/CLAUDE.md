@@ -1,6 +1,6 @@
 # @simlin/diagram
 
-Last verified: 2026-04-24
+Last verified: 2026-04-26
 
 React components for model visualization and editing. Designed as a general-purpose SD model editor toolkit without dependencies on the Simlin app or server API.
 
@@ -11,7 +11,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ### Editor and Core Logic
 
-- `Editor.tsx` -- Main model editor: user interaction, state, and tool selection. Manages module navigation stack (`modelStack`), module CRUD handlers, and delegates to `ModuleDetails` for module editing.
+- `Editor.tsx` -- Main model editor: user interaction, state, and tool selection. Manages module navigation stack (`modelStack`), module CRUD handlers, and delegates to `ModuleDetails` for module editing. Optional `onSelectionChanged?: (idents: string[]) => void` prop fires after each selection change (used by `simlin-serve`'s `EditorHost` to forward selection state to backend listeners; `HostedWebEditor` in `src/app` does not subscribe). The callback runs through `setTimeout(..., 0)` so React commits the new selection before `getSelectionIdents()` reads `this.state.selection`.
 - `VariableDetails.tsx` -- Variable properties/equation panel (stocks, flows, auxes)
 - `ModuleDetails.tsx` -- Module properties panel: model reference selector, input wiring table, output ports, units/docs editors
 - `BreadcrumbBar.tsx` -- Breadcrumb navigation: back arrow + breadcrumb trail when inside a module, hamburger menu at root
@@ -58,6 +58,7 @@ Material-style UI component library (40+ components): Accordion, AppBar, Button,
 - **Module navigation stack**: `Editor.modelStack` is an immutable array of `ModuleStackEntry`. Each entry stores the child model name, module ident, and the parent's selection/viewBox/zoom for restoration. `currentModelName(stack)` returns the active model. All navigation goes through `pushModule`/`popModule`/`navigateToLevel` pure functions.
 - **Module patches target `modelName`**: Module creation and editing patches use `this.state.modelName` (not hardcoded 'main'), so operations work at any nesting depth.
 - **Module warning suppression**: When no module in a model has a model reference, warning indicators are suppressed on all modules. This prevents a wall of warnings during initial module layout.
+- **`Editor.save()` releases `inSave` in a `finally` block**: A thrown `onSave` (e.g. host-side network failure) must not leave `inSave === true`, otherwise every subsequent edit silently queues forever. The queued-save retry uses `version ?? currVersion` so a save that errored before the server returned a new version still attempts to flush the next edit rather than dropping it.
 
 ## Gotchas
 

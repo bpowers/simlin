@@ -102,3 +102,11 @@ __pycache__/
 /src/simlin-mcp/vendor
 /src/simlin-mcp/npm
 /src/simlin-mcp/dist
+
+# simlin-serve frontend build artifacts
+/src/simlin-serve/web/dist
+
+# simlin-serve npm packaging artifacts
+/src/simlin-serve/vendor
+/src/simlin-serve/npm
+/src/simlin-serve/dist

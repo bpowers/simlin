@@ -1,0 +1,15 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+import * as React from 'react';
+import { createRoot } from 'react-dom/client';
+
+import { App } from './App';
+import './styles.css';
+
+const element = document.getElementById('root');
+if (element) {
+  const root = createRoot(element);
+  root.render(<App />);
+}

@@ -131,12 +131,17 @@ jobs:
         with:
           tool: cargo-tarpaulin
 
-      # 45-minute outer cap on tarpaulin.  Baseline is ~23 min;
-      # tarpaulin also self-polices per-test at 60s, but this backstop
-      # catches the case where instrumentation overhead tips a slow
-      # test suite into runaway territory.
+      # 90-minute outer cap on tarpaulin. Baseline pre-simlin-serve was
+      # ~23 min; the simlin-serve test suite (filesystem watcher with
+      # real debounce waits, MCP duplex pairs, end-to-end save/HTTP
+      # round-trips) tipped the wall-clock past the original 45-minute
+      # cap, so the whole job timed out without producing coverage XML.
+      # Tarpaulin still self-polices per-test at 60s, so this outer cap
+      # is a backstop against a runaway test rather than the primary
+      # budget. If runtime keeps growing, the next move is `--engine
+      # llvm` for source-based coverage at native test speed.
       - name: Run cargo-tarpaulin
-        timeout-minutes: 45
+        timeout-minutes: 90
         run: cargo tarpaulin --out Xml
 
       - name: Upload Coverage
@@ -261,3 +266,89 @@ jobs:
 
       - name: Run project lint rules
         run: bash scripts/lint-project.sh
+
+  serve-smoke:
+    name: simlin-serve smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # 30-minute cap. Once the cargo cache is warm a serve-smoke run
+    # completes in under 10 minutes on every platform (macos-latest is
+    # the slowest at ~8 min, ubuntu and windows ~5 min). The cold-cache
+    # path on Windows is the binding constraint: actions/cache@v4 only
+    # saves on job success by default, so a series of failing Windows
+    # runs leaves the cache unwarmed indefinitely, and a from-scratch
+    # MSVC build of simlin-engine + simlin-serve + their transitive deps
+    # takes 18-22 minutes. The previous 15-minute cap was tight for
+    # warm-cache macOS and impossible for cold-cache Windows. Once the
+    # Windows cache warms (after the first green run), a 15-minute cap
+    # would be reasonable again — the headroom here is for the
+    # bootstrapping case and to absorb the macos-latest p99.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors the @simlin/serve npm matrix shipped from
+        # serve-release.yml (darwin-arm64, linux-x64, win32-x64) so
+        # CI proves end-to-end behaviour on every platform we publish
+        # binaries for. linux-arm64 isn't a GitHub-hosted runner
+        # option; we cover that target via cross-compilation and
+        # rely on linux-x64 for runtime smoke coverage.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-serve-smoke-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-serve-smoke-${{ matrix.os }}-
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `vite build` only builds the @simlin/serve-web package; it does
+      # NOT build its workspace dependencies. The pnpm `...` filter
+      # selects serve-web AND its transitive deps (@simlin/core,
+      # @simlin/engine, @simlin/diagram) in topological order so each
+      # one's `lib/`/`lib.browser/`/`dist/` output exists before vite
+      # tries to resolve them. DISABLE_WASM_OPT=1 skips the
+      # multi-minute wasm-opt pass on the engine package — release-
+      # quality WASM is irrelevant for a smoke test of the serve
+      # binary.
+      - name: Build embedded SPA (with workspace deps)
+        env:
+          DISABLE_WASM_OPT: "1"
+        run: pnpm --filter "@simlin/serve-web..." run build
+
+      # SIMLIN_SERVE_BUILD_WEB=1 is set as defense-in-depth: the
+      # "Build embedded SPA" step above already populates web/dist/,
+      # so build.rs has nothing new to do, but the explicit env var
+      # guards against a future refactor that drops the explicit
+      # frontend step without noticing the embed went stale.
+      - name: Build simlin-serve binary
+        env:
+          SIMLIN_SERVE_BUILD_WEB: "1"
+        run: cargo build -p simlin-serve --release
+
+      - name: Run smoke test
+        run: cargo test -p simlin-serve --release --test smoke -- --ignored --nocapture

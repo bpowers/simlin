@@ -1,0 +1,36 @@
+{
+  "name": "@simlin/serve",
+  "version": "0.1.0",
+  "description": "Local-first system dynamics model server",
+  "bin": {
+    "simlin-serve": "bin/simlin-serve.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {
+    "@simlin/serve-darwin-arm64": "0.1.0",
+    "@simlin/serve-linux-arm64": "0.1.0",
+    "@simlin/serve-linux-x64": "0.1.0",
+    "@simlin/serve-win32-x64": "0.1.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bpowers/simlin.git",
+    "directory": "src/simlin-serve"
+  }
+}

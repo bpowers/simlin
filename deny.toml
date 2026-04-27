@@ -1,17 +1,61 @@
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # atomic-polyfill is unmaintained (the README points to portable-atomic
+    # as a replacement). It's a transitive dep we don't control:
+    # loro -> loro-internal -> postcard -> heapless -> atomic-polyfill.
+    # Heapless 0.7 is what postcard 1.x pins; postcard 2.x drops the
+    # dependency, but loro hasn't bumped postcard yet. Ignoring rather than
+    # pinning ourselves because the only fix is upstream-driven.
+    "RUSTSEC-2023-0089",
+]
 
 [licenses]
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # Boost Software License: permissive, OSI-approved, used by xxhash-rust
+    # (transitive via loro/loro-internal for stable hashing).
+    "BSL-1.0",
+    # Creative Commons CC0 (public-domain dedication): notify 8.x.
+    "CC0-1.0",
+    # ISC: BSD-style permissive, used by inotify / inotify-sys
+    # (transitive via notify-debouncer-full -> notify on Linux).
+    "ISC",
     "MIT",
+    # Mozilla Public License 2.0: file-level copyleft, OSI-approved.
+    # Brought in by loro -> im (and im's bitmaps / sized-chunks helpers).
+    # File-level copyleft means we just need to redistribute MPL-licensed
+    # source files unchanged, which is automatic for us since they ship
+    # via crates.io. We don't depend on portable-atomic / heapless feature
+    # combinations that would pull in the GPL-licensed variant.
+    "MPL-2.0",
     "Unicode-3.0",
     "Zlib",
 ]
 confidence-threshold = 0.9
+
+# Override the declared SPDX expression for crates that publish the
+# non-standard `MPL-2.0+` shorthand. `+` is a valid SPDX modifier in
+# *expressions* but cargo-deny rejects it in the flat allow list,
+# whereas the only later-than-2.0 MPL hasn't been published. These
+# crates are functionally MPL-2.0; the clarification just normalises
+# the string.
+[[licenses.clarify]]
+crate = "bitmaps"
+expression = "MPL-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "im"
+expression = "MPL-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sized-chunks"
+expression = "MPL-2.0"
+license-files = []
 
 [bans]
 multiple-versions = "warn"

@@ -310,3 +310,34 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Discovery context**: Found while writing an integration regression test for the codex P1 fix on PR #472. The test fixture deliberately built a model with both A2A and scalar feedback, expecting them to share a partition, and observed the A2A loop systematically getting `partition = None`. Documented in `test_compute_metadata_importance_series_length_matches_step_count` in `tests/layout.rs` so a future engine fix automatically begins exercising the mixed-stride path.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-25
+
+### 36. darwin-x64 Not Included in @simlin/mcp and @simlin/serve npm Distributions
+
+- **Component**: simlin-mcp, simlin-serve (`.github/workflows/serve-release.yml`, `mcp-release.yml`)
+- **Severity**: low
+- **Description**: The npm release workflows for `@simlin/mcp` and `@simlin/serve` do not produce a macOS Intel (darwin-x64) binary. Only `darwin-arm64` (Apple Silicon) and Linux targets are built. Intel Mac users cannot install these packages via npm optionalDependencies. The fix is to add `cargo-zigbuild --target x86_64-apple-darwin` steps to both release workflows and add `"@simlin/mcp-darwin-x64"` / `"@simlin/serve-darwin-x64"` entries to the respective `package.json` optionalDependencies.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-25
+
+### 37. macOS Watcher Loses Pre-Existing-File Removal and Rename Events
+
+- **Component**: simlin-serve (`src/watcher.rs`, `tests/watcher_merge.rs`)
+- **Severity**: medium
+- **Description**: Three watcher behaviours are lost on macOS for files that existed *before* the watcher's `FSEventStreamCreate` subscription:
+  1. **Rename source side**: an external `mv a.sd.json b.sd.json` doesn't produce a paired `Modify(Name(Both))` event. FSEvents reports each side as a single-path `Modify(Name(Any))`, and `notify-debouncer-full` only pairs them when its file-id cache already knows the source — which only happens for files that arrived via a `Create` event after the watcher started. The destination side merges via `handle_model_change`; the source side stays in the registry as a phantom entry.
+  2. **Rename-collision dual-removal**: `mv a b` where both are tracked never broadcasts the second `ProjectRemoved` because the destination side surfaces as a content-modify into the existing entry rather than a `Modify(Name(Both))` that would route to the `AlreadyExists` arm of `handle_model_rename`.
+  3. **Plain `unlink()` of a pre-existing file**: `external_remove_drops_registry_entry_and_broadcasts_removed` consistently times out on macOS-latest waiting for `ProjectRemoved`. The classify branch added in commit 7faf89d4 (treating `Modify(Name(_))` on a missing leaf as `Removed`) covers the rename-flagged-unlink case but does not move the test, so the underlying event must be arriving as something else (or not at all). Sister tests that *create* a file inside the watch window and then mutate or remove it pass on macOS, suggesting the file-id cache miss is the common factor.
+- The Linux-equivalent flows work because inotify's `MOVED_FROM`/`MOVED_TO` cookies always arrive together regardless of cache state, and `IN_DELETE` is a first-class event with no FSEvents-style flag coalescing.
+- **Symptoms**: external rename of a tracked file: SPA's editor for the old path may not migrate cleanly to the new path; rename-collision over a tracked destination merges contents instead of dropping both stale Loro states; `ProjectRenamed` is never broadcast on macOS; an external `rm` of a tracked file may leave a phantom registry entry.
+- **Test impact**: three integration tests are gated with `#[cfg_attr(target_os = "macos", ignore = ...)]`:
+  - `external_remove_drops_registry_entry_and_broadcasts_removed`
+  - `external_rename_re_keys_registry_and_emits_project_renamed`
+  - `rename_over_tracked_destination_removes_both_and_rehydrates`
+- **Possible fixes** (need design discussion, not papered over):
+  - **Hydrate the file-id cache at watcher start** by recursively scanning the root and registering each existing file with the debouncer's cache (e.g. via `notify_debouncer_full::FileIdMap::add_path`). Closes both the rename-source-side miss and the unlink miss for pre-existing files at the cost of a one-shot scan.
+  - **Heuristic post-hoc pairing / inference in our actor**: keep a short-lived (<=200ms) "recently disappeared registry entries" buffer; pair `Modify(Name(_))` events with a recent removal whose content hash matches.
+  - **Switch to `notify::PollWatcher` on macOS** for the smoke / CI surface and accept higher latency in exchange for deterministic event delivery.
+  - **Accept the macOS UX gap** as documented and update the SPA client to handle the unpaired event sequence (a removal followed by a separate hydrate of the destination) without losing in-flight Loro edits — likely requires Loro doc state to migrate via content rather than via path-key.
+- **Investigation log (2026-04-26)**: classify-side fix routes missing-leaf `Modify(Name(_))` → `Removed` was insufficient; path-resolution fix using `resolve_canonical_path` (canonicalize the deepest existing ancestor) made the Linux semantics platform-correct but did not move the macOS test 1 either, which strongly suggests the underlying event simply isn't reaching the actor. Without a macOS box to instrument the FSEvents stream directly, the next investigative step is to spawn a debug binary on a macOS runner that subscribes to FSEvents directly and prints the raw flags it receives for the test scenario.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-26

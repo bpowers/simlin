@@ -3,7 +3,9 @@
     "simlin-engine": ["xmutil"],
     "simlin": ["simlin-engine"],
     "simlin-cli": ["simlin-engine", "simlin"],
-    "simlin-mcp": ["simlin-engine"],
+    "simlin-mcp": ["simlin-engine", "simlin-mcp-core"],
+    "simlin-mcp-core": ["simlin-engine"],
+    "simlin-serve": ["simlin-engine", "simlin-mcp-core"],
     "xmutil": []
   },
   "typescript": {
@@ -12,6 +14,7 @@
     "@simlin/diagram": ["@simlin/core", "@simlin/engine"],
     "@simlin/app": ["@simlin/core", "@simlin/diagram", "@simlin/engine"],
     "@simlin/server": ["@simlin/core", "@simlin/diagram", "@simlin/engine"],
+    "@simlin/serve-web": ["@simlin/core", "@simlin/diagram", "@simlin/engine"],
     "simlin-site": []
   }
 }
