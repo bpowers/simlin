@@ -51,16 +51,36 @@ mod tests {
         );
     }
 
-    /// Smoke-test the failure path under the assumption that our test
-    /// environment has no GUI: in CI / headless dev shells, `xdg-open`
-    /// (Linux) and the equivalent on macOS/Windows have no display to open
-    /// against and report I/O failure. The point of this test is to make
-    /// sure that failure is downgraded to a `false` return rather than a
-    /// panic so the server keeps running for the user. If `DISPLAY` is set
-    /// we can't reliably predict the outcome, so skip the assertion in that
-    /// case rather than spuriously failing on a developer's desktop.
+    /// Smoke-test that `open_browser` does not panic when the platform's
+    /// launcher fails or quietly succeeds. The point is to keep the
+    /// server running for the user regardless of what `xdg-open` /
+    /// `open` / `start` return. The boolean result is not load-bearing:
+    ///
+    /// - Linux without `$DISPLAY`: `xdg-open` reports I/O failure and we
+    ///   get `false`. Asserting `false` here is the historical case.
+    /// - macOS: the system `open` command happily hands the URL to
+    ///   Launch Services even on a CI runner without a logged-in GUI
+    ///   session, so the call typically succeeds (returns `true`).
+    /// - Windows: the launcher's behaviour on headless runners is also
+    ///   non-deterministic.
+    ///
+    /// Rather than try to predict the boolean outcome on every host, we
+    /// just exercise the call path and assert it returns *some* bool
+    /// without panicking. The Linux-headless `false` arm is still the
+    /// case the implementation cares about; we keep that assertion
+    /// gated on `target_os = "linux"` and the absence of `$DISPLAY`,
+    /// where it is genuinely deterministic.
     #[test]
-    fn open_browser_returns_false_when_launcher_fails() {
+    fn open_browser_does_not_panic() {
+        let _ = open_browser("http://127.0.0.1:1/never-opens");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_browser_returns_false_in_linux_headless() {
+        // `xdg-open` exits non-zero when no display is available; we
+        // map that to `false`. On a developer machine with `$DISPLAY`
+        // set we cannot predict the outcome, so skip the assertion.
         let has_display = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
         if has_display {
             return;
@@ -68,7 +88,7 @@ mod tests {
         let result = open_browser("http://127.0.0.1:1/never-opens");
         assert!(
             !result,
-            "expected open_browser to fall through to false in headless env"
+            "expected open_browser to fall through to false in headless Linux"
         );
     }
 }
