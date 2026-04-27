@@ -270,10 +270,19 @@ jobs:
   serve-smoke:
     name: simlin-serve smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # 15-minute cap covers macos-latest's slower binary spawn + the
-    # release build itself; the actual smoke test runs in well under
-    # one minute on every platform we ship.
-    timeout-minutes: 15
+    # 30-minute cap. Once the cargo cache is warm a serve-smoke run
+    # completes in under 10 minutes on every platform (macos-latest is
+    # the slowest at ~8 min, ubuntu and windows ~5 min). The cold-cache
+    # path on Windows is the binding constraint: actions/cache@v4 only
+    # saves on job success by default, so a series of failing Windows
+    # runs leaves the cache unwarmed indefinitely, and a from-scratch
+    # MSVC build of simlin-engine + simlin-serve + their transitive deps
+    # takes 18-22 minutes. The previous 15-minute cap was tight for
+    # warm-cache macOS and impossible for cold-cache Windows. Once the
+    # Windows cache warms (after the first green run), a 15-minute cap
+    # would be reasonable again — the headroom here is for the
+    # bootstrapping case and to absorb the macos-latest p99.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
