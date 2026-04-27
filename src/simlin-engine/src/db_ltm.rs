@@ -2169,13 +2169,37 @@ pub(crate) fn build_element_level_loops(
                 // link score (Bare shape) via the variable-level link
                 // names produced by `circuit_to_links`.
                 let links = var_graph.circuit_to_links(&unique_cycle);
-                let stocks = var_graph.find_stocks_in_loop(&unique_cycle);
+
+                // Stocks must be element-level so `partition_for_loop`
+                // can resolve them in `model_element_cycle_partitions::
+                // stock_partition` (which is keyed element-level). The
+                // `Loop` docstring's stocks-granularity invariant holds
+                // for every loop with `dimensions.is_empty()`, including
+                // this cross-element approximation. Collect every
+                // element-level stock node that appears in the original
+                // circuit -- a cross-element loop typically traverses
+                // the same stock variable at multiple elements (e.g.,
+                // population[nyc] AND population[boston]); all of those
+                // belong in `stocks` so the partition lookup hits the
+                // SCC containing them, instead of returning None and
+                // dropping the loop into the catch-all None group in
+                // `compute_rel_loop_scores`.
+                let mut element_stocks: Vec<Ident<Canonical>> = Vec::new();
+                let mut seen_stocks = std::collections::HashSet::new();
+                for &node in representative {
+                    let var_name = strip_subscript(node);
+                    if var_graph.stocks.contains(&Ident::new(var_name)) && seen_stocks.insert(node)
+                    {
+                        element_stocks.push(Ident::new(node));
+                    }
+                }
+
                 let polarity = var_graph.calculate_polarity(&links);
 
                 all_loops.push(Loop {
                     id: String::new(),
                     links,
-                    stocks,
+                    stocks: element_stocks,
                     polarity,
                     dimensions: vec![], // scalar: wildcard-reducer aggregated
                 });

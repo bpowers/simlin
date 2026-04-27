@@ -158,12 +158,22 @@ fn resolve_literal_index(
                 }
             }
             crate::dimensions::Dimension::Indexed(_, size) => {
-                // Indexed dimensions accept integer literals in the range [1, size].
+                // Indexed dimensions accept integer literals in the
+                // range [1, size]. Canonicalize via parse-then-format
+                // so non-canonical forms like `pop[01]` reduce to `"1"`
+                // -- matching `dimension_element_names`'s `"1".."N"`
+                // output and the Expr0 sibling
+                // (`ltm_augment::resolve_literal_element_index`).
+                // Returning the original text would let `pop[01]`
+                // serialize as `FixedIndex(["01"])` while the partial
+                // builder reduces to `FixedIndex(["1"])`, the shape
+                // comparison would fail, and the live ref would be
+                // wrapped in `PREVIOUS()`.
                 if let Ok(n) = canonical.parse::<u32>()
                     && n >= 1
                     && n <= *size
                 {
-                    return Some(canonical);
+                    return Some(n.to_string());
                 }
             }
         }

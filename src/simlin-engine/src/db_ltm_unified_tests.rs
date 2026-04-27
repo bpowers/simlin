@@ -1249,6 +1249,86 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
 // through a scalar node (total_pop) and arrayed stocks (pop[nyc], pop[boston]).
 
 #[test]
+fn cross_element_loop_partitions_resolve_to_some() {
+    // The cross-element wildcard-reducer fixture (used elsewhere by
+    // `cross_element_loop_through_sum_reducer` in db_element_graph_tests):
+    //
+    //   population[Region] (stock, inflow=births)
+    //   births[Region] = SUM(population[*]) * 0.01
+    //
+    // The element graph contains a 4-node cross-element circuit
+    // population[nyc] -> births[boston] -> population[boston] -> births[nyc]
+    // -> population[nyc]. `build_element_level_loops`'s cross-element
+    // branch collapses this to a scalar loop with `dimensions: vec![]`.
+    //
+    // The `Loop` docstring's stocks-granularity invariant says any loop
+    // with `dimensions.is_empty()` MUST carry element-level stock names
+    // because `partition_for_loop` keys
+    // `model_element_cycle_partitions::stock_partition` element-level.
+    // The cross-element branch was using variable-level stocks, so its
+    // partition lookup returned None and the loop bucketed into the
+    // None group in `compute_rel_loop_scores` -- silently corrupting
+    // per-loop normalization (the cross-element loop should be in the
+    // partition containing the population[*] stocks).
+    let project = TestProject::new("cross_element_partition")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "SUM(population[*]) * 0.01", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert!(
+        !ltm.loop_partitions.is_empty(),
+        "expected loop_partitions for the cross-element fixture"
+    );
+
+    // Identify loop_score variables by id and inspect their dimensions
+    // to find loops with empty `dimensions` (i.e., cross-element /
+    // mixed / scalar). Per the `Loop` docstring's invariant, those
+    // MUST resolve to a Some partition. A2A loops (non-empty
+    // dimensions) legitimately return None because they don't use the
+    // element-level partition lookup.
+    let mut scalar_loop_ids: Vec<String> = Vec::new();
+    for v in &ltm.vars {
+        if let Some(id) = v
+            .name
+            .strip_prefix("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+            && v.dimensions.is_empty()
+        {
+            scalar_loop_ids.push(id.to_string());
+        }
+    }
+    assert!(
+        !scalar_loop_ids.is_empty(),
+        "expected at least one cross-element/scalar loop in the fixture; \
+         vars: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("loop_score"))
+            .map(|v| (&v.name, &v.dimensions))
+            .collect::<Vec<_>>()
+    );
+
+    for id in &scalar_loop_ids {
+        let partition = ltm
+            .loop_partitions
+            .get(id)
+            .unwrap_or_else(|| panic!("loop {id:?} missing from loop_partitions"));
+        assert!(
+            partition.is_some(),
+            "scalar / cross-element loop {id:?} resolved to None partition; \
+             cross-element branch must produce element-level stocks per the \
+             `Loop` docstring's invariant. loop_partitions: {:?}",
+            ltm.loop_partitions,
+        );
+    }
+}
+
+#[test]
 fn mixed_scalar_loop_partitions_resolve_to_some() {
     // Same fixture used in mixed_scalar_loop_score_refs_resolve_to_emitted_names:
     //   pop[Region] (stock, inflow=births)

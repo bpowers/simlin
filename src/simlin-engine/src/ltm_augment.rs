@@ -88,10 +88,17 @@ fn resolve_literal_element_index(
     let candidate = match idx {
         IndexExpr0::Expr(Expr0::Var(name, _)) => canonicalize(name.as_str()).into_owned(),
         IndexExpr0::Expr(Expr0::Const(s, _, _)) => {
-            // Only integer literals could be element references; other
-            // constants (floats, strings, etc.) never are.
-            s.parse::<u32>().ok()?;
-            s.clone()
+            // Integer literals (only) could be element references for
+            // indexed dims. Canonicalize via parse-then-format so
+            // non-canonical forms like `pop[01]` reduce to `"1"` and
+            // match `dimension_element_names`'s `"1".."N"` output. The
+            // Expr2 sibling (`db_analysis::resolve_literal_index`)
+            // does the same; without canonicalization here we'd
+            // disagree on `01` (Expr2 -> FixedIndex(["1"]),
+            // Expr0 -> DynamicIndex), the live-shape match would
+            // fail, and the partial would silently zero.
+            let n = s.parse::<u32>().ok()?;
+            n.to_string()
         }
         _ => return None,
     };
@@ -1476,6 +1483,48 @@ mod tests {
             in_range_shape,
             RefShape::FixedIndex(vec!["1".to_string()]),
             "in-range integer literal must classify as FixedIndex; got {in_range_shape:?}",
+        );
+    }
+
+    /// Regression test: integer-literal subscripts must canonicalize to
+    /// the engine's "1"-based string form before lookup, so `pop[01]`
+    /// (zero-padded) classifies as `FixedIndex(["1"])` -- the same form
+    /// `dimension_element_names` produces and the same form the Expr2
+    /// edge emitter (`db_analysis::resolve_literal_index`) returns
+    /// after this fix. Without canonicalization, `pop[01]` would be
+    /// rejected as non-literal here (string "01" doesn't match "1" in
+    /// `source_dim_elements`) while the Expr2 classifier accepted it
+    /// at the original "01" text -- shapes disagree, the live ref gets
+    /// wrapped in `PREVIOUS()`, and the link score silently zeros.
+    #[test]
+    fn classify_expr0_canonicalizes_integer_literal_subscript() {
+        use crate::ast::{Expr0, IndexExpr0, Loc};
+
+        // Indexed-style source_dim_elements: position 0 is an indexed
+        // dim of size 5 (elements "1".."5").
+        let dims = vec![
+            vec!["1", "2", "3", "4", "5"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>(),
+        ];
+        let indices = vec![IndexExpr0::Expr(Expr0::Const(
+            "01".to_string(),
+            1.0,
+            Loc::default(),
+        ))];
+
+        let shape = classify_expr0_subscript_shape(&indices, &dims);
+        assert_eq!(
+            shape,
+            RefShape::FixedIndex(vec!["1".to_string()]),
+            "zero-padded integer literal must canonicalize to '1' so the \
+             Expr0 and Expr2 classifiers agree; got {shape:?}",
+        );
+
+        assert!(
+            is_literal_element_index(&indices[0], 0, &dims),
+            "is_literal_element_index must accept canonicalized integer literal",
         );
     }
 

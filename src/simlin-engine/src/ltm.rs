@@ -92,20 +92,30 @@ pub struct Link {
 ///
 /// # `stocks` granularity invariant
 ///
-/// The granularity of `stocks` depends on the loop's branch:
+/// The granularity of `stocks` is keyed off `dimensions`:
 ///
-/// - **Mixed/scalar loops** (`dimensions.is_empty()`): stocks are
-///   **element-level** names (e.g., `"pop[nyc]"`).  This is required
-///   because `partition_for_loop` looks up stocks in
-///   `model_element_cycle_partitions`, whose `stock_partition` map is
-///   keyed on element-level names.  Using variable-level names here would
-///   cause every mixed/scalar loop to return `None`, silently corrupting
-///   per-loop normalization in `compute_rel_loop_scores`.
+/// - **`dimensions.is_empty()` -- mixed/scalar AND cross-element
+///   approximation loops**: stocks are **element-level** names (e.g.,
+///   `"pop[nyc]"`). This is required because `partition_for_loop` looks
+///   up stocks in `model_element_cycle_partitions`, whose
+///   `stock_partition` map is keyed on element-level names.  Using
+///   variable-level names here would cause `partition_for_loop` to
+///   return `None`, silently corrupting per-loop normalization in
+///   `compute_rel_loop_scores` (the loop would bucket into the
+///   catch-all `None` group instead of its actual SCC).  Cross-element
+///   approximation loops (built by the wildcard-reducer branch in
+///   `db_ltm::build_element_level_loops`) follow the same rule and
+///   include every element-level stock node that appears in the
+///   original circuit -- a single cross-element loop typically
+///   traverses the same stock variable at multiple elements (e.g.,
+///   both `population[nyc]` AND `population[boston]`), and all belong
+///   in `stocks` so the partition lookup hits the SCC containing them.
 ///
-/// - **A2A loops** (`!dimensions.is_empty()`): stocks are
+/// - **`!dimensions.is_empty()` -- A2A loops**: stocks are
 ///   **variable-level** names (e.g., `"pop"`).  A2A loops are expanded
 ///   per-element during simulation so variable-level names are correct;
-///   the element-level partition lookup is not used for A2A loops.
+///   the element-level partition lookup is not used for A2A loops, and
+///   `partition_for_loop` legitimately returns `None` for them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Loop {
