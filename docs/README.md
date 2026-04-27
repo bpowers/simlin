@@ -22,6 +22,7 @@
 - [tech-debt.md](tech-debt.md) -- Known technical debt items with measurement commands
 - [design-plans/](design-plans/) -- Design plans (architecture and phasing for major efforts)
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
+- [test-plans/](test-plans/) -- Human verification plans for completed features
 
 ## Domain Knowledge
 

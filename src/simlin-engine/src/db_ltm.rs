@@ -17,12 +17,12 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use super::{
-    Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, SourceModel, SourceProject,
+    Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, RefShape, SourceModel, SourceProject,
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
-    model_implicit_var_info, model_module_ident_context, model_module_map,
-    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
-    variable_dimensions, variable_size,
+    build_submodel_metadata, canonical_module_input_set, collect_reference_shapes, compute_layout,
+    link_score_equation_text, model_implicit_var_info, model_module_ident_context,
+    model_module_map, parse_source_variable_with_module_context, project_datamodel_dims,
+    project_units_context, variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -271,6 +271,153 @@ pub fn compile_ltm_var_fragment(
         model,
         project,
     )
+}
+
+/// Compute the per-shape link score equation text for a single causal link.
+///
+/// Sibling of [`super::link_score_equation_text`]. Where the legacy
+/// function keys only on `(from, to)` and emits one variable per causal
+/// link, this shape-aware variant emits one variable per
+/// `(from, to, shape)` tuple. `model_ltm_variables` calls this once per
+/// unique shape in the target's AST so per-shape link scores can be
+/// ceteris-paribus scored against their actual reference site.
+///
+/// Module-involved links delegate to the same module formulas as the
+/// legacy function (composite reference / black-box delta-ratio). Their
+/// equations are independent of `shape`, but the variable name still
+/// carries the suffix so the emission loop can keep one entry per
+/// (from, to, shape) tuple in the `Vec<LtmSyntheticVar>`.
+///
+/// `lsv.dimensions` is left empty here; the caller (the link emission
+/// loop) sets dimensions per the link-score-dimensions policy after
+/// receiving the value.
+///
+/// Salsa-tracked so a per-shape link score is recomputed only when the
+/// involved variables (and their shape-classifying dimensions) change.
+/// Lives in `db_ltm.rs` rather than `db.rs` so the latter stays under
+/// the project's per-file line cap.
+#[salsa::tracked(returns(ref))]
+pub fn link_score_equation_text_shaped<'db>(
+    db: &'db dyn Db,
+    link_id: LtmLinkId<'db>,
+    shape: RefShape,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<crate::db::LtmSyntheticVar> {
+    use crate::common::{Canonical, Ident};
+    use crate::db::LtmSyntheticVar;
+    use crate::db::{
+        black_box_delta_ratio_equation, find_model_output_ports_for_module, model_causal_edges,
+    };
+
+    let from_name = link_id.link_from(db);
+    let to_name = link_id.link_to(db);
+    let from_ident = Ident::<Canonical>::new(from_name);
+    let to_ident = Ident::<Canonical>::new(to_name);
+
+    let from_var = super::reconstruct_single_variable(db, model, project, from_name);
+    let to_var = super::reconstruct_single_variable(db, model, project, to_name)?;
+
+    let var_name = crate::ltm_augment::link_score_var_name(from_name, to_name, &shape);
+
+    let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
+    let to_is_module = to_var.is_module();
+
+    // Module-involved links: shape doesn't change the equation (modules
+    // are scalar nodes in the causal graph; their composite-reference and
+    // black-box delta-ratio formulas don't reach into the AST). Reuse the
+    // legacy formulas, but key the synthetic variable by the shape-driven
+    // name so the emission loop's per-shape map works.
+    if from_is_module || to_is_module {
+        let is_discovery = project.ltm_discovery_mode(db);
+        let equation = if !from_is_module && to_is_module {
+            if let crate::variable::Variable::Module { inputs, .. } = &to_var {
+                if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
+                    if is_discovery {
+                        let edges = model_causal_edges(db, model, project);
+                        let output_ports = find_model_output_ports_for_module(edges, to_name);
+                        let output_ref = output_ports
+                            .first()
+                            .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))
+                            .unwrap_or_else(|| format!("{}\u{00B7}output", to_ident.as_str()));
+                        black_box_delta_ratio_equation(from_ident.as_str(), &output_ref)
+                    } else {
+                        format!(
+                            "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
+                            module = to_ident.as_str(),
+                            port = input.dst.as_str(),
+                        )
+                    }
+                } else {
+                    black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+                }
+            } else {
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+            }
+        } else if from_is_module && !to_is_module {
+            let module_output_ref: Option<String> = to_var
+                .ast()
+                .map(|ast| crate::variable::identifier_set(ast, &[], None))
+                .and_then(|deps| {
+                    let prefix = format!("{}\u{00B7}", from_ident.as_str());
+                    deps.into_iter()
+                        .find(|d| d.as_str().starts_with(&prefix))
+                        .map(|d| d.to_string())
+                });
+            if let Some(output_ref) = module_output_ref {
+                black_box_delta_ratio_equation(&output_ref, to_ident.as_str())
+            } else {
+                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+            }
+        } else {
+            black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
+        };
+
+        return Some(LtmSyntheticVar {
+            name: var_name,
+            equation,
+            dimensions: vec![],
+        });
+    }
+
+    // Standard ceteris-paribus formula for non-module links.
+    //
+    // Build the source's per-dimension element lists so the per-shape
+    // partial-equation builder can validate literal-index names like
+    // `[NYC]` against the source's actual dimensions. For scalar sources
+    // this is empty, which is the right input for Bare-shape calls (no
+    // subscripts to classify).
+    let source_dim_elements: Vec<Vec<String>> =
+        if let Some(from_sv) = model.variables(db).get(from_name) {
+            variable_dimensions(db, *from_sv, project)
+                .iter()
+                .map(crate::ltm_augment::dimension_element_names)
+                .collect()
+        } else {
+            // Implicit variables (SMOOTH/DELAY expansions) aren't in
+            // source_vars and are scalar by construction.
+            Vec::new()
+        };
+
+    let mut all_vars = HashMap::new();
+    if let Some(ref fv) = from_var {
+        all_vars.insert(from_ident.clone(), fv.clone());
+    }
+    all_vars.insert(to_ident.clone(), to_var.clone());
+    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+        &from_ident,
+        &to_ident,
+        &shape,
+        &source_dim_elements,
+        &to_var,
+        &all_vars,
+    );
+
+    Some(LtmSyntheticVar {
+        name: var_name,
+        equation,
+        dimensions: vec![],
+    })
 }
 
 /// Compile an arbitrary LTM equation string to symbolic bytecodes.
@@ -1818,7 +1965,13 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
 /// Mixed: any circuit containing a scalar node or where the group has
 /// circuits with different variable-level structures. Each gets its own
 /// scalar loop with a unique element-specific ID suffix.
-fn build_element_level_loops(
+///
+/// Visibility is `pub(crate)` so unit tests in
+/// `db_ltm_unified_tests.rs` can drive this function directly to
+/// inspect per-link `shape` annotations -- the field isn't otherwise
+/// observable through the LtmVariablesResult.vars surface (which only
+/// exposes the rendered equation strings).
+pub(crate) fn build_element_level_loops(
     element_circuits: &super::LoopCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
     source_vars: &HashMap<String, super::SourceVariable>,
@@ -1938,6 +2091,10 @@ fn build_element_level_loops(
                 .iter()
                 .map(|n| Ident::new(strip_subscript(n)))
                 .collect();
+            // A2A loop: every link is a same-element diagonal access. The
+            // loop-score equation references the canonical
+            // `{from}->{to}` link score (the Bare-shape name) via the
+            // variable-level link names that `circuit_to_links` produces.
             let links = var_graph.circuit_to_links(&var_level_nodes);
             let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
             let polarity = var_graph.calculate_polarity(&links);
@@ -1974,22 +2131,25 @@ fn build_element_level_loops(
                 dimensions,
             });
         } else if is_cross_element {
-            // Cross-element circuits (mixed subscripts or repeated variable
-            // names). These circuits reference off-diagonal element edges
-            // like population[nyc] → migration_pressure[boston], for which
-            // no dedicated link score variables exist.
+            // Cross-element circuits: a circuit where nodes have different
+            // element subscripts on the same dimension (e.g., pop[nyc] ->
+            // total_pop -> pop[boston] -> total_pop -> pop[nyc] via a
+            // wildcard reducer like SUM(pop[*])).
             //
-            // Rather than dropping these entirely (which would leave models
-            // with ONLY cross-element feedback with no scored loops), extract
-            // the unique variable-level cycle and create a SCALAR loop that
-            // references existing A2A link score variables. The resulting
-            // loop score uses diagonal link score values as an approximation
-            // (the actual off-diagonal sensitivities may differ).
+            // After the per-reference element graph (FixedIndex no longer
+            // expands to NxN), the cross-element circuits that survive
+            // originate primarily from wildcard reducers. Such reducers
+            // already encode the cross-element contribution as a single
+            // A2A link-score value per neighbour, so we extract the unique
+            // variable-level cycle and emit a scalar Loop whose links
+            // reference the canonical {from}->{to} A2A link-score variables
+            // (Bare shape). The diagonal link-score values capture the loop
+            // structure without needing dedicated off-diagonal link scores.
             //
             // Deduplication: strip subscripts and take the shortest unique
-            // cycle. E.g., pop[nyc]→mp[boston]→mo[boston]→pop[boston]→mp[nyc]→
-            // mo[nyc] has stripped sequence pop,mp,mo,pop,mp,mo; the unique
-            // cycle starting at the first repeat is pop→mp→mo.
+            // cycle. E.g., pop[nyc]->total_pop->pop[boston]->total_pop has
+            // stripped sequence pop,total_pop,pop,total_pop; the unique
+            // cycle starting at the first repeat is pop->total_pop.
             let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
 
             // Find the shortest unique cycle in the stripped sequence
@@ -2003,16 +2163,45 @@ fn build_element_level_loops(
             }
 
             if unique_cycle.len() >= 2 {
+                // Cross-element circuits are scored as a scalar loop using
+                // the wildcard-reducer's already-aggregated A2A link-score
+                // values: every link reads the canonical `{from}->{to}` A2A
+                // link score (Bare shape) via the variable-level link
+                // names produced by `circuit_to_links`.
                 let links = var_graph.circuit_to_links(&unique_cycle);
-                let stocks = var_graph.find_stocks_in_loop(&unique_cycle);
+
+                // Stocks must be element-level so `partition_for_loop`
+                // can resolve them in `model_element_cycle_partitions::
+                // stock_partition` (which is keyed element-level). The
+                // `Loop` docstring's stocks-granularity invariant holds
+                // for every loop with `dimensions.is_empty()`, including
+                // this cross-element approximation. Collect every
+                // element-level stock node that appears in the original
+                // circuit -- a cross-element loop typically traverses
+                // the same stock variable at multiple elements (e.g.,
+                // population[nyc] AND population[boston]); all of those
+                // belong in `stocks` so the partition lookup hits the
+                // SCC containing them, instead of returning None and
+                // dropping the loop into the catch-all None group in
+                // `compute_rel_loop_scores`.
+                let mut element_stocks: Vec<Ident<Canonical>> = Vec::new();
+                let mut seen_stocks = std::collections::HashSet::new();
+                for &node in representative {
+                    let var_name = strip_subscript(node);
+                    if var_graph.stocks.contains(&Ident::new(var_name)) && seen_stocks.insert(node)
+                    {
+                        element_stocks.push(Ident::new(node));
+                    }
+                }
+
                 let polarity = var_graph.calculate_polarity(&links);
 
                 all_loops.push(Loop {
                     id: String::new(),
                     links,
-                    stocks,
+                    stocks: element_stocks,
                     polarity,
-                    dimensions: vec![], // scalar: approximate cross-element score
+                    dimensions: vec![], // scalar: wildcard-reducer aggregated
                 });
             }
         } else {
@@ -2027,40 +2216,96 @@ fn build_element_level_loops(
                 let var_links = var_graph.circuit_to_links(&var_level_nodes);
                 let polarity = var_graph.calculate_polarity(&var_links);
 
-                // For the actual loop links, use element-level names so
-                // the link score references match the generated per-element
-                // link score variable names.
-                let element_nodes: Vec<Ident<Canonical>> =
-                    circuit.iter().map(|n| Ident::new(n)).collect();
+                // Build links with names that match what the link-score
+                // emission system produces, so loop-score equations
+                // reference existing variables.
+                //
+                // Link-score emission generates names in two forms:
+                //
+                //   1. Cross-dimensional (arrayed-from, scalar-to):
+                //      `try_cross_dimensional_link_scores` emits
+                //      "$⁚ltm⁚link_score⁚{from}[{elem}]→{to}" per element.
+                //      Here `from` is the variable-level name and `elem` is
+                //      the subscript. Element-level circuit nodes encode this
+                //      as "{from}[{elem}]" for the source and "{to}" for the
+                //      target. We preserve this form so the generated
+                //      `link_score_var_name(from, to, Bare)` call inside
+                //      `generate_loop_score_equation` produces the matching
+                //      cross-dimensional name.
+                //
+                //   2. All other edges (A2A same-element, scalar-to-arrayed,
+                //      scalar-to-scalar): `emit_per_shape_link_scores` uses
+                //      variable-level (stripped) names for both from and to.
+                //      We strip subscripts here so the loop-score equation
+                //      references the same variable-level link score.
+                //
+                // Cross-dimensional: source has `[`, target does not.
+                // Everything else: strip subscripts from both ends.
+                let element_nodes: Vec<&str> = circuit.iter().map(|n| n.as_ref()).collect();
 
-                // Build element-level links with polarity from var-level analysis.
                 let mut links = Vec::with_capacity(element_nodes.len());
                 for (i, _) in element_nodes.iter().enumerate() {
-                    let from = &element_nodes[i];
-                    let to = &element_nodes[(i + 1) % element_nodes.len()];
+                    let from_raw = element_nodes[i];
+                    let to_raw = element_nodes[(i + 1) % element_nodes.len()];
                     // Use the polarity from the corresponding var-level link
                     let var_link_polarity = if i < var_links.len() {
                         var_links[i].polarity
                     } else {
                         crate::ltm::LinkPolarity::Unknown
                     };
+                    // Determine the canonical link name forms.
+                    let from_subscripted = from_raw.contains('[');
+                    let to_subscripted = to_raw.contains('[');
+                    let (link_from, link_to) = if from_subscripted && !to_subscripted {
+                        // Cross-dimensional: keep element-level from,
+                        // bare to (matches try_cross_dimensional_link_scores).
+                        (from_raw, to_raw)
+                    } else {
+                        // A2A, scalar→arrayed, or scalar→scalar:
+                        // use variable-level names (matches emit_per_shape_link_scores).
+                        (strip_subscript(from_raw), strip_subscript(to_raw))
+                    };
+                    // Use Bare so link_score_var_name does not prepend an
+                    // extra [elem] bracket to link_from (which already
+                    // contains the subscript for cross-dimensional edges).
                     links.push(crate::ltm::Link {
-                        from: from.clone(),
-                        to: to.clone(),
+                        from: Ident::new(link_from),
+                        to: Ident::new(link_to),
                         polarity: var_link_polarity,
                     });
                 }
 
                 // Find stocks among element-level nodes. We check the
-                // variable-level stock set by stripping subscripts.
+                // variable-level stock set by stripping subscripts from
+                // the circuit's element-level names, but preserve the
+                // element-level form in the result so partition_for_loop
+                // (which uses element-level keys from
+                // model_element_cycle_partitions) can resolve them.
                 let stocks: Vec<Ident<Canonical>> = element_nodes
                     .iter()
                     .filter(|n| {
-                        let var_name = strip_subscript(n.as_str());
+                        let var_name = strip_subscript(n);
                         var_graph.stocks.contains(&Ident::new(var_name))
                     })
-                    .cloned()
+                    .map(|n| Ident::new(n))
                     .collect();
+
+                // Each arrayed circuit node that is a stock must appear in
+                // `stocks` with its subscript intact. Stripping the subscript
+                // here would break partition_for_loop: model_element_cycle_
+                // partitions keys stock_partition on element-level names
+                // (e.g. "pop[nyc]"), not variable-level names (e.g. "pop").
+                debug_assert!(
+                    element_nodes
+                        .iter()
+                        .filter(|n| n.contains('[') && {
+                            let var_name = strip_subscript(n);
+                            var_graph.stocks.contains(&Ident::new(var_name))
+                        })
+                        .all(|n| stocks.iter().any(|s| s.as_str() == *n)),
+                    "mixed/scalar branch: arrayed stock node lost its subscript; \
+                     element_nodes={element_nodes:?} stocks={stocks:?}"
+                );
 
                 all_loops.push(Loop {
                     id: String::new(),
@@ -2286,9 +2531,10 @@ pub fn model_ltm_variables(
         // (e.g., `share[R] = population[R] / SUM(population[*])`), this
         // creates only N diagonal link scores (one per element). Off-diagonal
         // link scores (e.g., population[boston] -> share[nyc]) are not
-        // generated. Cross-element circuits are detected by
-        // build_element_level_loops and scored approximately using
-        // variable-level link references.
+        // generated; the wildcard reducer already aggregates the
+        // cross-element contribution into the diagonal A2A link score, and
+        // build_element_level_loops uses those diagonal values when
+        // emitting scalar Loops for the surviving cross-element circuits.
         //
         // Check whether this edge should use the target's dimensions for
         // the link score. This covers:
@@ -2419,6 +2665,97 @@ pub fn model_ltm_variables(
         Some(cross_vars)
     }
 
+    /// Enumerate the unique `RefShape`s under which `to`'s AST references `from`.
+    ///
+    /// Returns `None` for module sources/targets (modules are scalar nodes
+    /// in the causal graph; their link score equations don't depend on
+    /// per-reference AST shape) -- the caller should fall back to a
+    /// single Bare emission. Returns an empty vec when no AST reference
+    /// exists (e.g., structural edges or implicit synthesized references)
+    /// -- the caller should also fall back.
+    ///
+    /// For non-module variables, reconstructs the target's `Variable`
+    /// (which carries the AST) and walks it via `collect_reference_shapes`.
+    fn enumerate_shapes(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        model: SourceModel,
+        project: SourceProject,
+    ) -> Option<Vec<RefShape>> {
+        let to_sv = source_vars.get(to)?;
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        if let Some(from_sv) = source_vars.get(from)
+            && from_sv.kind(db) == SourceVariableKind::Module
+        {
+            return None;
+        }
+        let from_dims = source_vars
+            .get(from)
+            .map(|sv| variable_dimensions(db, *sv, project).clone())
+            .unwrap_or_default();
+        let target_var = super::reconstruct_single_variable(db, model, project, to)?;
+        let source_is_arrayed = !from_dims.is_empty();
+        Some(collect_reference_shapes(
+            &target_var,
+            from,
+            source_is_arrayed,
+            &from_dims,
+        ))
+    }
+
+    /// Emit per-shape link scores for a single (from, to) edge.
+    ///
+    /// The emission is shape-driven (Phase 3): one `LtmSyntheticVar` per
+    /// `(from, to, shape)` tuple, named by `link_score_var_name`. Module
+    /// links and edges with no AST reference fall back to a single
+    /// Bare emission so the legacy behavior is preserved at structural
+    /// boundaries.
+    ///
+    /// `fallback_shape` is the shape to use when shape enumeration is
+    /// not possible or yields no results (e.g., implicit synthesized
+    /// references that don't appear in the target's AST). Callers pass
+    /// `RefShape::Bare` to preserve the legacy single-shape behavior.
+    #[allow(clippy::too_many_arguments)] // helper threads through emission context
+    fn emit_per_shape_link_scores(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        fallback_shape: RefShape,
+        model: SourceModel,
+        project: SourceProject,
+        dm_dims: &[crate::datamodel::Dimension],
+        vars: &mut Vec<LtmSyntheticVar>,
+    ) {
+        let shapes = enumerate_shapes(db, source_vars, from, to, model, project)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| vec![fallback_shape]);
+
+        let target_dims = link_score_dimensions(db, source_vars, from, to, project, dm_dims);
+
+        for shape in shapes {
+            let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+            if let Some(mut lsv) =
+                link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
+            {
+                // Set the canonical name and dimensions per Phase 3 Task 4/5.
+                lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                // All shapes (FixedIndex, Bare, Wildcard) take the target's
+                // dimensions: for FixedIndex each per-element link score is
+                // scalar when the target is scalar and arrayed when the target
+                // is arrayed; Bare and Wildcard inherit target dims via the
+                // same compatibility rule.  link_score_dimensions already
+                // implements this for every case, so one assignment suffices.
+                lsv.dimensions = target_dims.clone();
+                vars.push(lsv);
+            }
+        }
+    }
+
     if has_input_ports || is_discovery {
         for (from, tos) in &edges_result.edges {
             for to in tos {
@@ -2429,26 +2766,40 @@ pub fn model_ltm_variables(
                     vars.extend(cross_vars);
                     continue;
                 }
-                let link_id = LtmLinkId::new(db, from.clone(), to.clone());
-                if let Some(mut lsv) = link_score_equation_text(db, link_id, model, project).clone()
-                {
-                    lsv.dimensions =
-                        link_score_dimensions(db, source_vars, from, to, project, dm_dims);
-                    vars.push(lsv);
-                }
+                emit_per_shape_link_scores(
+                    db,
+                    source_vars,
+                    from,
+                    to,
+                    RefShape::Bare,
+                    model,
+                    project,
+                    dm_dims,
+                    &mut vars,
+                );
             }
         }
     } else if let Some(ref detected_loops) = loops {
         let mut seen_links: HashSet<(String, String)> = HashSet::new();
         for loop_item in detected_loops {
             for link in &loop_item.links {
-                let key = (link.from.to_string(), link.to.to_string());
+                // For cross-dimensional edges in mixed/scalar loops, the
+                // loop builder preserves an element-level `link.from` like
+                // "pop[nyc]" so loop_score equations reference the right
+                // per-element link score. But `try_cross_dimensional_link_scores`
+                // and `source_vars` lookups want the variable-level name
+                // ("pop"). Strip the subscript for both the dedup key and
+                // the cross-dim helper. The helper emits all per-element
+                // link scores (one per source element), and the dedup
+                // ensures we only fire it once per (var_from, to) pair.
+                let from_var_level = strip_subscript(link.from.as_str());
+                let key = (from_var_level.to_string(), link.to.to_string());
                 if seen_links.insert(key) {
                     // Check for cross-dimensional (arrayed-to-scalar) edges.
                     if let Some(cross_vars) = try_cross_dimensional_link_scores(
                         db,
                         source_vars,
-                        link.from.as_str(),
+                        from_var_level,
                         link.to.as_str(),
                         model,
                         project,
@@ -2456,20 +2807,21 @@ pub fn model_ltm_variables(
                         vars.extend(cross_vars);
                         continue;
                     }
-                    let link_id = LtmLinkId::new(db, link.from.to_string(), link.to.to_string());
-                    if let Some(mut lsv) =
-                        link_score_equation_text(db, link_id, model, project).clone()
-                    {
-                        lsv.dimensions = link_score_dimensions(
-                            db,
-                            source_vars,
-                            link.from.as_str(),
-                            link.to.as_str(),
-                            project,
-                            dm_dims,
-                        );
-                        vars.push(lsv);
-                    }
+                    // Per-shape enumeration via the target's AST happens
+                    // inside emit_per_shape_link_scores; the fallback shape
+                    // is only used when the AST walk yields no sites
+                    // (e.g., implicit synthesized references).
+                    emit_per_shape_link_scores(
+                        db,
+                        source_vars,
+                        from_var_level,
+                        link.to.as_str(),
+                        RefShape::Bare,
+                        model,
+                        project,
+                        dm_dims,
+                        &mut vars,
+                    );
                 }
             }
         }
@@ -2505,8 +2857,22 @@ pub fn model_ltm_variables(
             loop_partitions.insert(l.id.clone(), partitions.partition_for_loop(l));
         }
 
-        let loop_vars =
-            crate::ltm_augment::generate_loop_score_variables(detected_loops, &partitions);
+        // Build the set of link-score variable names emitted so far so
+        // generate_loop_score_equation can resolve each loop link to a
+        // name that actually exists. Without this, loops traversing
+        // edges whose only AST shape is Wildcard or DynamicIndex would
+        // reference a never-emitted Bare canonical name and the
+        // fragment compiler would silently fall back to a stub dep.
+        let emitted_link_score_names: HashSet<String> = vars
+            .iter()
+            .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
+            .map(|v| v.name.clone())
+            .collect();
+        let loop_vars = crate::ltm_augment::generate_loop_score_variables(
+            detected_loops,
+            &partitions,
+            &emitted_link_score_names,
+        );
         for (name, var) in loop_vars {
             let equation = match var.get_equation() {
                 Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
@@ -2533,7 +2899,22 @@ pub fn model_ltm_variables(
         }
     }
 
-    // Pathway and composite scores for models with input ports
+    // Pathway and composite scores for models with input ports.
+    //
+    // Each pathway is a product of link-score references. Since
+    // emit_per_shape_link_scores only emits the names that appear in
+    // each target's AST, we resolve each link against the set of
+    // already-emitted names with shape priority (Bare > FixedIndex >
+    // Wildcard > DynamicIndex). Without this, an input-port model with
+    // an edge like `share[r] = SUM(x[*])` would reference the never-
+    // emitted Bare canonical name `x→share`, and the fragment
+    // compiler's stub-dep fallback would silently drop that pathway's
+    // contribution to the composite score.
+    let pathway_emitted_names: HashSet<String> = vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
+        .map(|v| v.name.clone())
+        .collect();
     for (input_port, port_pathways) in &pathways {
         let mut pathway_names = Vec::new();
         for (idx, pathway_links) in port_pathways.iter().enumerate() {
@@ -2546,11 +2927,12 @@ pub fn model_ltm_variables(
             let link_score_refs: Vec<String> = pathway_links
                 .iter()
                 .map(|link| {
-                    format!(
-                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}\"",
+                    let resolved = crate::ltm_augment::resolve_link_score_name_for_loop(
                         link.from.as_str(),
-                        link.to.as_str()
-                    )
+                        link.to.as_str(),
+                        &pathway_emitted_names,
+                    );
+                    format!("\"{resolved}\"")
                 })
                 .collect();
 

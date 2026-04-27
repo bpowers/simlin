@@ -6,7 +6,7 @@
 //!
 //! Extracted from db.rs for file-size management. Contains:
 //! - CausalEdgesResult, LoopCircuitsResult, CyclePartitionsResult
-//! - ElementCausalEdgesResult, ElementDependencyKind (element-level graph)
+//! - ElementCausalEdgesResult, RefShape, ReferenceSite (element-level graph)
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
 //! - model_causal_edges, model_element_causal_edges, model_loop_circuits,
 //!   model_cycle_partitions
@@ -66,190 +66,310 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
     format!("{}[{}]", var_name, elements.join(","))
 }
 
-/// How a source variable is referenced in a target's equation.
+/// How a source variable is accessed at a single AST reference site.
 ///
-/// When expanding variable-level causal edges to element-level edges,
-/// the dependency kind determines the expansion pattern:
-/// - `Scalar`: one-to-one or broadcast (no subscripts involved)
-/// - `SameElement`: A2A same-element reference (bare `Var` node with array bounds)
-/// - `CrossElement`: reducer over all elements (e.g., `SUM(population[*])`)
-///   or fixed-index reference to a specific element (e.g., `population[Boston]`)
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ElementDependencyKind {
-    /// Scalar reference: source appears as a bare variable with no subscripts
-    Scalar,
-    /// Same-element A2A reference: source appears as a bare `Var` node with
-    /// `ArrayBounds` (at the Expr2 level, A2A same-element references are NOT
-    /// lowered to `Subscript` nodes; subscript expansion happens in the Expr3 phase).
-    SameElement,
-    /// Cross-element reference: source appears with a wildcard subscript
-    /// (e.g., `population[*]` inside a reducer like SUM or MEAN), or with a
-    /// non-wildcard explicit subscript (e.g., `population[Boston]`) which is
-    /// a fixed-index reference to a specific element. Both patterns create
-    /// non-diagonal edges in the element graph.
-    CrossElement,
+/// Distinguishes bare references (in scalar or A2A context), wildcard
+/// reducers (e.g., inside `SUM(x[*])`), fixed-index references
+/// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
+/// `i` is a position iterator). The shape determines element-edge
+/// emission and per-reference partial-equation construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub enum RefShape {
+    /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
+    /// context with an arrayed source, this is same-element. In a scalar
+    /// context with a scalar source, this is a plain scalar dep.
+    Bare,
+    /// `Expr2::Subscript(source, [literal_elem_or_int_lit, ...])` —
+    /// every index is a literal element name or integer literal. The
+    /// `Vec<String>` carries the resolved element names per dimension
+    /// in source order (canonical lowercase).
+    FixedIndex(Vec<String>),
+    /// `Expr2::Subscript(source, indices)` where at least one index is
+    /// `IndexExpr2::Wildcard`. Conservative full cross-product.
+    Wildcard,
+    /// `Expr2::Subscript(source, indices)` where at least one index is
+    /// a non-literal expression (`@N`, `Range`, `StarRange`, or
+    /// arbitrary `Expr`). Conservative full cross-product.
+    DynamicIndex,
 }
 
-/// Classify how a source variable is referenced in a target variable's equation.
+/// One occurrence of a source variable in a target's AST.
 ///
-/// Walks the target variable's lowered AST (`Expr2` level) looking for
-/// references to the source identifier. The classification is:
-/// - `CrossElement` if the source appears inside an `Expr2::Subscript` node
-///   with any `IndexExpr2::Wildcard` index (from `x[*]` syntax), OR inside
-///   a `Subscript` with all non-wildcard indices (fixed-index reference like
-///   `source[Boston]` — at the Expr2 level, same-element A2A references stay
-///   as bare `Var` nodes, so explicit `Subscript` nodes are always fixed-index)
-/// - `SameElement` if the source is arrayed and appears as a bare `Expr2::Var`
-///   in an A2A equation context (at Expr2 level, A2A variable references
-///   retain their Var form; subscript expansion happens later in Expr3)
-/// - `Scalar` if the source appears as a bare `Expr2::Var` and is NOT arrayed
+/// The walker emits one site per reference. Callers iterating the
+/// variable-level edge map already know the source ident, so the site
+/// only needs to carry the per-reference `shape` and (for arrayed
+/// per-element targets) the `target_element` it was discovered under.
 ///
-/// `source_is_arrayed` indicates whether the source variable has dimensions.
-/// This is necessary because at the Expr2 level, arrayed variables referenced
-/// in an A2A equation keep their bare Var form (the ArrayBounds may not be
-/// populated when lowering with a minimal ScopeStage0 context).
+/// `target_element` is set only when the reference appears inside an
+/// `Ast::Arrayed` per-element expression: the value is the canonical
+/// element name (single-dim) or comma-separated tuple (multi-dim) of the
+/// target element being defined. For `Ast::Scalar` and `Ast::ApplyToAll`
+/// it stays `None` (the reference contributes to every target element
+/// according to the shape's normal broadcast/diagonal rules).
+#[derive(Debug, Clone)]
+pub(crate) struct ReferenceSite {
+    pub shape: RefShape,
+    pub target_element: Option<String>,
+}
+
+/// Resolve a single subscript index to a literal element name (canonical
+/// lowercase) if it matches one of the source's dimensions, or `None`
+/// for any other shape (wildcard, range, position, non-literal
+/// expression, or a literal that doesn't match a known element).
 ///
-/// If the source is referenced multiple ways (e.g., both `population` and
-/// `SUM(population[*])` in the same equation), the highest-priority kind
-/// wins: CrossElement > SameElement > Scalar.
+/// Used by `collect_reference_sites` to classify `Subscript` shapes:
+/// every index in a `FixedIndex` must resolve via this helper. If any
+/// index fails to resolve, the subscript falls back to `DynamicIndex` --
+/// or `Wildcard` if a wildcard is present (wildcards are checked first
+/// in the caller).
 ///
-/// Returns `Scalar` as default if the source is not found (defensive).
-fn classify_element_dependency(
+/// Element names parse as `Expr2::Var(ident, ...)` (the parser keeps the
+/// raw element identifier as a Var; dimension-resolution into a numeric
+/// offset happens later, in Expr3 lowering). Integer literals (used for
+/// indexed dimensions like `1`, `2`) parse as `Expr2::Const`. We accept
+/// both forms.
+///
+/// Note: `source_dims` is the source variable's *full* dimension list.
+/// In multidimensional subscripts the caller doesn't know which
+/// dimension a literal belongs to; we accept the first dimension whose
+/// element registry contains the canonical name. Literal indices that
+/// don't match any known element classify defensively as `DynamicIndex`,
+/// so the worst case is over-conservative (full cross-product) edges.
+fn resolve_literal_index(
+    idx: &crate::ast::IndexExpr2,
+    source_dims: &[crate::dimensions::Dimension],
+) -> Option<String> {
+    use crate::ast::{Expr2, IndexExpr2};
+
+    // Element names appear as `Var(ident, ...)`; integer literals appear
+    // as `Const(text, value, _)`. Anything else (wildcards, ranges, dim
+    // positions, or compound expressions) is not a literal element.
+    let canonical = match idx {
+        IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
+        IndexExpr2::Expr(Expr2::Const(text, _, _)) => canonicalize(text).into_owned(),
+        _ => return None,
+    };
+
+    for dim in source_dims {
+        match dim {
+            crate::dimensions::Dimension::Named(_, named) => {
+                if named.elements.iter().any(|e| e.as_str() == canonical) {
+                    return Some(canonical);
+                }
+            }
+            crate::dimensions::Dimension::Indexed(_, size) => {
+                // Indexed dimensions accept integer literals in the
+                // range [1, size]. Canonicalize via parse-then-format
+                // so non-canonical forms like `pop[01]` reduce to `"1"`
+                // -- matching `dimension_element_names`'s `"1".."N"`
+                // output and the Expr0 sibling
+                // (`ltm_augment::resolve_literal_element_index`).
+                // Returning the original text would let `pop[01]`
+                // serialize as `FixedIndex(["01"])` while the partial
+                // builder reduces to `FixedIndex(["1"])`, the shape
+                // comparison would fail, and the live ref would be
+                // wrapped in `PREVIOUS()`.
+                if let Ok(n) = canonical.parse::<u32>()
+                    && n >= 1
+                    && n <= *size
+                {
+                    return Some(n.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Walk a target variable's AST and emit one `ReferenceSite` per occurrence
+/// of `source_ident`, accumulating per-site shapes for downstream edge
+/// emission.
+///
+/// Subscript shape classification rules:
+/// - any `IndexExpr2::Wildcard(_)` index → `Wildcard`
+/// - all indices resolve via `resolve_literal_index` → `FixedIndex(names)`
+/// - any other pattern (`StarRange`, `DimPosition`, `Range`, non-literal
+///   `Expr`, or a literal that doesn't match a known element name) →
+///   `DynamicIndex`
+///
+/// Bare `Var` references push `RefShape::Bare`. The shape is independent
+/// of whether the source is arrayed -- edge emission resolves
+/// scalar-vs-arrayed semantics from the source/target dimension lists.
+///
+/// `App` arguments are walked via `walk_builtin_expr`; `BuiltinContents::Ident`
+/// matches contribute a `Bare` site (the builtin doesn't subscript its
+/// ident argument). The walker also recurses into each `Subscript` index
+/// expression so nested references like `source_outer[source_inner[*]]`
+/// emit a site for the inner reference.
+///
+/// Return order is the AST-walk order. Duplicate sites with identical
+/// `(source, shape)` are kept; downstream emission deduplicates edges
+/// implicitly via the `BTreeSet` value type, but the per-site count may
+/// matter for callers that use sites as a metric.
+/// Return the unique `RefShape`s under which `source_ident` is referenced
+/// in `target_var`'s AST.
+///
+/// Sibling of [`collect_reference_sites`] that drops the per-site
+/// `target_element` and source-name fields. Used by `model_ltm_variables`
+/// to enumerate the shapes for which a per-shape link score must be
+/// emitted (one `LtmSyntheticVar` per `(from, to, shape)` tuple).
+///
+/// Order is the AST-walk order of first occurrence; duplicates are
+/// removed. Returns an empty vec when the source isn't referenced.
+pub(crate) fn collect_reference_shapes(
     target_var: &crate::variable::Variable,
     source_ident: &str,
     source_is_arrayed: bool,
-) -> ElementDependencyKind {
+    source_dims: &[crate::dimensions::Dimension],
+) -> Vec<RefShape> {
+    let sites = collect_reference_sites(target_var, source_ident, source_is_arrayed, source_dims);
+    let mut shapes: Vec<RefShape> = Vec::new();
+    for site in sites {
+        if !shapes.iter().any(|s| s == &site.shape) {
+            shapes.push(site.shape);
+        }
+    }
+    shapes
+}
+
+fn collect_reference_sites(
+    target_var: &crate::variable::Variable,
+    source_ident: &str,
+    source_is_arrayed: bool,
+    source_dims: &[crate::dimensions::Dimension],
+) -> Vec<ReferenceSite> {
     let Some(ast) = target_var.ast() else {
-        return ElementDependencyKind::Scalar;
+        return Vec::new();
     };
 
-    let mut result = ElementDependencyKind::Scalar;
-    let mut found = false;
-
-    // Walk all expressions in the AST (scalar, A2A, or arrayed)
+    let mut sites = Vec::new();
     match ast {
         crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
-            classify_in_expr(
+            // Scalar/A2A equations: every reference site contributes to
+            // every target element according to its shape's broadcast or
+            // diagonal rule. `target_element = None` lets the emitter
+            // apply the default rules.
+            collect_in_expr(
                 expr,
                 source_ident,
                 source_is_arrayed,
-                &mut result,
-                &mut found,
+                source_dims,
+                None,
+                &mut sites,
             );
         }
         crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
-            for expr in subscript_map.values() {
-                classify_in_expr(
+            // Per-element expressions: each reference site is pinned to the
+            // specific target element being defined. The emitter restricts
+            // edge emission to that element only.
+            for (target_elem, expr) in subscript_map.iter() {
+                collect_in_expr(
                     expr,
                     source_ident,
                     source_is_arrayed,
-                    &mut result,
-                    &mut found,
+                    source_dims,
+                    Some(target_elem.as_str()),
+                    &mut sites,
                 );
-                if result == ElementDependencyKind::CrossElement {
-                    return result; // highest priority, short-circuit
-                }
             }
+            // The EXCEPT default applies to elements not explicitly listed.
+            // We don't know the exact target element set here, but the
+            // default expression's references contribute to every other
+            // target element. Treating `target_element = None` makes the
+            // emitter broadcast across the full target dimension, which
+            // is a conservative superset that preserves the variable-level
+            // projection invariant.
             if let Some(default) = default_expr {
-                classify_in_expr(
+                collect_in_expr(
                     default,
                     source_ident,
                     source_is_arrayed,
-                    &mut result,
-                    &mut found,
+                    source_dims,
+                    None,
+                    &mut sites,
                 );
             }
         }
     }
-
-    if found {
-        result
-    } else {
-        ElementDependencyKind::Scalar
-    }
+    sites
 }
 
-/// Recursively walk an `Expr2` tree, looking for references to `source_ident`.
+/// Recursively walk an `Expr2` tree, pushing one `ReferenceSite` for each
+/// reference to `source_ident`. See `collect_reference_sites` for the
+/// shape-classification rules.
 ///
-/// Updates `result` to the highest-priority classification found so far.
-/// Priority: CrossElement > SameElement > Scalar.
-///
-/// At the Expr2 level, an arrayed variable referenced without explicit subscripts
-/// in an A2A equation stays as `Expr2::Var(ident, Some(ArrayBounds), _)` -- it is
-/// NOT lowered to a `Subscript` node. The subscript expansion happens later in
-/// the compiler (Expr3 phase). We detect SameElement by checking whether the
-/// `Var` node carries `ArrayBounds` (meaning it's arrayed and will be subscript-
-/// expanded element-wise at compile time).
-fn classify_in_expr(
+/// `source_is_arrayed` is threaded through for callers that need it
+/// during recursion-local rewriting (currently a no-op here -- shape
+/// classification is determined by the AST node and `source_dims`),
+/// matching the documented public signature.
+#[allow(clippy::only_used_in_recursion)] // helper for collect_reference_sites
+fn collect_in_expr(
     expr: &crate::ast::Expr2,
     source_ident: &str,
     source_is_arrayed: bool,
-    result: &mut ElementDependencyKind,
-    found: &mut bool,
+    source_dims: &[crate::dimensions::Dimension],
+    target_element: Option<&str>,
+    sites: &mut Vec<ReferenceSite>,
 ) {
     use crate::ast::{Expr2, IndexExpr2};
     use crate::builtins::{BuiltinContents, walk_builtin_expr};
 
-    // Short-circuit once we've found the highest-priority kind
-    if *result == ElementDependencyKind::CrossElement {
-        return;
-    }
+    let make_site = |shape: RefShape| -> ReferenceSite {
+        ReferenceSite {
+            shape,
+            target_element: target_element.map(|s| s.to_string()),
+        }
+    };
 
     match expr {
         Expr2::Const(..) => {}
-        Expr2::Var(ident, array_bounds, _) => {
+        Expr2::Var(ident, _array_bounds, _) => {
             if ident.as_str() == source_ident {
-                *found = true;
-                // A bare Var reference to an arrayed variable in an A2A equation
-                // means same-element mapping. At Expr2 level, ArrayBounds may or
-                // may not be populated (depends on the lowering context), so we
-                // use the caller-provided `source_is_arrayed` flag as the primary
-                // signal, with ArrayBounds as a secondary check.
-                if (source_is_arrayed || array_bounds.is_some())
-                    && *result == ElementDependencyKind::Scalar
-                {
-                    *result = ElementDependencyKind::SameElement;
-                }
-                // Scalar source -> Scalar (no upgrade needed)
+                sites.push(make_site(RefShape::Bare));
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
             if ident.as_str() == source_ident {
-                *found = true;
-                let has_wildcard = indices
-                    .iter()
-                    .any(|idx| matches!(idx, IndexExpr2::Wildcard(_)));
-                if has_wildcard {
-                    *result = ElementDependencyKind::CrossElement;
-                    return;
-                }
-                // Non-wildcard explicit subscript (e.g., `source[Boston]`).
-                // At the Expr2 level, same-element A2A references stay as
-                // bare Var nodes (documented in classify_element_dependency);
-                // explicit Subscript nodes with non-wildcard indices are
-                // fixed-index references to specific elements. Classify as
-                // CrossElement because the target depends on a specific
-                // source element, not the corresponding same-index element.
-                // CrossElement expansion creates all NxN edges, which is a
-                // superset of the true dependency; the link scores for
-                // non-referenced source elements will be effectively zero.
-                *result = ElementDependencyKind::CrossElement;
-            } else {
-                // The subscripted variable is not our source, but the source
-                // might appear inside the index expressions
-                for idx in indices {
-                    match idx {
-                        IndexExpr2::Expr(e) => {
-                            classify_in_expr(e, source_ident, source_is_arrayed, result, found);
-                        }
-                        IndexExpr2::Range(l, r, _) => {
-                            classify_in_expr(l, source_ident, source_is_arrayed, result, found);
-                            classify_in_expr(r, source_ident, source_is_arrayed, result, found);
-                        }
-                        IndexExpr2::Wildcard(_)
-                        | IndexExpr2::StarRange(_, _)
-                        | IndexExpr2::DimPosition(_, _) => {}
+                let shape = classify_subscript_shape(indices, source_dims);
+                sites.push(make_site(shape));
+            }
+            // Always recurse into index expressions so nested references
+            // like `source_outer[source_inner[*]]` (or arbitrary index
+            // arithmetic mentioning the source) still emit per-site
+            // entries for the inner reference.
+            for idx in indices {
+                match idx {
+                    IndexExpr2::Expr(e) => {
+                        collect_in_expr(
+                            e,
+                            source_ident,
+                            source_is_arrayed,
+                            source_dims,
+                            target_element,
+                            sites,
+                        );
                     }
+                    IndexExpr2::Range(l, r, _) => {
+                        collect_in_expr(
+                            l,
+                            source_ident,
+                            source_is_arrayed,
+                            source_dims,
+                            target_element,
+                            sites,
+                        );
+                        collect_in_expr(
+                            r,
+                            source_ident,
+                            source_is_arrayed,
+                            source_dims,
+                            target_element,
+                            sites,
+                        );
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => {}
                 }
             }
         }
@@ -257,28 +377,103 @@ fn classify_in_expr(
             walk_builtin_expr(builtin, |contents| match contents {
                 BuiltinContents::Ident(id, _) => {
                     if id == source_ident {
-                        *found = true;
-                        // Ident inside a builtin but without subscript context -> Scalar
+                        sites.push(make_site(RefShape::Bare));
                     }
                 }
                 BuiltinContents::Expr(sub_expr) => {
-                    classify_in_expr(sub_expr, source_ident, source_is_arrayed, result, found);
+                    collect_in_expr(
+                        sub_expr,
+                        source_ident,
+                        source_is_arrayed,
+                        source_dims,
+                        target_element,
+                        sites,
+                    );
                 }
             });
         }
         Expr2::Op1(_, operand, _, _) => {
-            classify_in_expr(operand, source_ident, source_is_arrayed, result, found);
+            collect_in_expr(
+                operand,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
         }
         Expr2::Op2(_, left, right, _, _) => {
-            classify_in_expr(left, source_ident, source_is_arrayed, result, found);
-            classify_in_expr(right, source_ident, source_is_arrayed, result, found);
+            collect_in_expr(
+                left,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
+            collect_in_expr(
+                right,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
         }
         Expr2::If(cond, then_expr, else_expr, _, _) => {
-            classify_in_expr(cond, source_ident, source_is_arrayed, result, found);
-            classify_in_expr(then_expr, source_ident, source_is_arrayed, result, found);
-            classify_in_expr(else_expr, source_ident, source_is_arrayed, result, found);
+            collect_in_expr(
+                cond,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
+            collect_in_expr(
+                then_expr,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
+            collect_in_expr(
+                else_expr,
+                source_ident,
+                source_is_arrayed,
+                source_dims,
+                target_element,
+                sites,
+            );
         }
     }
+}
+
+/// Classify a subscript's indices into a `RefShape`.
+///
+/// Wildcard takes precedence: if any index is `IndexExpr2::Wildcard`,
+/// the shape is `Wildcard` (conservative full cross-product).
+/// Otherwise, every index must resolve via `resolve_literal_index` for
+/// the shape to be `FixedIndex`. Any other index pattern (or an
+/// unrecognized literal) falls back to `DynamicIndex`.
+fn classify_subscript_shape(
+    indices: &[crate::ast::IndexExpr2],
+    source_dims: &[crate::dimensions::Dimension],
+) -> RefShape {
+    use crate::ast::IndexExpr2;
+
+    if indices.iter().any(|i| matches!(i, IndexExpr2::Wildcard(_))) {
+        return RefShape::Wildcard;
+    }
+
+    let mut resolved: Vec<String> = Vec::with_capacity(indices.len());
+    for idx in indices {
+        match resolve_literal_index(idx, source_dims) {
+            Some(name) => resolved.push(name),
+            None => return RefShape::DynamicIndex,
+        }
+    }
+    RefShape::FixedIndex(resolved)
 }
 
 /// Collect element names from a dimension as owned strings.
@@ -288,113 +483,152 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
     crate::ltm_augment::dimension_element_names(dim)
 }
 
-/// Expand a single variable-level edge into element-level edges.
+/// Emit element edges for a single AST reference site.
 ///
-/// Uses the source/target dimensions and dependency classification to
-/// determine the expansion pattern. The rules are:
+/// The AST walker classifies each reference site into a `RefShape` and
+/// passes `(from_name, to_name, from_dims, to_dims, shape, target_element)`
+/// to this helper, which translates the shape into the appropriate
+/// element-level edges and unions them into `element_edges`.
 ///
-/// | from_dims | to_dims    | dep_kind     | Expansion                                    |
-/// |-----------|------------|--------------|----------------------------------------------|
-/// | []        | []         | Scalar       | from -> to (unchanged)                       |
-/// | []        | [D...]     | Scalar       | from -> to[d] for each element d             |
-/// | [D...]    | []         | any          | from[d] -> to for each element d             |
-/// | [D]       | [D]        | SameElement  | from[d] -> to[d] for each d                  |
-/// | [D]       | [D]        | CrossElement | from[d] -> to[e] for all d,e (full cross)    |
-/// | [D1,D2]   | [D1]       | SameElement  | from[d1,d2] -> to[d1] for all (d1,d2)        |
+/// `target_element` is `Some(elem)` when the reference appears inside an
+/// `Ast::Arrayed` per-element expression: the target node set is then
+/// pinned to that single element tuple (parsed from `elem`'s comma-
+/// separated form for multi-dim arrays). When `None`, the reference
+/// applies to every target element according to its shape's normal
+/// broadcast/diagonal rule (Scalar/A2A semantics).
 ///
-/// When both source and target are arrayed and dep_kind is CrossElement,
-/// every source element connects to every target element (a SUM(x[*])
-/// inside an A2A equation means each source element contributes to the
-/// scalar reduction, which then feeds all target elements).
-fn expand_edge_to_elements(
+/// Truth table (matches design plan; rows below assume `target_element`
+/// is `None` -- the per-element narrowing only changes which target
+/// element names appear on the right-hand side):
+/// | `from_dims` | `to_dims`  | `shape`                       | Edges emitted                                 |
+/// |-------------|------------|-------------------------------|-----------------------------------------------|
+/// | []          | []         | Bare                          | `from -> to`                                  |
+/// | []          | non-empty  | Bare                          | `from -> to[d]` for each cartesian d          |
+/// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
+/// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
+/// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
+/// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
+/// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
+/// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
+///
+/// `FixedIndex` carries the resolved per-dimension element names in
+/// source order; multi-dim fixed yields `from[e1,e2]`. Mixed
+/// fixed+wildcard subscripts classify upstream as `Wildcard` (or
+/// `DynamicIndex`), so this helper does not need to handle a
+/// "partial fixed" branch -- it only sees fully-resolved
+/// `FixedIndex(elems)` payloads or the conservative full-cross shapes.
+fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
-    dep_kind: ElementDependencyKind,
+    shape: &RefShape,
+    target_element: Option<&str>,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     let from_is_scalar = from_dims.is_empty();
     let to_is_scalar = to_dims.is_empty();
 
-    // Case 1: Both scalar -- pass through unchanged
-    if from_is_scalar && to_is_scalar {
-        element_edges
-            .entry(from_name.to_string())
-            .or_default()
-            .insert(to_name.to_string());
-        return;
-    }
+    // Compute the per-site target node set. With `target_element` set we
+    // restrict to a single target; otherwise, we use the full cartesian
+    // product. The single-target case mirrors `format_multi_element_name`
+    // by accepting comma-separated multi-dim subscripts as-is (the
+    // canonical form of `Arrayed`'s element key already matches that).
+    let target_nodes: Vec<String> = if to_is_scalar {
+        vec![to_name.to_string()]
+    } else if let Some(elem) = target_element {
+        // The element key from `Ast::Arrayed` is a comma-separated tuple
+        // of canonical element names (e.g. "nyc" or "nyc,adult"). Format
+        // the target node directly without re-cartesian-producting.
+        vec![format!("{}[{}]", to_name, elem)]
+    } else {
+        cartesian_element_names(to_name, to_dims)
+    };
 
-    // Case 2: Scalar source, arrayed target -- broadcast
-    // from -> to[d] for each element d across all target dimensions
+    // Scalar source short-circuits: shape doesn't matter (a scalar source
+    // has no subscript form). Either pass-through or broadcast.
     if from_is_scalar {
-        let to_elements = cartesian_element_names(to_name, to_dims);
-        for to_elem in to_elements {
+        for to_node in &target_nodes {
             element_edges
                 .entry(from_name.to_string())
                 .or_default()
-                .insert(to_elem);
+                .insert(to_node.clone());
         }
         return;
     }
 
-    // Case 3: Arrayed source, scalar target -- reduction
-    // from[d] -> to for each element d across all source dimensions
-    if to_is_scalar {
-        let from_elements = cartesian_element_names(from_name, from_dims);
-        for from_elem in from_elements {
-            element_edges
-                .entry(from_elem)
-                .or_default()
-                .insert(to_name.to_string());
-        }
-        return;
-    }
-
-    // Both arrayed: expansion depends on dep_kind
-    match dep_kind {
-        ElementDependencyKind::Scalar => {
-            // Scalar reference in an arrayed context (e.g., a scalar constant
-            // that the dependency tracker found -- shouldn't normally happen
-            // when both are arrayed, but handle defensively). Treat as
-            // broadcast: from[d] -> to[e] for all d,e.
-            let from_elements = cartesian_element_names(from_name, from_dims);
-            let to_elements = cartesian_element_names(to_name, to_dims);
-            for from_elem in &from_elements {
-                for to_elem in &to_elements {
+    // Arrayed source. The shape determines which source elements appear
+    // and how they connect to the target.
+    match shape {
+        RefShape::Bare => {
+            // Same-element semantics. With a scalar target this is a
+            // reduction (every from element feeds the single to). With
+            // an arrayed target (matching dims), this is the diagonal;
+            // with partial-collapse dims, expand_same_element handles
+            // the projection.
+            //
+            // When `target_element` is set (arrayed equation per-element
+            // expression), the bare reference still represents same-
+            // element semantics: only the source element matching the
+            // target element contributes. We delegate to
+            // `expand_same_element` and restrict the result to the
+            // pinned target node afterward by intersection with
+            // `target_nodes`.
+            if to_is_scalar {
+                for from_elem in cartesian_element_names(from_name, from_dims) {
                     element_edges
-                        .entry(from_elem.clone())
+                        .entry(from_elem)
                         .or_default()
-                        .insert(to_elem.clone());
+                        .insert(to_name.to_string());
                 }
+            } else if target_element.is_some() {
+                // Per-element bare reference: the same-element diagonal
+                // applies to the single pinned target. We compute the
+                // full diagonal into a scratch map and then keep only
+                // edges whose target appears in `target_nodes`.
+                let mut scratch: HashMap<String, BTreeSet<String>> = HashMap::new();
+                expand_same_element(from_name, to_name, from_dims, to_dims, &mut scratch);
+                let target_set: BTreeSet<String> = target_nodes.iter().cloned().collect();
+                for (from_node, tos) in scratch {
+                    let filtered: BTreeSet<String> =
+                        tos.into_iter().filter(|t| target_set.contains(t)).collect();
+                    if !filtered.is_empty() {
+                        let entry = element_edges.entry(from_node).or_default();
+                        for t in filtered {
+                            entry.insert(t);
+                        }
+                    }
+                }
+            } else {
+                expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
             }
         }
-        ElementDependencyKind::SameElement => {
-            // Same-element mapping. Shared dimensions are iterated element-wise;
-            // non-shared dimensions produce a partial collapse.
-            //
-            // Simple case: identical dimension lists -> from[d] -> to[d] per element.
-            // Partial collapse: from[D1,D2] -> to[D1] -> from[d1,d2] -> to[d1].
-            //
-            // We generate the cartesian product of source elements and map each
-            // source element tuple to the target element tuple by keeping only
-            // the dimensions present in the target.
-            expand_same_element(from_name, to_name, from_dims, to_dims, element_edges);
+        RefShape::FixedIndex(elems) => {
+            // The source is pinned to a single element tuple. Build
+            // exactly one source key and emit edges to every target
+            // node (which `target_nodes` already narrows when the
+            // reference is inside an arrayed per-element expression).
+            let from_node = if elems.len() == 1 {
+                format_element_name(from_name, &elems[0])
+            } else {
+                let elem_refs: Vec<&str> = elems.iter().map(String::as_str).collect();
+                format_multi_element_name(from_name, &elem_refs)
+            };
+
+            let entry = element_edges.entry(from_node).or_default();
+            for to_node in &target_nodes {
+                entry.insert(to_node.clone());
+            }
         }
-        ElementDependencyKind::CrossElement => {
-            // Cross-element: every source element connects to every target element.
-            // This represents a reducer like SUM(from[*]) inside the target's
-            // equation: each source element contributes to the reduction, whose
-            // scalar result feeds all target elements.
+        RefShape::Wildcard | RefShape::DynamicIndex => {
+            // Conservative full cross product over source elements.
+            // `target_nodes` already restricts the target side when
+            // inside an arrayed per-element expression.
             let from_elements = cartesian_element_names(from_name, from_dims);
-            let to_elements = cartesian_element_names(to_name, to_dims);
             for from_elem in &from_elements {
-                for to_elem in &to_elements {
-                    element_edges
-                        .entry(from_elem.clone())
-                        .or_default()
-                        .insert(to_elem.clone());
+                let entry = element_edges.entry(from_elem.clone()).or_default();
+                for to_node in &target_nodes {
+                    entry.insert(to_node.clone());
                 }
             }
         }
@@ -981,13 +1215,18 @@ pub fn model_element_causal_edges(
         }
     }
 
-    // Expand each variable-level edge to element-level edges
+    // Expand each variable-level edge to element-level edges using the
+    // AST-walking per-reference walker. For each (source, target) pair we
+    // collect every reference site of `source` in `target`'s AST, classify
+    // each into a `RefShape`, and emit the per-shape element edges. This
+    // replaces the older single-classification-per-pair scheme that
+    // over-expanded fixed-index references to the full N x N cross product.
     for (from_name, to_set) in &variable_edges.edges {
         let from_dims = lookup_dims(from_name, &mut dim_cache);
         for to_name in to_set {
             let to_dims = lookup_dims(to_name, &mut dim_cache);
 
-            // Fast path: both scalar -> direct edge
+            // Fast path: both scalar -> direct edge.
             if from_dims.is_empty() && to_dims.is_empty() {
                 element_edges
                     .entry(from_name.clone())
@@ -996,40 +1235,80 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // Structural flow->stock edges use SameElement when both are
-            // arrayed. The stock's equation is just the initial value, so
-            // the flow name never appears in the AST; AST-based
-            // classification would incorrectly default to Scalar.
-            let dep_kind = if structural_flow_to_stock
-                .contains(&(from_name.clone(), to_name.clone()))
+            // Structural flow->stock edges: the stock's equation is just the
+            // initial value, so the flow name never appears in the stock's
+            // AST. Without this bypass, the walker would find no reference
+            // sites and emit no edges. Both arrayed -> emit SameElement
+            // diagonal directly.
+            if structural_flow_to_stock.contains(&(from_name.clone(), to_name.clone()))
                 && !from_dims.is_empty()
                 && !to_dims.is_empty()
             {
-                ElementDependencyKind::SameElement
-            } else {
-                // Classify the dependency by inspecting the target's AST
-                // to determine how the source appears in the equation.
-                match reconstruct_single_variable(db, model, project, to_name) {
-                    Some(target_var) => {
-                        let source_is_arrayed = !from_dims.is_empty();
-                        classify_element_dependency(&target_var, from_name, source_is_arrayed)
-                    }
-                    None => {
-                        // If we can't reconstruct the variable (shouldn't happen
-                        // for well-formed models), default to Scalar
-                        ElementDependencyKind::Scalar
-                    }
+                emit_edges_for_reference(
+                    from_name,
+                    to_name,
+                    &from_dims,
+                    &to_dims,
+                    &RefShape::Bare,
+                    None,
+                    &mut element_edges,
+                );
+                continue;
+            }
+
+            // AST-based emission: collect reference sites and emit one set
+            // of element edges per site. Multiple sites of the same shape
+            // dedupe naturally because `element_edges` values are sets.
+            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
+                Some(v) => v,
+                None => {
+                    // Couldn't reconstruct (shouldn't happen for well-formed
+                    // models). Fall back to scalar broadcast emission so the
+                    // variable-level projection invariant still holds.
+                    emit_edges_for_reference(
+                        from_name,
+                        to_name,
+                        &from_dims,
+                        &to_dims,
+                        &RefShape::Bare,
+                        None,
+                        &mut element_edges,
+                    );
+                    continue;
                 }
             };
+            let source_is_arrayed = !from_dims.is_empty();
+            let sites =
+                collect_reference_sites(&target_var, from_name, source_is_arrayed, &from_dims);
 
-            expand_edge_to_elements(
-                from_name,
-                to_name,
-                &from_dims,
-                &to_dims,
-                dep_kind,
-                &mut element_edges,
-            );
+            if sites.is_empty() {
+                // Defensive: the variable-level edge exists but the AST has
+                // no reference. This can happen with structural edges or
+                // synthesized references. Fall back to scalar broadcast so
+                // the variable-level projection invariant still holds.
+                emit_edges_for_reference(
+                    from_name,
+                    to_name,
+                    &from_dims,
+                    &to_dims,
+                    &RefShape::Bare,
+                    None,
+                    &mut element_edges,
+                );
+                continue;
+            }
+
+            for site in sites {
+                emit_edges_for_reference(
+                    from_name,
+                    to_name,
+                    &from_dims,
+                    &to_dims,
+                    &site.shape,
+                    site.target_element.as_deref(),
+                    &mut element_edges,
+                );
+            }
         }
     }
 
@@ -1398,21 +1677,16 @@ fn reconstruct_implicit_variable(
 }
 
 #[cfg(test)]
-mod classify_element_dependency_tests {
+mod collect_reference_sites_tests {
     use super::*;
     use crate::db::{SimlinDb, sync_from_datamodel};
     use crate::test_common::TestProject;
 
-    /// Helper: build a project, sync into salsa, and classify the dependency
-    /// of `source_name` as seen by `target_name`.
-    ///
-    /// Looks up both variables' dimensions to determine whether the source
-    /// is arrayed, mirroring what the element-level graph expansion will do.
-    fn classify(
-        project: &TestProject,
-        target_name: &str,
-        source_name: &str,
-    ) -> ElementDependencyKind {
+    /// Helper: build a project, sync into salsa, and collect reference sites
+    /// for `source_name` as seen by `target_name`. Resolves the source's
+    /// `is_arrayed` flag and dimension list from the live salsa results so
+    /// the walker can validate literal subscripts against real elements.
+    fn collect(project: &TestProject, target_name: &str, source_name: &str) -> Vec<ReferenceSite> {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
@@ -1424,131 +1698,254 @@ mod classify_element_dependency_tests {
             reconstruct_single_variable(&db, source_model, source_project, target_name)
                 .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
 
-        // Determine if the source variable is arrayed by checking its dimensions
-        let source_is_arrayed = source_vars
+        let source_dims: Vec<crate::dimensions::Dimension> = source_vars
             .get(source_name)
-            .map(|sv| !super::super::variable_dimensions(&db, *sv, source_project).is_empty())
-            .unwrap_or(false);
+            .map(|sv| super::super::variable_dimensions(&db, *sv, source_project).to_vec())
+            .unwrap_or_default();
+        let source_is_arrayed = !source_dims.is_empty();
 
-        classify_element_dependency(&target_var, source_name, source_is_arrayed)
+        collect_reference_sites(&target_var, source_name, source_is_arrayed, &source_dims)
     }
 
     #[test]
-    fn scalar_reference() {
-        // A simple scalar equation: growth = base * 0.1
-        // "base" is referenced as a bare Var (no subscripts) and is not
-        // arrayed -> Scalar
-        let project = TestProject::new("scalar_ref")
-            .scalar_const("base", 100.0)
-            .scalar_aux("growth", "base * 0.1");
-
-        assert_eq!(
-            classify(&project, "growth", "base"),
-            ElementDependencyKind::Scalar
-        );
-    }
-
-    #[test]
-    fn same_element_a2a_reference() {
+    fn ref_site_bare_a2a() {
         // A2A equation: births[Region] = population * 0.1
-        // "population" is arrayed over Region and referenced without explicit
-        // subscripts in an A2A context. At Expr2 level, the reference stays
-        // as Expr2::Var (subscript expansion happens in Expr3), but because
-        // the source is known to be arrayed, we classify as SameElement.
-        let project = TestProject::new("same_element")
-            .named_dimension("Region", &["NYC", "Boston", "LA"])
+        // The bare `population` reference is one occurrence with shape Bare.
+        let project = TestProject::new("bare_a2a")
+            .named_dimension("Region", &["NYC", "Boston"])
             .array_aux("population[Region]", "100")
             .array_aux("births[Region]", "population * 0.1");
 
-        assert_eq!(
-            classify(&project, "births", "population"),
-            ElementDependencyKind::SameElement
-        );
+        let sites = collect(&project, "births", "population");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(sites[0].shape, RefShape::Bare);
     }
 
     #[test]
-    fn cross_element_wildcard_reference() {
-        // total_pop = SUM(population[*])
-        // "population" is referenced with a wildcard subscript -> CrossElement
-        let project = TestProject::new("cross_element")
-            .named_dimension("Region", &["NYC", "Boston", "LA"])
-            .array_aux("population[Region]", "100")
-            .scalar_aux("total_pop", "SUM(population[*])");
-
-        assert_eq!(
-            classify(&project, "total_pop", "population"),
-            ElementDependencyKind::CrossElement
-        );
-    }
-
-    #[test]
-    fn a2a_with_cross_element_in_same_equation() {
-        // An A2A equation that uses both same-element and cross-element:
-        // share[Region] = population / SUM(population[*])
-        // "population" appears both as SameElement (the numerator) and
-        // CrossElement (inside SUM). CrossElement should win.
-        let project = TestProject::new("mixed_dep")
-            .named_dimension("Region", &["NYC", "Boston", "LA"])
-            .array_aux("population[Region]", "100")
-            .array_aux("share[Region]", "population / SUM(population[*])");
-
-        assert_eq!(
-            classify(&project, "share", "population"),
-            ElementDependencyKind::CrossElement
-        );
-    }
-
-    #[test]
-    fn source_not_found_defaults_to_scalar() {
-        // If the source ident doesn't appear in the equation at all,
-        // classify_element_dependency should defensively return Scalar.
-        let project = TestProject::new("not_found")
-            .scalar_const("x", 1.0)
-            .scalar_aux("y", "x + 1");
-
-        assert_eq!(
-            classify(&project, "y", "nonexistent"),
-            ElementDependencyKind::Scalar
-        );
-    }
-
-    #[test]
-    fn scalar_source_in_a2a_target() {
-        // growth_factor is scalar, births[Region] references it as bare Var.
-        // Because growth_factor is NOT arrayed, this is Scalar.
-        let project = TestProject::new("scalar_in_a2a")
-            .named_dimension("Region", &["NYC", "Boston", "LA"])
-            .scalar_const("growth_factor", 0.1)
-            .array_aux("population[Region]", "100")
-            .array_aux("births[Region]", "population * growth_factor");
-
-        assert_eq!(
-            classify(&project, "births", "growth_factor"),
-            ElementDependencyKind::Scalar
-        );
-    }
-
-    #[test]
-    fn fixed_index_reference_is_cross_element() {
+    fn ref_site_fixed_index() {
         // relative_pop[Region] = population / population[NYC]
-        // "population" in the denominator has a fixed-index subscript [NYC].
-        // At the Expr2 level, same-element A2A references are bare Var nodes;
-        // explicit Subscript nodes with non-wildcard indices are fixed-index
-        // references. These should be classified as CrossElement, not SameElement,
-        // because the dependency is from a specific source element (NYC) to all
-        // target elements, not diagonal.
-        let project = TestProject::new("fixed_index")
-            .named_dimension("Region", &["NYC", "Boston", "LA"])
+        // Two occurrences: a bare `population` (numerator) and a
+        // FixedIndex `population[NYC]` (denominator).
+        let project = TestProject::new("fixed")
+            .named_dimension("Region", &["NYC", "Boston"])
             .array_aux("population[Region]", "100")
             .array_aux("relative_pop[Region]", "population / population[NYC]");
 
-        // The equation has both a bare Var "population" (SameElement) and a
-        // fixed-index Subscript "population[NYC]" (CrossElement).
-        // CrossElement wins since it's highest priority.
+        let sites = collect(&project, "relative_pop", "population");
+        assert_eq!(sites.len(), 2, "sites: {sites:?}");
+        // AST-walk order: numerator first (bare), denominator second (FixedIndex).
+        assert_eq!(sites[0].shape, RefShape::Bare);
         assert_eq!(
-            classify(&project, "relative_pop", "population"),
-            ElementDependencyKind::CrossElement
+            sites[1].shape,
+            RefShape::FixedIndex(vec!["nyc".to_string()])
         );
+    }
+
+    #[test]
+    fn ref_site_wildcard_reducer() {
+        // total = SUM(population[*])
+        // The wildcard subscript inside the reducer produces one Wildcard site.
+        let project = TestProject::new("wild")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .scalar_aux("total", "SUM(population[*])");
+
+        let sites = collect(&project, "total", "population");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(sites[0].shape, RefShape::Wildcard);
+    }
+
+    #[test]
+    fn ref_site_mixed_bare_and_wildcard() {
+        // share[Region] = population / SUM(population[*])
+        // Two occurrences: a bare numerator and a wildcard reducer denominator.
+        let project = TestProject::new("mixed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("share[Region]", "population / SUM(population[*])");
+
+        let sites = collect(&project, "share", "population");
+        assert_eq!(sites.len(), 2, "sites: {sites:?}");
+        let shapes: Vec<&RefShape> = sites.iter().map(|s| &s.shape).collect();
+        assert!(
+            shapes.contains(&&RefShape::Bare),
+            "expected Bare in {shapes:?}"
+        );
+        assert!(
+            shapes.contains(&&RefShape::Wildcard),
+            "expected Wildcard in {shapes:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod emit_edges_for_reference_tests {
+    use super::*;
+    use crate::common::{CanonicalDimensionName, CanonicalElementName};
+    use crate::dimensions::{Dimension, NamedDimension};
+    use std::collections::HashMap as StdHashMap;
+
+    /// Build a single-dim `Named` dimension from raw element names.
+    /// Mirrors `make_named_dimension` in `ltm_augment.rs::tests` -- inlined
+    /// here because that helper is private to the other test module.
+    fn make_named_dimension(name: &str, elements: &[&str]) -> Dimension {
+        let canonical_elements: Vec<CanonicalElementName> = elements
+            .iter()
+            .map(|e| CanonicalElementName::from_raw(e))
+            .collect();
+        let indexed: StdHashMap<CanonicalElementName, usize> = canonical_elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.clone(), i + 1))
+            .collect();
+        Dimension::Named(
+            CanonicalDimensionName::from_raw(name),
+            NamedDimension {
+                elements: canonical_elements,
+                indexed_elements: indexed,
+                maps_to: None,
+                mappings: vec![],
+            },
+        )
+    }
+
+    /// Scalar source -> scalar target with `Bare` shape: a single
+    /// from -> to edge, no expansion.
+    #[test]
+    fn scalar_to_scalar_bare_passthrough() {
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+        emit_edges_for_reference("a", "b", &[], &[], &RefShape::Bare, None, &mut edges);
+
+        let from = edges.get("a").expect("expected 'a' as a source key");
+        assert_eq!(from.len(), 1);
+        assert!(from.contains("b"));
+    }
+
+    /// Arrayed source -> arrayed target with `FixedIndex(["nyc"])`: only
+    /// `pop[nyc]` should appear as a source key, and it must connect to
+    /// every target element. `pop[boston]` must NOT appear as a source.
+    #[test]
+    fn fixed_index_to_arrayed_target() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            None,
+            &mut edges,
+        );
+
+        let from = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
+        assert!(from.contains("rel[nyc]"), "missing rel[nyc] in {from:?}");
+        assert!(
+            from.contains("rel[boston]"),
+            "missing rel[boston] in {from:?}"
+        );
+        assert_eq!(from.len(), 2, "expected exactly 2 outgoing edges");
+        assert!(
+            !edges.contains_key("pop[boston]"),
+            "pop[boston] must not appear as a source for FixedIndex(nyc)"
+        );
+    }
+
+    /// Arrayed source -> arrayed target with `Bare` shape on identical
+    /// dimensions: per-element diagonal `pop[d] -> rel[d]`. No off-diagonal
+    /// edges.
+    #[test]
+    fn bare_same_dim_diagonal() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference("pop", "rel", dims, dims, &RefShape::Bare, None, &mut edges);
+
+        let nyc = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
+        assert_eq!(nyc.len(), 1, "diagonal: one outgoing edge");
+        assert!(nyc.contains("rel[nyc]"));
+
+        let boston = edges.get("pop[boston]").expect("from key 'pop[boston]'");
+        assert_eq!(boston.len(), 1, "diagonal: one outgoing edge");
+        assert!(boston.contains("rel[boston]"));
+    }
+
+    /// `target_element` narrows the FixedIndex emission to the pinned target.
+    /// With `target_element = Some("boston")`, only `pop[nyc] -> rel[boston]`
+    /// is emitted; the NYC target broadcast is suppressed. This mirrors the
+    /// per-element `Ast::Arrayed` case used by the cross-element fixture.
+    #[test]
+    fn fixed_index_with_target_element_pins_to_one_target() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            Some("boston"),
+            &mut edges,
+        );
+
+        let from = edges.get("pop[nyc]").expect("from key 'pop[nyc]'");
+        assert_eq!(from.len(), 1, "expected exactly 1 outgoing edge");
+        assert!(from.contains("rel[boston]"));
+        assert!(!from.contains("rel[nyc]"));
+    }
+
+    /// `RefShape::Bare` with `target_element = Some("boston")` on identical
+    /// dimensions: only the diagonal edge `pop[boston] -> rel[boston]` survives;
+    /// the other diagonal edge `pop[nyc] -> rel[nyc]` is excluded because it
+    /// does not reach the pinned target. This exercises the scratch-map +
+    /// intersection path in the `Bare` branch of `emit_edges_for_reference`.
+    #[test]
+    fn bare_with_target_element_keeps_only_pinned_diagonal_edge() {
+        let region = make_named_dimension("Region", &["NYC", "Boston"]);
+        let dims = std::slice::from_ref(&region);
+        let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        emit_edges_for_reference(
+            "pop",
+            "rel",
+            dims,
+            dims,
+            &RefShape::Bare,
+            Some("boston"),
+            &mut edges,
+        );
+
+        // Only the boston diagonal edge should be present.
+        let from_boston = edges
+            .get("pop[boston]")
+            .expect("pop[boston] must be a source");
+        assert_eq!(
+            from_boston.len(),
+            1,
+            "expected exactly one outgoing edge from pop[boston]"
+        );
+        assert!(
+            from_boston.contains("rel[boston]"),
+            "expected pop[boston] -> rel[boston]"
+        );
+
+        // pop[nyc] should either be absent or have no edges into rel[boston];
+        // the diagonal for nyc is rel[nyc], which is not the pinned target.
+        if let Some(from_nyc) = edges.get("pop[nyc]") {
+            assert!(
+                !from_nyc.contains("rel[boston]"),
+                "pop[nyc] must not reach rel[boston] via Bare diagonal"
+            );
+            assert!(
+                !from_nyc.contains("rel[nyc]"),
+                "pop[nyc] -> rel[nyc] must be excluded when target_element = boston"
+            );
+        }
     }
 }
 

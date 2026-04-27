@@ -643,3 +643,145 @@ fn scalar_model_loops_and_partitions_identical() {
         "scalar model: element-level stock_partition should be identical to variable-level"
     );
 }
+
+// ---- Per-reference element-graph edge-set tests ----
+//
+// These tests pin the per-reference element-graph behavior implemented in
+// Phase 2. `model_element_causal_edges` walks each target's `Expr2` AST,
+// classifies each reference by its `RefShape` (`Bare`, `FixedIndex`,
+// `Wildcard`, or `DynamicIndex`), and emits edges per occurrence rather
+// than per `(source, target)` pair. The earlier classifier collapsed
+// every reference into a single kind and over-approximated fixed-index
+// references as a full N x N expansion; the asserted edge sets below
+// reflect the truthful per-reference output.
+
+/// AC1.1: Fixed-index broadcast must not be over-expanded.
+///
+/// For `relative_pop[Region] = population / population[NYC]` over a
+/// dimension R of size N, the truthful element-graph contains exactly
+/// the diagonal `population[d] -> relative_pop[d]` edges from the bare
+/// `population` (SameElement) plus the broadcast-from-NYC edges
+/// `population[nyc] -> relative_pop[d]` from the literal `population[NYC]`
+/// (FixedIndex). After deduplication this is 2N - 1 = 5 edges for N=3,
+/// not the N^2 = 9 edges today's classifier emits.
+#[test]
+fn element_graph_fixed_index_broadcast_truthful() {
+    let project = TestProject::new("fixed_index_broadcast")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_aux("population[Region]", "100")
+        .array_aux("relative_pop[Region]", "population / population[NYC]");
+
+    let result = element_edges(&project);
+
+    // Diagonal edges from the bare `population` (SameElement)
+    assert_edge(&result, "population[nyc]", "relative_pop[nyc]");
+    assert_edge(&result, "population[boston]", "relative_pop[boston]");
+    assert_edge(&result, "population[la]", "relative_pop[la]");
+
+    // Broadcast edges from the literal `population[NYC]` (FixedIndex).
+    // The NYC-to-NYC edge overlaps with the diagonal edge above; only the
+    // two non-overlapping ones add to the unique-edge count.
+    assert_edge(&result, "population[nyc]", "relative_pop[boston]");
+    assert_edge(&result, "population[nyc]", "relative_pop[la]");
+
+    // Spurious edges that today's CrossElement-collapse classifier emits
+    // and that the post-refactor builder must NOT emit. Each one would
+    // imply that some element other than NYC is referenced from a literal
+    // element subscript, which the equation does not do.
+    assert_no_edge(&result, "population[boston]", "relative_pop[nyc]");
+    assert_no_edge(&result, "population[la]", "relative_pop[nyc]");
+    assert_no_edge(&result, "population[boston]", "relative_pop[la]");
+    assert_no_edge(&result, "population[la]", "relative_pop[boston]");
+}
+
+/// AC1.2: Wildcard reducer remains all-pairs and the bare-Var diagonal
+/// edges survive.
+///
+/// For `share[Region] = population / SUM(population[*])`, the wildcard
+/// reducer continues to emit all N x N edges (every source element feeds
+/// every target element via the reduction). The diagonal edges from the
+/// bare `population` numerator must also be present after the refactor;
+/// today they are subsumed by the CrossElement classifier's all-pairs
+/// expansion, but the post-refactor builder emits them per-reference and
+/// the union must still cover all 9.
+#[test]
+fn element_graph_wildcard_reducer_plus_bare_truthful() {
+    let project = TestProject::new("wildcard_plus_bare")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_aux("population[Region]", "100")
+        .array_aux("share[Region]", "population / SUM(population[*])");
+
+    let result = element_edges(&project);
+
+    // All 9 edges must be present: the wildcard reducer emits the full
+    // 3x3 cross product, and the bare numerator's 3 diagonal edges are a
+    // subset of those 9.
+    let regions = &["nyc", "boston", "la"];
+    for &from_r in regions {
+        for &to_r in regions {
+            assert_edge(
+                &result,
+                &format!("population[{from_r}]"),
+                &format!("share[{to_r}]"),
+            );
+        }
+    }
+}
+
+/// AC1.5: Multidim partial-fixed references conservatively expand as
+/// full Wildcard.
+///
+/// For `target[Region] = pop[NYC, Adult] + SUM(pop[NYC, *])` with
+/// `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult, Child}):
+///
+/// - The literal pair `pop[NYC, Adult]` produces broadcast edges from
+///   that single source element to every target element (FixedIndex).
+/// - The partial-wildcard `pop[NYC, *]` inside SUM is conservatively
+///   treated as a full Wildcard for now: it drops the literal `NYC`
+///   pinning and expands as if every (Region, Age) source element fed
+///   every target element. Tightening this to a per-dimension
+///   wildcard-on-Age-only expansion is deferred (TODO: see
+///   ltm-per-ref-elem-graph design plan AC1.5).
+///
+/// Concretely, the conservative behavior emits all 4 x 2 = 8 source-to-
+/// target edges. This is the same edge count today's CrossElement
+/// classifier emits, which is intentional: AC1.5 is documented as
+/// "not a regression vs today" -- the test should pass today AND after
+/// the refactor lands, pinning the conservative semantics in place.
+#[test]
+fn element_graph_multidim_partial_fixed_conservative() {
+    let project = TestProject::new("multidim_partial_fixed")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
+        .array_aux_direct(
+            "target",
+            vec!["Region".into()],
+            "pop[NYC, Adult] + SUM(pop[NYC, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // Literal-pair broadcast edges from FixedIndex source `pop[NYC, Adult]`:
+    // the single source element feeds every target element.
+    assert_edge(&result, "pop[nyc,adult]", "target[nyc]");
+    assert_edge(&result, "pop[nyc,adult]", "target[boston]");
+
+    // Partial-wildcard SUM(pop[NYC, *]) expanded conservatively as full
+    // Wildcard: every source element of `pop` (including the Boston row,
+    // because we drop the literal `NYC` pinning in the conservative
+    // expansion) feeds every target element.
+    let from_elems = &[
+        "pop[nyc,adult]",
+        "pop[nyc,child]",
+        "pop[boston,adult]",
+        "pop[boston,child]",
+    ];
+    let to_elems = &["target[nyc]", "target[boston]"];
+    for from in from_elems {
+        for to in to_elems {
+            assert_edge(&result, from, to);
+        }
+    }
+}

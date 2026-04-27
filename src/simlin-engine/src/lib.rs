@@ -28,6 +28,8 @@ mod compiler;
 pub mod data_provider;
 pub mod datamodel;
 pub mod db;
+#[cfg(test)]
+mod db_element_graph_proptest;
 pub mod diagram;
 mod dimensions;
 pub mod errors;

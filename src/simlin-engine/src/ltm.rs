@@ -62,7 +62,16 @@ pub enum LinkPolarity {
     Unknown,  // Cannot determine polarity statically
 }
 
-/// Represents a causal link between two variables
+/// Represents a causal link between two variables.
+///
+/// The per-reference access shape distinction (Bare / FixedIndex / Wildcard
+/// / DynamicIndex) is encoded in the link's `from` / `to` strings, not as
+/// a separate field. Cross-dimensional edges in mixed/scalar loops carry
+/// element-level `from` like `"pop[nyc]"` so loop-score equations resolve
+/// to the per-element link score variable that
+/// `try_cross_dimensional_link_scores` emits. All other edges use
+/// variable-level names. See `db_ltm::build_element_level_loops` for the
+/// normalization rule.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Link {
@@ -80,6 +89,33 @@ pub struct Link {
 /// per-element evaluation).  Mixed loops (scalar + arrayed nodes, or
 /// cross-element feedback) have empty `dimensions` and use
 /// element-specific link names.
+///
+/// # `stocks` granularity invariant
+///
+/// The granularity of `stocks` is keyed off `dimensions`:
+///
+/// - **`dimensions.is_empty()` -- mixed/scalar AND cross-element
+///   approximation loops**: stocks are **element-level** names (e.g.,
+///   `"pop[nyc]"`). This is required because `partition_for_loop` looks
+///   up stocks in `model_element_cycle_partitions`, whose
+///   `stock_partition` map is keyed on element-level names.  Using
+///   variable-level names here would cause `partition_for_loop` to
+///   return `None`, silently corrupting per-loop normalization in
+///   `compute_rel_loop_scores` (the loop would bucket into the
+///   catch-all `None` group instead of its actual SCC).  Cross-element
+///   approximation loops (built by the wildcard-reducer branch in
+///   `db_ltm::build_element_level_loops`) follow the same rule and
+///   include every element-level stock node that appears in the
+///   original circuit -- a single cross-element loop typically
+///   traverses the same stock variable at multiple elements (e.g.,
+///   both `population[nyc]` AND `population[boston]`), and all belong
+///   in `stocks` so the partition lookup hits the SCC containing them.
+///
+/// - **`!dimensions.is_empty()` -- A2A loops**: stocks are
+///   **variable-level** names (e.g., `"pop"`).  A2A loops are expanded
+///   per-element during simulation so variable-level names are correct;
+///   the element-level partition lookup is not used for A2A loops, and
+///   `partition_for_loop` legitimately returns `None` for them.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Loop {

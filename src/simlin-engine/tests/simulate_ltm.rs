@@ -3934,6 +3934,33 @@ fn test_arrayed_population_ltm_exhaustive() {
         );
     }
 
+    // Tightened in 2026-04-25-ltm-per-ref-elem-graph: NYC (slot 0,
+    // birth_rate=0.03) and Boston (slot 1, birth_rate=0.02) both have
+    // birth_rate != death_rate (0.01 uniform), so neither population is
+    // in equilibrium -- their per-slot loop scores must be non-zero on
+    // every loop in the model.  Only LA (slot 2) is at equilibrium.
+    // Pre-Phase-2 the per-element loop-score bookkeeping was scrambled by
+    // the spurious NxN cross-element edges (the auto-flip threshold
+    // could trip on this model and force discovery mode), so this
+    // slot-resolved check could not be made cleanly; post-refactor the
+    // per-element values are stable and we can hold each non-equilibrium
+    // slot to a non-zero contract.
+    let non_equilibrium_slots = [0_usize, 1_usize]; // NYC, Boston
+    for (name, base_offset) in &loop_scores {
+        for &elem in &non_equilibrium_slots {
+            let off = base_offset + elem;
+            let any_step_nonzero = (2..results.step_count).any(|step| {
+                let val = results.data[step * results.step_size + off];
+                val.abs() > 1e-10 && !val.is_nan()
+            });
+            assert!(
+                any_step_nonzero,
+                "Loop score var {} slot[{}] (non-equilibrium element) should be non-zero",
+                name, elem
+            );
+        }
+    }
+
     // Verify relative loop scores exist and each element's absolute values
     // sum to approximately 1.0 (since each region has independent dynamics,
     // each element is its own partition).  rel_loop_score is no longer
@@ -4223,6 +4250,130 @@ fn test_cross_element_ltm_exhaustive() {
         any_loop_active,
         "Cross-element fixture should have at least one loop with non-zero per-element loop_score values"
     );
+
+    // Tightened in 2026-04-25-ltm-per-ref-elem-graph: the A2A reinforcing
+    // births loop (population[r] -> births[r] -> population[r]) is a pure
+    // same-element cycle whose link scores are independent of the
+    // cross-element migration machinery.  Both NYC (init=1000) and Boston
+    // (init=500) start with non-equilibrium populations and a uniform
+    // birth rate of 0.02, so both slots must carry a non-zero loop score
+    // every step after t=2.  Pre-Phase-2 this could not be asserted
+    // because the spurious NxN cross-element edges polluted the A2A loop
+    // structure; post-refactor the A2A loop is clean and this slot-by-slot
+    // check is robust.  We still cannot assert the same on the migration
+    // (u*) loops: those legitimately zero out one slot due to MAX(...)
+    // semantics in migration_in / migration_out, which is fixture
+    // behavior independent of the refactor.
+    let a2a_reinforcing_loop = loop_scores
+        .iter()
+        .find(|(name, _)| name.ends_with("\u{205A}r1"))
+        .expect("A2A reinforcing births loop r1 should be present in loop_scores");
+    for elem in 0..n_elements {
+        let off = a2a_reinforcing_loop.1 + elem;
+        let any_step_nonzero = (2..results.step_count).any(|step| {
+            let val = results.data[step * results.step_size + off];
+            val.abs() > 1e-10 && !val.is_nan()
+        });
+        assert!(
+            any_step_nonzero,
+            "A2A reinforcing loop {} slot[{}] should be non-zero (NYC and Boston both have non-equilibrium births dynamics)",
+            a2a_reinforcing_loop.0, elem
+        );
+    }
+}
+
+/// AC1.3: truthful per-reference element edge set for the cross-element
+/// fixture.
+///
+/// `model_element_causal_edges` walks each target's `Expr2` AST and emits
+/// element edges per reference site, classifying each reference by its
+/// `RefShape`. A fixed-index reference like `migration_pressure[Boston]`
+/// is classified as `FixedIndex(Boston)` and emits one edge from
+/// `migration_pressure[boston]` to the target, rather than expanding to
+/// all N x N edges. The two `assert_no_edge` calls verify that
+/// `migration_in[NYC]` -- which references only
+/// `migration_pressure[Boston]` -- does not pick up a spurious
+/// `migration_pressure[NYC] -> migration_in[NYC]` edge.
+#[test]
+fn test_cross_element_ltm_edge_set_truthful() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model = sync
+        .project
+        .models(&db)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist");
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+
+    // Helper closures for readable assertions. Each takes &str instead of
+    // String because the edge-key strings are short and stable; cloning
+    // through `to_string` once per assertion is negligible.
+    let has_edge = |from: &str, to: &str| -> bool {
+        element_edges
+            .edges
+            .get(from)
+            .is_some_and(|targets| targets.contains(to))
+    };
+    let assert_edge = |from: &str, to: &str| {
+        assert!(
+            has_edge(from, to),
+            "expected edge {from} -> {to}, but it was missing.\nedges from '{from}': {:?}",
+            element_edges.edges.get(from)
+        );
+    };
+    let assert_no_edge = |from: &str, to: &str| {
+        assert!(
+            !has_edge(from, to),
+            "expected NO edge {from} -> {to}, but it was present"
+        );
+    };
+
+    // population -> migration_pressure: every element of population is
+    // referenced by at least one migration_pressure equation, so all four
+    // (population[d] -> migration_pressure[e]) edges exist by literal
+    // FixedIndex reference.
+    assert_edge("population[nyc]", "migration_pressure[nyc]");
+    assert_edge("population[boston]", "migration_pressure[nyc]");
+    assert_edge("population[boston]", "migration_pressure[boston]");
+    assert_edge("population[nyc]", "migration_pressure[boston]");
+
+    // migration_pressure -> migration_in: each migration_in equation
+    // references the OTHER region's migration_pressure only. The truthful
+    // edge set is the swap-pair (boston -> nyc, nyc -> boston); the same-
+    // element edges (nyc -> nyc, boston -> boston) are spurious today and
+    // must disappear after the refactor.
+    assert_edge("migration_pressure[boston]", "migration_in[nyc]");
+    assert_edge("migration_pressure[nyc]", "migration_in[boston]");
+    assert_no_edge("migration_pressure[nyc]", "migration_in[nyc]");
+    assert_no_edge("migration_pressure[boston]", "migration_in[boston]");
+
+    // migration_pressure -> migration_out: A2A bare ref `MAX(migration_pressure, 0)`
+    // is a SameElement reference; only the diagonal edges should exist.
+    assert_edge("migration_pressure[nyc]", "migration_out[nyc]");
+    assert_edge("migration_pressure[boston]", "migration_out[boston]");
+
+    // population -> births: A2A bare ref `population * 0.02` is SameElement.
+    assert_edge("population[nyc]", "births[nyc]");
+    assert_edge("population[boston]", "births[boston]");
+
+    // population -> total_population: SUM(population[*]) is a wildcard
+    // reducer feeding a scalar, so every element of population edges to it.
+    assert_edge("population[nyc]", "total_population");
+    assert_edge("population[boston]", "total_population");
+
+    // Structural flow -> stock edges from the population stock's
+    // inflow/outflow declarations. Each flow's element feeds the matching
+    // stock element (SameElement at the structural-edge level).
+    assert_edge("births[nyc]", "population[nyc]");
+    assert_edge("births[boston]", "population[boston]");
+    assert_edge("migration_in[nyc]", "population[nyc]");
+    assert_edge("migration_in[boston]", "population[boston]");
+    assert_edge("migration_out[nyc]", "population[nyc]");
+    assert_edge("migration_out[boston]", "population[boston]");
 }
 
 /// AC8.2: Cross-element feedback model -- discovery mode.

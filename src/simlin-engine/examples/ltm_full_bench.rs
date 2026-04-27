@@ -37,11 +37,12 @@ use std::fs;
 use std::time::Instant;
 
 use simlin_engine::db::{
-    SimlinDb, compile_project_incremental, model_causal_edges, model_element_causal_edges,
+    SimlinDb, causal_graph_from_edges, causal_graph_from_element_edges,
+    compile_project_incremental, model_causal_edges, model_element_causal_edges,
     model_element_loop_circuits, model_ltm_variables, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{open_vensim, open_xmile};
+use simlin_engine::{json, open_vensim, open_xmile};
 
 fn read_proc_status_kb(key: &str) -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;
@@ -182,13 +183,17 @@ fn main() {
     let mut tracker = Tracker::new(initial, abort_peak_mib);
     let run_start = Instant::now();
 
-    // Stage 1: parse model file.  MDL and XMILE (.stmx/.xmile) are both
-    // supported so the bench can profile non-Vensim test models without
-    // needing per-format driver scripts.
+    // Stage 1: parse model file.  MDL, XMILE (.stmx/.xmile), and the
+    // Simlin JSON format (.sd.json) are all supported so the bench can
+    // profile non-Vensim test models without needing per-format driver
+    // scripts.
     let t0 = Instant::now();
     let contents = fs::read_to_string(&mdl_path).expect("read model file");
     let datamodel = if mdl_path.ends_with(".mdl") {
         open_vensim(&contents).expect("parse MDL")
+    } else if mdl_path.ends_with(".sd.json") {
+        let json_proj: json::Project = serde_json::from_str(&contents).expect("parse Simlin JSON");
+        json_proj.into()
     } else {
         let mut reader = contents.as_bytes();
         open_xmile(&mut reader).expect("parse XMILE")
@@ -236,28 +241,42 @@ fn main() {
         "flag=true".into(),
     );
 
-    // Stage 4: variable-level causal edges.
+    // Stage 4: variable-level causal edges.  We report the
+    // variable-level largest SCC alongside the element-level
+    // counterpart in stage 5 so Phase-5 measurements can show how
+    // per-element expansion influences SCC density.
     let t0 = Instant::now();
     let edges = model_causal_edges(&db, root_source_model, sync.project);
     let n_edge_src = edges.edges.len();
     let n_edge_total: usize = edges.edges.values().map(|v| v.len()).sum();
     let n_stocks = edges.stocks.len();
+    let var_largest_scc = causal_graph_from_edges(edges).largest_scc_size();
     tracker.record(
         "causal_edges",
         t0.elapsed().as_secs_f64() * 1000.0,
-        format!("src_nodes={n_edge_src} total_edges={n_edge_total} stocks={n_stocks}"),
+        format!(
+            "src_nodes={n_edge_src} total_edges={n_edge_total} stocks={n_stocks} \
+             largest_scc={var_largest_scc}"
+        ),
     );
 
     // Stage 5: element-level causal edges (A2A / cross-element expansion).
+    // Element-level largest SCC drives the auto-flip gate
+    // (`MAX_LTM_SCC_NODES`) in `model_ltm_variables`; reporting it here
+    // makes Phase-5 measurements directly comparable to the gate threshold.
     let t0 = Instant::now();
     let elem_edges = model_element_causal_edges(&db, root_source_model, sync.project);
     let n_elem_src = elem_edges.edges.len();
     let n_elem_total: usize = elem_edges.edges.values().map(|v| v.len()).sum();
     let n_elem_stocks = elem_edges.stocks.len();
+    let elem_largest_scc = causal_graph_from_element_edges(elem_edges).largest_scc_size();
     tracker.record(
         "element_edges",
         t0.elapsed().as_secs_f64() * 1000.0,
-        format!("src_nodes={n_elem_src} total_edges={n_elem_total} stocks={n_elem_stocks}"),
+        format!(
+            "src_nodes={n_elem_src} total_edges={n_elem_total} stocks={n_elem_stocks} \
+             largest_scc={elem_largest_scc}"
+        ),
     );
 
     // Stage 6: element-level circuit enumeration (Johnson's w/ SCC).

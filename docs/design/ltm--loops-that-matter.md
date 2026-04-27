@@ -524,28 +524,68 @@ element.
 
 ### Element-Level Causal Graph
 
-`model_element_causal_edges` (salsa tracked, `db_analysis.rs`) expands the
-variable-level graph from `model_causal_edges` into per-element edges. Each
-variable-level edge is classified by inspecting the target variable's `Expr2`
-AST for how the source appears:
+`model_element_causal_edges` (salsa tracked, `db_analysis.rs`) builds the
+element-level graph by walking each target variable's `Expr2` AST and
+emitting one or more element edges per reference site. A reference site is
+one occurrence of an `Expr2::Var` or `Expr2::Subscript` node naming a
+source variable; `collect_reference_sites` finds them and
+`emit_edges_for_reference` writes the edges.
 
-| Source | Target | Classification | Edge expansion |
-|--------|--------|----------------|----------------|
-| scalar | scalar | -- | `from -> to` (unchanged) |
-| scalar | arrayed | Broadcast | `from -> to[d]` for each element d |
-| arrayed | scalar | Reduction | `from[d] -> to` for each element d |
-| arrayed | arrayed | SameElement | `from[d] -> to[d]` per shared element |
-| arrayed | arrayed | CrossElement | `from[d] -> to[e]` for all d, e |
+Each reference is classified by access shape:
 
-**SameElement** applies when the source is referenced with non-wildcard
-subscripts or as a bare variable in an A2A equation. **CrossElement** applies
-when the source appears inside a wildcard subscript (e.g., `SUM(x[*])`).
-Structural flow-to-stock edges are always classified as SameElement.
+| Source dims | Target dims | RefShape         | Edges emitted                                |
+|-------------|-------------|------------------|----------------------------------------------|
+| scalar      | scalar      | Bare             | `from -> to`                                 |
+| scalar      | arrayed     | Bare             | `from -> to[d]` for each target element d    |
+| arrayed     | scalar      | Bare             | `from[d] -> to` for each source element d    |
+| arrayed     | arrayed     | Bare             | `from[d] -> to[d]` per shared element        |
+| arrayed     | any         | Wildcard         | `from[d] -> to[e]` full cross-product        |
+| arrayed     | scalar      | FixedIndex(elem) | `from[elem] -> to` (one edge)                |
+| arrayed     | arrayed     | FixedIndex(elem) | `from[elem] -> to[d]` for each target element d |
+| arrayed     | any         | DynamicIndex     | conservative full cross-product              |
+
+`Bare` covers both bare `Expr2::Var` references (scalar dep or A2A
+same-element). `FixedIndex` carries the resolved element subscripts from a
+literal-index `Subscript` node. `Wildcard` covers reducer patterns
+(`SUM(x[*])`); `DynamicIndex` covers any subscript with non-literal indices
+(`@N`, `Range`, `StarRange`, or arbitrary `Expr`).
+
+Edges from multiple reference sites in the same target are unioned. For
+`relative_pop[R] = population / population[NYC]`, the bare numerator emits
+diagonal edges `population[d] -> relative_pop[d]` and the fixed-index
+denominator emits broadcast edges `population[NYC] -> relative_pop[d]` --
+2N - 1 unique edges, not N^2. For `share[R] = pop / SUM(pop[*])`, the bare
+numerator and the wildcard reducer each emit their own edge sets; the
+result is the union (N diagonals plus N^2 cross-pairs, deduplicated).
+
+Structural flow-to-stock edges (an inflow or outflow's variable name does
+not appear in the stock's equation, which holds only the initial value)
+are emitted as same-element diagonals without AST consultation.
+
+Multidimensional subscripts where some indices are literal and others are
+wildcards (e.g., `source[NYC, *]`) are conservatively classified as
+`Wildcard`. A future refinement could honor partial-fixed semantics; the
+overhead is bounded today because such patterns are uncommon in real
+models.
 
 Stock names are similarly expanded: `population` with dimension `Region`
 becomes `population[NYC]`, `population[Boston]`, etc. When no variables in
 a model are arrayed, the element graph is identical to the variable graph
 (zero overhead).
+
+This per-reference design replaces the earlier `ElementDependencyKind`
+classifier that collapsed every reference between a `(from, to)` pair to a
+single kind. That collapse over-expanded fixed-index references to N^2
+edges (resolving tech-debt #20) and forced the link-score partial equation
+to wrap every reference uniformly in `PREVIOUS()`, breaking targets that
+mixed bare and reducer references (resolving tech-debt #26). The
+post-refactor measurements in
+`docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md` show that the
+element-graph SCC sizes that previously drove tech-debt #25's auto-flip
+pressure on FixedIndex models are no longer inflated by spurious edges,
+though `MAX_LTM_SCC_NODES = 50` was retained because WRLD3-class models
+trip the gate from variable-level cycle structure rather than
+element-graph artifacts.
 
 ### Link Score Classification
 
