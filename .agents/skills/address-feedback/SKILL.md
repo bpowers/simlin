@@ -12,6 +12,34 @@ You are performing iterative code review and improvement using local review tool
 3. **Pushed to remote**: The branch must be pushed. Run `git push -u origin HEAD` if needed.
 4. **PR exists**: You might already know the PR number (e.g. from system-reminder or in context). If not, create a PR with `gh pr create` and note the returned PR number.
 
+## Pre-PR self-review (run BEFORE the first review iteration)
+
+Before kicking off the review loop, read your own diff with reviewer eyes. Reviewer rounds tend to find the same patterns repeatedly; getting them in your first commit saves an iteration cycle. Run:
+
+```bash
+git diff origin/main...HEAD
+```
+
+and walk it with these questions in mind:
+
+1. **Contract changes**: For every new function, ask "what is its contract? what edge violates it?" Then write a test for that edge if one doesn't exist. Specifically:
+   - Path-resolution / canonicalization functions: probe symlink escapes, `..` traversals, case-folding, missing leaves vs missing intermediate components.
+   - Validation gates: probe the case where the gate's input *is* the to-be-validated state (a real shape of bug — "validate against new content" is a no-op).
+   - Race-sensitive primitives (atomic create, optimistic lock, echo suppression): probe N concurrent callers.
+
+2. **Consumer audit on contract changes**: If the PR changes a contract that has multiple consumers (e.g. a path-resolution rule, a registry primitive, an auth check), grep for every other consumer of the affected primitive. Apply the same change everywhere — DO NOT fix one site and ship.
+   ```bash
+   # Example: changed how `.mdl` paths resolve. Find every consumer.
+   git grep -nE 'mdl|sidecar' src/
+   ```
+   The test for whether you've finished: every consumer should be calling the same primitive, not reimplementing the rule inline.
+
+3. **Threat-model alignment**: If the PR touches auth, transport, path validation, file-creation, or anything described in `docs/threat-model.md`, cross-reference each promise against your code. The threat model is a contract; if your PR's code doesn't match it, either fix the code or update the threat model — but don't ship divergence silently.
+
+4. **N≥3 duplication smell**: If the same conditional / helper / rule appears in 3+ places, refactor before merging. This is the source of the "next round of bugs" — every duplicated rule eventually drifts.
+
+If you find issues during this pass, fix them with TDD before pushing. The review loop below should be addressing things you genuinely missed, not things visible to anyone reading the diff.
+
 ## Main Loop
 
 Execute this loop until the reviewer reports no actionable feedback in the same iteration:
@@ -57,10 +85,12 @@ Ignore suggestions that:
 If ANY feedback would genuinely improve the code:
 - Think deeply about each piece of feedback
 - Identify the ROOT CAUSE, not just the symptom
+- **Audit consumers of the affected contract.** If the fix changes a primitive's contract (e.g. "rename now also updates format", "save now applies sidecar preference"), grep for every other call site of that primitive and verify they all behave correctly. Reviewers will find the next-leaked site if you don't — this is the single biggest source of "still finding P1s after N iterations." When fixing one consumer, find them all.
 - Follow Test-Driven Development:
-  1. Write failing test(s) that capture the expected behavior.  If there is refactoring needed to enable writing good tests that is ok -- this improves the codebase.
+  1. Write failing test(s) that capture the expected behavior.  If there is refactoring needed to enable writing good tests that is ok -- this improves the codebase.  Test the CONTRACT, not the call site: the test should probe the edge where the contract leaks (symlink escape, format mismatch, race window, …) rather than just exercising the change.
   2. Implement the fix to make the tests pass
   3. Refactor if needed while keeping tests green
+- **Re-run the pre-PR self-review pass** above against the new diff before pushing. Each iteration is an opportunity to apply the same scrutiny to the new code.
 - Create ONE commit for all feedback from this review cycle
 - **Go back to Step 0** (both reviewers must re-verify after changes)
 
