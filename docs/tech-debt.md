@@ -341,3 +341,17 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Investigation log (2026-04-26)**: classify-side fix routes missing-leaf `Modify(Name(_))` → `Removed` was insufficient; path-resolution fix using `resolve_canonical_path` (canonicalize the deepest existing ancestor) made the Linux semantics platform-correct but did not move the macOS test 1 either, which strongly suggests the underlying event simply isn't reaching the actor. Without a macOS box to instrument the FSEvents stream directly, the next investigative step is to spawn a debug binary on a macOS runner that subscribes to FSEvents directly and prints the raw flags it receives for the test scenario.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-26
+
+### 38. Windows Smoke Save Returns 500 (Atomic-Replace Race)
+
+- **Component**: simlin-serve (`src/handlers.rs::save_project`, `simlin-engine/src/io.rs::atomic_write`, `tests/smoke.rs`)
+- **Severity**: medium
+- **Description**: On windows-latest the smoke test's `POST /api/projects/teacup.xmile` save returns `500 Internal Server Error` with the generic `SaveError::Internal` body. The Linux and macOS smoke jobs both pass through the same end-to-end code path, so the failure is Windows-specific. The most likely root cause is the Windows-only branch in `simlin-engine::io::atomic_write` that calls `fs::remove_file(target)` before `fs::rename(tmp, target)` — std's `rename` does not overwrite on Windows, so the target must be unlinked first, but if the in-process watcher's `notify-debouncer-full` is holding a directory handle (via `ReadDirectoryChangesW`) at the same path, the unlink can be deferred or the rename can lose to a kernel-level open-handle race.
+- **Symptoms**: Linux + macOS smoke pass; Windows smoke fails on the first save assertion at `tests/smoke.rs:316:5`. The save POST receives a 500 within seconds, with the response body `{"error":"internal server error"}`.
+- **Test impact**: `tests/smoke.rs` is gated with `#![cfg(not(target_os = "windows"))]` so the windows-latest matrix entry compiles, links, runs the test binary, and reports zero tests run. The `Build simlin-serve binary` step on Windows still validates that the cargo build itself succeeds end-to-end, so a regression that breaks the Windows compile (rather than runtime) still trips CI.
+- **Investigation hints**:
+  - The harness already captures the spawned binary's stdout (where `tracing_subscriber::fmt()` writes by default) and stderr, and `ChildGuard::drop` dumps both on test panic. So the next failing CI run on Windows will surface the underlying `tracing::error!` from `handlers.rs:708` in the job log, naming the specific err value behind `SaveError::Internal`. Read that first.
+  - Once the err is visible, the most likely paths are (a) `commit_write` -> `atomic_write` returning a Windows I/O error from `remove_file` or `rename`; (b) `serialize_project` failing on Windows-style line endings if Git's autocrlf checked out `teacup.xmile` with `\r\n` and the XMILE writer emits something incompatible; (c) `redirect_to_sidecar` / registry `ensure_or_get` racing with the watcher.
+  - A fix worth trying as a hypothesis test: switch `atomic_write` on Windows to use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` via `windows-sys` instead of the `remove`-then-`rename` two-step. That eliminates the open-handle window the watcher might be sitting in.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-04-27
