@@ -92,8 +92,6 @@
     "test": "jest",
     "prepublishOnly": "pnpm build",
     "clean": "rm -rf ./lib ./lib.browser",
-    "build": "tsc && tsc -p tsconfig.browser.json && pnpm run build:css-stubs && pnpm run build:copy-css",
-    "build:css-stubs": "find . -name '*.css' -not -path './lib*' -not -path './node_modules/*' | while read src; do dir=$(dirname \"$src\" | sed 's|^\\./||'); mkdir -p \"lib/$dir\"; echo \"module.exports = new Proxy({}, { get: () => '' });\" > \"lib/$dir/$(basename \"$src\")\"; done",
-    "build:copy-css": "find . -name '*.css' -not -path './lib*' -not -path './node_modules/*' | while read src; do dir=$(dirname \"$src\" | sed 's|^\\./||'); mkdir -p \"lib.browser/$dir\"; cp \"$src\" \"lib.browser/$dir/\"; done"
+    "build": "tsc && tsc -p tsconfig.browser.json && bash build-css.sh"
   }
 }
