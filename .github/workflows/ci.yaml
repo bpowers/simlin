@@ -131,12 +131,17 @@ jobs:
         with:
           tool: cargo-tarpaulin
 
-      # 45-minute outer cap on tarpaulin.  Baseline is ~23 min;
-      # tarpaulin also self-polices per-test at 60s, but this backstop
-      # catches the case where instrumentation overhead tips a slow
-      # test suite into runaway territory.
+      # 90-minute outer cap on tarpaulin. Baseline pre-simlin-serve was
+      # ~23 min; the simlin-serve test suite (filesystem watcher with
+      # real debounce waits, MCP duplex pairs, end-to-end save/HTTP
+      # round-trips) tipped the wall-clock past the original 45-minute
+      # cap, so the whole job timed out without producing coverage XML.
+      # Tarpaulin still self-polices per-test at 60s, so this outer cap
+      # is a backstop against a runaway test rather than the primary
+      # budget. If runtime keeps growing, the next move is `--engine
+      # llvm` for source-based coverage at native test speed.
       - name: Run cargo-tarpaulin
-        timeout-minutes: 45
+        timeout-minutes: 90
         run: cargo tarpaulin --out Xml
 
       - name: Upload Coverage
@@ -312,9 +317,19 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build embedded SPA
-        working-directory: src/simlin-serve/web
-        run: pnpm build
+      # `vite build` only builds the @simlin/serve-web package; it does
+      # NOT build its workspace dependencies. The pnpm `...` filter
+      # selects serve-web AND its transitive deps (@simlin/core,
+      # @simlin/engine, @simlin/diagram) in topological order so each
+      # one's `lib/`/`lib.browser/`/`dist/` output exists before vite
+      # tries to resolve them. DISABLE_WASM_OPT=1 skips the
+      # multi-minute wasm-opt pass on the engine package — release-
+      # quality WASM is irrelevant for a smoke test of the serve
+      # binary.
+      - name: Build embedded SPA (with workspace deps)
+        env:
+          DISABLE_WASM_OPT: "1"
+        run: pnpm --filter "@simlin/serve-web..." run build
 
       # SIMLIN_SERVE_BUILD_WEB=1 is set as defense-in-depth: the
       # "Build embedded SPA" step above already populates web/dist/,
