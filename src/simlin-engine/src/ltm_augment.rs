@@ -59,19 +59,54 @@ fn is_literal_element_index(
     position: usize,
     source_dim_elements: &[Vec<String>],
 ) -> bool {
-    match idx {
-        IndexExpr0::Expr(Expr0::Var(name, _)) => {
-            let canon = canonicalize(name.as_str()).into_owned();
-            let matches_position = position < source_dim_elements.len()
-                && source_dim_elements[position].iter().any(|e| e == &canon);
-            let matches_any = !matches_position
-                && source_dim_elements
-                    .iter()
-                    .any(|dim| dim.iter().any(|e| e == &canon));
-            matches_position || matches_any
+    resolve_literal_element_index(idx, position, source_dim_elements).is_some()
+}
+
+/// Resolve a single subscript index to a literal element name, mirroring
+/// `db_analysis::resolve_literal_index` (the Expr2 sibling) so both
+/// classifiers agree on what counts as a "literal element". The two
+/// must stay in sync: the edge emitter uses the Expr2 classifier and
+/// the partial-equation builder uses this Expr0 sibling -- if they
+/// disagree (for example on out-of-range integer literals), the edge
+/// emitter classifies as `DynamicIndex` while the partial builder
+/// classifies as `FixedIndex(...)`, the shape comparison in
+/// `wrap_non_matching_in_previous` fails, and the live reference is
+/// wrapped in `PREVIOUS()` -- silently zeroing the link score.
+///
+/// Element names appear as `Var` nodes; integer literals appear as
+/// `Const` nodes whose text is the integer. Either form is validated
+/// by membership in `source_dim_elements`. For an indexed dim of size
+/// N, `dimension_element_names` produces `["1", "2", ..., "N"]`, so a
+/// `Const("999", ...)` over an indexed dim of size 5 won't match and
+/// falls through to `None`. Matching prefers the dim at the index's
+/// position, falling back to any dim if not found there.
+fn resolve_literal_element_index(
+    idx: &IndexExpr0,
+    position: usize,
+    source_dim_elements: &[Vec<String>],
+) -> Option<String> {
+    let candidate = match idx {
+        IndexExpr0::Expr(Expr0::Var(name, _)) => canonicalize(name.as_str()).into_owned(),
+        IndexExpr0::Expr(Expr0::Const(s, _, _)) => {
+            // Only integer literals could be element references; other
+            // constants (floats, strings, etc.) never are.
+            s.parse::<u32>().ok()?;
+            s.clone()
         }
-        IndexExpr0::Expr(Expr0::Const(s, _, _)) => s.parse::<u32>().is_ok(),
-        _ => false,
+        _ => return None,
+    };
+    let matches_position = position < source_dim_elements.len()
+        && source_dim_elements[position]
+            .iter()
+            .any(|e| e == &candidate);
+    let matches_any = !matches_position
+        && source_dim_elements
+            .iter()
+            .any(|dim| dim.iter().any(|e| e == &candidate));
+    if matches_position || matches_any {
+        Some(candidate)
+    } else {
+        None
     }
 }
 
@@ -87,26 +122,18 @@ fn classify_expr0_subscript_shape(
     }
     let mut elems = Vec::with_capacity(indices.len());
     for (i, idx) in indices.iter().enumerate() {
-        match idx {
-            IndexExpr0::Expr(Expr0::Var(name, _)) => {
-                let canon = canonicalize(name.as_str()).into_owned();
-                let matches_position = i < source_dim_elements.len()
-                    && source_dim_elements[i].iter().any(|e| e == &canon);
-                let matches_any = !matches_position
-                    && source_dim_elements
-                        .iter()
-                        .any(|dim| dim.iter().any(|e| e == &canon));
-                if matches_position || matches_any {
-                    elems.push(canon);
-                } else {
-                    return RefShape::DynamicIndex;
-                }
-            }
-            // Possibly an integer literal index for an indexed dimension.
-            IndexExpr0::Expr(Expr0::Const(s, _, _)) if s.parse::<u32>().is_ok() => {
-                elems.push(s.clone());
-            }
-            _ => return RefShape::DynamicIndex,
+        // Use the same resolver as `is_literal_element_index` so this
+        // classifier and the Expr2 sibling
+        // (`db_analysis::resolve_literal_index`) agree on what counts
+        // as a literal element. Integer literals are validated against
+        // `source_dim_elements` (which contains `["1", ..., "size"]`
+        // for indexed dims), so out-of-range integers like `pop[999]`
+        // over a size-5 indexed dim fall through to `DynamicIndex` --
+        // matching what the edge emitter sees and avoiding the
+        // shape-mismatch that would zero out the partial.
+        match resolve_literal_element_index(idx, i, source_dim_elements) {
+            Some(elem) => elems.push(elem),
+            None => return RefShape::DynamicIndex,
         }
     }
     RefShape::FixedIndex(elems)
@@ -656,7 +683,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     let partial_eq =
         build_partial_equation_shaped(&to_equation, &deps, from, shape, source_dim_elements);
 
-    let from_q = quote_ident(from.as_str());
+    let from_source_q = shape_aware_source_ref(from.as_str(), shape);
     let to_q = quote_ident(to.as_str());
 
     // Using SAFEDIV for both divisions
@@ -665,7 +692,7 @@ fn generate_auxiliary_to_auxiliary_equation(
         "ABS(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({to_q} - PREVIOUS({to_q})), 0))",
     );
     let sign_part = format!(
-        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({from_q} - PREVIOUS({from_q})), 0))",
+        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({from_source_q} - PREVIOUS({from_source_q})), 0))",
     );
 
     // Return 0 at the initial timestep when PREVIOUS values don't exist yet
@@ -674,10 +701,45 @@ fn generate_auxiliary_to_auxiliary_equation(
             (TIME = INITIAL_TIME) \
             then 0 \
             else if \
-                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_q} - PREVIOUS({from_q})) = 0) \
+                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_source_q} - PREVIOUS({from_source_q})) = 0) \
                 then 0 \
                 else {abs_part} * {sign_part}",
     )
+}
+
+/// Render the source reference that drives the link-score's denominator
+/// (the SIGN normalizer and the early-return zero-guard) for a given
+/// shape. The denominator must match the *live* source reference left
+/// in `partial_eq` so SAFEDIV captures the same source the partial
+/// isolates.
+///
+///   - `Bare` -> `from` (per-element under A2A; the partial keeps the
+///     bare reference live, so per-element Δfrom is correct).
+///   - `FixedIndex(elems)` -> `from[elems_joined]` rendered as a
+///     subscript expression (NOT a quoted ident) so the LTM equation
+///     parser interprets it as a per-element subscript matching the
+///     `from[elem]` reference left live in `partial_eq`. Per-element-
+///     target normalization must use Δfrom[elem], not Δfrom[r],
+///     otherwise the cross-element sensitivity gets divided by the
+///     wrong source delta and can flip sign or collapse to zero.
+///   - `Wildcard` / `DynamicIndex` -> `from` (TODO: the truly principled
+///     denominator would be the change in the aggregate
+///     `SUM(from[*])` / `from[expr]` referenced live in the partial,
+///     but that requires re-parsing partial_eq or threading the AST
+///     subtree through. For now we keep the variable-level Δfrom; the
+///     resulting under/over-counting is the same documented edge-
+///     aliasing limitation already pinned by integration tests).
+fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
+    match shape {
+        RefShape::FixedIndex(elems) if !elems.is_empty() => {
+            // Subscript syntax, NOT quote_ident: a literal `pop[nyc]`
+            // parses as a Subscript node (per-element reference), while
+            // `"pop[nyc]"` would parse as a quoted ident referring to
+            // a synthetic variable that doesn't exist.
+            format!("{}[{}]", quote_ident(from), elems.join(","))
+        }
+        _ => quote_ident(from),
+    }
 }
 
 /// Generate flow-to-stock link score equation
@@ -764,9 +826,14 @@ fn generate_stock_to_flow_equation(
         build_partial_equation_shaped(&flow_equation, &deps, stock, shape, source_dim_elements);
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
-    // For stock-to-flow: x=stock, z=flow
+    // For stock-to-flow: x=stock, z=flow. The stock side respects
+    // shape: a FixedIndex(elem) link score must normalize by
+    // Δstock[elem], not the variable-level Δstock; otherwise the
+    // SAFEDIV captures the wrong source delta (same bug class as the
+    // auxiliary-to-auxiliary path -- see `shape_aware_source_ref`).
     let flow_diff = format!("({flow} - PREVIOUS({flow}))", flow = flow.as_str());
-    let stock_diff = format!("({stock} - PREVIOUS({stock}))", stock = stock.as_str());
+    let stock_source_q = shape_aware_source_ref(stock.as_str(), shape);
+    let stock_diff = format!("({stock_source_q} - PREVIOUS({stock_source_q}))");
     let partial_change = format!(
         "(({partial_eq}) - PREVIOUS({flow}))",
         partial_eq = partial_eq,
@@ -1355,6 +1422,61 @@ mod tests {
     /// subscript like `[NYC]` resolves to a known element.
     fn region_dim_elements() -> Vec<Vec<String>> {
         vec![vec!["nyc".to_string(), "boston".to_string()]]
+    }
+
+    /// Regression test for the integer-literal bounds asymmetry between
+    /// the Expr0 and Expr2 classifiers. The Expr2 classifier
+    /// (`db_analysis::resolve_literal_index`) validates integer
+    /// literals against the indexed dimension's size and returns None
+    /// (so the shape becomes `DynamicIndex`) for out-of-range values.
+    /// The Expr0 classifier here previously accepted any `u32`-parseable
+    /// `Const`, so `pop[999]` over an indexed dim of size 2 would
+    /// classify as `FixedIndex(["999"])` here while the edge emitter
+    /// classifies it as `DynamicIndex`. The shapes wouldn't match,
+    /// the live reference would be wrapped in `PREVIOUS()`, and the
+    /// link score would silently zero out.
+    ///
+    /// Both classifiers must agree -- so out-of-range integer literals
+    /// classify as `DynamicIndex`.
+    #[test]
+    fn classify_expr0_rejects_out_of_range_integer_literal() {
+        use crate::ast::{Expr0, IndexExpr0, Loc};
+
+        // Indexed-style source_dim_elements: position 0 is an indexed
+        // dim of size 2 (elements "1", "2"). "999" is out of range.
+        let dims = vec![vec!["1".to_string(), "2".to_string()]];
+        let indices = vec![IndexExpr0::Expr(Expr0::Const(
+            "999".to_string(),
+            999.0,
+            Loc::default(),
+        ))];
+
+        let shape = classify_expr0_subscript_shape(&indices, &dims);
+        assert_eq!(
+            shape,
+            RefShape::DynamicIndex,
+            "out-of-range integer literal must classify as DynamicIndex \
+             to agree with Expr2's resolve_literal_index; got {shape:?}",
+        );
+
+        // Same fixture: is_literal_element_index must also reject.
+        assert!(
+            !is_literal_element_index(&indices[0], 0, &dims),
+            "is_literal_element_index must reject out-of-range integer literal",
+        );
+
+        // Sanity: the same classifier still accepts an in-range integer.
+        let in_range = vec![IndexExpr0::Expr(Expr0::Const(
+            "1".to_string(),
+            1.0,
+            Loc::default(),
+        ))];
+        let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims);
+        assert_eq!(
+            in_range_shape,
+            RefShape::FixedIndex(vec!["1".to_string()]),
+            "in-range integer literal must classify as FixedIndex; got {in_range_shape:?}",
+        );
     }
 
     // -- dimension_element_names tests --

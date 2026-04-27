@@ -829,6 +829,80 @@ fn fixed_index_link_score_emits_per_element_name() {
     );
 }
 
+/// Regression test: the FixedIndex link score's source-delta normalizer
+/// must reference the FixedIndex element (e.g., `pop[nyc]`), not the
+/// variable-level `from` (`pop`).
+///
+/// For `rel_pop[r] = pop / pop[NYC]`:
+///   - Bare link score `pop→rel_pop` partial leaves bare `pop` live and
+///     wraps `pop[NYC]` in PREVIOUS. Source delta should be `Δpop` (per
+///     element under A2A) -- correct today.
+///   - FixedIndex link score `pop[nyc]→rel_pop` partial leaves
+///     `pop[nyc]` live and wraps bare `pop`. Source delta should be
+///     `Δpop[nyc]`, but the buggy version used `Δpop`, so under A2A the
+///     denominator became `Δpop[r]` at each target element -- wrong
+///     source. This distorts magnitude and can flip the loop-score sign
+///     when `pop[nyc]` and `pop[r]` move in opposite directions.
+#[test]
+fn fixed_index_link_score_denominator_uses_fixed_element() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = TestProject::new("rel_pop_denom")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &[], &[], None)
+        .array_aux("rel_pop[Region]", "pop / pop[NYC]")
+        .build_datamodel();
+
+    let (source_project, model) = {
+        let result = sync_from_datamodel(&db, &project);
+        (result.project, result.models["main"].source)
+    };
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+
+    let fixed_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop";
+    let fixed = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == fixed_name)
+        .expect("expected FixedIndex(nyc) link score");
+
+    // The denominator that drives the SIGN of the link score must
+    // reference `pop[nyc]` (the FixedIndex element kept live in the
+    // partial), not the bare variable-level `pop`.
+    assert!(
+        fixed.equation.contains("(pop[nyc] - PREVIOUS(pop[nyc]))"),
+        "FixedIndex link score denominator must reference pop[nyc]; got: {}",
+        fixed.equation
+    );
+    // It must NOT contain the unsuffixed `(pop - PREVIOUS(pop))` form,
+    // which under A2A becomes `Δpop[r]` and normalizes by the wrong
+    // source.
+    assert!(
+        !fixed.equation.contains("(pop - PREVIOUS(pop))"),
+        "FixedIndex link score must not normalize by the unsuffixed Δpop; got: {}",
+        fixed.equation
+    );
+
+    // The Bare variant must still use the unsuffixed source delta --
+    // its partial keeps the bare `pop` live, so `Δpop` (per element
+    // under A2A) is the correct normalizer.
+    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}rel_pop";
+    let bare = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == bare_name)
+        .expect("expected Bare link score");
+    assert!(
+        bare.equation.contains("(pop - PREVIOUS(pop))"),
+        "Bare link score must keep its unsuffixed Δpop denominator; got: {}",
+        bare.equation
+    );
+}
+
 // -- Loop-link naming in build_element_level_loops --
 //
 // AC4.1 / AC4.2: build_element_level_loops must produce link names that

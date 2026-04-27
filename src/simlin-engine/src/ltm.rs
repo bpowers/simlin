@@ -1443,7 +1443,6 @@ impl CausalGraph {
                 from: from.clone(),
                 to: to.clone(),
                 polarity,
-                // Shape is populated in Phase 4 at loop construction.
             });
         }
         links
@@ -1461,7 +1460,6 @@ impl CausalGraph {
                 from: from.clone(),
                 to: to.clone(),
                 polarity,
-                // Shape is populated in Phase 4 at loop construction.
             });
         }
         links
@@ -1718,7 +1716,6 @@ impl CausalGraph {
                     from: from.clone(),
                     to: to.clone(),
                     polarity,
-                    // Shape is populated in Phase 4 at loop construction.
                 });
             }
         }
@@ -3297,13 +3294,11 @@ mod tests {
                 from: Ident::new("a"),
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Unknown,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
-                // Shape is populated in Phase 4 at loop construction.
             },
         ];
 
@@ -3331,13 +3326,11 @@ mod tests {
                 from: Ident::new("a"),
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
-                // Shape is populated in Phase 4 at loop construction.
             },
         ];
 
@@ -3354,19 +3347,16 @@ mod tests {
                 from: Ident::new("a"),
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Positive,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("c"),
                 polarity: LinkPolarity::Positive,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("c"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Unknown,
-                // Shape is populated in Phase 4 at loop construction.
             },
         ];
 
@@ -3394,13 +3384,11 @@ mod tests {
                 from: Ident::new("a"),
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Positive,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Positive,
-                // Shape is populated in Phase 4 at loop construction.
             },
         ];
 
@@ -3417,13 +3405,11 @@ mod tests {
                 from: Ident::new("a"),
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Positive,
-                // Shape is populated in Phase 4 at loop construction.
             },
         ];
 
@@ -3440,13 +3426,11 @@ mod tests {
                 from: Ident::new("a"),
                 to: Ident::new("b"),
                 polarity: LinkPolarity::Negative,
-                // Shape is populated in Phase 4 at loop construction.
             },
             Link {
                 from: Ident::new("b"),
                 to: Ident::new("a"),
                 polarity: LinkPolarity::Negative,
-                // Shape is populated in Phase 4 at loop construction.
             },
         ];
 
@@ -3476,13 +3460,11 @@ mod tests {
                         from: Ident::new("a"),
                         to: Ident::new("b"),
                         polarity: LinkPolarity::Unknown,
-                        // Shape is populated in Phase 4 at loop construction.
                     },
                     Link {
                         from: Ident::new("b"),
                         to: Ident::new("a"),
                         polarity: LinkPolarity::Unknown,
-                        // Shape is populated in Phase 4 at loop construction.
                     },
                 ],
                 stocks: vec![],
@@ -3496,13 +3478,11 @@ mod tests {
                         from: Ident::new("x"),
                         to: Ident::new("y"),
                         polarity: LinkPolarity::Positive,
-                        // Shape is populated in Phase 4 at loop construction.
                     },
                     Link {
                         from: Ident::new("y"),
                         to: Ident::new("x"),
                         polarity: LinkPolarity::Positive,
-                        // Shape is populated in Phase 4 at loop construction.
                     },
                 ],
                 stocks: vec![],
