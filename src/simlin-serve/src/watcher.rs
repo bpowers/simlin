@@ -50,7 +50,7 @@ use crate::events::{ChangeSource, WsMessage};
 use crate::handlers::AppState;
 use crate::hashing::content_hash;
 use crate::parse::parse_to_datamodel;
-use crate::path_resolution::{sidecar_for_mdl, to_forward_slash};
+use crate::path_resolution::{resolve_canonical_path, sidecar_for_mdl, to_forward_slash};
 use crate::registry::{GitState, ProjectFormat, ProjectMeta, RegistryError};
 use crate::validation::{compute_baseline, validate_save_project};
 
@@ -692,41 +692,43 @@ impl WatcherActor {
         to: PathBuf,
         format: ProjectFormat,
     ) {
-        // The registry is keyed by absolute paths under `state.root`. The
-        // `from` path may not exist on disk anymore (the rename moved it),
-        // so canonicalize() would fail; for `to` the file should be in
-        // place but a racy filesystem can still surprise us. Fall back to
-        // strip_prefix-then-rejoin so the lookup keys are consistent.
-        let from_key = match from.strip_prefix(state.root.as_ref()) {
-            Ok(rel) => state.root.as_ref().join(rel),
+        // The registry is keyed by canonicalized absolute paths under
+        // `state.root`. The `from` leaf no longer exists on disk; the
+        // `to` leaf should but might race with another writer. Both
+        // sides go through `resolve_canonical_path`, which walks up to
+        // the deepest existing ancestor before canonicalizing. That
+        // closes the macOS quirk where FSEvents reports paths through an
+        // unresolved symlink alias of the root: a plain `strip_prefix`
+        // against the canonicalized `state.root` would miss when the
+        // path was reported with `/var/folders/...` and the registry
+        // was keyed via `/private/var/folders/...`.
+        let from_key = match resolve_canonical_path(&from, state.root.as_ref()) {
+            Ok(k) => k,
             Err(_) => {
                 tracing::debug!(
                     from = %from.display(),
-                    "watcher: rename source outside watcher root; ignoring"
+                    "watcher: rename source outside watcher root or unresolvable; ignoring"
                 );
                 return;
             }
         };
-        let to_key = match to.canonicalize() {
-            Ok(c) => c,
-            Err(_) => match to.strip_prefix(state.root.as_ref()) {
-                Ok(rel) => state.root.as_ref().join(rel),
-                Err(_) => {
-                    tracing::debug!(
-                        to = %to.display(),
-                        "watcher: rename destination outside watcher root; ignoring"
-                    );
-                    return;
-                }
-            },
+        let to_key = match resolve_canonical_path(&to, state.root.as_ref()) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::debug!(
+                    to = %to.display(),
+                    "watcher: rename destination outside watcher root or unresolvable; ignoring"
+                );
+                return;
+            }
         };
 
         match state.registry.rename_entry(&from_key, &to_key, format) {
             Ok(()) => {}
             Err(RegistryError::NotFound) => {
                 tracing::debug!(
-                    from = %from.display(),
-                    to = %to.display(),
+                    from = %from_key.display(),
+                    to = %to_key.display(),
                     "watcher: rename source not in registry; treating as Created at destination"
                 );
                 Self::handle_model_change(state, to, format, ChangeKind::Created).await;
@@ -740,17 +742,17 @@ impl WatcherActor {
                 // file. Both clients receive `ProjectRemoved`, then the
                 // destination is re-hydrated from the freshly renamed file
                 // via `handle_model_change`.
-                let from_display = match from.strip_prefix(state.root.as_ref()) {
+                let from_display = match from_key.strip_prefix(state.root.as_ref()) {
                     Ok(rel) => to_forward_slash(rel),
-                    Err(_) => to_forward_slash(&from),
+                    Err(_) => to_forward_slash(&from_key),
                 };
                 let to_display = match to_key.strip_prefix(state.root.as_ref()) {
                     Ok(rel) => to_forward_slash(rel),
                     Err(_) => to_forward_slash(&to_key),
                 };
                 tracing::debug!(
-                    from = %from.display(),
-                    to = %to.display(),
+                    from = %from_key.display(),
+                    to = %to_key.display(),
                     "watcher: rename destination already tracked; removing both then re-hydrating destination"
                 );
                 state.registry.remove(&from_key);
@@ -766,8 +768,8 @@ impl WatcherActor {
             }
             Err(err) => {
                 tracing::warn!(
-                    from = %from.display(),
-                    to = %to.display(),
+                    from = %from_key.display(),
+                    to = %to_key.display(),
                     error = %err,
                     "watcher: rename re-key failed; preserving last-known-good"
                 );
@@ -775,9 +777,9 @@ impl WatcherActor {
             }
         }
 
-        let from_display = match from.strip_prefix(state.root.as_ref()) {
+        let from_display = match from_key.strip_prefix(state.root.as_ref()) {
             Ok(rel) => to_forward_slash(rel),
-            Err(_) => to_forward_slash(&from),
+            Err(_) => to_forward_slash(&from_key),
         };
         let to_display = match to_key.strip_prefix(state.root.as_ref()) {
             Ok(rel) => to_forward_slash(rel),
@@ -831,14 +833,25 @@ impl WatcherActor {
             return;
         }
 
-        // The registry key is the canonical path; canonicalize() can't
-        // run on a now-deleted file, so we strip the watcher root prefix
-        // and recompose against `state.root` (which is canonicalized at
-        // server startup). For paths outside the root we fall back to
-        // the original `path`; the registry's `remove` is no-op-on-miss.
-        let registry_key = match path.strip_prefix(state.root.as_ref()) {
-            Ok(rel) => state.root.as_ref().join(rel),
-            Err(_) => path.clone(),
+        // Resolve to the registry's canonical key. `canonicalize()` can't
+        // run on the now-deleted leaf, so `resolve_canonical_path`
+        // canonicalizes the deepest existing ancestor (typically the
+        // parent directory) and re-attaches the lexical remainder. That
+        // is also what closes the macOS FSEvents quirk: when the watcher
+        // is rooted at a canonicalized `/private/var/folders/...` but
+        // FSEvents reports the unresolved alias `/var/folders/...`, a
+        // plain `strip_prefix(state.root)` would miss; canonicalizing
+        // the parent resolves the alias and produces the registry key.
+        let registry_key = match resolve_canonical_path(&path, state.root.as_ref()) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    ?format,
+                    "watcher: removal path outside watcher root or unresolvable; skipping"
+                );
+                return;
+            }
         };
 
         // Was the entry actually present? `remove` doesn't tell us, so
@@ -851,16 +864,16 @@ impl WatcherActor {
 
         if !was_present {
             tracing::debug!(
-                path = %path.display(),
+                path = %registry_key.display(),
                 ?format,
                 "watcher: removal for path not in registry; skipping broadcast"
             );
             return;
         }
 
-        let display_path = match path.strip_prefix(state.root.as_ref()) {
+        let display_path = match registry_key.strip_prefix(state.root.as_ref()) {
             Ok(rel) => to_forward_slash(rel),
-            Err(_) => to_forward_slash(&path),
+            Err(_) => to_forward_slash(&registry_key),
         };
 
         tracing::info!(

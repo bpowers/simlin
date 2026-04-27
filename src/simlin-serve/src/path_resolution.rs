@@ -6,7 +6,7 @@
 
 //! Shared path-resolution primitives.
 //!
-//! Three concerns recur across the HTTP handlers, the MCP `RegistryAccess`
+//! Four concerns recur across the HTTP handlers, the MCP `RegistryAccess`
 //! impl, the watcher, and the scanner:
 //!
 //! 1. **Reading an existing path safely** — the leaf must exist; canonicalize
@@ -17,13 +17,25 @@
 //!    missing leaves, so we walk up to the deepest *existing* ancestor and
 //!    canonicalize that. The boundary check applies before any byte hits
 //!    disk so a symlinked parent dir cannot create files outside the root.
-//!    Implemented by [`resolve_create_target`].
-//! 3. **Resolving the registry's canonical key** — for `.mdl` paths, when a
-//!    sibling `.sd.json` exists on disk it becomes the canonical entry for
-//!    both reads and writes. The sidecar's canonical form must itself
-//!    descend from the registry root: a symlink sidecar pointing outside
-//!    the tree falls back to the `.mdl`. Implemented by
-//!    [`apply_sidecar_preference`].
+//!    Implemented by [`resolve_canonical_path`] (also exposed as
+//!    [`resolve_create_target`] for write-side call sites that prefer the
+//!    pre-write naming).
+//! 3. **Observing a path whose leaf just disappeared** — rename source
+//!    paths and removal events arrive at the watcher *after* the leaf
+//!    is gone, so plain `canonicalize()` would fail and plain
+//!    `strip_prefix(root)` would miss when the OS watcher reports the
+//!    path through an unresolved symlink alias of the root (notably on
+//!    macOS, where `/var/folders/...` aliases `/private/var/folders/...`).
+//!    The same algorithm as #2 — canonicalize the deepest existing
+//!    ancestor and re-attach the lexical remainder — produces the
+//!    registry's canonical key for both write-side and observe-side
+//!    consumers, so they share [`resolve_canonical_path`].
+//! 4. **Resolving the registry's canonical key for `.mdl`** — when a
+//!    sibling `.sd.json` exists on disk it becomes the canonical entry
+//!    for both reads and writes. The sidecar's canonical form must
+//!    itself descend from the registry root: a symlink sidecar
+//!    pointing outside the tree falls back to the `.mdl`. Implemented
+//!    by [`apply_sidecar_preference`].
 //!
 //! Centralizing these here removes the class of bug "consumer X forgot to
 //! apply the rule consumer Y enforces": the rules are implemented once and
@@ -240,14 +252,17 @@ pub fn resolve_existing_within_root(
     Ok(canonical)
 }
 
-/// Resolve `abs_path` (which **does not yet exist** at its leaf) to a
-/// canonical absolute path inside `root_canonical`, rejecting symlinked
-/// or `..`-traversal escapes before the file is created.
+/// Resolve `abs_path` to a canonical absolute path inside
+/// `root_canonical`, rejecting symlinked or `..`-traversal escapes.
+/// Works whether or not `abs_path`'s leaf currently exists on disk.
 ///
 /// The algorithm:
 ///
-/// 1. Walk up `abs_path` until we find an existing ancestor (the leaf
-///    cannot exist because we are about to create it).
+/// 1. Walk up `abs_path` until we find an existing ancestor. When the
+///    leaf exists, the first iteration succeeds and we canonicalize
+///    the leaf itself; when it does not (yet-to-be-created files,
+///    rename sources, removed files), we descend through ancestors
+///    until something exists.
 /// 2. Canonicalize that ancestor — this resolves any symlinks in the
 ///    existing prefix.
 /// 3. Confirm the canonical ancestor descends from `root_canonical`.
@@ -258,8 +273,22 @@ pub fn resolve_existing_within_root(
 ///    available for it.
 /// 5. Final boundary check on the composed path.
 ///
+/// Used by both write-side and observe-side consumers:
+///
+/// - Pre-write (HTTP `create_new_project`, MCP create flow,
+///   `save_project` post-write check): see [`resolve_create_target`],
+///   which is a thin alias documenting the create-target intent.
+/// - Post-disappearance (watcher `handle_model_removal`, the source
+///   side of `handle_model_rename`): the leaf has just been unlinked,
+///   so a plain `canonicalize()` on the leaf would error and a plain
+///   `strip_prefix(root)` would miss when the OS watcher reports the
+///   path through an unresolved symlink alias of the root (notably on
+///   macOS, where a `TempDir` root under `/var/folders/...` is the
+///   `/private/var/folders/...` form a `canonicalize()` produced and
+///   FSEvents reports the unresolved `/var/folders/...` form).
+///
 /// Returns the resolved absolute path on success.
-pub fn resolve_create_target(
+pub fn resolve_canonical_path(
     abs_path: &Path,
     root_canonical: &Path,
 ) -> Result<PathBuf, CreatePathError> {
@@ -306,6 +335,20 @@ pub fn resolve_create_target(
         return Err(CreatePathError::OutOfRoot);
     }
     Ok(resolved)
+}
+
+/// Pre-write alias of [`resolve_canonical_path`]. Used by call sites
+/// that want the function name to reflect the "we are about to create
+/// the file at this path" intent. The algorithm is identical to
+/// [`resolve_canonical_path`]; the watcher-side rename / removal
+/// dispatch calls the underlying primitive directly because the
+/// "we are observing a leaf that has just disappeared" intent is the
+/// counterpart to creation and shares the same resolution rules.
+pub fn resolve_create_target(
+    abs_path: &Path,
+    root_canonical: &Path,
+) -> Result<PathBuf, CreatePathError> {
+    resolve_canonical_path(abs_path, root_canonical)
 }
 
 #[cfg(test)]
@@ -577,6 +620,49 @@ mod tests {
             Err(CreatePathError::OutOfRoot) => {}
             other => panic!("expected OutOfRoot, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_disappeared_leaf_via_symlinked_root_alias() {
+        // Models the macOS FSEvents quirk on Linux. The registry root is
+        // canonicalized at server startup, but the watcher's events may
+        // arrive at the actor with paths reported through an unresolved
+        // symlink alias of the root (FSEvents on macOS does not always
+        // resolve `/var/folders/...` to `/private/var/folders/...`). The
+        // shared resolution primitive must produce the canonical key for
+        // both forms so the registry lookup keys hash identically.
+        //
+        // Here `canonical_root` is the analogue of macOS
+        // `/private/var/folders/...`, and `aliased_root` is a symlink
+        // pointing at it (analogous to `/var/folders/...`). A path
+        // composed via the alias with a leaf that does not exist on
+        // disk must still resolve to the canonical key inside the root.
+        let temp = TempDir::new().expect("tempdir");
+        let outer = temp.path().canonicalize().expect("canon outer");
+        let canonical_root = outer.join("real_root");
+        fs::create_dir(&canonical_root).expect("mkdir real root");
+
+        let aliased_root = outer.join("aliased_root");
+        std::os::unix::fs::symlink(&canonical_root, &aliased_root).expect("symlink alias");
+
+        // The leaf does not exist on disk — this is the
+        // post-removal / rename-source state the watcher observes.
+        let leaf_via_alias = aliased_root.join("disappeared.sd.json");
+        assert!(!leaf_via_alias.exists(), "precondition: leaf is absent");
+
+        let resolved = resolve_canonical_path(&leaf_via_alias, &canonical_root)
+            .expect("resolution succeeds via canonicalize-the-existing-prefix");
+
+        assert!(
+            resolved.starts_with(&canonical_root),
+            "resolved key must descend from canonical root; got {resolved:?}"
+        );
+        assert_eq!(
+            resolved,
+            canonical_root.join("disappeared.sd.json"),
+            "resolved key must be the canonical equivalent regardless of which alias the caller passed in"
+        );
     }
 
     #[cfg(unix)]
