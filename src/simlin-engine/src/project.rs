@@ -252,18 +252,21 @@ mod tests {
         let model = x_model("main", vec![x_aux("x", "1", None)]);
         let sim_specs = sim_specs_with_units("years");
         let mut dm = x_project(sim_specs, &[model]);
-        // Add a duplicate unit definition to provoke a unit parse error.
+        // Provoke a real unit-definition error: two units claim the same
+        // alias `gadget`, mapping it to *different* primary names.  Identical
+        // duplicate declarations are intentionally tolerated (Vensim MDL
+        // footers routinely repeat `22:` lines) so we cannot use them here.
         dm.units.push(datamodel::Unit {
             name: "widget".to_string(),
             equation: None,
             disabled: false,
-            aliases: vec![],
+            aliases: vec!["gadget".to_string()],
         });
         dm.units.push(datamodel::Unit {
-            name: "widget".to_string(),
+            name: "doodad".to_string(),
             equation: None,
             disabled: false,
-            aliases: vec![],
+            aliases: vec!["gadget".to_string()],
         });
 
         let db = SimlinDb::default();
@@ -282,13 +285,14 @@ mod tests {
             "diagnostics should contain unit definition errors, got: {:?}",
             diagnostics,
         );
-        // The failing unit name must appear in the diagnostic so
+        // The conflicting unit name must appear in the diagnostic so
         // callers can identify which unit definition is broken.
         assert!(
-            unit_errs
-                .iter()
-                .any(|d| d.variable.as_deref().unwrap_or("").contains("widget")),
-            "Diagnostic variable should include the unit name 'widget', got: {:?}",
+            unit_errs.iter().any(|d| {
+                let v = d.variable.as_deref().unwrap_or("");
+                v.contains("doodad") || v.contains("widget")
+            }),
+            "Diagnostic variable should include a conflicting unit name, got: {:?}",
             unit_errs,
         );
     }

@@ -132,40 +132,61 @@ impl Context {
     ) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
         let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
 
+        // Vensim's MDL files routinely repeat the same `22:` unit-equivalence
+        // line in the settings footer (e.g. wrld3-03.mdl declares each
+        // equivalence twice).  Re-declaring an identical mapping is harmless,
+        // so we only flag a duplicate as an error when the new declaration
+        // contradicts an existing one.  A helper to keep the logic uniform
+        // across the alias and primary-name checks below.
+        let dup_err = |name: &str| {
+            (
+                name.to_owned(),
+                vec![EquationError {
+                    start: 0,
+                    end: 0,
+                    code: ErrorCode::DuplicateUnit,
+                }],
+            )
+        };
+
         // step 1: build our base context consisting of all prime units
-        let mut aliases = HashMap::new();
-        let mut parsed_units = HashMap::new();
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        let mut parsed_units: HashMap<String, UnitMap> = HashMap::new();
         for unit in units.iter().filter(|unit| unit.equation.is_none()) {
             let unit_name = canonicalize(&unit.name).into_owned();
             for alias in unit.aliases.iter() {
                 let alias = canonicalize(alias).into_owned();
-                if let Entry::Vacant(e) = aliases.entry(alias) {
-                    e.insert(unit_name.clone());
-                } else {
-                    unit_errors.push((
-                        unit_name.clone(),
-                        vec![EquationError {
-                            start: 0,
-                            end: 0,
-                            code: ErrorCode::DuplicateUnit,
-                        }],
-                    ));
+                match aliases.entry(alias) {
+                    Entry::Vacant(e) => {
+                        e.insert(unit_name.clone());
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &unit_name {
+                            unit_errors.push(dup_err(&unit_name));
+                        }
+                    }
                 }
             }
-            if aliases.contains_key(&unit_name) || parsed_units.contains_key(&unit_name) {
-                unit_errors.push((
-                    unit_name.clone(),
-                    vec![EquationError {
-                        start: 0,
-                        end: 0,
-                        code: ErrorCode::DuplicateUnit,
-                    }],
-                ));
+            // A primary name that is already an alias of *another* unit is a
+            // genuine conflict; a primary name that's already itself a prime
+            // unit is a benign re-declaration as long as the inferred unit
+            // map matches.
+            if let Some(target) = aliases.get(&unit_name) {
+                if target != &unit_name {
+                    unit_errors.push(dup_err(&unit_name));
+                }
             } else {
-                parsed_units.insert(
-                    unit_name.clone(),
-                    [(unit_name.clone(), 1)].iter().cloned().collect(),
-                );
+                let new_map: UnitMap = [(unit_name.clone(), 1)].iter().cloned().collect();
+                match parsed_units.entry(unit_name.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(new_map);
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &new_map {
+                            unit_errors.push(dup_err(&unit_name));
+                        }
+                    }
+                }
             }
         }
 
@@ -180,17 +201,15 @@ impl Context {
             let unit_name = canonicalize(&unit.name).into_owned();
             for alias in unit.aliases.iter() {
                 let alias = canonicalize(alias).into_owned();
-                if let Entry::Vacant(e) = ctx.aliases.entry(alias) {
-                    e.insert(unit_name.clone());
-                } else {
-                    unit_errors.push((
-                        unit_name.clone(),
-                        vec![EquationError {
-                            start: 0,
-                            end: 0,
-                            code: ErrorCode::DuplicateUnit,
-                        }],
-                    ));
+                match ctx.aliases.entry(alias) {
+                    Entry::Vacant(e) => {
+                        e.insert(unit_name.clone());
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &unit_name {
+                            unit_errors.push(dup_err(&unit_name));
+                        }
+                    }
                 }
             }
 
@@ -222,17 +241,21 @@ impl Context {
                 None => [(unit_name.clone(), 1)].iter().cloned().collect(),
             };
 
-            if ctx.aliases.contains_key(&unit_name) || ctx.units.contains_key(&unit_name) {
-                unit_errors.push((
-                    unit_name.clone(),
-                    vec![EquationError {
-                        start: 0,
-                        end: 0,
-                        code: ErrorCode::DuplicateUnit,
-                    }],
-                ));
+            if let Some(target) = ctx.aliases.get(&unit_name) {
+                if target != &unit_name {
+                    unit_errors.push(dup_err(&unit_name));
+                }
             } else {
-                ctx.units.insert(unit_name.clone(), unit_components);
+                match ctx.units.entry(unit_name.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(unit_components);
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &unit_components {
+                            unit_errors.push(dup_err(&unit_name));
+                        }
+                    }
+                }
             }
         }
 
@@ -879,6 +902,69 @@ fn test_builtin_unit_equivalences() {
     let expr = Expr0::new("Units", LexerType::Units).unwrap().unwrap();
     let result = build_unit_components(&context, &expr).unwrap();
     assert_eq!(result, expected, "Units should resolve to unit");
+}
+
+#[test]
+fn test_redundant_duplicate_unit_declarations_are_benign() {
+    // Vensim MDL files routinely repeat the same `22:` unit-equivalence
+    // line.  Identical re-declarations should not poison the units context;
+    // only contradictory mappings should produce a DuplicateUnit error.
+    let units = vec![
+        Unit {
+            name: "Resource unit".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["Resource units".to_string()],
+        },
+        // Verbatim duplicate -- harmless.
+        Unit {
+            name: "Resource unit".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["Resource units".to_string()],
+        },
+    ];
+    let context = Context::new_with_builtins(&units, &Default::default())
+        .expect("duplicate identical unit declarations must be tolerated; got an error");
+
+    // Both spellings must still resolve through the alias to the same canonical unit.
+    let expr = Expr0::new("Resource_unit", LexerType::Units)
+        .unwrap()
+        .unwrap();
+    let r1 = build_unit_components(&context, &expr).unwrap();
+    let expr = Expr0::new("Resource_units", LexerType::Units)
+        .unwrap()
+        .unwrap();
+    let r2 = build_unit_components(&context, &expr).unwrap();
+    assert_eq!(
+        r1, r2,
+        "alias resolution must survive duplicate declarations"
+    );
+}
+
+#[test]
+fn test_conflicting_unit_declarations_are_still_errors() {
+    // If two declarations disagree about what an alias points to, that is a
+    // real conflict and must still produce a DuplicateUnit error.
+    let units = vec![
+        Unit {
+            name: "Foo".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["FB".to_string()],
+        },
+        Unit {
+            name: "Bar".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["FB".to_string()], // same alias mapped to a different primary
+        },
+    ];
+    let result = Context::new(&units, &Default::default());
+    assert!(
+        result.is_err(),
+        "conflicting alias declarations must still produce an error"
+    );
 }
 
 #[test]
