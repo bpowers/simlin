@@ -241,8 +241,9 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs `generate_nonlinear_partial`)
 - **Severity**: medium
 - **Description**: For STDDEV and RANK the "nonlinear" reducer path returns the target variable itself, yielding a delta-ratio `(target - PREV(target)) / (source[d] - PREV(source[d]))` instead of a ceteris-paribus partial. Under uniform scaling of all elements, STDDEV does not change, but the delta-ratio still reports nonzero per-element attributions. Fix: unroll STDDEV element-by-element with the standard formula `sqrt(((s[d] - mean_p)^2 + sum_{i!=d}(PREV(s[i]) - mean_p)^2) / N)` where `mean_p = (s[d] + sum_{i!=d}PREV(s[i]))/N`. Similar unroll applies to RANK.
+- **Note (2026-04-29):** MIN and MAX (the scalar two-arg forms) are now handled correctly via explicit nested binary calls with selective `PREVIOUS()` wrapping (`ltm_augment.rs:1348-1372`). STDDEV and RANK still fall through to the delta-ratio path at `ltm_augment.rs:1374-1381`, with a code comment documenting the limitation.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 28. LTM Discovery Truncates Before Partition-Scoped Filtering
 
@@ -279,10 +280,10 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 32. LTM Unused `_is_affecting_stock` Flag
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs:374)
-- **Severity**: low
-- **Description**: `generate_stock_to_flow_equation` computes `_is_affecting_stock` and discards it. Either use it (e.g., zero out scores for non-connected stock->flow pairs) or delete. Trivial cleanup.
+- **Severity**: RESOLVED (2026-04-29)
+- **Description**: (**Resolved** in commit f408528b "engine: drop unused `_is_affecting_stock` flag in stock-to-flow link score".) `generate_stock_to_flow_equation` no longer computes the unused flag; structural routing now happens in `generate_link_score_equation` (`ltm_augment.rs:607-637`) before the three per-shape helpers (`generate_flow_to_stock_equation`, `generate_stock_to_flow_equation`, `generate_auxiliary_to_auxiliary_equation`) are invoked. Keeping the entry as a historical pointer to the commit that removed it.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 33. VDF 0x53 Result-Family Tail Is Undecoded
 
@@ -308,8 +309,9 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Why this matters**: The `compute_rel_loop_scores*` family normalises against partition denominators. With every A2A loop in the same fictitious "no parent" bucket, partition normalisation is wrong for any model that has multiple independent A2A loops (their rel-scores get cross-normalised against unrelated partitions). It also prevents mixed (A2A + scalar) partitions from arising in practice -- the codex review on PR #472 pointed at a real algorithmic bug in the layout aggregation that, today, can only be triggered through hand-crafted helper inputs because the engine never produces mixed-stride partitions due to this quirk.
 - **Suspected fix**: Either (a) make `Loop::stocks` for A2A loops carry element-level names (one per element of the A2A dim, all of which should be in the same SCC by construction), or (b) extend `partition_for_loop` to expand a variable-level stock name to its element-level instances and look those up. (a) is more local but changes the `Loop` struct's semantic; (b) keeps the type unchanged. Either fix needs care that downstream consumers of `Loop::stocks` (e.g., `enumerate_module_pathways`) still get the names they expect.
 - **Discovery context**: Found while writing an integration regression test for the codex P1 fix on PR #472. The test fixture deliberately built a model with both A2A and scalar feedback, expecting them to share a partition, and observed the A2A loop systematically getting `partition = None`. Documented in `test_compute_metadata_importance_series_length_matches_step_count` in `tests/layout.rs` so a future engine fix automatically begins exercising the mixed-stride path.
+- **Note (2026-04-29):** The behaviour described above is now formalised in `ltm.rs:114-118` as a deliberate design invariant (A2A loops carry variable-level stock names; `partition_for_loop` legitimately returns `None` for them) and `tests/layout.rs:779-798` documents the same. This bumps the item from "silent bug" to "documented design choice with normalisation gap"; the underlying normalisation issue still needs resolution.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-25
+- **Last reviewed**: 2026-04-29
 
 ### 36. darwin-x64 Not Included in @simlin/mcp and @simlin/serve npm Distributions
 
