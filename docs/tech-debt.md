@@ -192,16 +192,18 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `analyze_expr_polarity_with_context`)
 - **Severity**: medium
 - **Description**: Only the scalar two-arg forms of `Max(a, Some(b))` / `Min(a, Some(b))` are handled; the array reducer forms (`Sum`, `Mean`, `Max(_, None)`, `Min(_, None)`, `Stddev`, `Rank`) fall through to `App(_, _, _) => Unknown`. Any variable computed via `SUM(x[*])` or `MEAN(x[*])` therefore contributes `Unknown` polarity, and every loop through it is classified `Undetermined`. For `Sum` and `Mean` polarity is trivially the argument's polarity (monotone in every element). Graphical-function monotonicity also uses a strict EPSILON=1e-10 check that flags numeric import noise as `Unknown`. Fix: add reducer cases (pass through for SUM/MEAN, Unknown for STDDEV/RANK) and consider a plateau-tolerant GF monotonicity check.
+- **Tracked in**: #480 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 22. LTM Dedup Keys Fold Distinct Directed Cycles with Matching Node Sets
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `IndexedGraph::dedup_circuits`, `CausalGraph::deduplicate_loops`)
 - **Severity**: medium
 - **Description**: Dedup hashes the sorted node-index vector. In a multidigraph a cycle A->B->C->A and the distinct cycle A->C->B->A share a node set and are silently merged into a single `Loop`. `test_layout_arms_race` exercises this today. For scalar SD models with asymmetric dependency structure the merge happens to be benign, but the semantics are wrong: the two cycles have distinct edge sequences and potentially distinct polarity products. Fix: key dedup by a canonical edge-sequence rotation (rotate so the lex-smallest node starts the cycle, then compare the ordered edge list) instead of the sorted node set.
+- **Tracked in**: #308 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 23. LTM Circuit Enumeration Is Tiernan-Style, Not Johnson's
 
@@ -216,8 +218,9 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs `SearchGraph::check_outbound_uses`)
 - **Severity**: medium
 - **Description**: The per-timestep strongest-path DFS keys `best_score` and `visiting` on `Ident<Canonical>` (String-backed), cloning identifiers into hash maps on every recursive call. For a 1000-variable model with 500 saved timesteps this is ~5x10^7 map operations per run; element-level expansion makes it far worse. Apply the same NodeId indexing pattern that `IndexedGraph` uses in the exhaustive path: per-timestep `Vec<u32>`-indexed `SearchGraph`, dense `Vec<f64>` for `best_score`, `Vec<bool>` for `visiting`. Expected 5-10x speedup on large discovery runs.
+- **Tracked in**: #481 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 25. LTM Element-Level Loop Enumeration Runs at Wrong Granularity
 
@@ -225,8 +228,9 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Severity**: medium
 - **Description**: `model_element_loop_circuits` enumerates circuits on the element graph. For a pure-A2A model with 20 variables over a 100-element dimension, every variable-level circuit produces 100 element-level circuits that `build_element_level_loops` then collapses into one A2A loop. The circuit count is no longer artificially capped (the old `MAX_LTM_CIRCUITS = 100_000` gate was retired on 2026-04-18 once auto-flip made it vestigial), but the `MAX_LTM_SCC_NODES = 50` gate in `model_ltm_variables` still flips dense feedback subgraphs to discovery mode far sooner than variable-level enumeration would. Fix: enumerate at the variable level first, tag each loop's edges by same-element / cross-element / scalar, and only element-level-enumerate the cross-element subgraph. Cost becomes additive in N for pure-A2A loops instead of multiplicative, and SCC width stays below the auto-flip threshold.
 - **Note (2026-04-25):** The per-reference element graph refactor (`docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md`) eliminated the spurious NxN edge density that previously inflated element-graph SCCs on `FixedIndex`-using models. The Phase 5 measurement postscript records before/after numbers on cross_element_ltm, arrayed_population_ltm, hero_culture_ltm, and WRLD3-03: edge counts and circuit counts dropped on cross_element_ltm (20 -> 18 edges, 12 -> 8 circuits) without changing the largest element-SCC, and the other three fixtures were unchanged because they do not exercise the FixedIndex path. `MAX_LTM_SCC_NODES = 50` was retained because WRLD3 still trips the gate from variable-level cycle structure (population, capital, agriculture, persistent-pollution, non-renewable resources) rather than element-graph artifacts. The "enumerate at the variable level first, then expand only the cross-element subgraph" approach remains the right structural fix for pure-A2A models, but its pressure is materially lower now that FixedIndex no longer inflates SCC width.
+- **Tracked in**: #482 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-25
+- **Last reviewed**: 2026-04-29
 
 ### 26. LTM A2A Partial Equation Is Wrong When Target Mixes Same-Element and Cross-Element References
 
@@ -242,6 +246,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Severity**: medium
 - **Description**: For STDDEV and RANK the "nonlinear" reducer path returns the target variable itself, yielding a delta-ratio `(target - PREV(target)) / (source[d] - PREV(source[d]))` instead of a ceteris-paribus partial. Under uniform scaling of all elements, STDDEV does not change, but the delta-ratio still reports nonzero per-element attributions. Fix: unroll STDDEV element-by-element with the standard formula `sqrt(((s[d] - mean_p)^2 + sum_{i!=d}(PREV(s[i]) - mean_p)^2) / N)` where `mean_p = (s[d] + sum_{i!=d}PREV(s[i]))/N`. Similar unroll applies to RANK.
 - **Note (2026-04-29):** MIN and MAX (the scalar two-arg forms) are now handled correctly via explicit nested binary calls with selective `PREVIOUS()` wrapping (`ltm_augment.rs:1348-1372`). STDDEV and RANK still fall through to the delta-ratio path at `ltm_augment.rs:1374-1381`, with a code comment documenting the limitation.
+- **Tracked in**: #483 (LTM tracking epic: #488)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-29
 
@@ -250,32 +255,36 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_finding.rs `rank_and_filter`)
 - **Severity**: low
 - **Description**: `rank_and_filter` sorts loops by average absolute score, truncates to MAX_LOOPS=200, and then applies MIN_CONTRIBUTION filtering per-partition. A loop that is dominant in a small partition but globally ranked below 200 is lost before the partition scope sees it. In practice MAX_LOOPS is generous enough that the case is rare; the comment already acknowledges the concern. Fix: filter first, truncate second.
+- **Tracked in**: #310 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 29. LTM LOOPSCORE / PATHSCORE Builtins Not Implemented
 
 - **Component**: simlin-engine (LTM augmentation layer)
 - **Severity**: low
 - **Description**: The reference treats `LOOPSCORE(path...)` and `PATHSCORE(path...)` as primitives users invoke to track loops the heuristic discovery may have missed. Simlin does not implement them. Given discovery is heuristic, users currently have no way to pin a specific loop and compare it across runs or parameter sweeps. Fix: generate one synthetic variable per user-named loop that computes the product of its constituent link scores; coexists cleanly with discovery.
+- **Tracked in**: #484 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 30. LTM Polarity Confidence Metric Missing
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `LoopPolarity::from_runtime_scores`)
 - **Severity**: low
 - **Description**: The paper's polarity-confidence metric `|r - |b|| / (r + |b|)` classifies loops as Rux/Bux when mostly one polarity. Simlin collapses any sign change to Undetermined, losing information on mostly-reinforcing loops that briefly dip balancing (or vice versa). Fix: retain the ratio alongside the categorical polarity and surface it in `DetectedLoopsResult`.
+- **Tracked in**: #485 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 31. RK4 + LTM Combination Has No Hard-Error Guard
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs flow-to-stock path)
 - **Severity**: medium
 - **Description**: The 2023 flow-to-stock link-score formula assumes Euler integration: `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` aligns the numerator to the causal interval that drove the stock change from t-1 to t. Under RK2/RK4 this alignment breaks and link scores become mathematically nonsensical. Nothing currently prevents a user from setting `integration_method = RK4` and `ltm_enabled = true`; they'd get numbers that look plausible but are wrong. Fix: emit a compile-time diagnostic (preferably an Error) when LTM is enabled on a model whose sim specs select a non-Euler integrator.
+- **Tracked in**: #486 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-17
+- **Last reviewed**: 2026-04-29
 
 ### 32. LTM Unused `_is_affecting_stock` Flag
 
@@ -310,6 +319,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Suspected fix**: Either (a) make `Loop::stocks` for A2A loops carry element-level names (one per element of the A2A dim, all of which should be in the same SCC by construction), or (b) extend `partition_for_loop` to expand a variable-level stock name to its element-level instances and look those up. (a) is more local but changes the `Loop` struct's semantic; (b) keeps the type unchanged. Either fix needs care that downstream consumers of `Loop::stocks` (e.g., `enumerate_module_pathways`) still get the names they expect.
 - **Discovery context**: Found while writing an integration regression test for the codex P1 fix on PR #472. The test fixture deliberately built a model with both A2A and scalar feedback, expecting them to share a partition, and observed the A2A loop systematically getting `partition = None`. Documented in `test_compute_metadata_importance_series_length_matches_step_count` in `tests/layout.rs` so a future engine fix automatically begins exercising the mixed-stride path.
 - **Note (2026-04-29):** The behaviour described above is now formalised in `ltm.rs:114-118` as a deliberate design invariant (A2A loops carry variable-level stock names; `partition_for_loop` legitimately returns `None` for them) and `tests/layout.rs:779-798` documents the same. This bumps the item from "silent bug" to "documented design choice with normalisation gap"; the underlying normalisation issue still needs resolution.
+- **Tracked in**: #487 (LTM tracking epic: #488)
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-29
 
