@@ -92,7 +92,11 @@ facts are called out where the Rust parser has not caught up yet.
   predecessor-shape-code shift (see section 3 below). `field[6] == 0`
   remains ambiguous and is excluded from fact-only record-span reports.
 - Section 3 is a reusable array-shape directory: flat size, axis sizes, and
-  axis slot refs are decoded for the observed array fixtures.
+  axis refs are decoded for the observed array fixtures. The axis refs are
+  not slot-table refs; each is a section-1 word pointer to `field[9]` of the
+  corresponding dimension-anchor record:
+  `sec1.data_offset + 4 * axis_ref == anchor_record.file_offset + 36`
+  (currently xray-only).
 - Section 5 ref-set entries begin immediately at `sec5.data_offset()`;
   section-5 header `field1` points to the section's final word
   (`sec5.region_end - 4`) on both populated and degenerate result fixtures
@@ -119,11 +123,12 @@ facts are called out where the Rust parser has not caught up yet.
   proceed in 64-byte strides until just before the slot table. Several files
   leave a short non-record trailer before `slot_table_offset`; xray pins this
   as residual bytes, not as another complete record.
-- Many dimension element catalogs are recoverable from record `field[8]`
-  groups: a dimension anchor and zero-based element records share a compact
-  group id. `tools/vdf_xray.py` also surfaces incomplete anchors, such as
-  subranges with no element catalog and `scenario` in `Ref.vdf` with only its
-  saved element. This is currently xray-only.
+- Many dimension element catalogs are recoverable from section-1 records.
+  The common layout uses record `field[8]` groups: a dimension anchor and
+  zero-based element records share a compact group id. `Ref.vdf`'s
+  `scenario` root also uses a compact late-record element layout where
+  `field[12]` is the group id, `field[15]` is the zero-based element index,
+  and `field[6]` is the direct name key. This is currently xray-only.
 - Attached dimension-anchor records can bind a recovered element catalog to a
   reusable section-3 shape template. When that binding is unique, sibling
   owners using the same template inherit the same element labels.
@@ -143,9 +148,8 @@ Current reconstruction, not format fact:
   selection used by xray. These are diagnostics/reconstruction aids and can
   still pick the wrong side of an owner/descriptor conflict in `not-proven`
   files.
-- Labeling axes when two or more recovered dimensions have the same
-  cardinality and no decoded shape-template or axis binding distinguishes
-  them.
+- Labeling axes in files that lack the decoded section-3 axis-ref to
+  dimension-anchor binding.
 - Labeling array elements from unique cardinality alone.
 - Pairing lookup-like names to section-6 lookup records by matching order.
 - Non-overlap interval selection, file-order/shift-by-one owner mapping, and
@@ -186,14 +190,10 @@ exact-by-xray. Conversely, WRLD3 has the same descriptor-overlap pattern in a
 2005 `SCEN01.VDF` and a 2026 `experiment.vdf`. The header timestamp is useful
 provenance, but no reliable Vensim version field has been identified.
 
-Note: the audit recorded in `/tmp/vdf_audit_phase1.md` flagged two
-reconstruction paths that `extract_named_results` currently takes silently
-(lookup-name-to-lookup-record pairing by order, and the system-variable
-alphabetical placement fallback). A planned follow-up will add
-`used-lookup-name-order-pairing` and `used-system-variable-fallback` to the
-blocker list so `exact-by-xray` more tightly matches the set of files that
-are genuinely decoded rather than reconstructed. When that lands, the
-corpus counts above will shift.
+Note: `precision_report` flags two reconstruction paths when extraction uses
+them (`used-lookup-name-order-pairing` and
+`used-system-variable-fallback`) so `exact-by-xray` does not hide those
+fallbacks. No tracked fixture currently trips either flag.
 
 Current blocker meanings:
 
@@ -208,12 +208,14 @@ Current blocker meanings:
   quoted names and internal runtime signatures.
 - `numeric-array-labels`: one or more emitted array elements fell back to
   `[0]`, `[1]`, etc.; the values may be decoded, but element names are not
-  proven.
+  proven. This is currently zero across the tracked result corpus after the
+  section-3 axis-ref binding was decoded.
 - `duplicate-result-names` / `duplicate-result-ots`: two emitted results
   share a visible name or OT slot. This is currently zero across the result
   fixture corpus.
 - `incomplete-dimension-anchors`: record `field[8]` exposes a dimension
   anchor whose complete element catalog is not present or not yet decoded.
+  This is currently zero across the tracked result corpus.
 - `data-block-tail-mismatch`: decoded sparse blocks disagree with the
   section-6 final-value array. This is currently zero across the result
   fixture corpus.
@@ -695,7 +697,7 @@ In `Ref.vdf`, the first few records begin:
 | 1..3    | Packed shape words. One-dimensional entries duplicate the flattened size (`3, 3` -> one axis of size 3). Composite entries use `flattened_size + axis factors` (`21, 7, 3` -> two axes of sizes 7 and 3). In validated fixtures, `flattened_size = product(axis_sizes)`. |
 | 10      | Packing hint. It is `1` for one-dimensional entries; for composite entries it equals the trailing axis size (`3` in `[21, 7, 3]`, `4` in `[12, 3, 4]`). |
 | 11      | Small axis counter word. `0` on one-dimensional entries, `1` on the validated two-axis entries. |
-| 18..19  | One section-1 slot ref per encoded axis in the validated fixtures. They resolve through the slot table (for example `172 -> "net flow"` in `subscripts`, `2412 -> "FF stop growth year"` in `Ref.vdf`). The refs are useful as axis/dimension anchors, but not yet as direct base-variable owners. |
+| 18..19  | One section-1 word ref per encoded axis in the validated fixtures. The word ref points to `field[9]` of the dimension-anchor record: `sec1.data_offset + 4 * axis_ref == anchor_record.file_offset + 36`. Examples: `subscripts.vdf` has `172 -> sub1`; `Ref.vdf` has `540 -> scenario`, `636 -> COP`, `7036 -> Target`. These are not slot-table refs and direct slot-table name resolution is misleading. |
 | 26      | Encoded axis count. Validated values are `1` (one-dimensional entry) and `2` (two-axis composite entry). It matches both the number of axis-size factors and the number of slot refs. |
 
 The `field4=32` in the section header matches the record `arrayed_flag`
@@ -712,20 +714,21 @@ entries normalize cleanly into:
 
 - `flat_size`: total OT span for one array instance
 - `axis_sizes`: one size per encoded axis
-- `axis_slot_refs`: one section-1 anchor per axis
+- `axis_refs`: one section-1 word pointer to a dimension anchor per axis
 
 Examples from `Ref.vdf`:
 
-- `[3, 3]` + one slot ref => one axis of size 3
-- `[12, 3, 4]` + two slot refs => two axes of sizes 3 and 4
-- `[63, 7, 9]` + two slot refs => two axes of sizes 7 and 9
+- `[3, 3]` + axis ref `540` => one `scenario` axis of size 3
+- `[12, 3, 4]` + axis refs `540,3436` => `scenario,layers`
+- `[21, 7, 3]` + axis refs `636,7036` => `COP,Target`
+- `[63, 7, 9]` + axis refs `636,1852` => `COP,HFC type`
 
 The resulting flat sizes (`3, 4, 6, 7, 9, 12, 21, 42, 63`) all reappear as
 record-derived OT range lengths in the validated array fixtures, which ties
 section 3 directly to the contiguous OT block structure used for array data.
-What section 3 still does **not** give by itself is the owner binding:
-multiple OT blocks can share the same flat size, and repeated sizes like 3 and
-21 remain ambiguous without another signal.
+Section 3 now gives array axis identity as well as shape. It still does **not**
+give the base-variable owner binding: multiple OT blocks can share the same
+template, and owner/descriptor conflicts are resolved elsewhere.
 
 
 ## Section 4: view/sketch metadata (not a shape-owner directory)
@@ -819,10 +822,11 @@ a 1-based word pointer from the section magic to the section's final word
 scalar files with no section-5 data words, the same formula lands on the
 header's `field5` word, immediately before the next section header.
 
-The trailing refs often match section-3 `axis_slot_ref` values. In `Ref.vdf`,
-6 of 7 unique section-3 axis refs are shared with section-5 trailing refs,
-which is evidence for a section-5/section-3 bridge, but the missing 1-of-7 and
-the ambiguous payload refs mean this bridge is not fully decoded.
+The trailing refs often match raw section-3 axis-ref values. In `Ref.vdf`, 6
+of 7 unique section-3 axis refs are shared with section-5 trailing refs. This
+was useful evidence for a section-5/section-3 bridge, but axis identity is now
+decoded more directly through the section-3 axis-ref-to-dimension-anchor
+pointer formula.
 
 The non-trailing refs do **not** directly name every element: in the
 `subscripts` fixture they resolve to `TIME STEP`, `sub1`, `.Control`, and `0`.
@@ -913,13 +917,15 @@ Pinned examples:
 | `Ref.vdf` | 65 | `layers` | `0:layer1`, `1:layer2`, `2:layer3`, `3:layer4` |
 | `Ref.vdf` | 85 | `Semi Agg` | `0:US` ... `5:Other Developing` |
 | `Ref.vdf` | 100 | `Target` | `0:t1`, `1:t2`, `2:t3` |
+| `Ref.vdf` | 79 | `scenario` | `0:Deterministic`, `1:Low 2xCO2 sensitivity`, `2:High 2xCO2 sensitivity` |
 
 The current `tools/vdf_xray.py` extractor uses this path to recover dimension
-element lists only from complete catalogs. It also reports incomplete anchors
-through `--record-facts` without promoting them to labels. Examples from
-`Ref.vdf` include `COP Developed`, `lower`, `upper`, and other subrange
-anchors with no element records; `scenario` has only element `0:Deterministic`
-even though other scenario names exist in the name table.
+element lists from complete catalogs. `scenario` is a mixed catalog: element
+0 uses the ordinary field[8]/field[11] shape, while elements 1 and 2 use the
+compact late-record layout (`field[12]` group id, `field[15]` element index,
+`field[6]` name key). Xray also reports incomplete anchors through
+`--record-facts`; examples from `Ref.vdf` include `COP Developed`, `lower`,
+`upper`, and other subrange anchors with no direct element records.
 
 The extractor labels one-dimensional blocks when the block length matches
 exactly one recovered complete dimension, or when an attached dimension-anchor
@@ -928,12 +934,12 @@ shape template. The latter is what distinguishes `sub2=[i,j]` from
 `sub3=[x,y]` in `run_8.vdf`: the stock owner carries the anchor, and the
 same-template `flow` owner inherits `flow[i]` / `flow[j]`.
 
-For multi-axis shapes, xray uses section-3 axis sizes and record-field[8]
-element lists only when each axis cardinality is unique in the recovered
-dimension set. Same-size dimensions still stay numeric when no owner in that
-shape template carries a unique attached anchor. Recovered dimension anchors
-and element names are also excluded from the visible series-owner candidate
-set; they describe array structure, not independent time-series owners.
+For multi-axis shapes, xray uses section-3 axis refs to bind each axis to a
+dimension anchor and then labels elements from the recovered catalog. This
+disambiguates same-cardinality axes in `Ref.vdf`, such as `scenario` vs
+`Target` vs `Aggregated Regions`. Recovered dimension anchors and element
+names are excluded from the visible series-owner candidate set; they describe
+array structure, not independent time-series owners.
 
 
 ## Section 6: OT metadata
@@ -1264,8 +1270,7 @@ offset table (OT) entries. The record-to-name bridge is now decoded for the
 observed simulation-result corpus: record field[2] is a section-2 string-pool
 word offset plus seven, pointing at the first printable byte of the name. The
 remaining hard parts are deciding which owner-like records should emit saved
-series when descriptors overlap, and binding same-cardinality array axes to
-their element-name catalogs.
+series when descriptors overlap.
 
 ### What is structurally determined
 
@@ -1334,8 +1339,9 @@ their element-name catalogs.
    `run_8.vdf` without consulting the MDL.
 
 10. **Section-3 extension in array models** provides dimension cardinality
-   through each directory entry's shape words (for example `[3, 3]` for one
-   3-element axis, `[21, 7, 3]` for a 7-by-3 shape).
+   and axis identity through each directory entry's shape words and axis refs
+   (for example `[3, 3]` plus `540 -> scenario`, or `[21, 7, 3]` plus
+   `636,7036 -> COP,Target`).
 
 11. **Record sort_key (field 10) as alphabetical ordering signal**. Within a
    decoded view block, sorting records by f[10] often produces case-insensitive
@@ -1702,22 +1708,17 @@ Remaining gaps:
    `assimilation half life mult table` lookup-name bug that also
    affects experiment.vdf.
 
-3. **Ambiguous same-cardinality axis labels.** Section-3
-   shape templates plus record field[8] dimension groups can label axes when
-   cardinalities are unique, or when an attached dimension anchor uniquely
-   binds a same-cardinality catalog to the reusable shape template. Same-size
-   dimensions still need another binding when no owner using that shape carries
-   such an anchor (`Ref.vdf` has multiple cardinality-3 dimensions). Base-name
-   ownership for the previously broken `Ref.vdf` examples is now handled by
-   field[2] name keys, Ref-style predecessor shape codes, and non-overlapping
-   owner-span selection; the remaining gap is choosing the right axis labels
-   when dimensions share cardinality and no template-local anchor is present.
+3. **Axis labels.** Resolved in xray for the tracked corpus. Section-3 axis
+   refs point to dimension-anchor records, so repeated cardinality-3 axes in
+   `Ref.vdf` are now distinguishable (`scenario`, `Aggregated Regions`,
+   `Target`, `lower`, `upper`, etc.) without the MDL.
 
-4. **Lookup-record payload structure.** Section-6 lookup records
-   identify lookup definitions and their OT indices, but the internal
-   payload is not fully decoded. When parsed lookup-record OT indices overlap
-   already-owned variable slots, extraction emits the already-owned series and
-   does not add a duplicate lookup-definition column.
+4. **Lookup-record ownership.** Section-6 lookup records identify lookup
+   definitions and their evaluated-output OT indices, and their 13-word
+   payload is structurally accounted for. The remaining gap is not lookup
+   payload parsing; it is choosing which overlapping section-1 record span is
+   the emitted owner when descriptor records carry lookup-index-shaped
+   `field[11]` values that are also valid OT starts.
 
 5. **C-LEARN (`Ref.vdf`) view-grouping.** `Ref.vdf` has 69 dot-prefix
    names but only 17 `field[1] == 138` records. The view-header-per-
@@ -1954,8 +1955,9 @@ the overlap is real, not decodable.
 These investigations target: for an arrayed variable with 2-D shape like
 `[COP, Target]`, Vensim's VDF shows element names (`OECD US, t1`, `OECD EU,
 t1`, ...) even without the MDL. The element names must be in the file.
-None of the following signals, however, encodes a deterministic
-`axis_slot_ref -> dim_name -> element_list` binding.
+The final decoded binding is now: section-3 axis refs are section-1 word
+pointers to `field[9]` of dimension-anchor records, and those anchors bind to
+element catalogs through record groups plus section-5 subrange payloads.
 
 - **Candidate A: sec4 as `(axis_slot_ref, dim_name_slot_ref)` binding**:
   refuted (see above).
@@ -1992,35 +1994,26 @@ None of the following signals, however, encodes a deterministic
   array-heavy), containing only the simulation command string and zero
   padding. No trailing array-dim directory.
 
-- **sec3 axis_slot_refs as direct pointers to dim names**: refuted. In
-  `Ref.vdf`, the size-7 axis slot `636` resolves under direct slot_table
-  mapping to the scalar `watt per J s`. The size-9 slot `1852` resolves
-  to `Sea Level Rise` (a 3-element scenario-dim variable, not a 9-dim
-  variable). No axis slot's direct-mapped name corresponds to the dim
-  itself or to any variable of matching cardinality.
+- **sec3 axis refs as direct slot-table pointers to dim names**:
+  superseded. Direct slot-table mapping was correctly refuted: in
+  `Ref.vdf`, axis ref `636` resolves that way to `watt per J s`, not
+  `COP`. The missing step is that these are not slot-table refs at all.
+  They are section-1 word refs to `field[9]` of dimension-anchor records:
+  `540 -> scenario`, `636 -> COP`, `1852 -> HFC type`,
+  `2412 -> Aggregated Regions`, `3436 -> layers`, `4508 -> Semi Agg`,
+  and `7036 -> Target` on `Ref.vdf`.
 
 - **sec3 axis-anchor record's f[2] as the first-element name-table index**:
-  refuted. For the size-7 axis in `Ref.vdf`, the anchor record (rec[9]
-  at byte offset 636) has `f[2]=72` and `names[72..78] = ['OECD EU',
-  'G77 China', ..., 'UN population LOW LOOKUP']`. The actual 7 COP
-  elements start at `names[71]='OECD US'`, so f[2] is off-by-one, and
-  the resulting slice still includes a non-element `UN population LOW
-  LOOKUP` at the tail. Other anchor records' f[2] values (`237=layers`,
-  `189=CH4 per C`, `323=Developing B stop growth year`) produce
-  mismatched or unrelated name slices. The f[2]-pointer hypothesis does
-  not generalize.
+  refuted. Once the axis ref is resolved to the dimension-anchor record,
+  that anchor's `field[2]` names the dimension itself, not the first
+  element. Element names come from the dimension element-record catalog
+  or from section-5 subrange projection.
 
 - **sec3 anchor record's 16-byte substructure as a dim descriptor**:
-  refuted. Dumping the 16 bytes at each `axis_slot_ref` in `Ref.vdf`
-  yields diverse u32 tuples: `(0, 0, 0, 1)` for slot 636, `(8460, 0,
-  1008981770, 0)` for slot 1852, `(17, 0, 0, 5)` for slot 3436, etc.
-  Some values look like float constants (`0.01`, `0.1`), others are
-  small ints, none encode a cardinality or a name-table pointer. Two
-  "dim-flavored" anchor records (rec[9] with `f[1]=143, f[5]=8028,
-  f[6]=0, f[11]=0` and rec[28] with `f[1]=135, f[5]=508, f[6]=0,
-  f[11]=0`) have a distinctive shape, but the pattern does not hold for
-  other axis anchors (rec[8], rec[37], rec[53], rec[70], rec[109]
-  are ordinary variable records).
+  superseded. The old dump read 16 bytes at the raw word ref and then
+  interpreted the tuple directly. The correct interpretation is simpler:
+  the word ref lands on `field[9]` of a normal 64-byte section-1 record,
+  and the full record is the dimension anchor.
 
 - **sec5 entry index -> dim mapping by tested ordering rules**:
   **superseded**. When this investigation was written, file-order, MDL
@@ -2070,16 +2063,16 @@ None of the following signals, however, encodes a deterministic
   the zambaqui simulation files, so even if it encoded dim data on
   `Ref.vdf` it cannot be a universal decoding signal.
 
-Practical consequence after the field[8] discovery: section 5 should no
-longer be treated as the only dimension-element source. `tools/vdf_xray.py`
-now recovers element lists from record field[8] groups and uses section-5 only
-as a fallback for the old single-entry layout. Multi-dim labels are now
-possible when section-3 axis cardinalities uniquely identify recovered
-field[8] dimension groups. The remaining hard problems are (a) same-size
-dimension disambiguation and (b) correct base-name-to-OT ownership on large
-multi-view files like `Ref.vdf`.
+Practical consequence after the field[8] and section-3-axis-ref discoveries:
+section 5 should no longer be treated as the only dimension-element source.
+`tools/vdf_xray.py` now recovers element lists from record field[8] groups,
+the alternate compact `scenario` element records, and section-5 subrange
+payload projection. Multi-dim labels are now decoded from section-3 axis refs,
+not guessed from cardinality. The remaining hard problem in normal result
+extraction is correct base-name-to-OT ownership when owner and descriptor
+records overlap.
 
-#### Resolved: multi-dim element naming via sec5 subsequence rule
+#### Resolved: multi-dim element naming via axis refs and sec5 subsequences
 
 The core structural question for this subsection -- "how does a VDF carry
 the element names of a multi-dim dimension when no element record is
@@ -2095,13 +2088,13 @@ subsequence"). Both rules are validated on all 11 `Ref.vdf` subranges
 and the smaller array fixtures; evidence is recorded in
 `/tmp/vdf_ref_dims.md`.
 
-The remaining unresolved direction on `Ref.vdf` is `scenario`: it is a
-root with three declared elements, but only one element record
-(`Deterministic`) is emitted. The other two element names
-(`Low 2xCO2 sensitivity`, `High 2xCO2 sensitivity`) are present in the
-name table but no section-1/4/5/6 structure references them. This
-appears to be a legitimate single-run-save artifact of Vensim: element
-records are emitted only for elements selected in the run.
+`Ref.vdf`'s `scenario` root uses one ordinary field[8]/field[11] element
+record for `Deterministic` and two compact late element records for
+`Low 2xCO2 sensitivity` and `High 2xCO2 sensitivity`. Those compact records
+carry `field[12]=79` (the `scenario` group id), `field[15]=1/2` (the
+zero-based element index), and `field[6]` as the direct section-2 name key.
+Section 5's `scenario` payload points at all three element records, which
+confirms that the compact records are part of the same catalog.
 
 New pinned evidence:
 
@@ -2110,9 +2103,13 @@ New pinned evidence:
   see `test_record_field8_recovers_dimension_element_groups` in
   `tools/test_vdf_xray.py`.
 - `Ref.vdf` also exposes incomplete record field[8] anchors. Xray reports
-  them as facts but does not use them for array labels unless the element
-  catalog is complete; see
+  them as facts; subrange labels are recovered through the section-5
+  subsequence rule instead of direct element records. See
   `test_record_field8_exposes_incomplete_dimension_anchors`.
+- `Ref.vdf` section-3 axis refs point to `field[9]` of dimension-anchor
+  records. This binds repeated cardinality-3 axes deterministically:
+  `540 -> scenario`, `2412 -> Aggregated Regions`, and `7036 -> Target`.
+  See `test_section3_axis_refs_point_to_dimension_anchor_field9_words`.
 - `econ/risk2.vdf` has declared-length, non-printable name-table entries in
   the middle of section 2. Skipping those declared byte ranges recovers 113
   names and the 106-entry slot table at section 1 `field1`; stopping at the

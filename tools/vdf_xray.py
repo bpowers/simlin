@@ -2126,6 +2126,12 @@ def decoded_record_dimension_anchors(vdf: VdfFile) -> list[RecordDimensionAnchor
     sentinel used by dimension anchors. This is deliberately stricter than
     "same group id" so view/unit/helper groups do not become dimensions.
 
+    Ref.vdf's `scenario` dimension stores two late element records in a
+    compact alternate layout: field[12] is the dimension group id, field[15]
+    is the zero-based element index, and field[6] is the direct name key.
+    Those records are still pointed to by section 5 and participate in the
+    same group-id catalog.
+
     A returned anchor is a fact even when its element catalog is incomplete.
     `status == "complete"` is the narrower condition used for labeling array
     elements without guessing.
@@ -2138,29 +2144,48 @@ def decoded_record_dimension_anchors(vdf: VdfFile) -> list[RecordDimensionAnchor
     element_groups: dict[int, list[tuple[int, int, str]]] = {}
 
     for rec_idx, rec in enumerate(vdf.records):
-        if rec.fields[6] != 0:
-            continue
-        group_id = rec.fields[8]
-        if not _valid_record_dimension_group_id(group_id):
-            continue
-        name_idx = key_to_name_idx.get(rec.fields[2])
-        if name_idx is None:
-            continue
-        name = vdf.names[name_idx]
-        if not _is_visible_model_name(name):
+        if rec.fields[6] == 0:
+            group_id = rec.fields[8]
+            if not _valid_record_dimension_group_id(group_id):
+                continue
+            name_idx = key_to_name_idx.get(rec.fields[2])
+            if name_idx is None:
+                continue
+            name = vdf.names[name_idx]
+            if not _is_visible_model_name(name):
+                continue
+
+            if (
+                rec.fields[12] == 124
+                and rec.fields[10] == 0
+                and rec.fields[14] != VDF_SENTINEL
+                and rec.fields[11] < 4096
+            ):
+                element_groups.setdefault(group_id, []).append(
+                    (rec.fields[11], rec_idx, name)
+                )
+                continue
+
+            if rec.fields[14] == VDF_SENTINEL:
+                candidate_dims.setdefault(group_id, []).append((rec_idx, name, rec.fields[11]))
             continue
 
+        alt_group_id = rec.fields[12]
+        alt_name_idx = key_to_name_idx.get(rec.fields[6])
         if (
-            rec.fields[12] == 124
+            _valid_record_dimension_group_id(alt_group_id)
+            and alt_name_idx is not None
             and rec.fields[10] == 0
+            and rec.fields[11] == 0
+            and rec.fields[13] == VDF_SENTINEL
             and rec.fields[14] != VDF_SENTINEL
-            and rec.fields[11] < 4096
+            and rec.fields[15] < 4096
         ):
-            element_groups.setdefault(group_id, []).append((rec.fields[11], rec_idx, name))
-            continue
-
-        if rec.fields[14] == VDF_SENTINEL:
-            candidate_dims.setdefault(group_id, []).append((rec_idx, name, rec.fields[11]))
+            name = vdf.names[alt_name_idx]
+            if _is_visible_model_name(name):
+                element_groups.setdefault(alt_group_id, []).append(
+                    (rec.fields[15], rec_idx, name)
+                )
 
     anchors: list[RecordDimensionAnchor] = []
     for group_id in sorted(set(candidate_dims) | set(element_groups)):
@@ -2216,6 +2241,37 @@ def decoded_record_dimension_anchors(vdf: VdfFile) -> list[RecordDimensionAnchor
             ))
 
     return anchors
+
+
+def section3_axis_ref_to_dimension_anchor(vdf: VdfFile) -> dict[int, RecordDimensionAnchor]:
+    """
+    Map section-3 axis refs to decoded dimension anchors.
+
+    The "axis slot ref" name is historical. In observed array fixtures these
+    words are section-1 word pointers to field[9] of the dimension-anchor
+    record, not slot-table refs:
+
+        sec1.data_offset + 4 * axis_ref == anchor_record.file_offset + 9 * 4
+
+    That is a direct C-struct pointer shape and resolves same-cardinality
+    axes without guessing from cardinality.
+    """
+    if len(vdf.sections) <= 1:
+        return {}
+
+    sec1_data_offset = vdf.sections[1].data_offset()
+    out: dict[int, RecordDimensionAnchor] = {}
+    for anchor in decoded_record_dimension_anchors(vdf):
+        if anchor.record_index >= len(vdf.records):
+            continue
+        record = vdf.records[anchor.record_index]
+        field9_offset = record.file_offset + 9 * 4
+        rel = field9_offset - sec1_data_offset
+        if rel < 0 or rel % 4 != 0:
+            continue
+        axis_ref = rel // 4
+        out.setdefault(axis_ref, anchor)
+    return out
 
 
 def sec5_anchor_binding(
@@ -2314,9 +2370,8 @@ def recover_all_dimension_elements(vdf: VdfFile) -> dict[str, list[str]]:
     results: dict[str, list[str]] = {}
 
     # Step 1: resolve roots. Complete anchors use their decoded element
-    # records. Partial-single-element roots keep the one recorded element
-    # (e.g. Ref.vdf's `scenario`); callers already treat those as partial
-    # via precision diagnostics.
+    # records. Partial roots keep whatever element facts are present so xray
+    # can still expose the partial catalog in diagnostics.
     root_elements: dict[int, list[str]] = {}
     for idx, anchor in enumerate(anchors):
         if not is_root[idx]:
@@ -2762,6 +2817,14 @@ def _array_element_labels_for_block(
     if anchor_labels is not None:
         return anchor_labels
 
+    axis_ref_labels = _array_element_labels_from_section3_axis_refs(
+        vdf,
+        block,
+        dimension_sets,
+    )
+    if axis_ref_labels is not None:
+        return axis_ref_labels
+
     shape_key = _shape_template_key_for_block(vdf, block)
     if shape_label_bindings is not None and shape_key is not None:
         labels = shape_label_bindings.get(shape_key)
@@ -2792,6 +2855,48 @@ def _array_element_labels_for_block(
             return None
         axes.append(axis_matches[0])
 
+    return [",".join(coords) for coords in product(*axes)]
+
+
+def _array_element_labels_from_section3_axis_refs(
+    vdf: VdfFile,
+    block: OwnerRecordBlock,
+    dimension_sets: list[RecoveredDimensionSet],
+) -> Optional[list[str]]:
+    """
+    Label an array block using section-3 axis refs bound to dimension anchors.
+
+    This is the direct structural path for same-cardinality axes. Cardinality
+    matching alone cannot distinguish `scenario`, `Target`, `lower`, `upper`,
+    or `Aggregated Regions` in Ref.vdf, but the section-3 axis words point to
+    the corresponding dimension-anchor records.
+    """
+    entry = _shape_template_entry_for_block(vdf, block)
+    if entry is None or entry.flat_size() != block.length():
+        return None
+
+    axis_sizes = entry.axis_sizes()
+    axis_refs = [ref for ref in entry.axis_slot_refs() if ref > 0]
+    if not axis_sizes or len(axis_sizes) != len(axis_refs):
+        return None
+    if math.prod(axis_sizes) != block.length():
+        return None
+
+    anchors_by_axis_ref = section3_axis_ref_to_dimension_anchor(vdf)
+    dims_by_name = {dim.name.lower(): dim for dim in dimension_sets}
+
+    axes: list[list[str]] = []
+    for axis_size, axis_ref in zip(axis_sizes, axis_refs):
+        anchor = anchors_by_axis_ref.get(axis_ref)
+        if anchor is None:
+            return None
+        dim = dims_by_name.get(anchor.name.lower())
+        if dim is None or len(dim.elements) != axis_size:
+            return None
+        axes.append(dim.elements)
+
+    if len(axes) == 1:
+        return axes[0]
     return [",".join(coords) for coords in product(*axes)]
 
 
@@ -4754,20 +4859,27 @@ def print_section3(vdf: VdfFile) -> None:
         return
 
     slot_to_names = build_direct_slot_to_names(vdf)
+    axis_ref_anchors = section3_axis_ref_to_dimension_anchor(vdf)
     sec4_entries = vdf.parse_section4_entries()
     sec4_idx_words = set()
     if sec4_entries:
         sec4_idx_words = {e.index_word for e in sec4_entries}
 
+    def axis_ref_label(ref: int) -> str:
+        anchor = axis_ref_anchors.get(ref)
+        if anchor is not None:
+            return f"{ref}:dim:{anchor.name}"
+        return resolve_slot_ref(ref, slot_to_names)
+
     for i, entry in enumerate(directory.entries):
-        slot_refs = [resolve_slot_ref(sr, slot_to_names) for sr in entry.axis_slot_refs()]
+        axis_refs = [axis_ref_label(sr) for sr in entry.axis_slot_refs()]
         sec4_hit = entry.index_word() in sec4_idx_words
         state = "placeholder" if entry.flat_size() == 0 else "active"
         print(f"  {i:>3} @0x{entry.file_offset:08x} idx={entry.index_word()} sec4_hit={sec4_hit} "
               f"state={state} flat={entry.flat_size()} axes={entry.axis_sizes()} "
               f"w10={entry.words[10]} w11={entry.words[11]} "
               f"shape_words={entry.words[:4]} "
-              f"slot_refs={slot_refs} raw_slot_refs={entry.axis_slot_refs()} "
+              f"axis_refs={axis_refs} raw_axis_refs={entry.axis_slot_refs()} "
               f"tail={entry.terminal_tag()}")
     print()
 
@@ -5499,7 +5611,7 @@ def print_owner_sketch_alignment(vdf: VdfFile, model: MdlModel, mdl_path: str) -
 
 
 def print_section35_bridge(vdf: VdfFile) -> None:
-    """Show the section-3 -> section-5 relationship via shared axis_slot_refs."""
+    """Show the section-3 -> section-5 relationship via raw axis refs."""
     print("=== Section 3 -> Section 5 Bridge ===")
     directory = vdf.parse_section3_directory()
     if directory is None or not directory.entries:
@@ -5512,6 +5624,13 @@ def print_section35_bridge(vdf: VdfFile) -> None:
         return
 
     slot_to_names = build_direct_slot_to_names(vdf)
+    axis_ref_anchors = section3_axis_ref_to_dimension_anchor(vdf)
+
+    def axis_ref_label(ref: int) -> str:
+        anchor = axis_ref_anchors.get(ref)
+        if anchor is not None:
+            return f"{ref}:dim:{anchor.name}"
+        return resolve_slot_ref(ref, slot_to_names)
 
     for i, sec3 in enumerate(directory.entries):
         axis_refs = set(sec3.axis_slot_refs())
@@ -5522,7 +5641,7 @@ def print_section35_bridge(vdf: VdfFile) -> None:
 
         matches = classify_section5_bridge_matches(sec3, sec5_entries)
 
-        axis_ref_strs = [resolve_slot_ref(r, slot_to_names) for r in sec3.axis_slot_refs()]
+        axis_ref_strs = [axis_ref_label(r) for r in sec3.axis_slot_refs()]
         state = "placeholder" if sec3.flat_size() == 0 else "active"
         print(f"  sec3[{i}] state={state} idx={sec3.index_word()} flat={sec3.flat_size()} "
               f"axes={sec3.axis_sizes()} axis_refs={axis_ref_strs}")
@@ -5661,19 +5780,22 @@ def print_validation(vdf: VdfFile) -> None:
         elif len(idx_words) == 1:
             print(f"  [PASS] sec3 single entry, index_word={idx_words[0]}")
 
-        # 5. All sec3 axis_slot_refs are in the slot table
-        slot_set = set(vdf.slot_table)
+        # 5. Sec3 axis refs point to dimension-anchor record field[9] words.
+        axis_anchor_by_ref = section3_axis_ref_to_dimension_anchor(vdf)
         all_axis_refs: list[int] = []
         for entry in directory.entries:
-            all_axis_refs.extend(entry.axis_slot_refs())
+            all_axis_refs.extend(ref for ref in entry.axis_slot_refs() if ref > 0)
         if all_axis_refs:
-            in_slot = [r for r in all_axis_refs if r in slot_set]
-            not_in_slot = [r for r in all_axis_refs if r not in slot_set]
-            if not_in_slot:
+            missing_anchor = [r for r in all_axis_refs if r not in axis_anchor_by_ref]
+            if missing_anchor:
                 errors.append(
-                    f"sec3 axis_slot_refs NOT in slot table: {not_in_slot}")
+                    f"sec3 axis refs do NOT point to dimension anchors: {missing_anchor}"
+                )
             else:
-                print(f"  [PASS] all {len(in_slot)} sec3 axis_slot_refs found in slot table")
+                print(
+                    f"  [PASS] all {len(all_axis_refs)} sec3 axis refs point to "
+                    "dimension anchors"
+                )
     else:
         print(f"  [SKIP] no section-3 directory entries")
 
@@ -5703,7 +5825,7 @@ def print_validation(vdf: VdfFile) -> None:
         else:
             if sec3_axis_set and sec5_trailing:
                 warnings.append(
-                    f"sec3 axis_slot_refs and sec5 trailing refs have no overlap: "
+                    f"sec3 axis refs and sec5 trailing refs have no overlap: "
                     f"sec3={sec3_axis_set}, sec5={sec5_trailing}")
             else:
                 print(f"  [SKIP] empty axis ref sets (sec3={len(sec3_axis_set)}, "

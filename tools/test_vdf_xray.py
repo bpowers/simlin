@@ -320,6 +320,45 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(matches.partial, [])
         self.assertEqual(matches.null_trailing, [0])
 
+    def test_section3_axis_refs_point_to_dimension_anchor_field9_words(self) -> None:
+        cases = {
+            "test/bobby/vdf/subscripts/subscripts.vdf": {
+                172: "sub1",
+            },
+            "test/bobby/vdf/model_editing/run_8.vdf": {
+                236: "sub3",
+                348: "sub2",
+            },
+            "test/xmutil_test_models/Ref.vdf": {
+                540: "scenario",
+                636: "COP",
+                1852: "HFC type",
+                2412: "Aggregated Regions",
+                3436: "layers",
+                4508: "Semi Agg",
+                7036: "Target",
+            },
+        }
+
+        for relpath, expected in cases.items():
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                anchors_by_ref = vdf_xray.section3_axis_ref_to_dimension_anchor(vdf)
+
+                self.assertEqual(
+                    {ref: anchors_by_ref[ref].name for ref in expected},
+                    expected,
+                )
+                sec1_data_offset = vdf.sections[1].data_offset()
+                for axis_ref, expected_name in expected.items():
+                    anchor = anchors_by_ref[axis_ref]
+                    record = vdf.records[anchor.record_index]
+                    self.assertEqual(
+                        sec1_data_offset + 4 * axis_ref,
+                        record.file_offset + 9 * 4,
+                        expected_name,
+                    )
+
     def test_run6_section5_payload_and_sec3_axis_size_diverge(self) -> None:
         run6 = parse_fixture("test/bobby/vdf/model_editing/run_6.vdf")
         sec3 = run6.parse_section3_directory()
@@ -1316,16 +1355,14 @@ class VdfXrayModelEditingTests(unittest.TestCase):
 
         self.assertEqual(report.status, "not-proven")
         self.assertIn("record-span-overlap", report.reasons)
-        # After sec5-subseq subrange recovery, incomplete-dimension-anchors
-        # no longer fires on Ref.vdf: every anchor is either complete or has
-        # its element list recovered through the sec5 payload subsequence
-        # rule. Numeric array labels remain because per-block dim binding
-        # for ambiguous same-cardinality dims is still unresolved.
+        # Ref.vdf still has unresolved owner/descriptor span overlap, but
+        # dimension labels are now decoded through section-3 axis refs plus
+        # the alternate scenario element records.
         self.assertNotIn("incomplete-dimension-anchors", report.reasons)
-        self.assertIn("numeric-array-labels", report.reasons)
+        self.assertNotIn("numeric-array-labels", report.reasons)
         self.assertGreater(report.record_span_overlap_slots, 0)
         self.assertEqual(report.unmapped_block_count, 0)
-        self.assertGreater(report.numeric_array_label_count, 0)
+        self.assertEqual(report.numeric_array_label_count, 0)
         self.assertEqual(report.duplicate_result_name_count, 0)
         self.assertEqual(report.duplicate_result_ot_count, 0)
         self.assertEqual(report.data_block_tail_mismatches, 0)
@@ -1441,14 +1478,14 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(anchors["lower"].status, "no-elements")
         self.assertEqual(anchors["upper"].dimension_id, 22)
 
-        # `scenario` has only the saved/recorded element in this structure;
-        # the other element names exist in the name table but have no matching
-        # field[8] element records.
-        self.assertEqual(anchors["scenario"].status, "partial-single-element")
+        # `scenario` mixes the ordinary field[8]/field[11] element layout for
+        # Deterministic with a compact late-record layout for the other two
+        # elements. The merged catalog is complete.
+        self.assertEqual(anchors["scenario"].status, "complete")
         self.assertEqual(anchors["scenario"].dimension_id, 13)
         self.assertEqual(
             [name for _, _, name in anchors["scenario"].elements],
-            ["Deterministic"],
+            ["Deterministic", "Low 2xCO2 sensitivity", "High 2xCO2 sensitivity"],
         )
 
         # Subrange dims whose element records are missing are nonetheless
@@ -1464,9 +1501,10 @@ class VdfXrayModelEditingTests(unittest.TestCase):
             recovered["COP Developed"],
             ["OECD US", "OECD EU", "Remaining Developed"],
         )
-        # `scenario` is partial: only the Deterministic element has a VDF
-        # element record, so we expose that one element as a single-item list.
-        self.assertEqual(recovered["scenario"], ["Deterministic"])
+        self.assertEqual(
+            recovered["scenario"],
+            ["Deterministic", "Low 2xCO2 sensitivity", "High 2xCO2 sensitivity"],
+        )
 
     def test_run8_dimension_set_recovery_uses_record_groups_and_stock_sort_anchor(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
@@ -1664,6 +1702,31 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertIn("Layer Depth[layer4]", names)
         self.assertNotIn("Layer Depth[OECD US,HFC134a]", names)
 
+    def test_ref_extraction_labels_same_cardinality_axes_from_section3_refs(self) -> None:
+        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
+
+        results = vdf_xray.extract_named_results(ref)
+
+        self.assertIsNotNone(results)
+        assert results is not None
+        names = {result.name for result in results}
+        for expected in [
+            "C AF Sequestered[Deterministic]",
+            "C AF Sequestered[Low 2xCO2 sensitivity]",
+            "C AF Sequestered[High 2xCO2 sensitivity]",
+            "C in Deep Ocean[Deterministic,layer1]",
+            "C in Deep Ocean[High 2xCO2 sensitivity,layer4]",
+            "Intensity RS target[OECD US,t1]",
+            "Intensity RS target[COP Developing B,t3]",
+            "Aggregated Definition[OECD US,Developed Countries]",
+            "Aggregated Definition[COP Developing B,Developing B Countries]",
+        ]:
+            self.assertIn(expected, names)
+
+        self.assertFalse(
+            any(vdf_xray.NUMERIC_ARRAY_LABEL_RE.search(name) for name in names)
+        )
+
     def test_record_f2_is_name_table_string_start_word_offset_plus_seven(self) -> None:
         run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
         run8_keys = vdf_xray.build_record_name_key_to_name_index(run8)
@@ -1836,27 +1899,25 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                 self.assertEqual(positions, expected_positions, subrange)
 
     def test_dimension_element_recovery_closes_ref_vdf_numeric_array_labels(self) -> None:
-        # After implementing the sec5-payload subsequence rule, every
-        # Ref.vdf dimension has a decoded element list (roots directly from
-        # element records, subranges via parent-root subseq projection).
-        # The `incomplete-dimension-anchors` blocker therefore no longer
-        # fires, even though 11 anchors still carry status='no-elements'.
+        # Ref.vdf now has decoded labels for every dimension used by saved
+        # arrays: roots come from element records, scenario adds its compact
+        # late-record elements, and subranges come from parent-root sec5
+        # subsequence projection. The `incomplete-dimension-anchors` and
+        # `numeric-array-labels` blockers therefore no longer fire.
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
 
         recovered = {
             dim.name: dim.elements
             for dim in vdf_xray._recover_dimension_sets(ref)
         }
-        # All 17 fully-recoverable dims: 7 roots + 11 subranges (scenario
-        # is a partial root and is excluded from this assertion because it
-        # has card=1 of 3 saved elements).
+        # All fully-recoverable dims: 7 roots plus 11 subranges.
         for expected_name in [
             "Aggregated Regions",
             "COP", "COP Developed", "COP Developing A", "COP Remaining Developing",
             "Developing A", "Developing B",
             "HFC type",
             "layers", "bottom", "lower", "upper",
-            "Semi Agg",
+            "scenario", "Semi Agg",
             "Target", "set targets", "tNext", "tPrev",
         ]:
             self.assertIn(expected_name, recovered, expected_name)
@@ -1878,6 +1939,10 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
         self.assertEqual(recovered["Developing A"], ["China", "India"])
         self.assertEqual(recovered["Developing B"], ["Other Developing"])
+        self.assertEqual(
+            recovered["scenario"],
+            ["Deterministic", "Low 2xCO2 sensitivity", "High 2xCO2 sensitivity"],
+        )
         self.assertEqual(recovered["set targets"], ["t1", "t2"])
         self.assertEqual(recovered["tNext"], ["t2", "t3"])
         self.assertEqual(recovered["tPrev"], ["t1", "t2"])
@@ -1885,6 +1950,7 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         # And finally: precision_report must drop the blocker.
         report = vdf_xray.precision_report(ref)
         self.assertNotIn("incomplete-dimension-anchors", report.reasons)
+        self.assertNotIn("numeric-array-labels", report.reasons)
 
 
 if __name__ == "__main__":
