@@ -93,6 +93,10 @@ facts are called out where the Rust parser has not caught up yet.
   remains ambiguous and is excluded from fact-only record-span reports.
 - Section 3 is a reusable array-shape directory: flat size, axis sizes, and
   axis slot refs are decoded for the observed array fixtures.
+- Section 5 ref-set entries begin immediately at `sec5.data_offset()`;
+  section-5 header `field1` points to the section's final word
+  (`sec5.region_end - 4`) on both populated and degenerate result fixtures
+  (currently xray-only).
 - Section 6 contains OT class codes, final-value floats, and fixed-width
   lookup metadata records at header-derived offsets.
 - The section-6 ref-stream starts after `max(0, sec6.field4 - 1)` prefix
@@ -806,11 +810,14 @@ cardinality. In simple array fixtures, `n` happens to match the model
 dimension cardinality; in edited and large fixtures, the payload refs look
 more like use-list/view/compiler refs than element descriptors.
 
-The Python xray parser locates the first sec5 entry by brute-forcing skip
-offsets in `[0..8]` words past the section header and keeping the longest
-structurally valid stream. A deterministic skip formula (analogous to
-`sec6.field4 - 1` for section 6) has not been identified; the brute-force
-probe is a reconstruction step, not a decoded framing rule.
+Section-5 entries begin immediately at the section data offset. The older
+Python xray parser tried multiple prefix skips, but the tracked result corpus
+now pins `skip=0`: every populated section-5 stream starts at
+`sec5.data_offset()`. Section-5 header `field1` is not the stream start; it is
+a 1-based word pointer from the section magic to the section's final word
+(`sec5.file_offset + 4 * (field1 - 1) == sec5.region_end - 4`). In degenerate
+scalar files with no section-5 data words, the same formula lands on the
+header's `field5` word, immediately before the next section header.
 
 The trailing refs often match section-3 `axis_slot_ref` values. In `Ref.vdf`,
 6 of 7 unique section-3 axis refs are shared with section-5 trailing refs,
@@ -1419,6 +1426,12 @@ their element-name catalogs.
     helper blocks and reordering broke the rank-offset approximation), and
     the large WRLD3/Ref fixtures for the records whose names are present in
     the visible name table.
+
+    In `model_editing/run_9` and `run_10`, the extra SMOOTH state is not an
+    anonymous adjacent stock: its sentinel owner record keys directly to
+    `#v>SMOOTH#`, while `v` also has a separate visible owner record. Xray now
+    uses that decoded signature/alias relation as the guard before hiding the
+    one-element helper block; adjacency alone is not treated as evidence.
 
 11. **Record `field[1] == 138` marks view headers**. Every simulation VDF file
     contains a run of records with `field[1] == 138` (also `field[0] ==

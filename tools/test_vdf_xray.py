@@ -68,6 +68,46 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                     vdf.offset_table_start,
                 )
 
+    def test_section5_stream_starts_at_data_offset_and_field1_points_to_tail(self) -> None:
+        cases = {
+            "test/bobby/vdf/model_editing/run_2.vdf": 2,
+            "test/bobby/vdf/model_editing/run_7.vdf": 3,
+            "test/bobby/vdf/model_editing/run_8.vdf": 3,
+            "test/bobby/vdf/model_editing/run_9.vdf": 3,
+            "test/bobby/vdf/model_editing/run_10.vdf": 3,
+            "test/bobby/vdf/subscripts/subscripts.vdf": 1,
+            "test/xmutil_test_models/Ref.vdf": 18,
+        }
+        for relpath, expected_count in cases.items():
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                sec5 = vdf.sections[5]
+                entries = vdf.parse_section5_sets()
+
+                self.assertIsNotNone(entries)
+                assert entries is not None
+                self.assertEqual(len(entries), expected_count)
+                self.assertEqual(entries[0].file_offset, sec5.data_offset())
+                self.assertEqual(
+                    vdf.section5_region_last_word_from_field1(),
+                    sec5.region_end - 4,
+                )
+
+        for relpath in [
+            "test/bobby/vdf/model_editing/run_1.vdf",
+            "test/bobby/vdf/econ/base.vdf",
+            "test/metasd/WRLD3-03/SCEN01.VDF",
+        ]:
+            with self.subTest(relpath=relpath):
+                vdf = parse_fixture(relpath)
+                entries = vdf.parse_section5_sets()
+
+                self.assertEqual(entries, [])
+                self.assertEqual(
+                    vdf.section5_region_last_word_from_field1(),
+                    vdf.sections[5].region_end - 4,
+                )
+
     def test_section1_records_start_at_fixed_offset_with_short_trailer(self) -> None:
         cases = {
             "test/bobby/vdf/model_editing/run_8.vdf": (8, [32, 131]),
@@ -520,6 +560,7 @@ class VdfXrayModelEditingTests(unittest.TestCase):
     def test_run10_owner_blocks_keep_visible_blocks_and_hide_helper_structurally(self) -> None:
         run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
         blocks = vdf_xray.build_owner_record_blocks(run10)
+        key_to_name_idx = vdf_xray.build_record_name_key_to_name_index(run10)
 
         self.assertEqual([(block.start, block.end, block.hidden) for block in blocks], [
             (1, 2, True),
@@ -530,6 +571,9 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         ])
 
         hidden_block = blocks[0]
+        hidden_record = run10.records[hidden_block.sentinel_record_indices[0]]
+        hidden_name_idx = key_to_name_idx[hidden_record.fields[2]]
+        self.assertEqual(run10.names[hidden_name_idx], "#v>SMOOTH#")
         self.assertEqual(hidden_block.direct_sort_keys, [5])
         self.assertEqual(hidden_block.attached_sort_keys, [5, 13])
 

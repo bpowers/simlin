@@ -649,21 +649,11 @@ class VdfFile:
 
         sec1_data_size = self.sections[1].region_data_size() if len(self.sections) > 1 else 0
         slot_set = set(self.slot_table)
-        best = (0, [], 0)
-
-        for skip in range(9):
-            entries, stop = self._section5_with_skip(skip, sec1_data_size, slot_set)
-            if len(entries) > len(best[1]) or (len(entries) == len(best[1]) and stop > best[2]):
-                best = (skip, entries, stop)
-        return best[1]
-
-    def _section5_with_skip(self, skip: int, sec1_data_size: int,
-                            slot_set: set[int]) -> tuple[list[Section5SetEntry], int]:
         sec = self.sections[5]
-        start = sec.data_offset() + skip * 4
+        start = sec.data_offset()
         end = min(sec.region_end, len(self.data))
         if start >= end:
-            return [], end
+            return []
 
         entries = []
         pos = start
@@ -692,7 +682,24 @@ class VdfFile:
                 slotted_ref_count=slotted,
             ))
             pos = refs_end
-        return entries, pos
+        return entries
+
+    def section5_region_last_word_from_field1(self) -> Optional[int]:
+        """
+        Decode the section-5 region-end pointer from the section header.
+
+        For observed simulation-result fixtures, section 5 header field1 is a
+        1-based word index from the section magic to the final word before the
+        next section header: `sec5.file_offset + 4 * (field1 - 1)`.
+        Degenerate scalar-model section 5 has no data words, so the pointer
+        lands on the section header's last word (`field5`).
+        """
+        if len(self.sections) <= 5:
+            return None
+        sec = self.sections[5]
+        if sec.field1 == 0:
+            return None
+        return sec.file_offset + 4 * (sec.field1 - 1)
 
     # ---- Section 6: OT metadata ----
 
@@ -1907,16 +1914,58 @@ def build_owner_record_blocks(vdf: VdfFile) -> list[OwnerRecordBlock]:
         block.attached_sort_keys.sort()
         block.sort_anchor_record_indices.sort()
 
-    # Fixture-backed cleanup for run_9/run_10-style edited models: a one-element
-    # stock helper can sit immediately before the visible stock array block even
-    # when slot-based hidden detection does not mark it. Treat this as
-    # conservative ownership cleanup, not as a fully decoded helper rule.
+    key_to_name_idx = build_record_name_key_to_name_index(vdf)
+
+    def record_name(rec_idx: int) -> Optional[str]:
+        if rec_idx >= len(vdf.records):
+            return None
+        name_idx = key_to_name_idx.get(vdf.records[rec_idx].fields[2])
+        if name_idx is None:
+            return None
+        return vdf.names[name_idx]
+
+    def new_style_signature_alias(name: str) -> Optional[str]:
+        if not name.startswith("#") or not name.endswith("#"):
+            return None
+        inner = name[1:-1]
+        alias, sep, _rest = inner.partition(">")
+        if not sep or not alias:
+            return None
+        return alias
+
+    def block_has_visible_alias_owner(block: OwnerRecordBlock) -> bool:
+        aliases = [
+            alias.lower()
+            for rec_idx in block.sentinel_record_indices
+            if (name := record_name(rec_idx)) is not None
+            if (alias := new_style_signature_alias(name)) is not None
+        ]
+        if not aliases:
+            return False
+
+        for candidate in visible_blocks:
+            if candidate is block:
+                continue
+            candidate_names = [
+                name.lower()
+                for rec_idx in candidate.sentinel_record_indices
+                if (name := record_name(rec_idx)) is not None
+            ]
+            if any(alias in candidate_names for alias in aliases):
+                return True
+        return False
+
+    # Edited SMOOTH fixtures can save a `#alias>FUNC#` helper stock immediately
+    # before the visible stock array. The decoded signature name is the guard:
+    # without it, adjacency alone would be too broad an ownership rule.
     for block in blocks:
         if block.hidden:
             continue
         if block.length() != 1 or not block.direct_sort_keys:
             continue
         if not block.ot_codes or any(code != OT_CODE_STOCK for code in block.ot_codes):
+            continue
+        if not block_has_visible_alias_owner(block):
             continue
         neighbor = next(
             (
@@ -4751,7 +4800,13 @@ def print_section5(vdf: VdfFile) -> None:
     if entries is None:
         print("  (unparseable)\n")
         return
-    print(f"  sets={len(entries)}")
+    sec = vdf.sections[5] if len(vdf.sections) > 5 else None
+    last_word = vdf.section5_region_last_word_from_field1()
+    if sec is not None and last_word is not None:
+        print(f"  sets={len(entries)} stream_start=0x{sec.data_offset():08x} "
+              f"field1_last_word=0x{last_word:08x} region_end=0x{sec.region_end:08x}")
+    else:
+        print(f"  sets={len(entries)}")
     if not entries:
         print()
         return
@@ -5559,6 +5614,16 @@ def print_validation(vdf: VdfFile) -> None:
                 "sec1 field1 points into the slot/ref area but not exactly at the "
                 f"visible slot table: field1=0x{sec1_slot_area:x}, "
                 f"visible=0x{vdf.slot_table_offset:x}")
+
+    sec5_last_word = vdf.section5_region_last_word_from_field1()
+    if sec5_last_word is not None and len(vdf.sections) > 5:
+        expected = vdf.sections[5].region_end - 4
+        if sec5_last_word == expected:
+            print("  [PASS] sec5 field1 points to the section's final word")
+        else:
+            errors.append(
+                "sec5 field1 pointer does not match section final word: "
+                f"field1=0x{sec5_last_word:x}, expected=0x{expected:x}")
 
     # 3. Slot tables in small/medium fixtures form a contiguous 16-byte lattice.
     slot_layout = analyze_slot_table_offsets(vdf.slot_table)
