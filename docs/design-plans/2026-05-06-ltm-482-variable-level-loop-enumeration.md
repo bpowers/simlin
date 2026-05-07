@@ -742,15 +742,64 @@ below use that scope.
 - Pre-commit hook passes on every commit.
 - `cargo test --workspace` finishes within the 3-minute cap.
 
-## Measurement Postscript (to be filled in during Phase 2)
+## Measurement Postscript
 
-This section will be populated with before/after measurements during
-implementation. The format will mirror the Phase 5 postscript in
-`docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md`:
+Captured 2026-05-06 on the post-Stage-6 branch tip via the
+`measurement_postscript_*` integration tests in
+`src/simlin-engine/tests/simulate_ltm.rs`.
 
-| Fixture | var-circuits | fast-path | slow-path circuits | slow-path SCC | auto-flip |
-|---------|-------------:|----------:|-------------------:|--------------:|-----------|
-| ... | ... | ... | ... | ... | ... |
+| Fixture | var SCC | elem SCC | var circuits | elem circuits (legacy) | fast path | slow path | slow-path SCC |
+|---------|--------:|---------:|-------------:|------------------------:|----------:|----------:|--------------:|
+| cross_element_ltm | 5 | 10 | 3 | 8 | 1 | 6 | 8 |
+| arrayed_population_ltm | 3 | 3 | 2 | 6 | 2 | 0 | 0 |
 
-Predictions are documented above; the actuals fill this table after
-the implementation lands.
+Notes per fixture:
+
+- **cross_element_ltm**: 5 stocks/auxes/flows in one variable-level
+  SCC (population, migration_pressure, migration_in, migration_out,
+  total_population's wildcard reducer back-edge). 3 variable-level
+  cycles: the population<->births A2A cycle classifies as
+  PureSameElementA2A (fast path), and the two FixedIndex-driven
+  migration cycles classify as CrossElementOrMixed (slow path). The
+  slow-path subgraph excludes births[*] (which is in the fast-path
+  cycle but not in any cross-element cycle), so the slow-path Johnson
+  enumerates 6 element-level circuits versus 8 in the legacy full-element
+  Johnson run. Auto-flip status: no in either run (both elem_scc=10 and
+  var_scc=5 well under 50).
+- **arrayed_population_ltm**: pure-A2A model with 2 variable-level
+  cycles (births reinforcing, deaths balancing) over 3 regions.
+  Both cycles classify as PureSameElementA2A; fast path emits 2 cycles
+  and the slow-path subgraph is empty. Legacy enumeration produced 6
+  element-level circuits (2 cycles * 3 regions); the tiered enumerator
+  produces 0 element-level circuits and 2 fast-path cycles.
+  Auto-flip status: no in either run.
+- **WRLD3-03** (not measured here; from prior postscripts): scalar
+  model with var_scc = elem_scc = 166, well above the gate threshold.
+  Auto-flip fires in both runs. The new variable-level gate fires
+  before any Johnson runs at all (legacy gate also fired before
+  Johnson). No structural change in WRLD3 behavior.
+- **hero_culture_ltm** (not measured here; scalar model with elem_scc
+  = 15 from prior postscript): every cycle classifies as PureScalar;
+  fast_path equals var_circuits, slow_path is empty. Auto-flip status
+  unchanged.
+
+### Threshold decision
+
+`MAX_LTM_SCC_NODES = 50` is retained, applied to two SCCs in series:
+
+1. **Variable-level SCC** (early gate, before any Johnson runs).
+   Cheap Tarjan on the variable graph. WRLD3 trips here exactly as
+   before the refactor.
+2. **Slow-path subgraph SCC** (late gate, computed inside
+   `model_loop_circuits_tiered`). Cheap Tarjan on the cross-element /
+   mixed slice. Models with huge cross-element subgraphs auto-flip
+   here without paying for slow-path Johnson.
+
+Pure-A2A and pure-scalar models contribute 0 to the slow-path SCC,
+so the late gate only fires for legitimate cross-element pressure.
+The legacy "full element-graph SCC" gate is removed: it was an
+upper bound on both variable-level and cross-element pressure, and
+the per-reference refactor (#448) had already broken pure-A2A models
+into N independent small SCCs, so the legacy gate was effectively
+gating on `max(variable SCC, cross-element SCC)` -- which is what
+the new gate does explicitly.

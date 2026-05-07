@@ -613,9 +613,27 @@ element's contribution.
 
 ### Loop Scores
 
-Element-level circuits from `model_element_loop_circuits` are grouped by their
-variable-level node sequence (strip subscripts, join) to distinguish A2A loops
-from mixed loops:
+Tiered loop enumeration (`model_loop_circuits_tiered`) classifies each
+variable-level cycle into one of three categories before deciding whether
+element-level enumeration is needed:
+
+- **PureScalar / PureSameElementA2A**: every traversed edge has only `Bare`
+  references and every variable in the cycle is either uniformly scalar or
+  uniformly arrayed over the same dimension list. The cycle materializes
+  directly into a single `Loop` (with `dimensions` populated for the A2A
+  case) without entering the element-level enumerator. This is the fast
+  path; cost is O(K) per cycle of size K rather than O(K * N) on N
+  elements.
+- **CrossElementOrMixed**: any edge has a `Wildcard`, `FixedIndex`, or
+  `DynamicIndex` reference, or the cycle mixes scalar and arrayed nodes,
+  or the arrayed nodes don't share a dimension list. These cycles drive
+  the slow-path subgraph: the element graph restricted to the variables
+  participating in such cycles. Johnson runs on this restricted subgraph,
+  and the results flow through the same per-circuit grouping logic the
+  legacy `build_element_level_loops` uses.
+
+Slow-path element-level circuits are grouped by their variable-level node
+sequence (strip subscripts, join) to distinguish A2A loops from mixed loops:
 
 **A2A loops**: All circuits in a group have the same variable-level structure
 and every node carries a subscript. These are collapsed into a single `Loop`
@@ -679,12 +697,16 @@ computational interval" strategy.
    does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
    enumeration and `ltm_discovery_mode` runs `discover_loops()`. However,
    `model_ltm_variables` in `src/simlin-engine/src/db_ltm.rs` does automatically
-   switch from exhaustive to discovery when the largest SCC of the element-level
-   causal graph exceeds `MAX_LTM_SCC_NODES` (currently 50, defined in
-   `src/simlin-engine/src/ltm.rs`). Above this size, Johnson circuit enumeration
-   blows past reasonable memory and time budgets on its own; see
-   `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` for the
-   measurements. (The legacy per-loop relative-score equation synthesis
+   switch from exhaustive to discovery in two phases. The early gate fires on
+   the variable-level causal graph's largest SCC (cheap Tarjan, no Johnson
+   yet). The late gate fires on the slow-path element-level subgraph's largest
+   SCC, computed inside `model_loop_circuits_tiered` after variable-level
+   cycles are classified. Both gates use `MAX_LTM_SCC_NODES` (currently 50,
+   defined in `src/simlin-engine/src/ltm.rs`). Above either size, Johnson
+   circuit enumeration blows past reasonable memory and time budgets on its
+   own; see `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` and
+   `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`
+   for the measurements. (The legacy per-loop relative-score equation synthesis
    compounded this with an O(P^2) text blowup; moving the normalization
    post-simulation -- divergence 5 below -- removed that factor from
    augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
