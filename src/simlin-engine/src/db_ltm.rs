@@ -1989,26 +1989,28 @@ pub(crate) fn build_loops_from_tiered(
         if fp.variables.is_empty() {
             continue;
         }
-        let var_level_nodes: Vec<Ident<Canonical>> =
-            fp.variables.iter().map(|s| Ident::new(s.as_str())).collect();
+        let var_level_nodes: Vec<Ident<Canonical>> = fp
+            .variables
+            .iter()
+            .map(|s| Ident::new(s.as_str()))
+            .collect();
         let links = var_graph.circuit_to_links(&var_level_nodes);
         let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
         let polarity = var_graph.calculate_polarity(&links);
 
-        // Map the canonical dimension list to original datamodel
+        // Map the canonical dimension names to original datamodel
         // names so equation parsing on the loop-score variable
         // resolves the dimension by string match. Mirrors the
         // legacy pure-dimension branch's mapping logic.
         let dimensions: Vec<String> = fp
             .dimensions
             .iter()
-            .map(|d| {
-                let canonical = d.name();
+            .map(|canonical| {
                 dm_dims
                     .iter()
                     .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
                     .map(|dm| dm.name().to_string())
-                    .unwrap_or_else(|| canonical.to_string())
+                    .unwrap_or_else(|| canonical.clone())
             })
             .collect();
 
@@ -2438,10 +2440,9 @@ pub fn model_ltm_variables(
 
     use super::{
         CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
-        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_element_edges,
-        causal_graph_with_modules, generate_max_abs_chain_str, model_causal_edges,
-        model_element_causal_edges, model_element_cycle_partitions, model_loop_circuits_tiered,
-        module_input_pathways_from_edges,
+        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_edges, causal_graph_with_modules,
+        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
+        model_loop_circuits_tiered, module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
@@ -2452,35 +2453,59 @@ pub fn model_ltm_variables(
         };
     }
 
-    // When the user explicitly requested discovery mode, honor it directly.
-    // Otherwise gate on the element-level graph's largest SCC so we avoid
-    // Cliff A (~17 GB in `build_element_level_loops`) and Cliff B (~140 TB
-    // of `rel_loop_score` equation text at WRLD3 scale) *before* paying
-    // for Johnson's circuit enumeration.  See
-    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
+    // When the user explicitly requested discovery mode, honor it
+    // directly. Otherwise auto-flip if either:
+    //   1. The variable-level SCC exceeds `MAX_LTM_SCC_NODES`, or
+    //   2. The slow-path (cross-element / mixed) element-level
+    //      subgraph's SCC exceeds `MAX_LTM_SCC_NODES` after the tiered
+    //      enumerator classifies cycles.
+    //
+    // Gating on the *variable-level* SCC (instead of the full
+    // element-graph SCC) is the structural change that motivates this
+    // PR: pure-A2A models with tens of variables over hundreds of
+    // elements have a huge element-graph SCC but a small variable
+    // SCC, and the new tiered enumerator produces no element-level
+    // circuits for them. Today's gate fires anyway on the inflated
+    // element-graph SCC, dropping these models into discovery mode
+    // unnecessarily.
+    //
+    // The variable-level SCC check (Tarjan, O(V+E)) runs first so
+    // models like WRLD3 (var SCC = 166) auto-flip without paying for
+    // variable-level Johnson. Only models that pass that check pay
+    // for the tiered enumerator, which is itself bounded: variable
+    // Johnson sees at most `MAX_LTM_SCC_NODES` nodes, and slow-path
+    // Johnson is skipped internally when the slow-path subgraph SCC
+    // exceeds the threshold.
+    //
+    // Cliff A (~17 GB in legacy `build_element_level_loops` on
+    // WRLD3-scale models) was tied to enumerating the full element
+    // graph; the tiered path skips that entirely on pure-scalar /
+    // pure-A2A models. Cliff B (rel_loop_score equation text) was
+    // retired earlier when post-simulation normalization moved out of
+    // the VM. See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`
+    // and `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`.
     let is_discovery_user = project.ltm_discovery_mode(db);
-    let max_scc_size = if is_discovery_user {
+    let var_scc_size = if is_discovery_user {
         0
     } else {
-        let element_edges = model_element_causal_edges(db, model, project);
-        causal_graph_from_element_edges(element_edges).largest_scc_size()
+        let edges = model_causal_edges(db, model, project);
+        causal_graph_from_edges(edges).largest_scc_size()
     };
-    let auto_flipped = !is_discovery_user && max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
-    let is_discovery = is_discovery_user || auto_flipped;
+    let var_auto_flipped = !is_discovery_user && var_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
 
-    if auto_flipped {
+    if var_auto_flipped {
         let msg = format!(
             "LTM analysis auto-switched from exhaustive to discovery mode: \
-             the element-level causal graph's largest SCC has {} nodes, \
-             exceeding MAX_LTM_SCC_NODES = {}.  Exhaustive compilation at \
-             this scale would allocate gigabytes of synthetic-variable \
-             equation text (see \
-             docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+             the variable-level causal graph's largest SCC has {} nodes, \
+             exceeding MAX_LTM_SCC_NODES = {}.  Variable-level Johnson at \
+             this scale would enumerate millions of circuits (see \
+             docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md and \
+             docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md). \
              Per-loop scores are ranked post-simulation via the \
              strongest-path search; see \
              docs/design/ltm--loops-that-matter.md for the two-tier \
              strategy.",
-            max_scc_size,
+            var_scc_size,
             crate::ltm::MAX_LTM_SCC_NODES,
         );
         CompilationDiagnostic(Diagnostic {
@@ -2491,6 +2516,7 @@ pub fn model_ltm_variables(
         })
         .accumulate(db);
     }
+    let mut is_discovery = is_discovery_user || var_auto_flipped;
 
     // Determine output ports for this model. Stdlib models always use
     // the "output" convention. For user-defined models, output ports are
@@ -2536,7 +2562,33 @@ pub fn model_ltm_variables(
     // data.
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let tiered = model_loop_circuits_tiered(db, model, project);
-        if tiered.fast_path.is_empty() && tiered.slow_path.is_empty() {
+        // Late-stage auto-flip: the variable-level SCC was small enough
+        // to clear the early gate, but the cross-element / mixed
+        // subgraph (the slow path) blew past the threshold. The tiered
+        // enumerator already skipped Johnson on the slow path in that
+        // case (`slow_path` is empty); we just need to flip the
+        // is_discovery flag so link-score generation, etc. follow the
+        // discovery path.
+        if tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+            let msg = format!(
+                "LTM analysis auto-switched from exhaustive to discovery mode: \
+                 the cross-element / mixed slow-path subgraph's largest SCC has {} nodes, \
+                 exceeding MAX_LTM_SCC_NODES = {}.  Per-loop scores are ranked \
+                 post-simulation via the strongest-path search; see \
+                 docs/design/ltm--loops-that-matter.md for the two-tier strategy.",
+                tiered.slow_path_largest_scc,
+                crate::ltm::MAX_LTM_SCC_NODES,
+            );
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
+            is_discovery = true;
+            None
+        } else if tiered.fast_path.is_empty() && tiered.slow_path.is_empty() {
             if !has_input_ports {
                 return LtmVariablesResult {
                     vars: vec![],

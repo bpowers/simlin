@@ -1314,15 +1314,15 @@ pub enum CycleClass {
     /// Every variable in the cycle is arrayed over the same dimension
     /// list and every traversed edge has only `Bare` references. The
     /// cycle exists at every element of the shared dimensions; emit one
-    /// A2A `Loop` whose `dimensions` field carries those dimension names
-    /// (canonical / lex-ordered as they appear on the participating
+    /// A2A `Loop` whose `dimensions` field carries those dimensions'
+    /// canonical names (lex-ordered as they appear on the participating
     /// variables) and skip the element-level enumerator.
     PureSameElementA2A {
-        /// Dimensions, in source order from the participating variables'
-        /// dimension list. The list is identical for every variable in
-        /// the cycle (otherwise the cycle classifies as
-        /// `CrossElementOrMixed`).
-        dimensions: Vec<crate::dimensions::Dimension>,
+        /// Canonical (lower-case) dimension names, in source order from
+        /// the participating variables' dimension list. The list is
+        /// identical for every variable in the cycle (otherwise the
+        /// cycle classifies as `CrossElementOrMixed`).
+        dimensions: Vec<String>,
     },
     /// At least one edge has a non-Bare shape (Wildcard, FixedIndex, or
     /// DynamicIndex), or the cycle mixes scalar and arrayed nodes, or
@@ -1417,7 +1417,7 @@ pub(crate) fn classify_cycle(
         }
     }
     CycleClass::PureSameElementA2A {
-        dimensions: first_dims,
+        dimensions: first_dims.iter().map(|d| d.name().to_string()).collect(),
     }
 }
 
@@ -1792,11 +1792,14 @@ pub fn model_element_loop_circuits(
 pub struct FastPathCircuit {
     /// Variable names in cycle order (canonical / lower-case).
     pub variables: Vec<String>,
-    /// Empty for `PureScalar`; the shared dimension list for
-    /// `PureSameElementA2A`. Stored as `Dimension` values so the
-    /// consumer (`build_element_level_loops`) can map canonical names
-    /// to original datamodel names without re-querying salsa.
-    pub dimensions: Vec<crate::dimensions::Dimension>,
+    /// Empty for `PureScalar`; the shared dimension *canonical names*
+    /// (lower-case) for `PureSameElementA2A`. Canonical names rather
+    /// than full `Dimension` values so the result type's
+    /// auto-derivable traits (`Debug`, `Eq`) don't depend on
+    /// `Dimension`'s feature-gated derives. The consumer
+    /// (`build_loops_from_tiered`) maps canonical names back to
+    /// datamodel names via the project's `dm_dims` list.
+    pub dimensions: Vec<String>,
 }
 
 /// Result of the tiered loop enumerator: variable-level cycles
@@ -1812,17 +1815,31 @@ pub struct FastPathCircuit {
 /// any `CrossElementOrMixed` variable-level cycle. When no such cycles
 /// exist the slow path is empty -- that's the headline win for pure
 /// A2A or pure scalar models.
+///
+/// `slow_path_largest_scc` reports the largest SCC of the slow-path
+/// subgraph (computed via Tarjan, cheap), regardless of whether
+/// Johnson actually ran on it. Callers gate auto-flip on this value
+/// instead of the *full* element-graph SCC -- the pure-A2A and
+/// pure-scalar cycles never inflate the slow-path subgraph, so this
+/// number is the structurally correct upper bound on the cost of
+/// running slow-path Johnson.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct TieredCircuitsResult {
     /// Variable-level cycles that the classifier resolved to a single
     /// Loop without element-level Johnson.
     pub fast_path: Vec<FastPathCircuit>,
     /// Element-level circuits from the slow-path subgraph. Empty when
-    /// no variable-level cycle classifies as `CrossElementOrMixed`.
+    /// no variable-level cycle classifies as `CrossElementOrMixed` or
+    /// when the subgraph SCC exceeds the auto-flip threshold and
+    /// Johnson was skipped to avoid the cost cliff.
     /// Indexed in the same canonical (lex-sorted) form as
     /// `model_element_loop_circuits` so downstream grouping logic in
     /// `build_element_level_loops` can be reused unchanged.
     pub slow_path: LoopCircuitsResult,
+    /// Largest SCC in the slow-path element-level subgraph. 0 when no
+    /// cycle classifies as `CrossElementOrMixed`. Callers compare
+    /// this against `MAX_LTM_SCC_NODES` to decide auto-flip.
+    pub slow_path_largest_scc: usize,
 }
 
 /// Tiered loop enumeration: variable-level Johnson first, then
@@ -1912,11 +1929,21 @@ pub fn model_loop_circuits_tiered(
     // in `slow_path_var_nodes`. An element node `population[nyc]`
     // belongs to the subgraph iff its underlying variable name
     // (`population`) is in the slow-path set.
-    let slow_path = if slow_path_var_nodes.is_empty() {
-        LoopCircuitsResult {
-            names: Vec::new(),
-            circuits: Vec::new(),
-        }
+    //
+    // We compute the subgraph's largest SCC via Tarjan (cheap) before
+    // running Johnson, so the caller can auto-flip on huge cross-element
+    // subgraphs without paying for circuit enumeration. Johnson is
+    // skipped (and `slow_path` returned empty) when the SCC exceeds
+    // `MAX_LTM_SCC_NODES`; the SCC count is exposed on
+    // `slow_path_largest_scc` either way.
+    let (slow_path, slow_path_largest_scc) = if slow_path_var_nodes.is_empty() {
+        (
+            LoopCircuitsResult {
+                names: Vec::new(),
+                circuits: Vec::new(),
+            },
+            0,
+        )
     } else {
         let element_edges = model_element_causal_edges(db, model, project);
         let mut sub_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -1943,9 +1970,7 @@ pub fn model_loop_circuits_tiered(
             element_edges
                 .stocks
                 .iter()
-                .filter(|s| {
-                    slow_path_var_nodes.contains(strip_element_subscript(s.as_str()))
-                })
+                .filter(|s| slow_path_var_nodes.contains(strip_element_subscript(s.as_str())))
                 .map(|s| crate::common::Ident::new(s))
                 .collect();
         let sub_edge_idents: HashMap<
@@ -1956,7 +1981,9 @@ pub fn model_loop_circuits_tiered(
             .map(|(from, tos)| {
                 (
                     crate::common::Ident::new(&from),
-                    tos.into_iter().map(|t| crate::common::Ident::new(&t)).collect(),
+                    tos.into_iter()
+                        .map(|t| crate::common::Ident::new(&t))
+                        .collect(),
                 )
             })
             .collect();
@@ -1966,15 +1993,29 @@ pub fn model_loop_circuits_tiered(
             variables: HashMap::new(),
             module_graphs: HashMap::new(),
         };
-        let (names, circuits) = graph
-            .find_indexed_circuits_with_limit(usize::MAX)
-            .expect("usize::MAX cannot exhaust the enumeration budget");
-        LoopCircuitsResult { names, circuits }
+        let scc = graph.largest_scc_size();
+        if scc > crate::ltm::MAX_LTM_SCC_NODES {
+            // Skip Johnson on a huge cross-element subgraph; the
+            // caller will auto-flip on the SCC count.
+            (
+                LoopCircuitsResult {
+                    names: Vec::new(),
+                    circuits: Vec::new(),
+                },
+                scc,
+            )
+        } else {
+            let (names, circuits) = graph
+                .find_indexed_circuits_with_limit(usize::MAX)
+                .expect("usize::MAX cannot exhaust the enumeration budget");
+            (LoopCircuitsResult { names, circuits }, scc)
+        }
     };
 
     TieredCircuitsResult {
         fast_path,
         slow_path,
+        slow_path_largest_scc,
     }
 }
 
@@ -2643,16 +2684,13 @@ mod tiered_circuits_tests {
         );
         let fp = &result.fast_path[0];
         let var_set: BTreeSet<&str> = fp.variables.iter().map(|s| s.as_str()).collect();
-        assert_eq!(
-            var_set,
-            ["births", "population"].iter().copied().collect()
-        );
+        assert_eq!(var_set, ["births", "population"].iter().copied().collect());
         assert_eq!(
             fp.dimensions.len(),
             1,
             "PureSameElementA2A cycle must carry shared dimension list"
         );
-        assert_eq!(fp.dimensions[0].name(), "region");
+        assert_eq!(fp.dimensions[0], "region");
 
         assert_eq!(
             result.slow_path.len(),
@@ -2762,6 +2800,76 @@ mod tiered_circuits_tests {
             "no cross-element cycle exists; slow path must be empty"
         );
     }
+
+    /// Structural-win demonstration: pure-A2A model with N elements.
+    ///
+    /// Today's `model_element_loop_circuits` enumerates one circuit
+    /// per element (N circuits) even though `build_element_level_loops`
+    /// collapses them all back into one A2A Loop. The tiered
+    /// enumerator emits exactly one fast-path circuit and runs zero
+    /// element-level Johnson on the slow-path subgraph -- O(1) work
+    /// instead of O(N).
+    ///
+    /// This test pins the circuit-count inequality and the empty
+    /// slow-path subgraph in a single fixture. The post-2026-04-25
+    /// per-reference refactor already broke up the element graph into
+    /// N independent SCCs of size 2 each (one per element); the new
+    /// win is that we no longer pay for Johnson on each of those
+    /// N SCCs.
+    #[test]
+    fn pure_a2a_eliminates_per_element_circuit_redundancy() {
+        const N: usize = 30;
+        let elements: Vec<String> = (0..N).map(|i| format!("e{i}")).collect();
+        let elem_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+        let project = TestProject::new("dense_a2a_circuits")
+            .named_dimension("Region", &elem_refs)
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+
+        // Legacy element-level Johnson: one circuit per element
+        // because the per-reference refactor produces N independent
+        // SCCs of size 2.
+        let legacy = model_element_loop_circuits(&db, source_model, source_project);
+        assert_eq!(
+            legacy.len(),
+            N,
+            "legacy element-level Johnson must enumerate {N} circuits for N-element pure-A2A model"
+        );
+
+        // Tiered enumerator: one fast-path cycle, zero slow-path
+        // circuits, zero slow-path SCC. The element-level Johnson is
+        // skipped entirely.
+        let tiered = model_loop_circuits_tiered(&db, source_model, source_project);
+        assert_eq!(
+            tiered.fast_path.len(),
+            1,
+            "tiered enumerator must emit exactly one fast-path A2A cycle"
+        );
+        assert_eq!(
+            tiered.slow_path.len(),
+            0,
+            "tiered enumerator must run zero element-level Johnson on pure-A2A model"
+        );
+        assert_eq!(
+            tiered.slow_path_largest_scc, 0,
+            "slow-path subgraph SCC must be 0 (no cross-element / mixed cycles)"
+        );
+
+        // Variable-level SCC: 2 (population, births). The new gate
+        // keys on this value, well under the 50-node threshold.
+        let var_edges = model_causal_edges(&db, source_model, source_project);
+        let var_scc = causal_graph_from_edges(var_edges).largest_scc_size();
+        assert_eq!(
+            var_scc, 2,
+            "variable-level SCC must be 2 (population, births), got {var_scc}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2813,9 +2921,7 @@ mod classify_cycle_tests {
         }
     }
 
-    fn shapes_with(
-        edges: &[(&str, &str, &[RefShape])],
-    ) -> EdgeShapesResult {
+    fn shapes_with(edges: &[(&str, &str, &[RefShape])]) -> EdgeShapesResult {
         let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
         for (from, to, shapes) in edges {
             let set: BTreeSet<RefShape> = shapes.iter().cloned().collect();
@@ -2847,7 +2953,7 @@ mod classify_cycle_tests {
         let lookup = dim_lookup(&["pop", "births"], &dims);
         match classify_cycle(&cycle, &edges, &lookup) {
             CycleClass::PureSameElementA2A { dimensions } => {
-                assert_eq!(dimensions, dims);
+                assert_eq!(dimensions, vec!["region".to_string()]);
             }
             other => panic!("expected PureSameElementA2A, got {other:?}"),
         }
@@ -2938,10 +3044,7 @@ mod classify_cycle_tests {
         let region = make_dim("region");
         let category = make_dim("category");
         let cycle = vec!["a".to_string(), "b".to_string()];
-        let edges = shapes_with(&[
-            ("a", "b", &[RefShape::Bare]),
-            ("b", "a", &[RefShape::Bare]),
-        ]);
+        let edges = shapes_with(&[("a", "b", &[RefShape::Bare]), ("b", "a", &[RefShape::Bare])]);
         // a -> region; b -> category.
         let lookup = move |name: &str| -> Vec<Dimension> {
             match name {
@@ -3006,12 +3109,7 @@ mod edge_shapes_tests {
 
     /// Helper: assert that the edge `(from, to)` has exactly the given
     /// shape set in the result.
-    fn assert_shapes(
-        result: &EdgeShapesResult,
-        from: &str,
-        to: &str,
-        expected: &[RefShape],
-    ) {
+    fn assert_shapes(result: &EdgeShapesResult, from: &str, to: &str, expected: &[RefShape]) {
         let key = (from.to_string(), to.to_string());
         let actual = result
             .edge_shapes
