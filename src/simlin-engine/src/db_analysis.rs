@@ -1925,10 +1925,19 @@ pub fn model_loop_circuits_tiered(
         }
     }
 
-    // Slow-path subgraph: project the element graph onto the variables
-    // in `slow_path_var_nodes`. An element node `population[nyc]`
-    // belongs to the subgraph iff its underlying variable name
-    // (`population`) is in the slow-path set.
+    // Slow-path subgraph: project the element graph onto every variable
+    // that appears in *any* `CrossElementOrMixed` cycle. The induction
+    // is intentionally broad -- a variable that participates in even one
+    // cross-element cycle must keep its element nodes in the subgraph so
+    // Johnson can re-discover the cross-element traversal -- but the
+    // breadth has a side effect: a pure-A2A cycle that *shares variables*
+    // with a cross-element cycle (typical when a small "aux ring" feeds
+    // both a same-element loop and a longer cross-element loop) gets
+    // dragged into the subgraph too. Johnson then re-finds the per-element
+    // reflections of that pure-A2A cycle, which `build_element_level_loops`
+    // would collapse back into an A2A `Loop` -- the same `Loop` the fast
+    // path already emitted. To prevent the duplicate, we dedupe slow-path
+    // circuits below against the fast-path emissions before returning.
     //
     // We compute the subgraph's largest SCC via Tarjan (cheap) before
     // running Johnson, so the caller can auto-flip on huge cross-element
@@ -2008,7 +2017,56 @@ pub fn model_loop_circuits_tiered(
             let (names, circuits) = graph
                 .find_indexed_circuits_with_limit(usize::MAX)
                 .expect("usize::MAX cannot exhaust the enumeration budget");
-            (LoopCircuitsResult { names, circuits }, scc)
+            // Dedup slow-path circuits whose stripped variable-level
+            // node sequence matches a fast-path circuit. This drops the
+            // per-element reflections of pure-A2A cycles that share
+            // variables with a cross-element cycle (see the slow-path
+            // subgraph-induction comment above for the topology). Each
+            // dropped circuit would otherwise be re-collapsed into an
+            // A2A `Loop` by `build_element_level_loops`, duplicating the
+            // `Loop` the fast path already emitted.
+            //
+            // The match is rotation-invariant: both fast-path
+            // (variable-level) and slow-path (element-level) Johnson
+            // emit each cycle starting from its lex-smallest node, but
+            // the rotations might still differ when two distinct slow-
+            // path nodes happen to strip to the same variable name
+            // (impossible for the simple-cycle case we dedupe here,
+            // but we re-canonicalize defensively). Slow-path cycles
+            // whose stripped names contain repeats cannot collapse onto
+            // a fast-path cycle (Johnson emits simple cycles, so fast-
+            // path entries always have distinct nodes); we skip the key
+            // computation for those circuits.
+            let fast_path_keys: HashSet<Vec<String>> = fast_path
+                .iter()
+                .map(|fp| canonical_cycle_rotation(&fp.variables))
+                .collect();
+            let mut filtered_circuits: Vec<Vec<u32>> = Vec::with_capacity(circuits.len());
+            for circuit in circuits {
+                // `names` holds element-suffixed labels (e.g. `a[nyc]`).
+                // Stripping recovers the variable-level sequence used
+                // to build fast-path keys.
+                let stripped: Vec<String> = circuit
+                    .iter()
+                    .map(|i| strip_element_subscript(&names[*i as usize]).to_string())
+                    .collect();
+                let mut seen: HashSet<&str> = HashSet::with_capacity(stripped.len());
+                let unique = stripped.iter().all(|s| seen.insert(s.as_str()));
+                if unique {
+                    let key = canonical_cycle_rotation(&stripped);
+                    if fast_path_keys.contains(&key) {
+                        continue;
+                    }
+                }
+                filtered_circuits.push(circuit);
+            }
+            (
+                LoopCircuitsResult {
+                    names,
+                    circuits: filtered_circuits,
+                },
+                scc,
+            )
         }
     };
 
@@ -2017,6 +2075,36 @@ pub fn model_loop_circuits_tiered(
         slow_path,
         slow_path_largest_scc,
     }
+}
+
+/// Return the rotation of `nodes` that starts at the lex-smallest entry.
+///
+/// The fast-path / slow-path dedup needs a rotation-invariant key for a
+/// directed cycle. Johnson's algorithm emits each cycle starting at its
+/// lex-smallest node, so for fast-path circuits and the stripped form of
+/// slow-path circuits with all-distinct entries the input is already in
+/// canonical form. We re-canonicalize defensively here so the dedup
+/// remains correct if Johnson's emission order ever shifts.
+///
+/// `nodes` with repeated entries are returned as-is: such sequences are
+/// only produced by cross-element cycles visiting the same variable at
+/// multiple elements, and those cannot match any fast-path entry (which
+/// always has distinct nodes). Callers that compute the dedup key must
+/// pre-check that the stripped sequence is unique.
+fn canonical_cycle_rotation(nodes: &[String]) -> Vec<String> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let mut best = 0;
+    for i in 1..nodes.len() {
+        if nodes[i] < nodes[best] {
+            best = i;
+        }
+    }
+    let mut rotated: Vec<String> = Vec::with_capacity(nodes.len());
+    rotated.extend(nodes[best..].iter().cloned());
+    rotated.extend(nodes[..best].iter().cloned());
+    rotated
 }
 
 /// Strip an element-subscript suffix from a node name.

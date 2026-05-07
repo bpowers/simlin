@@ -3968,6 +3968,99 @@ fn measurement_postscript_arrayed_population_ltm() {
     );
 }
 
+/// Regression for the slow-path / fast-path duplicate-Loop bug uncovered
+/// during PR #496 review. The bug: when a pure-A2A cycle (e.g.
+/// `a -> grow -> stock -> b -> a`) shares variables with a cross-element
+/// cycle (e.g. `a -> grow -> stock -> b -> c -> a` where `c[r] = b[NYC] +
+/// ...`), all four variables `a, grow, stock, b` end up in
+/// `slow_path_var_nodes` because they participate in the cross-element
+/// cycle. Johnson on the induced subgraph then re-discovers the per-element
+/// reflections of the pure-A2A cycle (one per dimension element) which
+/// `build_element_level_loops` collapses into a fresh A2A Loop -- duplicating
+/// the A2A Loop the fast path already emitted.
+///
+/// Without the fix, this fixture emits three Loops (`r1`, `r2`, ...) where
+/// `r1` and a slow-path-derived A2A Loop describe the same feedback loop.
+/// With the fix, exactly two distinct Loops are emitted: one A2A loop and
+/// one cross-element loop.
+///
+/// None of the pre-existing fixtures (cross_element_ltm,
+/// arrayed_population_ltm, hero_culture_ltm, WRLD3) construct this
+/// topology -- pure-A2A and cross-element cycles in those models don't
+/// share more than the structural stock-flow variables, so the bug slipped
+/// past existing coverage.
+#[test]
+fn test_dedup_slow_path_a2a_against_fast_path() {
+    let n_elements: usize = 3;
+
+    // Variable-level edges (with shapes):
+    //   a -> grow      (Bare; grow = a * 0.001)
+    //   grow -> stock  (structural inflow edge; treated as Bare)
+    //   stock -> b     (Bare; b = stock * 0.01)
+    //   b -> a         (Bare; a = b + c)
+    //   c -> a         (Bare; a = b + c)
+    //   b -> c         (FixedIndex(["nyc"]); c = b[NYC] * 0.5)
+    //
+    // Variable-level cycles:
+    //   1) a -> grow -> stock -> b -> a            (PureSameElementA2A; fast path)
+    //   2) a -> grow -> stock -> b -> c -> a       (CrossElementOrMixed; slow path)
+    //
+    // Cycle 2 contributes a, grow, stock, b, c to slow_path_var_nodes.
+    // Cycle 1's variables a, grow, stock, b therefore also enter the
+    // slow-path subgraph and Johnson re-finds the per-element pure-A2A
+    // reflections that we already emitted from the fast path.
+    let project = TestProject::new("dedup_slow_a2a")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("stock[Region]", "100", &["grow"], &[], None)
+        .array_flow("grow[Region]", "a * 0.001", None)
+        .array_aux("b[Region]", "stock * 0.01")
+        .array_aux("c[Region]", "b[NYC] * 0.5")
+        .array_aux("a[Region]", "b + c")
+        .build_datamodel();
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("dedup regression fixture should simulate");
+    let results = vm.into_results();
+
+    // Without the dedup the slow-path Johnson finds the pure-A2A cycle's
+    // per-element reflections (one per region) and
+    // `build_element_level_loops` collapses them into a third Loop with a
+    // distinct id -- the unfixed branch emits 3 loops (`r1`, `r2`, `u1`).
+    // The dedup drops the per-element reflections so the only slow-path
+    // survivor is the genuine longer cycle that traverses `c`. End state:
+    // exactly two loop ids -- one A2A, one cross-element -- with two
+    // partition entries.
+    let loop_scores = find_loop_score_offsets(&results);
+    assert_eq!(
+        loop_scores.len(),
+        2,
+        "expected exactly 2 loop_score variables (one A2A, one cross-element); \
+         got {}: {:?}",
+        loop_scores.len(),
+        loop_scores
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        loop_partitions.len(),
+        2,
+        "expected exactly 2 distinct loop ids in loop_partitions; got {}: {:?}",
+        loop_partitions.len(),
+        loop_partitions.keys().collect::<Vec<_>>()
+    );
+    // Touch n_elements once so the value remains documented in the
+    // fixture even though the slot-count assertion is intentionally
+    // omitted: the loop-score-variable allocation strategy interacts with
+    // `is_cross_element` heuristics in `build_element_level_loops` that
+    // are out of scope for the dedup regression. The two-loops invariant
+    // above is the load-bearing assertion.
+    let _ = n_elements;
+}
+
 /// AC8.1: A2A arrayed population model -- exhaustive mode.
 ///
 /// Model: population[Region] (3 regions: NYC, Boston, LA) with:
