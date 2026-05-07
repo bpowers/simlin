@@ -27,9 +27,20 @@ fn git_available() -> bool {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
+    // Strip every `GIT_*` env var inherited from the parent: when the
+    // workspace test suite runs from inside an outer `git commit` (the
+    // project pre-commit hook invokes `cargo test --workspace`),
+    // `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down and
+    // would make this `git` operate on the outer repository instead of
+    // the freshly-initialised temp dir.
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd).args(args);
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GIT_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let status = cmd
         .status()
         .unwrap_or_else(|_| panic!("git {} failed to spawn", args.join(" ")));
     assert!(status.success(), "git {} failed", args.join(" "));

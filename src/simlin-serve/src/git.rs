@@ -254,7 +254,21 @@ fn build_repo_cache(repo_root: &Path) -> std::io::Result<RepoCache> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> std::io::Result<String> {
-    let output = Command::new("git").current_dir(cwd).args(args).output()?;
+    // Strip inherited `GIT_*` env vars so this command always operates on
+    // the repository at `cwd`. If the simlin-serve binary is launched
+    // from inside another git context (e.g. a developer running it from
+    // a terminal where `GIT_DIR` happens to be set, or the workspace
+    // test suite running inside the project pre-commit hook), the
+    // inherited variables would override `cwd` and silently report
+    // status against the wrong repository.
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd).args(args);
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GIT_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let output = cmd.output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
             "git {} exited with {:?}: {}",
@@ -297,10 +311,25 @@ mod tests {
     use std::process::Command;
 
     /// Run `git` in `cwd` with `args`. Asserts success; returns stdout as String.
+    ///
+    /// Clears every `GIT_*` environment variable inherited from the parent
+    /// before spawning. This matters when the test runs from inside an outer
+    /// `git commit` (e.g. the project pre-commit hook invokes
+    /// `cargo test --workspace`): without sanitization, `GIT_DIR`,
+    /// `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down to the inner
+    /// `git` and cause it to operate on the OUTER repository instead of the
+    /// freshly-`git init`'d temp dir, producing surprising failures like
+    /// `pathspec 'model.stmx' did not match any files` or invoking the
+    /// outer repo's pre-commit hook on the temp commit.
     fn must_git(cwd: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .current_dir(cwd)
-            .args(args)
+        let mut cmd = Command::new("git");
+        cmd.current_dir(cwd).args(args);
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(&key);
+            }
+        }
+        let out = cmd
             .output()
             .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
         if !out.status.success() {
