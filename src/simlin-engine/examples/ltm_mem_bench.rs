@@ -4,27 +4,79 @@
 
 //! Memory and timing benchmark for LTM circuit enumeration.
 //!
-//! Usage: `cargo run --release --example ltm_mem_bench -- [mdl] [budget]`
+//! Two modes:
 //!
-//! Example:
+//! 1. Real model (default): parse a Vensim MDL file, build the causal
+//!    graph, and enumerate elementary circuits.  Reports nodes, edges,
+//!    stocks, wall-clock time, circuit count, and peak RSS.  Used to
+//!    track regressions on dense single-SCC graphs like wrld3.
+//!
+//! 2. Synthetic graph (`--synthetic` first arg): build a graph with
+//!    `num_sccs` strongly-connected components of mixed sizes embedded
+//!    in a `padding_nodes`-sized acyclic feeder/sink padding, so the
+//!    total node count vastly exceeds any individual SCC size.  Drives
+//!    the per-SCC allocation regression in issue #460: the pre-fix
+//!    `JohnsonState` allocates O(|graph|) per SCC even when only
+//!    O(|SCC|) is used.
+//!
+//! Usage:
+//!   cargo run --release --example ltm_mem_bench -- [mdl] [budget]
+//!   cargo run --release --example ltm_mem_bench -- --synthetic
+//!
+//! Examples:
 //!   cargo run --release --example ltm_mem_bench -- \
 //!       test/metasd/WRLD3-03/wrld3-03.mdl 10000000
+//!   cargo run --release --example ltm_mem_bench -- --synthetic
 //!
-//! Reports nodes, edges, stocks, wall-clock time, circuits found, and peak
-//! RSS as reported by `/proc/self/status` (VmPeak / VmHWM).  Designed as a
-//! repeatable measurement harness for iterating on the LTM enumeration
-//! algorithm without having to reason about the full salsa pipeline.
+//! Designed as a repeatable measurement harness for iterating on the
+//! LTM enumeration algorithm without having to reason about the full
+//! salsa pipeline.
 
-use std::collections::HashMap;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{
-    SimlinDb, causal_graph_from_edges, model_causal_edges, sync_from_datamodel,
+    CausalEdgesResult, SimlinDb, causal_graph_from_edges, model_causal_edges, sync_from_datamodel,
 };
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::open_vensim;
+
+/// Tracking allocator: counts the number of `alloc` calls and the total
+/// bytes requested.  The benchmark zeros the counters before each
+/// enumeration window and reports the deltas to surface the per-SCC
+/// transient allocation churn that issue #460 targets.  Peak RSS
+/// (`VmPeak` / `VmHWM`) is page-granular and doesn't move when the
+/// allocator reuses freed memory between SCCs, so byte counts are the
+/// load-bearing metric here.
+struct CountingAlloc;
+
+static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+static ALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        ALLOC_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
+
+fn alloc_snapshot() -> (u64, usize) {
+    (
+        ALLOC_COUNT.load(Ordering::Relaxed),
+        ALLOC_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 fn read_proc_status_kb(key: &str) -> Option<u64> {
     let status = fs::read_to_string("/proc/self/status").ok()?;
@@ -207,23 +259,176 @@ fn connected_component_stats(
     (all_nodes.len(), sizes)
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let mdl_path = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "test/metasd/WRLD3-03/wrld3-03.mdl".to_string());
-    let budget: usize = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(usize::MAX);
+/// Build a synthetic graph with multiple SCCs of mixed sizes embedded
+/// in a much larger acyclic node space.
+///
+/// Each SCC is a complete directed cycle (n nodes, n edges in a ring),
+/// which keeps the per-SCC enumeration cost trivial (1 cycle per SCC)
+/// and the total budget bounded -- the benchmark measures the
+/// transient JohnsonState allocation, not enumeration runtime.
+///
+/// Layout:
+///   * `padding_acyclic_nodes` feeder/sink nodes whose names sort
+///     before/after any SCC member.  Each padding node contributes one
+///     directed edge to a sink, so the resulting graph has many singleton
+///     SCCs that get skipped fast by the trivial-SCC filter, plus the
+///     non-trivial cycle SCCs we constructed.
+///   * `scc_sizes` describes the cycle SCCs to construct: each entry is
+///     a (count, nodes_per_scc) pair.  E.g., `[(50, 5), (50, 10), (80,
+///     50), (20, 100)]` builds 50 5-cycles, 50 10-cycles, 80 50-cycles,
+///     and 20 100-cycles -- the same shape the issue calls out as the
+///     pathological case for the pre-fix per-SCC allocation pattern.
+fn build_synthetic_edges_result(
+    scc_sizes: &[(usize, usize)],
+    padding_acyclic_nodes: usize,
+) -> CausalEdgesResult {
+    let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut next_scc_idx = 0usize;
+    for &(count, size) in scc_sizes {
+        for _ in 0..count {
+            let scc_idx = next_scc_idx;
+            next_scc_idx += 1;
+            // Names: scc_{idx:06}_n{member:04} -- six-digit zero padded
+            // SCC index keeps lex order stable across runs and across
+            // SCC sizes.
+            let names: Vec<String> = (0..size)
+                .map(|i| format!("scc_{scc_idx:06}_n{i:04}"))
+                .collect();
+            for i in 0..size {
+                let from = names[i].clone();
+                let to = names[(i + 1) % size].clone();
+                edges.entry(from).or_default().insert(to);
+            }
+        }
+    }
+    // Padding feeders: feed_NNN -> feed_NNN_sink (a fresh sink per feeder
+    // so each is its own singleton SCC and the padding does not
+    // accidentally form cycles).  These exist to inflate the global
+    // node count without contributing cycles.
+    for i in 0..padding_acyclic_nodes {
+        let from = format!("feed_{i:06}");
+        let to = format!("sink_{i:06}");
+        edges.entry(from).or_default().insert(to);
+    }
+    CausalEdgesResult {
+        edges,
+        stocks: BTreeSet::new(),
+        dynamic_modules: HashMap::new(),
+    }
+}
 
+fn run_enumeration(label: &str, edges_result: &CausalEdgesResult, budget: usize) {
+    let graph: CausalGraph = causal_graph_from_edges(edges_result);
+
+    let n_nodes_with_outedges = graph.edges().len();
+    let total_outedges: usize = graph.edges().values().map(|v| v.len()).sum();
+    let (n_total_nodes, cc_sizes) = connected_component_stats(graph.edges());
+    eprintln!(
+        "[{label}] graph: nodes-with-outedges={n_nodes_with_outedges}  \
+         all-nodes(by edges)={n_total_nodes}  total-outedges={total_outedges}  stocks={}",
+        graph.stocks().len()
+    );
+    eprintln!(
+        "[{label}] weakly-connected components: {} (largest = {})",
+        cc_sizes.len(),
+        cc_sizes.first().copied().unwrap_or(0)
+    );
+
+    let (n_sccs, scc_sizes, non_trivial) = scc_stats(graph.edges());
+    eprintln!(
+        "[{label}] strongly-connected components: {n_sccs} (largest = {})",
+        scc_sizes.first().copied().unwrap_or(0)
+    );
+    eprintln!(
+        "[{label}] scc sizes (top 15): {:?}",
+        &scc_sizes[..scc_sizes.len().min(15)]
+    );
+    let loop_carrying: usize = non_trivial.iter().map(|s| s.len()).sum();
+    eprintln!(
+        "[{label}] non-trivial SCCs (size>1 or self-loop): {}  loop-carrying nodes: {loop_carrying}",
+        non_trivial.len()
+    );
+    print_mem(label);
+
+    eprintln!("[{label}] enumerating circuits...");
+    let (alloc_count_before, alloc_bytes_before) = alloc_snapshot();
+    let t0 = Instant::now();
+    let result = graph.find_indexed_circuits_with_limit(budget);
+    let elapsed = t0.elapsed();
+    let (alloc_count_after, alloc_bytes_after) = alloc_snapshot();
+    let alloc_count_delta = alloc_count_after - alloc_count_before;
+    let alloc_bytes_delta = alloc_bytes_after - alloc_bytes_before;
+
+    match result {
+        Ok((names, circuits)) => {
+            eprintln!(
+                "[{label}] circuits (deduplicated): {}  unique node names: {}",
+                circuits.len(),
+                names.len(),
+            );
+            let lens: Vec<usize> = circuits.iter().map(|c| c.len()).collect();
+            if !lens.is_empty() {
+                let min = *lens.iter().min().unwrap();
+                let max = *lens.iter().max().unwrap();
+                let sum: usize = lens.iter().sum();
+                eprintln!(
+                    "[{label}] circuit lengths: min={min}  max={max}  mean={:.1}",
+                    sum as f64 / lens.len() as f64
+                );
+            }
+        }
+        Err(_) => {
+            eprintln!("[{label}] TRUNCATED at budget {budget}");
+        }
+    }
+    eprintln!("[{label}] elapsed: {elapsed:?}");
+    eprintln!(
+        "[{label}] enumeration allocations: count={alloc_count_delta}  bytes={alloc_bytes_delta} \
+         ({:.3} MiB)",
+        alloc_bytes_delta as f64 / (1024.0 * 1024.0)
+    );
+    print_mem(&format!("{label}-done"));
+}
+
+fn run_synthetic(budget: usize) {
+    eprintln!("=== LTM synthetic-graph benchmark ===");
+    eprintln!("budget: {budget}");
+    print_mem("startup");
+
+    // Issue #460's measurement target: 10,000-ish nodes spread across
+    // 200 SCCs of mixed sizes (5/10/50/100).  In practice pure ring
+    // SCCs of this size enumerate trivially (one circuit per SCC); the
+    // benchmark is sensitive to the per-SCC JohnsonState allocation,
+    // not enumeration runtime.  Padding inflates the global node count
+    // so the pre-fix behaviour pays O(|graph|) per non-trivial SCC.
+    let scc_sizes: &[(usize, usize)] = &[(50, 5), (50, 10), (80, 50), (20, 100)];
+    // Total cycle nodes: 50*5 + 50*10 + 80*50 + 20*100 = 250+500+4000+2000 = 6750
+    // Plus padding to keep the total around 10K.
+    let padding_acyclic_nodes = 3500usize;
+
+    let cycle_nodes: usize = scc_sizes.iter().map(|(c, s)| c * s).sum();
+    let total_sccs: usize = scc_sizes.iter().map(|(c, _)| c).sum();
+    eprintln!(
+        "synthetic params: {} non-trivial SCCs ({} cycle nodes), {} padding nodes -> ~{} total",
+        total_sccs,
+        cycle_nodes,
+        padding_acyclic_nodes,
+        cycle_nodes + 2 * padding_acyclic_nodes
+    );
+
+    let edges_result = build_synthetic_edges_result(scc_sizes, padding_acyclic_nodes);
+    print_mem("built");
+
+    run_enumeration("synthetic", &edges_result, budget);
+}
+
+fn run_real_model(mdl_path: &str, budget: usize) {
     eprintln!("=== LTM memory/time benchmark ===");
     eprintln!("model:  {mdl_path}");
     eprintln!("budget: {budget}");
     print_mem("startup");
 
-    let mdl = fs::read_to_string(&mdl_path).expect("read model file");
+    let mdl = fs::read_to_string(mdl_path).expect("read model file");
     let datamodel = open_vensim(&mdl).expect("parse MDL");
     eprintln!(
         "parsed: {} models, root variables = {}",
@@ -294,6 +499,7 @@ fn main() {
     print_mem("graph");
 
     eprintln!("\n--- enumerating circuits ---");
+    let (alloc_count_before, alloc_bytes_before) = alloc_snapshot();
     let t0 = Instant::now();
     // Use the indexed API (names table + u32 paths) so the benchmark
     // reflects the post-H13 memory profile -- the legacy
@@ -302,6 +508,9 @@ fn main() {
     // view exclusively.
     let result = graph.find_indexed_circuits_with_limit(budget);
     let elapsed = t0.elapsed();
+    let (alloc_count_after, alloc_bytes_after) = alloc_snapshot();
+    let alloc_count_delta = alloc_count_after - alloc_count_before;
+    let alloc_bytes_delta = alloc_bytes_after - alloc_bytes_before;
 
     match result {
         Ok((names, circuits)) => {
@@ -326,5 +535,35 @@ fn main() {
         }
     }
     eprintln!("elapsed: {elapsed:?}");
+    eprintln!(
+        "enumeration allocations: count={alloc_count_delta}  bytes={alloc_bytes_delta} \
+         ({:.3} MiB)",
+        alloc_bytes_delta as f64 / (1024.0 * 1024.0)
+    );
     print_mem("done");
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let first = args.get(1).cloned().unwrap_or_default();
+
+    if first == "--synthetic" {
+        let budget: usize = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(usize::MAX);
+        run_synthetic(budget);
+        return;
+    }
+
+    let mdl_path = if first.is_empty() {
+        "test/metasd/WRLD3-03/wrld3-03.mdl".to_string()
+    } else {
+        first
+    };
+    let budget: usize = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(usize::MAX);
+    run_real_model(&mdl_path, budget);
 }

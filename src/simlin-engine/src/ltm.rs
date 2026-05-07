@@ -481,14 +481,34 @@ struct DfsState {
 /// are they unblocked for re-exploration.  This avoids Tiernan's repeated
 /// traversal of dead-end subtrees from different parent branches.
 ///
-/// `blocked` and `b_list` are reset for every start node within an SCC,
-/// but `in_scc` is fixed for the whole SCC.  `path` and `circuits` are
-/// reused across starts to amortize allocation.
+/// ## Indexing scheme
+///
+/// To keep transient memory proportional to the SCC and not the whole
+/// indexed graph, `blocked` and `b_list` are sized to `scc.len()` and
+/// indexed by **local** index (0..scc.len()).  The translation from
+/// global node id (the `u32` index into [`IndexedGraph::nodes`]) to
+/// local position lives in a separate `global_to_local: Vec<i32>` map
+/// owned by [`IndexedGraph::enumerate_indexed_circuits`] (sized
+/// `nodes.len()`, sentinel `-1` for non-members).  That map is allocated
+/// once per top-level enumeration call and reset between SCCs by walking
+/// the previous SCC's members, so neither it nor `JohnsonState` ever
+/// pays the whole-graph allocation cost more than once.
+///
+/// `path`, `circuits`, and `hash_scratch` continue to use **global**
+/// indices because the public contract is that emitted circuits use
+/// global node ids (downstream dedup and `build_element_level_loops`
+/// rely on this).  The cycle-fingerprint hash is computed on the
+/// already-global `path`, so dedup behaviour is identical to the
+/// pre-refactor version.
+///
+/// `blocked` and `b_list` are reset for every start node within an SCC.
+/// SCC membership is checked via the `global_to_local[w] >= 0` test on
+/// the hot path, replacing the previous whole-graph `in_scc: Vec<bool>`.
+/// `path` and `circuits` are reused across starts to amortize allocation.
 struct JohnsonState {
     blocked: Vec<bool>,
     b_list: Vec<Vec<u32>>,
     path: Vec<u32>,
-    in_scc: Vec<bool>,
     circuits: Vec<Vec<u32>>,
     /// 64-bit rapidhash fingerprints of already-emitted circuits (by
     /// sorted node-index set).  Lets us reject duplicate node-set
@@ -743,6 +763,7 @@ impl IndexedGraph {
         &self,
         scc: &[u32],
         budget: &mut usize,
+        global_to_local: &mut [i32],
     ) -> std::result::Result<Vec<Vec<u32>>, TruncatedByBudgetInternal> {
         if scc.is_empty() {
             return Ok(Vec::new());
@@ -756,37 +777,48 @@ impl IndexedGraph {
             return Ok(Vec::new());
         }
 
-        let n = self.nodes.len();
+        // Populate the local-index map for this SCC.  Caller passes
+        // `global_to_local` filled with `-1` (or with the previous SCC's
+        // entries already cleared); we set member entries to their
+        // local index 0..scc.len() for the duration of this call and
+        // reset them on the way out.  The `JohnsonState` buffers are
+        // sized to `scc.len()` rather than the whole graph, so all
+        // hot-path indexing into them goes through the local id.
+        for (local, &v) in scc.iter().enumerate() {
+            global_to_local[v as usize] = local as i32;
+        }
+
         let mut state = JohnsonState {
-            blocked: vec![false; n],
-            b_list: vec![Vec::new(); n],
+            blocked: vec![false; scc.len()],
+            b_list: vec![Vec::new(); scc.len()],
             path: Vec::with_capacity(scc.len()),
-            in_scc: vec![false; n],
             circuits: Vec::new(),
             seen: HashSet::new(),
             hash_scratch: Vec::with_capacity(scc.len()),
         };
-        for &v in scc {
-            state.in_scc[v as usize] = true;
-        }
 
         for &start in scc {
             // Reset blocked/B[] for this start's search.  Reusing the
             // allocations across starts saves a per-start Vec<bool>/Vec<Vec>
             // construction cost.  O(|SCC|) per start; wrld3's 166-node SCC
-            // and 166 starts is 27 K bool writes total -- trivial.
-            for &v in scc {
-                state.blocked[v as usize] = false;
-                state.b_list[v as usize].clear();
+            // and 166 starts is 27 K bool writes total -- trivial.  The
+            // local-id range is exactly 0..scc.len() by construction
+            // (see `JohnsonState` indexing notes), so we walk the
+            // per-SCC buffers directly.
+            for local in 0..scc.len() {
+                state.blocked[local] = false;
+                state.b_list[local].clear();
             }
 
             // Push start onto the DFS stack and block it before entering
             // the recursive CIRCUIT() subroutine -- the subroutine assumes
-            // its caller has already done this.
-            state.blocked[start as usize] = true;
+            // its caller has already done this.  `start` is a global id;
+            // `start_local` is its position within the per-SCC buffers.
+            let start_local = global_to_local[start as usize] as usize;
+            state.blocked[start_local] = true;
             state.path.push(start);
 
-            let result = self.johnson_circuit(start, start, &mut state, budget);
+            let result = self.johnson_circuit(start, start, &mut state, budget, global_to_local);
 
             // Always restore the path stack even on bail-out so nested
             // state is coherent if we ever chose to retry; since we
@@ -797,12 +829,19 @@ impl IndexedGraph {
             result?;
         }
 
+        // Restore `global_to_local` for the next SCC.  Walking the SCC
+        // members (rather than re-zeroing the full vec) keeps the cost
+        // proportional to |SCC| not |graph|.
+        for &v in scc {
+            global_to_local[v as usize] = -1;
+        }
+
         Ok(state.circuits)
     }
 
     /// Recursive CIRCUIT() of Johnson 1975.  Caller must have already:
     ///   * pushed `v` onto `state.path`
-    ///   * set `state.blocked[v] = true`
+    ///   * set `state.blocked[global_to_local[v]] = true`
     ///
     /// Returns `Ok(true)` if any cycle was discovered through `v` (direct
     /// or via a descendant's recursive call); `Ok(false)` otherwise.
@@ -810,14 +849,27 @@ impl IndexedGraph {
     /// value -- callers typically only need to concern themselves with
     /// that when `v == start` at the outermost frame, where unblocking
     /// happens inside the function itself.
+    ///
+    /// All identifier types follow the convention documented on
+    /// [`JohnsonState`]: `v`, `start`, `w`, and `state.path` entries are
+    /// **global** node ids (indices into [`IndexedGraph::nodes`]);
+    /// `state.blocked` and `state.b_list` are indexed by **local** ids
+    /// translated through `global_to_local`.  The cycle dedup hash is
+    /// computed on `state.path` (global), so circuit fingerprints are
+    /// identical to the pre-refactor implementation.
     fn johnson_circuit(
         &self,
         v: u32,
         start: u32,
         state: &mut JohnsonState,
         budget: &mut usize,
+        global_to_local: &[i32],
     ) -> std::result::Result<bool, TruncatedByBudgetInternal> {
         let mut found_cycle = false;
+        // Caller already established that v is an SCC member, so its
+        // local id is non-negative; cache it once for the post-loop
+        // unblock / waiter-registration paths to avoid redundant lookups.
+        let v_local = global_to_local[v as usize] as usize;
 
         // Successor list is already sorted ascending by
         // `IndexedGraph::from_edges`.  Index iteration avoids holding an
@@ -832,9 +884,18 @@ impl IndexedGraph {
             // emitted when their lex-smallest node was the start.
             // Targets outside the SCC can never close a cycle back to
             // start.
-            if !state.in_scc[w as usize] || w < start {
+            //
+            // SCC membership comes from `global_to_local[w] >= 0`;
+            // `-1` is the sentinel for non-members.  This replaces the
+            // pre-refactor whole-graph `in_scc: Vec<bool>` and folds
+            // the membership check into the same array we'd consult to
+            // index `blocked` / `b_list` on the recurse path -- so the
+            // hot loop performs one fewer array probe per neighbor.
+            let w_local = global_to_local[w as usize];
+            if w_local < 0 || w < start {
                 continue;
             }
+            let w_local = w_local as usize;
 
             if w == start && state.path.len() > 1 {
                 // Elementary cycle: `state.path` currently holds
@@ -878,13 +939,13 @@ impl IndexedGraph {
                 // semantically misleading even though in this case
                 // unblocking v is harmless (we're about to return from
                 // the outermost frame anyway).
-            } else if !state.blocked[w as usize] {
+            } else if !state.blocked[w_local] {
                 // Recurse into w: caller contract is "block and push
                 // before call, pop after call, unblock only via the
                 // Johnson unblock machinery".
-                state.blocked[w as usize] = true;
+                state.blocked[w_local] = true;
                 state.path.push(w);
-                let sub_found = self.johnson_circuit(w, start, state, budget)?;
+                let sub_found = self.johnson_circuit(w, start, state, budget, global_to_local)?;
                 state.path.pop();
                 if sub_found {
                     found_cycle = true;
@@ -896,7 +957,7 @@ impl IndexedGraph {
             // Cycle found through v: unblock v and everything waiting
             // on v (transitively).  Next exploration from a different
             // branch might close a cycle through v and those waiters.
-            johnson_unblock(v, state);
+            johnson_unblock(v_local as u32, state);
         } else {
             // No cycle through v on this branch.  Register v as a waiter
             // in each successor w's b_list, so that if w is later
@@ -911,10 +972,11 @@ impl IndexedGraph {
             // pure win on dense SCCs.
             for i in 0..succs_len {
                 let w = self.succ[v as usize][i];
-                if !state.in_scc[w as usize] || w < start {
+                let w_local = global_to_local[w as usize];
+                if w_local < 0 || w < start {
                     continue;
                 }
-                state.b_list[w as usize].push(v);
+                state.b_list[w_local as usize].push(v_local as u32);
             }
         }
 
@@ -1051,16 +1113,27 @@ fn loops_have_unique_node_sets(loops: &[Loop]) -> bool {
 /// every waiter that is still blocked.  `std::mem::take` empties the B[]
 /// list so that if `u` is re-blocked later, its list is ready for a fresh
 /// round of waiters.
+///
+/// `u` is a **local** index into the per-SCC `blocked` / `b_list`
+/// buffers (see [`JohnsonState`] for the global/local indexing scheme).
+/// Waiters stored in `b_list` are also local ids, so the cascade stays
+/// inside the per-SCC arrays without ever touching the whole-graph
+/// `global_to_local` map.  We carry locals as `u32` rather than `usize`
+/// in the work stack because SCC sizes are bounded by graph node counts
+/// (which already fit in `u32` everywhere else in this module), and
+/// halving the stack-element width vs. `usize` matches the pre-refactor
+/// allocation footprint on 64-bit targets exactly.
 fn johnson_unblock(u: u32, state: &mut JohnsonState) {
     let mut stack: Vec<u32> = vec![u];
     while let Some(v) = stack.pop() {
         // A vertex can appear in multiple B[] lists; the first pop
         // transitions it to unblocked and any subsequent pop is a no-op.
-        if !state.blocked[v as usize] {
+        let v_idx = v as usize;
+        if !state.blocked[v_idx] {
             continue;
         }
-        state.blocked[v as usize] = false;
-        let waiters = std::mem::take(&mut state.b_list[v as usize]);
+        state.blocked[v_idx] = false;
+        let waiters = std::mem::take(&mut state.b_list[v_idx]);
         for w in waiters {
             if state.blocked[w as usize] {
                 stack.push(w);
@@ -1252,6 +1325,18 @@ impl CausalGraph {
         let mut all_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget = max_circuits;
 
+        // Cross-SCC scratch: maps a global node id to its position within
+        // the currently-processing SCC, with `-1` for non-members.  Sized
+        // to the whole graph (one allocation per top-level enumeration
+        // call) and reset between SCCs by walking the previous SCC's
+        // members.  Letting `enumerate_circuits_in_scc` size its
+        // per-SCC `JohnsonState` to `scc.len()` instead of
+        // `nodes.len()` is the whole point of threading this map through
+        // -- on graphs with many small SCCs in a large node space it
+        // cuts the transient allocation from O(|graph|) per SCC to
+        // O(|SCC|) per SCC.  See issue #460 for the measurement context.
+        let mut global_to_local: Vec<i32> = vec![-1; graph.nodes.len()];
+
         // SCC iteration order is whatever Tarjan emitted.  Each SCC's
         // contribution to `all_circuits` is independent, and per-cycle
         // uniqueness comes from the per-SCC `seen` fingerprint set, not
@@ -1266,7 +1351,7 @@ impl CausalGraph {
             if scc.len() == 1 && !graph.succ[scc[0] as usize].contains(&scc[0]) {
                 continue;
             }
-            match graph.enumerate_circuits_in_scc(scc, &mut budget) {
+            match graph.enumerate_circuits_in_scc(scc, &mut budget, &mut global_to_local) {
                 Ok(mut circuits) => all_circuits.append(&mut circuits),
                 Err(TruncatedByBudgetInternal) => return Err(TruncatedByBudget),
             }
@@ -5062,8 +5147,14 @@ mod tests {
 
         let mut johnson_circuits: Vec<Vec<u32>> = Vec::new();
         let mut budget_j = usize::MAX;
+        // Cross-SCC scratch: see `enumerate_indexed_circuits` for the
+        // ownership rationale.  Tests reuse the same map across SCCs to
+        // mirror production behaviour.
+        let mut g2l: Vec<i32> = vec![-1; graph.nodes.len()];
         for scc in &sccs {
-            let mut part = graph.enumerate_circuits_in_scc(scc, &mut budget_j).unwrap();
+            let mut part = graph
+                .enumerate_circuits_in_scc(scc, &mut budget_j, &mut g2l)
+                .unwrap();
             johnson_circuits.append(&mut part);
         }
 
@@ -5379,6 +5470,135 @@ mod tests {
                 vec!["x".to_string(), "y".to_string()],
             ]
         );
+    }
+
+    #[test]
+    fn johnson_multi_scc_in_large_node_space_golden() {
+        // Build a graph with several SCCs of mixed sizes embedded in a
+        // larger node space (with plenty of acyclic feeder/sink nodes
+        // padding the index range).  This is the golden fixture for the
+        // per-SCC allocation refactor: emitted circuits MUST remain
+        // byte-identical to the pre-fix output, including:
+        //   * use of GLOBAL node indices (callers depend on this)
+        //   * each cycle rotated to start at its lex-smallest member
+        //   * dedup across multidigraph rotations (K3-with-all-edges
+        //     contributes a single node-set after dedup)
+        //
+        // The pre-fix implementation sized JohnsonState to the whole graph;
+        // the post-fix implementation sizes per-SCC with a global<->local
+        // remap.  Both must produce the same emitted circuits.
+        //
+        // Topology (named so lexicographic order is predictable):
+        //   * trivial feeders feed01..feed20 (no edges -> only acyclic role)
+        //   * 2-cycle SCC: scc2_a <-> scc2_b
+        //   * 3-cycle SCC: scc3_a -> scc3_b -> scc3_c -> scc3_a
+        //   * K3 multidigraph SCC: scc_k3_a/b/c with all 6 directed edges
+        //   * 4-cycle SCC with chord: scc4_a -> scc4_b -> scc4_c -> scc4_d -> scc4_a
+        //                             plus scc4_a -> scc4_c (creates 3-cycle inside)
+        //   * cross-SCC feeder edge: feed01 -> scc2_a (must not affect cycle output)
+        //   * trailing sink nodes sink01..sink20 to pad out the index range
+        let mut edges: Vec<(String, Vec<String>)> = vec![
+            ("scc2_a".to_string(), vec!["scc2_b".to_string()]),
+            ("scc2_b".to_string(), vec!["scc2_a".to_string()]),
+            ("scc3_a".to_string(), vec!["scc3_b".to_string()]),
+            ("scc3_b".to_string(), vec!["scc3_c".to_string()]),
+            ("scc3_c".to_string(), vec!["scc3_a".to_string()]),
+            (
+                "scc_k3_a".to_string(),
+                vec!["scc_k3_b".to_string(), "scc_k3_c".to_string()],
+            ),
+            (
+                "scc_k3_b".to_string(),
+                vec!["scc_k3_a".to_string(), "scc_k3_c".to_string()],
+            ),
+            (
+                "scc_k3_c".to_string(),
+                vec!["scc_k3_a".to_string(), "scc_k3_b".to_string()],
+            ),
+            (
+                "scc4_a".to_string(),
+                vec!["scc4_b".to_string(), "scc4_c".to_string()],
+            ),
+            ("scc4_b".to_string(), vec!["scc4_c".to_string()]),
+            ("scc4_c".to_string(), vec!["scc4_d".to_string()]),
+            ("scc4_d".to_string(), vec!["scc4_a".to_string()]),
+        ];
+        // Cross-SCC feeder + sink padding to ensure global node count
+        // greatly exceeds individual SCC sizes.
+        for i in 1..=20 {
+            edges.push((format!("feed{i:02}"), vec!["scc2_a".to_string()]));
+            edges.push((format!("sink{i:02}_src"), vec![format!("sink{i:02}_dst")]));
+        }
+        let edge_refs: Vec<(&str, Vec<&str>)> = edges
+            .iter()
+            .map(|(f, ts)| (f.as_str(), ts.iter().map(|s| s.as_str()).collect()))
+            .collect();
+        // Convert to the &[(&str, &[&str])] shape build_causal_graph wants.
+        let edge_slices: Vec<(&str, &[&str])> = edge_refs
+            .iter()
+            .map(|(f, ts)| (*f, ts.as_slice()))
+            .collect();
+        let cg = build_causal_graph(&edge_slices);
+
+        // Total node count is >60 (20 feeders + 20 sink-src + 20 sink-dst +
+        // SCC members), so the pre-fix JohnsonState would allocate buffers
+        // sized to ~70 even though the largest SCC is only 4 nodes.
+        let graph = IndexedGraph::from_edges(cg.edges());
+        assert!(
+            graph.len() > 30,
+            "test fixture must have a large total node count to exercise the regression"
+        );
+
+        let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+        let got = circuits_as_sorted_name_sets(&circuits);
+
+        // Expected node-sets per SCC:
+        //   scc2: {scc2_a, scc2_b}
+        //   scc3: {scc3_a, scc3_b, scc3_c}
+        //   scc_k3 (K3 with all 6 directed edges): three 2-cycles (one per
+        //     bidirectional pair) plus one 3-cycle (the two distinct
+        //     directed 3-rotations are deduped to a single node-set).
+        //   scc4 (rim a->b->c->d->a plus chord a->c): the 4-cycle around
+        //     the rim and the 3-cycle skipping b via the chord.  No third
+        //     cycle exists because b is only reachable from a and only
+        //     reaches c, so the only path through b returns via the rim.
+        let mut expected: Vec<Vec<String>> = vec![
+            vec!["scc2_a".to_string(), "scc2_b".to_string()],
+            vec![
+                "scc3_a".to_string(),
+                "scc3_b".to_string(),
+                "scc3_c".to_string(),
+            ],
+            vec!["scc_k3_a".to_string(), "scc_k3_b".to_string()],
+            vec!["scc_k3_a".to_string(), "scc_k3_c".to_string()],
+            vec!["scc_k3_b".to_string(), "scc_k3_c".to_string()],
+            vec![
+                "scc_k3_a".to_string(),
+                "scc_k3_b".to_string(),
+                "scc_k3_c".to_string(),
+            ],
+            vec![
+                "scc4_a".to_string(),
+                "scc4_b".to_string(),
+                "scc4_c".to_string(),
+                "scc4_d".to_string(),
+            ],
+            vec![
+                "scc4_a".to_string(),
+                "scc4_c".to_string(),
+                "scc4_d".to_string(),
+            ],
+        ];
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "multi-SCC enumeration must match pre-refactor golden output"
+        );
+
+        // Cross-check against Tiernan oracle directly on the IndexedGraph
+        // -- this catches any drift in the per-SCC enumerator that the
+        // public dedup might mask.
+        assert_johnson_matches_tiernan(&cg);
     }
 
     #[test]
