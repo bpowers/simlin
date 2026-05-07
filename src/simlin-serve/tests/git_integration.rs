@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use simlin_serve::git::{GitProbe, enclosing_git_root};
+use simlin_serve::git::{GitProbe, enclosing_git_root, strip_git_path_env};
 use simlin_serve::registry::GitState;
 use simlin_serve::test_support::unavailable_git_probe;
 use tempfile::TempDir;
@@ -27,23 +27,19 @@ fn git_available() -> bool {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
-    // Strip every `GIT_*` env var inherited from the parent: when the
-    // workspace test suite runs from inside an outer `git commit` (the
-    // project pre-commit hook invokes `cargo test --workspace`),
-    // `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down and
-    // would make this `git` operate on the outer repository instead of
-    // the freshly-initialised temp dir.
-    //
-    // Iterate `vars_os` rather than `vars()` so a non-UTF-8 env var in the
-    // parent process cannot panic the test runner. The "GIT_" prefix is
-    // ASCII, so a byte-level comparison is sufficient.
+    // Neutralise the path-targeting `GIT_*` vars inherited from the parent
+    // (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+    // `GIT_COMMON_DIR`). When the workspace test suite runs from inside an
+    // outer `git commit` (the project pre-commit hook invokes
+    // `cargo test --workspace`), these would otherwise override the inner
+    // git's `current_dir(cwd)` and make it operate on the outer repository
+    // instead of the freshly-initialised temp dir. Identity / transport /
+    // credential / interaction `GIT_*` vars are intentionally preserved so
+    // future test code that commits, pushes, or pulls inherits them as the
+    // caller expects -- see `simlin_serve::git::GIT_PATH_TARGETING_VARS`.
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd).args(args);
-    for (key, _) in std::env::vars_os() {
-        if key.as_encoded_bytes().starts_with(b"GIT_") {
-            cmd.env_remove(&key);
-        }
-    }
+    strip_git_path_env(&mut cmd);
     let status = cmd
         .status()
         .unwrap_or_else(|_| panic!("git {} failed to spawn", args.join(" ")));

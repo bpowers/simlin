@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use simlin_serve::events::{ChangeSource, EventBus, WsMessage};
-use simlin_serve::git::GitProbe;
+use simlin_serve::git::{GitProbe, strip_git_path_env};
 use simlin_serve::handlers::AppState;
 use simlin_serve::registry::{GitState, ProjectFormat, ProjectMeta, ProjectRegistry};
 use simlin_serve::watcher::{ShutdownSignal, spawn_watcher};
@@ -39,22 +39,21 @@ fn git_available() -> bool {
 
 /// Run `git` in `cwd`; assert success. Echoes stderr in the panic.
 ///
-/// Strips every `GIT_*` env var inherited from the parent so the inner
-/// git always operates on the temp repo at `cwd`. Without this, when
-/// the workspace test suite runs from inside an outer `git commit` (the
-/// project pre-commit hook invokes `cargo test --workspace`), `GIT_DIR`,
-/// `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down to the inner
-/// `git` and cause it to operate on the OUTER repository instead of
-/// the freshly-`git init`'d temp dir, masking the watcher behavior the
-/// test exercises.
+/// Strips the path-targeting `GIT_*` vars (see
+/// `simlin_serve::git::GIT_PATH_TARGETING_VARS`) inherited from the parent
+/// so the inner git always operates on the temp repo at `cwd`. Without
+/// this, when the workspace test suite runs from inside an outer
+/// `git commit` (the project pre-commit hook invokes
+/// `cargo test --workspace`), `GIT_DIR`, `GIT_WORK_TREE`, and
+/// `GIT_INDEX_FILE` propagate down to the inner `git` and cause it to
+/// operate on the OUTER repository instead of the freshly-`git init`'d
+/// temp dir, masking the watcher behavior the test exercises. Identity /
+/// transport / credential / interaction `GIT_*` vars are intentionally
+/// preserved.
 fn must_git(cwd: &Path, args: &[&str]) {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd).args(args);
-    for (key, _) in std::env::vars() {
-        if key.starts_with("GIT_") {
-            cmd.env_remove(&key);
-        }
-    }
+    strip_git_path_env(&mut cmd);
     let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
